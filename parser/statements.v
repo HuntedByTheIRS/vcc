@@ -10,10 +10,9 @@ import tokenize
 // about the first token and the one after it, and it is asked here.
 
 // statement_keywords are the statements this compiler does not implement. They
-// are named so that `if (x) return;` is reported as an unsupported statement
-// rather than as an expression that went wrong at its first parenthesis.
-const statement_keywords = ['if', 'else', 'while', 'do', 'for', 'switch', 'case', 'default', 'goto',
-	'break', 'continue']
+// are named so that `switch (x)` is reported as an unsupported statement rather
+// than as an expression that went wrong at its first parenthesis.
+const statement_keywords = ['do', 'switch', 'case', 'default', 'goto']
 
 // parse_statement reads one statement. A statement that cannot be read is
 // reported where it starts and skipped by the reader that failed on it, so the
@@ -31,19 +30,38 @@ fn (mut p Parser) parse_statement() ![]ast.Stmt {
 			col:  t.col
 		}]
 	}
-	if t.kind == .identifier && t.text == 'return' {
-		return p.parse_return_statement()
+	if t.kind == .identifier {
+		if t.text == 'return' {
+			return p.parse_return_statement()
+		}
+		if t.text == 'if' {
+			return p.parse_if_statement()
+		}
+		if t.text == 'while' {
+			return p.parse_while_statement()
+		}
+		if t.text == 'break' || t.text == 'continue' {
+			return p.parse_loop_jump(t)
+		}
+		if t.text == 'else' {
+			// An else belongs to the if in front of it. Getting here means
+			// there was no if, and a branch with nothing to branch from is not
+			// a statement this file has.
+			p.error_at(t, 'unsupported: else with no if')
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		if t.text in statement_keywords {
+			p.error_at(t, 'unsupported statement starting at ${describe(t)}: ${t.text} is not implemented yet')
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
 	}
 	// A statement that starts with a type name declares an object. Storage in
 	// the frame is what the tree calls a var_decl, and one statement names one
 	// object, so a declaration of several declarators is several statements.
 	if p.starts_declaration(t) {
 		return p.parse_local_declaration()
-	}
-	if t.kind == .identifier && t.text in statement_keywords {
-		p.error_at(t, 'unsupported statement starting at ${describe(t)}: only return statements and expressions are implemented')
-		p.skip_statement()
-		return []ast.Stmt{}
 	}
 	// Anything else is an assignment or an expression evaluated for what it
 	// does, which is what a call written as a statement is. An expression that
@@ -156,6 +174,102 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 		line:   target.line
 		col:    target.col
 	}
+}
+
+// parse_control_body reads the statement a branch or a loop governs: a block, a
+// single statement, or the empty statement `;`, which governs nothing. The body
+// is a list of statements because a run of statements is what the tree has a
+// shape for, and an empty body is the empty list.
+fn (mut p Parser) parse_control_body() ![]ast.Stmt {
+	if p.at_punct(';') {
+		p.next()
+		return []ast.Stmt{}
+	}
+	return p.parse_statement()
+}
+
+// parse_if_statement reads `if (cond) stmt else stmt`. An `else if` is an if
+// inside the else, which is where the tree puts it: a branch is a list of
+// statements, and the one that branch holds is an if.
+fn (mut p Parser) parse_if_statement() ![]ast.Stmt {
+	t := p.next() // if
+	if !p.expect_punct('(') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	cond := p.parse_expression() or {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(')') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	then_body := p.parse_control_body()!
+	mut else_body := []ast.Stmt{}
+	if p.peek().kind == .identifier && p.peek().text == 'else' {
+		p.next()
+		else_body = p.parse_control_body()!
+	}
+	return [ast.Stmt{
+		kind:      .if_stmt
+		cond:      cond
+		then_body: then_body
+		else_body: else_body
+		line:      t.line
+		col:       t.col
+	}]
+}
+
+// parse_while_statement reads `while (cond) stmt`. The condition is what has to
+// be true for the loop to go round again, and it is read by the expression
+// reader, so a comparison or two of them joined need nothing here.
+fn (mut p Parser) parse_while_statement() ![]ast.Stmt {
+	t := p.next() // while
+	if !p.expect_punct('(') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	cond := p.parse_expression() or {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(')') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	body := p.parse_control_body()!
+	return [ast.Stmt{
+		kind: .while_stmt
+		cond: cond
+		body: body
+		line: t.line
+		col:  t.col
+	}]
+}
+
+// parse_loop_jump reads `break;` or `continue;`. Which loop it belongs to is a
+// question about the loops around it, and it is not asked here: the statement is
+// kept where it was written, and a break with no loop around it is the
+// emitter's diagnostic to give.
+fn (mut p Parser) parse_loop_jump(t tokenize.Token) []ast.Stmt {
+	p.next() // break or continue
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if t.text == 'break' {
+		return [ast.Stmt{
+			kind: .break_stmt
+			line: t.line
+			col:  t.col
+		}]
+	}
+	return [ast.Stmt{
+		kind: .continue_stmt
+		line: t.line
+		col:  t.col
+	}]
 }
 
 // parse_local_declaration reads a declaration inside a body: storage in the

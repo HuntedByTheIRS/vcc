@@ -108,11 +108,12 @@ fn test_a_variable_declaration_says_function_definitions_are_what_exists() {
 // the file produces exactly one diagnostic. A statement this compiler has no
 // form for is what that path is for.
 fn test_one_unsupported_statement_does_not_cascade() {
-	result := parsed('int main() { while (1) ; return 0; }')
+	result := parsed('int main() { do { return 1; } while (0); return 0; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('unsupported statement')
 	assert result.unit.decls.len == 1
 	assert result.unit.decls[0].body.len == 1
+	assert result.unit.decls[0].body[0].kind == .return_stmt
 }
 
 // The statement is an expression evaluated for what it does, which is what a
@@ -398,6 +399,122 @@ fn test_an_expression_that_compares_is_not_an_assignment() {
 	}
 	assert expr is ast.Binary
 	assert (expr as ast.Binary).op == '=='
+}
+
+fn test_an_if_keeps_its_condition_and_both_branches() {
+	result := parsed('int main() { int x = 0; if (x < 1) return 1; else return 2; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .if_stmt
+	cond := body[1].cond or {
+		assert false
+		return
+	}
+	assert cond is ast.Binary
+	assert (cond as ast.Binary).op == '<'
+	assert body[1].then_body.len == 1
+	assert body[1].then_body[0].kind == .return_stmt
+	assert body[1].else_body.len == 1
+	assert body[1].else_body[0].kind == .return_stmt
+}
+
+fn test_an_if_without_an_else_leaves_the_else_empty() {
+	result := parsed('int main() { if (x) return 1; return 2; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[0].kind == .if_stmt
+	assert body[0].then_body.len == 1
+	assert body[0].else_body.len == 0
+	assert body[1].kind == .return_stmt
+}
+
+fn test_an_else_if_is_an_if_in_the_else() {
+	result := parsed('int main() { if (a) return 1; else if (b) return 2; else return 3; }')
+	assert result.diagnostics.len == 0
+	first := result.unit.decls[0].body[0]
+	assert first.kind == .if_stmt
+	assert first.else_body.len == 1
+	assert first.else_body[0].kind == .if_stmt
+	assert first.else_body[0].else_body.len == 1
+	assert first.else_body[0].else_body[0].kind == .return_stmt
+}
+
+// A branch written as a block is a block statement, which is the shape a block
+// already had inside a body.
+fn test_a_branch_that_is_a_block_is_a_block_statement() {
+	result := parsed('int main() { if (x) { return 1; } return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[0].then_body.len == 1
+	assert body[0].then_body[0].kind == .block
+	assert body[0].then_body[0].body.len == 1
+	assert body[0].then_body[0].body[0].kind == .return_stmt
+}
+
+fn test_a_condition_may_be_a_call() {
+	result := parsed('int main() { if (is_even(x)) return 1; return 0; }')
+	assert result.diagnostics.len == 0
+	cond := result.unit.decls[0].body[0].cond or {
+		assert false
+		return
+	}
+	assert cond is ast.Call
+	assert (cond as ast.Call).name == 'is_even'
+}
+
+fn test_a_while_keeps_its_condition_and_its_body() {
+	result := parsed('int main() { int x = 0; while (x < 3) x = x + 1; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .while_stmt
+	cond := body[1].cond or {
+		assert false
+		return
+	}
+	assert cond is ast.Binary
+	assert (cond as ast.Binary).op == '<'
+	assert body[1].body.len == 1
+	assert body[1].body[0].kind == .assign
+	assert body[1].body[0].target == 'x'
+}
+
+fn test_a_while_body_may_be_empty() {
+	result := parsed('int main() { while (1) ; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[0].kind == .while_stmt
+	assert body[0].body.len == 0
+	assert body[1].kind == .return_stmt
+}
+
+fn test_break_and_continue_are_statements() {
+	result := parsed('int main() { while (1) { if (x) break; continue; } return 0; }')
+	assert result.diagnostics.len == 0
+	loop := result.unit.decls[0].body[0]
+	assert loop.kind == .while_stmt
+	assert loop.body.len == 1
+	inner := loop.body[0]
+	assert inner.kind == .block
+	assert inner.body[0].kind == .if_stmt
+	assert inner.body[0].then_body[0].kind == .break_stmt
+	assert inner.body[1].kind == .continue_stmt
+}
+
+// A condition that does not parse is reported by the expression reader, and the
+// statement is skipped so the one after it still parses.
+fn test_a_condition_that_does_not_parse_costs_one_diagnostic() {
+	result := parsed('int main() { if (x > ) return 1; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('expected an expression')
+	body := result.unit.decls[0].body
+	assert body.len == 1
+	assert body[0].kind == .return_stmt
+}
+
+fn test_an_else_with_no_if_is_reported() {
+	result := parsed('int main() { else return 1; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('else with no if')
 }
 
 fn test_an_unterminated_block_is_reported_once() {
