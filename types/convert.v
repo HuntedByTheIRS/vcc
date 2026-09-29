@@ -19,10 +19,14 @@ module types
 // machine, because an int of 16 bits cannot hold 65535, so the representation
 // decides it and a description that does not carry both widths gets a refusal.
 //
-// An enumerated type promotes to int. Measured on gcc 16.2.1: an enum whose
-// enumerators all fit in an int is compatible with int, and one with an enumerator
-// above INT_MAX is compatible with unsigned int; this model holds the int reading,
-// and the enumeration's own values are the milestone that owns enumerators.
+// An enumerated type promotes to int in this model. Measured, gcc 16.2.1 does
+// not agree: `enum E { A }; unsigned int f(unsigned int); unsigned int f(enum E);`
+// is accepted, and the same pair written with int is refused as conflicting
+// types, so gcc gives an enum whose enumerators are non-negative the compatible
+// type unsigned int and promotes it accordingly. This model holds the int
+// reading instead, which is a divergence from gcc recorded here to be settled by
+// the milestone that owns enumerators, because that is where an enumerator's
+// value can decide the compatible type.
 //
 // A type that is not an integer promotes to itself, which is what makes the
 // function safe to call on any operand of an arithmetic expression.
