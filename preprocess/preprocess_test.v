@@ -122,3 +122,84 @@ fn test_an_undefine_from_the_command_line_takes_a_macro_away() {
 	assert result.diagnostics.len == 0
 	assert result.tokens[3].text == 'N'
 }
+
+fn test_ifdef_reads_the_branch_that_is_taken() {
+	assert processed('#ifdef N\nint x;\n#endif\n') == [] // N is not defined
+	assert processed('#define N\n#ifdef N\nint x;\n#endif\n') == ['int', 'x', ';']
+}
+
+fn test_ifndef_is_the_other_side_of_ifdef() {
+	assert processed('#ifndef N\nint x;\n#endif\n') == ['int', 'x', ';']
+	assert processed('#define N\n#ifndef N\nint x;\n#endif\n') == []
+}
+
+fn test_if_reads_its_expression() {
+	assert processed('#if 1\nint x;\n#endif\n') == ['int', 'x', ';']
+	assert processed('#if 0\nint x;\n#endif\n') == []
+	assert processed('#if 1 + 1 == 2\nint x;\n#endif\n') == ['int', 'x', ';']
+	assert processed('#if 1 < 2 && 3 > 2\nint x;\n#endif\n') == ['int', 'x', ';']
+}
+
+fn test_a_name_that_is_not_defined_is_zero_in_an_if() {
+	assert processed('#if NOPE\nint x;\n#endif\n') == []
+	assert processed('#if !NOPE\nint x;\n#endif\n') == ['int', 'x', ';']
+}
+
+fn test_defined_answers_from_the_macro_table_before_expansion() {
+	assert processed('#define N 1\n#if defined(N)\nint x;\n#endif\n') == ['int', 'x', ';']
+	assert processed('#if defined N\nint x;\n#endif\n') == []
+	assert processed('#define N 1\n#if defined NOPE\nint x;\n#endif\n') == []
+}
+
+fn test_elif_and_else_take_the_first_branch_that_is_true() {
+	source := '#if 0\nint a;\n#elif 1\nint b;\n#else\nint c;\n#endif\n'
+	assert processed(source) == ['int', 'b', ';']
+	source2 := '#if 0\nint a;\n#elif 0\nint b;\n#else\nint c;\n#endif\n'
+	assert processed(source2) == ['int', 'c', ';']
+}
+
+fn test_only_one_branch_is_read_even_when_two_would_be_true() {
+	source := '#if 1\nint a;\n#elif 1\nint b;\n#endif\n'
+	assert processed(source) == ['int', 'a', ';']
+}
+
+fn test_nested_conditionals_keep_their_own_state() {
+	source := '#if 1\n#if 0\nint a;\n#else\nint b;\n#endif\n#endif\n'
+	assert processed(source) == ['int', 'b', ';']
+	// The inner one is closed by the first #endif and the outer by the second,
+	// so text between the two is still inside the outer branch.
+	source2 := '#if 1\n#endif\nint a;\n'
+	assert processed(source2) == ['int', 'a', ';']
+}
+
+fn test_a_define_inside_a_branch_that_was_not_taken_is_not_defined() {
+	source := '#if 0\n#define N 1\n#endif\n#ifdef N\nint a;\n#endif\n'
+	assert processed(source) == []
+}
+
+fn test_a_branch_that_was_not_taken_is_not_evaluated() {
+	// Short-circuiting is what keeps this one from being a division by zero.
+	assert processed('#if 0 && 1 / 0\nint x;\n#endif\n') == []
+	assert processed('#if 1 || 1 / 0\nint x;\n#endif\n') == ['int', 'x', ';']
+	messages := diagnostics_of('#if 1 / 0\nint x;\n#endif\n')
+	assert messages.len == 1
+	assert messages[0].contains('division by zero')
+}
+
+fn test_a_conditional_that_is_never_closed_is_diagnosed() {
+	messages := diagnostics_of('#if 1\nint x;\n')
+	assert messages.len == 1
+	assert messages[0].contains('unterminated')
+}
+
+fn test_a_conditional_directive_with_nothing_to_belong_to_is_diagnosed() {
+	assert diagnostics_of('#endif\n')[0].contains('#endif')
+	assert diagnostics_of('#else\n')[0].contains('#else')
+	assert diagnostics_of('#elif 1\n')[0].contains('#elif')
+}
+
+fn test_a_second_else_has_nothing_left_to_say() {
+	messages := diagnostics_of('#if 0\n#else\n#else\n#endif\n')
+	assert messages.len == 1
+	assert messages[0].contains('#else after #else')
+}

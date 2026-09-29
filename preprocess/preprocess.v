@@ -205,12 +205,14 @@ fn (mut p Processor) directive(tok tokenize.Token) {
 	args := trimmed[name.len..]
 	// The conditionals decide whether the text around them is read at all, so
 	// they are read whether or not anything around them is: an #if inside a
-	// branch that was not taken still has to be followed to its #endif. The
-	// stage that implements them replaces this arm.
+	// branch that was not taken still has to be followed to its #endif.
 	match name {
-		'if', 'ifdef', 'ifndef', 'elif', 'else', 'endif' {
-			p.problem(tok, 'unsupported: #${name} is not implemented yet')
-		}
+		'if' { p.if_directive(tok, args) }
+		'ifdef' { p.ifdef_directive(tok, args, false) }
+		'ifndef' { p.ifdef_directive(tok, args, true) }
+		'elif' { p.elif_directive(tok, args) }
+		'else' { p.else_directive(tok) }
+		'endif' { p.endif_directive(tok) }
 		else {
 			if !p.reading() {
 				return
@@ -218,6 +220,151 @@ fn (mut p Processor) directive(tok tokenize.Token) {
 			p.text_directive(tok, name, args)
 		}
 	}
+}
+
+// if_directive opens a conditional whose first branch is taken when its
+// expression is not zero. The expression is only read when the text around it
+// is being read: a `#if` inside a branch that was not taken must not be
+// evaluated, and a name in it must not be reported as anything.
+fn (mut p Processor) if_directive(tok tokenize.Token, args string) {
+	parent := p.reading()
+	mut taken := false
+	if parent {
+		value := p.if_value(tok, args) or { 0 }
+		taken = value != 0
+	}
+	p.conditionals << Conditional{
+		parent:    parent
+		taken:     taken
+		any_taken: taken
+		file:      p.frames.last().path
+		line:      tok.line
+		col:       tok.col
+	}
+}
+
+fn (mut p Processor) ifdef_directive(tok tokenize.Token, args string, negated bool) {
+	parent := p.reading()
+	mut taken := false
+	if parent {
+		tokens := tokenize.lex_fragment(args)
+		if tokens.len == 0 || tokens[0].kind != .identifier {
+			p.problem(tok, 'expected an identifier after #${if negated { 'ifndef' } else { 'ifdef' }}')
+		} else {
+			defined := tokens[0].text in p.macros
+			taken = if negated { !defined } else { defined }
+		}
+	}
+	p.conditionals << Conditional{
+		parent:    parent
+		taken:     taken
+		any_taken: taken
+		file:      p.frames.last().path
+		line:      tok.line
+		col:       tok.col
+	}
+}
+
+fn (mut p Processor) elif_directive(tok tokenize.Token, args string) {
+	if p.conditionals.len == 0 {
+		p.problem(tok, '#elif with no #if to belong to')
+		return
+	}
+	i := p.conditionals.len - 1
+	if p.conditionals[i].seen_else {
+		p.problem(tok, '#elif after #else')
+		return
+	}
+	mut taken := false
+	if p.conditionals[i].parent && !p.conditionals[i].any_taken {
+		value := p.if_value(tok, args) or { 0 }
+		taken = value != 0
+	}
+	p.conditionals[i].taken = taken
+	if taken {
+		p.conditionals[i].any_taken = true
+	}
+}
+
+fn (mut p Processor) else_directive(tok tokenize.Token) {
+	if p.conditionals.len == 0 {
+		p.problem(tok, '#else with no #if to belong to')
+		return
+	}
+	i := p.conditionals.len - 1
+	if p.conditionals[i].seen_else {
+		p.problem(tok, '#else after #else')
+		return
+	}
+	p.conditionals[i].seen_else = true
+	taken := p.conditionals[i].parent && !p.conditionals[i].any_taken
+	p.conditionals[i].taken = taken
+	if taken {
+		p.conditionals[i].any_taken = true
+	}
+}
+
+fn (mut p Processor) endif_directive(tok tokenize.Token) {
+	if p.conditionals.len == 0 {
+		p.problem(tok, '#endif with no #if to close')
+		return
+	}
+	p.conditionals.delete(p.conditionals.len - 1)
+}
+
+// if_value evaluates the controlling expression of one #if or #elif. `defined`
+// is answered before the macros around it are expanded, because what it takes
+// is the name of a macro and not a use of one, and every name left after the
+// expansion is a name that is not defined, which C says is zero.
+fn (mut p Processor) if_value(tok tokenize.Token, args string) ?i64 {
+	raw := tokenize.lex_fragment(args)
+	mut expanded := []tokenize.Token{}
+	mut i := 0
+	for i < raw.len {
+		t := raw[i]
+		if t.kind == .identifier && t.text == 'defined' {
+			i++
+			mut name := ''
+			if i < raw.len && raw[i].kind == .punct && raw[i].text == '(' {
+				i++
+				if i < raw.len && raw[i].kind == .identifier {
+					name = raw[i].text
+					i++
+				}
+				if i < raw.len && raw[i].kind == .punct && raw[i].text == ')' {
+					i++
+				} else {
+					p.problem(t, 'defined( has no closing )')
+					return none
+				}
+			} else if i < raw.len && raw[i].kind == .identifier {
+				name = raw[i].text
+				i++
+			} else {
+				p.problem(t, 'defined wants the name of a macro')
+				return none
+			}
+			expanded << tokenize.Token{
+				kind: .number
+				text: if name in p.macros { '1' } else { '0' }
+				line: t.line
+				col:  t.col
+				file: t.file
+			}
+			continue
+		}
+		expanded << p.expand(t)
+		i++
+	}
+	mut condition := Condition{
+		tokens: expanded
+		file:   p.frames.last().path
+		line:   tok.line
+		col:    tok.col
+	}
+	value := condition.parse()
+	p.diagnostics << condition.diagnostics
+	return value
 }
 
 // text_directive handles the directives that do something to the text being
@@ -302,28 +449,39 @@ fn (mut p Processor) undef(tok tokenize.Token, args string) {
 }
 
 // text is one token of the file being read, or of a macro body, which is the
-// same thing once a name has been replaced. An identifier that names an
-// object-like macro is replaced with the macro's tokens and those are expanded
-// again, which is what makes macros expand into other macros.
+// same thing once a name has been replaced. What a token stands for is decided
+// by expand(), and this writes the answer out.
 fn (mut p Processor) text(tok tokenize.Token) {
+	for expanded in p.expand(tok) {
+		p.emit(expanded)
+	}
+}
+
+// expand returns the tokens a token stands for: itself, unless it names an
+// object-like macro, in which case it is the macro's replacement tokens with
+// their own names expanded in turn.
+//
+// The result is a value rather than something written out, because the
+// controlling expression of an #if needs the same expansion without the text
+// reaching the output.
+fn (mut p Processor) expand(tok tokenize.Token) []tokenize.Token {
 	if tok.kind != .identifier || tok.text !in p.macros {
-		p.emit(tok)
-		return
+		return [tok]
 	}
 	macro := p.macros[tok.text]
 	if macro.takes_arguments() {
 		p.problem(tok, 'unsupported: ${tok.text} is a function-like macro, and arguments are not implemented yet')
-		return
+		return []
 	}
 	if tok.text in p.expanding {
 		// The name is being expanded right now, so this occurrence is the text
 		// it stands for and not another expansion.
-		p.emit(tok)
-		return
+		return [tok]
 	}
 	p.expanding << tok.text
+	mut out := []tokenize.Token{}
 	for body_token in macro.body {
-		p.text(tokenize.Token{
+		out << p.expand(tokenize.Token{
 			kind: body_token.kind
 			text: body_token.text
 			// Tokens out of a macro body are reported where the macro was used,
@@ -334,6 +492,7 @@ fn (mut p Processor) text(tok tokenize.Token) {
 		})
 	}
 	p.expanding.delete(p.expanding.len - 1)
+	return out
 }
 
 fn (mut p Processor) emit(tok tokenize.Token) {
