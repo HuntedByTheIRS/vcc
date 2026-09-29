@@ -33,8 +33,11 @@ pub:
 	// interpreter is the loader the kernel starts for a dynamically linked
 	// image. A program that calls a shared library has to name it in the image.
 	interpreter string
-	page_size   u64
-	load_base   u64
+	// library_dirs is where a library named with -l is looked for, the -L
+	// directories having been searched first.
+	library_dirs []string
+	page_size    u64
+	load_base    u64
 }
 
 // targets lists the descriptions the compiler can emit for. A new target is a
@@ -60,6 +63,7 @@ fn x86_64_linux() Target {
 		syscall_args_regs:  os.syscall_args_regs(arch.name)
 		exit_syscall:       os.exit_syscall
 		interpreter:        os.interpreter
+		library_dirs:       os.library_dirs(arch.name, os.name)
 		page_size:          os.page_size
 		load_base:          os.load_base
 	}

@@ -67,3 +67,19 @@ pub const interpreter = '/lib64/ld-linux-x86-64.so.2'
 // decides how low a program may be loaded.
 pub const page_size = u64(0x1000)
 pub const load_base = u64(0x400000)
+
+// library_dirs is where a library named with -l is looked for when -L says
+// nothing, in the order they are searched. Which directories a system keeps its
+// shared libraries in is a fact about that system, so the list is here and not
+// in the emitter that needs it.
+//
+// The architecture-and-system directory in the middle is the layout Debian and
+// its relatives use; on a machine without that split the path is not there and
+// the search moves past it. The names are per machine for the same reason the
+// syscalls are: a library built for another machine would not run here.
+pub fn library_dirs(machine string, system string) []string {
+	return match machine {
+		'x86_64' { ['/usr/local/lib', '/usr/lib/${machine}-${system}-gnu', '/usr/lib', '/lib'] }
+		else { []string{} }
+	}
+}
