@@ -140,6 +140,18 @@ fn test_a_long_chain_of_calls_is_rewritten() {
 	os.rm(binary) or {}
 }
 
+// The separate spelling of -std, end to end, because reading it as an input file
+// is a failure that shows up two stages away from the flag that caused it.
+fn test_the_separate_std_spelling_compiles_the_same_program() {
+	source := scratch('std.c')
+	binary := scratch('std')
+	exit_status := compile_and_run(['-std', 'gnu11', source, '-o', binary],
+		'int main() { return 3; }\n')
+	assert exit_status == 3
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // Reading the tree is a mode of its own: the compiler parses, prints, and stops
 // without writing anything. `main()` returns from inside that mode, so the test
 // walks the same steps in the same order and checks the output file is not there.

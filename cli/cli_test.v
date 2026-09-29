@@ -75,6 +75,26 @@ fn test_what_v_passes_is_accepted_rather_than_refused() {
 	assert opts.ignored.contains('-B/opt/tcc/lib/tcc')
 }
 
+fn test_the_standard_is_recorded_from_either_spelling() {
+	// V passes -std=gnu11 and a person types -std gnu11. The second one has to
+	// be read as a value, or the version name becomes an input file and the
+	// failure is about linking rather than about standards.
+	joined := parse(['-std=gnu11', 'src.c'])!
+	separate := parse(['-std', 'c99', 'src.c'])!
+	assert joined.standard == 'gnu11'
+	assert separate.standard == 'c99'
+	assert joined.inputs == ['src.c']
+	assert separate.inputs == ['src.c']
+	assert !joined.ignored.contains('-std=gnu11')
+	assert !separate.ignored.contains('-std')
+}
+
+fn test_the_standard_needs_a_value() {
+	if _ := parse(['src.c', '-std']) {
+		assert false, '-std with nothing after it should be an error'
+	}
+}
+
 fn test_run_mode_splits_the_source_from_the_program_arguments() {
 	opts := parse(['-run', 'prog.c', 'one', 'two'])!
 	assert opts.run
@@ -135,4 +155,5 @@ fn test_usage_mentions_the_output_and_the_version_flags() {
 	assert text.contains('-o outfile')
 	assert text.contains('--version')
 	assert text.contains('libgc.a')
+	assert text.contains('-std version')
 }

@@ -40,6 +40,7 @@ fn main() {
 		}
 		println('target: ${target.name}')
 		println('optimize: ${opts.optimization.summary()}')
+		println('standard: ${standard_line(opts.standard)}')
 		if opts.include_dirs.len == 0 {
 			println('include: (the standard directories, which are not used yet)')
 		}
@@ -140,6 +141,16 @@ fn main() {
 
 // read_source takes the path or the source itself, so a pipeline that feeds the
 // compiler on standard input works the way it does with tcc.
+// standard_line reports what -std bought, which today is a record and nothing
+// else: the subset this compiler accepts is the same one whatever is named, and
+// claiming otherwise would be a promise the parser does not keep.
+fn standard_line(standard string) string {
+	if standard == '' {
+		return '(none asked for; V passes -std=gnu11)'
+	}
+	return '${standard} (recorded; the accepted language does not change with it yet)'
+}
+
 fn read_source(path string) !string {
 	if path == '-' {
 		return os.get_raw_stdin().bytestr()

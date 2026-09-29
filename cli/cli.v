@@ -173,6 +173,11 @@ pub fn parse(args []string) !Options {
 			opts.target = cursor.value_of('')!
 		} else if arg.starts_with('--target=') {
 			opts.target = arg[9..]
+		} else if arg == '-std' {
+			// Both spellings, because V writes -std=gnu11 and a person writes
+			// -std gnu11, and a compiler that takes one of them turns the other
+			// into an input file named gnu11.
+			opts.standard = cursor.value_of('')!
 		} else if arg.starts_with('-std=') {
 			opts.standard = arg[5..]
 		} else if arg == '-x' {
@@ -246,18 +251,20 @@ pub fn usage(all bool) string {
 	out << '  -print-ast    print the tree the emitter would be given, then stop'
 	out << '  -bench        print per-phase timings'
 	out << '  -v --version  show the version'
-	out << '  -vv           show the version, the target and the include paths'
+	out << '  -vv           show the version, the target, the recorded flags and the paths'
 	out << '  -h -hh        show this, show more help'
 	out << '  -w -g         accepted for compatibility; the stub warns about nothing'
 	out << '  -O0 -O1 -O2 -O3 -Os   optimization level (default -O0)'
 	out << '  -fno-builtin  do not compute calls to library functions the compiler knows'
 	out << '  -fno-builtin-NAME  the same for one function'
-	out << '  -Idir -Dname -Uname -Ldir -llib -std=version -x type -o outfile'
+	out << '  -Idir -Dname -Uname -Ldir -llib -x type -o outfile'
+	out << '  -std=version  -std version   recorded; one subset is accepted either way'
 	if all {
 		out << ''
 		out << 'What a replacement for the bundled tcc is asked to accept, and what'
 		out << 'this compiler does with each one today:'
-		out << '  -std=gnu11 -std=c99   recorded, the standard is fixed for now'
+		out << '  -std=gnu11 -std c99   recorded in both spellings; the language accepted'
+		out << '                        today is one subset, so the flag changes nothing yet'
 		out << '  -fwrapv -fPIC -w -g   accepted and ignored'
 		out << '  -Werror=name          accepted and ignored'
 		out << '  -Btcc -Idir -Ldir     accepted; -I and -L paths are recorded, -B is not used yet'
