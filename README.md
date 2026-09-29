@@ -68,6 +68,19 @@ plus `--version`, `-v`, `-h`, `-hh`, `-run`, `-E`, `-c`, `-o`, `-bench`,
 own: `-D`, `-U`, `-nostdinc`, `-undef`, `-include`, `-imacros`, `-M`, `-MM`,
 `-MD`, `-MMD`, `-MF`, `-MT` and `-dM`. See `vcc -hh` for the annotated list.
 
+`-std=` selects the dialect rather than only being recorded: `-std=c99` and
+`-std=gnu99` are the two modes the compiler has, and every other spelling —
+including the `-std=gnu11` V passes when it writes none — is recorded and never
+refused. The two modes differ in one macro, defined before the first line of the
+program is read: `-std=c99` defines `__STRICT_ANSI__ 1` and `-std=gnu99` does
+not, which is what gcc 16.2.1 defines with the same flags. The standard headers
+read that macro, and it decides which declarations they expose: as c99 the C
+library shows the program the declarations C99 has and hides the POSIX ones
+beside them, and as gnu99 it shows both. `-std=c99` is therefore the strict path,
+and it is the one place where the two modes differ in what they accept — a
+`<stdlib.h>` program that stops in the header as gnu99 compiles as c99, which is
+what gcc does with the same file under the same flag.
+
 `preprocess/` is a C preprocessor and not a macro pass bolted onto the parser:
 `#include` with C's search order and `#include_next`, object-like and
 function-like macros with `#`, `##` and variadic arguments, conditionals with the
