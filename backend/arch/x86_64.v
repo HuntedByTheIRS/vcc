@@ -770,6 +770,28 @@ fn indirect_move(address Register, operand Register, width int, store bool) ![]u
 // reserves the space with a zero and fills the number in once the body has been
 // walked. The immediate is the wide form so the instruction keeps its length
 // when that happens, and frame_reserve_immediate is where the four bytes sit.
+// push_register hands one value over on the stack, which is where an argument
+// past the registers goes. The machine's push moves eight bytes and takes eight
+// off the stack pointer, and a register whose code is eight or more needs the
+// prefix byte that reaches it.
+pub fn push_register(reg Register) []u8 {
+	mut out := []u8{cap: 2}
+	if reg.code >= 8 {
+		out << u8(0x41)
+	}
+	out << u8(0x50 | (reg.code & 0x07))
+	return out
+}
+
+// stack_release gives back the stack a call's own arguments took, so the frame
+// is where it was before the call and the function's own slots keep the offsets
+// they were written with. It is the other half of push_register, and it also
+// gives back the one word an odd number of them took to keep the call aligned.
+pub fn stack_release(size u32) []u8 {
+	return [u8(0x48), 0x81, 0xc4, u8(size & 0xff), u8((size >> 8) & 0xff), u8((size >> 16) & 0xff),
+		u8((size >> 24) & 0xff)] // add rsp, imm32
+}
+
 pub fn frame_reserve(size u32) []u8 {
 	return [u8(0x48), 0x81, 0xec, u8(size & 0xff), u8((size >> 8) & 0xff), u8((size >> 16) & 0xff),
 		u8((size >> 24) & 0xff)]

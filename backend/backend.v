@@ -270,6 +270,18 @@ pub fn (t Target) remainder() ?arch.Register {
 // frame_reserve opens the space a function's locals live in. The size is not
 // known while the body is written, so frame_immediate_offset is where it sits in
 // those bytes and the emitter fills it in once the body has been walked.
+// push_register and stack_release are the two instructions a call's arguments
+// past the registers need: the caller puts them on the stack before the call and
+// gives the stack back after it, and the callee reads them from where the
+// convention says they are.
+pub fn (t Target) push_register(reg arch.Register) []u8 {
+	return arch.push_register(reg)
+}
+
+pub fn (t Target) stack_release(size u32) []u8 {
+	return arch.stack_release(size)
+}
+
 pub fn (t Target) frame_reserve(size u32) []u8 {
 	return arch.frame_reserve(size)
 }
