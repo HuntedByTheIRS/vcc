@@ -190,36 +190,17 @@ pub fn decay(t Type) Type {
 	return t
 }
 
-// pointer_compatible is the relation an assignment and an argument both ask
-// about: two pointers to compatible types, or one of them a pointer to void and
-// the other a pointer to an object or incomplete type. A pointer to a function is
-// not a pointer to an object, so `void *` and a function pointer are not
-// compatible, which is the reading ISO C has and gcc reports under
-// `-pedantic-errors`.
-//
-// The qualifiers on the types themselves are dropped here, because the standard
-// says "pointers to qualified or unqualified versions of compatible types". The
-// qualifiers below them are not dropped: `char **` and `const char **` point at
-// two different pointer types and are not compatible.
-pub fn pointer_compatible(to Type, from Type) bool {
-	if !to.is_pointer() || !from.is_pointer() {
-		return false
-	}
-	target := to.pointee() or { return false }
-	source := from.pointee() or { return false }
-	if target.is_void() {
-		return source.is_object()
-	}
-	if source.is_void() {
-		return target.is_object()
-	}
-	return unqualified(target).compatible(unqualified(source))
-}
-
 // assignment_problem is the constraint on assignment, 6.5.16.1, and with it the
 // constraint on an argument, which 6.5.2.2 says is checked as if by assignment.
 // It answers with the reason the assignment is a constraint violation, and with
 // none when it is one the standard allows.
+//
+// It is the one place the pointer rules of 6.5.16.1 live: a pointer to void
+// converts to and from a pointer to any object or incomplete type and not to a
+// pointer to a function, two pointers are compatible when they point to
+// compatible types, and the qualifiers on the type being pointed at survive.
+// A second implementation of the same relation would be a second answer waiting
+// to disagree with this one.
 //
 // constant_zero says the source is an integer constant expression with the value
 // zero, which is the null pointer constant: it converts to every pointer type,
