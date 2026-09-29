@@ -201,6 +201,17 @@ fn test_the_constraint_on_assignment_between_pointer_types() {
 	// Two pointers to the same function type are compatible.
 	int_function := pointer_to(function_type(int_type(), [], false, true))
 	assert reason(int_function, pointer_to(function_type(int_type(), [], false, true)), false) == ''
+	// e_function_pointer_from_null_constant: accepted. 6.5.16.1 allows an
+	// integer constant of value zero to convert to any pointer type, and a
+	// pointer to a function is one. Measured, gcc 16.2.1 compiles and runs
+	// `int h(int (*fp)(void)); int main(void) { return h(0); }`.
+	assert reason(int_function, int_type(), true) == ''
+	// The integer still has to be zero: gcc refuses `h(1)` with `passing
+	// argument 1 of 'h' makes pointer from integer without a cast`.
+	assert only_reason(int_function, int_type(), false, 'integer constant')
+	// o_pointer_to_bool: accepted, and it is 6.5.16.1's last allowed form. gcc
+	// accepts `int *p; _Bool b = p;` and refuses `int i = p;`.
+	assert reason(bool_type(), pointer_to(int_type()), false) == ''
 	// l_double_from_int: arithmetic converts, both ways.
 	assert reason(double_type(), int_type(), false) == ''
 	assert reason(int_type(), double_type(), false) == ''

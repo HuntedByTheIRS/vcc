@@ -259,15 +259,32 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 			}
 			return none
 		}
+		// 6.5.16.1: the only integer that converts to a pointer is the integer
+		// constant expression with the value zero, the null pointer constant,
+		// and that holds for every pointer type, a pointer to a function
+		// included. Measured, gcc 16.2.1 compiles and runs
+		// `int h(int (*fp)(void)) { return 0; } int main(void) { return h(0); }`
+		// under `-std=c99 -pedantic-errors`, and refuses `h(1)`, so the question
+		// is asked before the target says what it points to.
+		if from.is_integer() {
+			if constant_zero {
+				return none
+			}
+			return 'a constraint violation: ${from.describe()} is an integer and ${to.describe()} is a pointer, and only an integer constant of value zero converts to one'
+		}
 		if target.is_function() {
 			return 'a constraint violation: only a pointer to an object or an incomplete type converts to ${to.describe()}, and it points to a function'
-		}
-		if constant_zero {
-			return none
 		}
 		return 'a constraint violation: ${from.describe()} is an integer and ${to.describe()} is a pointer, and only an integer constant of value zero converts to one'
 	}
 	if from.is_pointer() {
+		// 6.5.16.1's last form: the target is _Bool and the source is a pointer.
+		// Measured, gcc 16.2.1 accepts `int *p; _Bool b = p;` under
+		// `-std=c99 -pedantic-errors`, where an int target with the same source
+		// is refused.
+		if to.kind == .bool_ {
+			return none
+		}
 		return 'a constraint violation: ${from.describe()} is a pointer and ${to.describe()} is not'
 	}
 	if to.is_void() {
