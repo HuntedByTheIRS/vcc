@@ -24,6 +24,14 @@ pub:
 }
 
 // knows says whether the description carries this kind.
+// bits_in_a_byte is the one fact about a target this module states in code
+// rather than asks for: the back end describes x86_64 this milestone, and a
+// byte there is eight bits. Every size, alignment and member offset below comes
+// from the description it is handed; the arithmetic that turns a member's width
+// into a bit position counts bits in that byte, which is the only place this
+// module needs the width of one.
+const bits_in_a_byte = 8
+
 pub fn (r Representation) knows(kind Kind) bool {
 	return kind in r.sizes && kind in r.aligns
 }
@@ -137,13 +145,13 @@ pub fn (r Representation) layout(t Type) ?Layout {
 				// answer.
 				return none
 			}
-			unit := 8 * member_size
+			unit := bits_in_a_byte * member_size
 			if unit <= 0 {
 				return none
 			}
 			if member.bits == 0 {
 				pos = round_up(pos, unit)
-				offsets << pos / 8
+				offsets << pos / bits_in_a_byte
 				bits << 0
 				align = larger(align, member_align)
 				continue
@@ -160,21 +168,21 @@ pub fn (r Representation) layout(t Type) ?Layout {
 			}
 			// The unit is the aligned storage unit of the declared type the
 			// position falls in, and the bit is the position inside it.
-			offsets << (at - (at % unit)) / 8
+			offsets << (at - (at % unit)) / bits_in_a_byte
 			bits << at % unit
 			align = larger(align, member_align)
 			cover(mut covered, at, member.bits)
 			pos = at + member.bits
 			continue
 		}
-		offset := round_up((pos + 7) / 8, member_align)
+		offset := round_up((pos + bits_in_a_byte - 1) / bits_in_a_byte, member_align)
 		offsets << offset
 		bits << -1
 		align = larger(align, member_align)
-		cover(mut covered, offset * 8, member_size * 8)
-		pos = (offset + member_size) * 8
+		cover(mut covered, offset * bits_in_a_byte, member_size * bits_in_a_byte)
+		pos = (offset + member_size) * bits_in_a_byte
 	}
-	size := round_up((pos + 7) / 8, align)
+	size := round_up((pos + bits_in_a_byte - 1) / bits_in_a_byte, align)
 	return Layout{
 		size:    size
 		align:   align
@@ -284,8 +292,8 @@ fn cover(mut marked []bool, bit int, width int) {
 	if width <= 0 {
 		return
 	}
-	last := (bit + width - 1) / 8
-	for index := bit / 8; index <= last; index++ {
+	last := (bit + width - 1) / bits_in_a_byte
+	for index := bit / bits_in_a_byte; index <= last; index++ {
 		for marked.len <= index {
 			marked << false
 		}

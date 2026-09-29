@@ -135,7 +135,7 @@ fn fits_with(kind Kind, value i64, rep Representation) !bool {
 	size := rep.size_of(kind_type) or {
 		return error('the width of ${kind_type.describe()} is not in the description')
 	}
-	return within(kind, value, 8 * size)
+	return within(kind, value, bits_in_a_byte * size)
 }
 
 // within says whether a value is one of the values a type of this signedness and
