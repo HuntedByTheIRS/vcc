@@ -195,7 +195,10 @@ fn print_tokens(tokens []tokenize.Token) {
 
 fn report(path string, diagnostics []tokenize.Diagnostic) {
 	for diagnostic in diagnostics {
-		eprintln('${path}:${diagnostic.line}:${diagnostic.col}: ${diagnostic.msg}')
+		// A diagnostic raised inside an included file names that file; the one
+		// the compiler was handed is the fallback for everything else.
+		where := if diagnostic.file != '' { diagnostic.file } else { path }
+		eprintln('${where}:${diagnostic.line}:${diagnostic.col}: ${diagnostic.msg}')
 	}
 }
 

@@ -26,23 +26,28 @@ pub fn (k Kind) str() string {
 }
 
 // Token carries its own location so every later stage can point at source text
-// without keeping a second copy of the file.
+// without keeping a second copy of the file. file names the source it came from,
+// and it stays empty until a stage that follows more than one file — the
+// preprocessor — fills it in.
 pub struct Token {
 pub:
 	kind Kind
 	text string
 	line int
 	col  int
+	file string
 }
 
 // Diagnostic is one thing that went wrong, with the place it went wrong. The
 // lexer defines it because the lexer is what gives a byte offset a line and a
-// column; the parser and the back end report in the same terms.
+// column; the parser and the back end report in the same terms. file is the
+// source the location belongs to, empty when the caller already knows it.
 pub struct Diagnostic {
 pub:
 	line int
 	col  int
 	msg  string
+	file string
 }
 
 pub fn (d Diagnostic) str() string {
