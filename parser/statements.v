@@ -489,6 +489,15 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 	}
 	if offender := unsupported_type_word(spec) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
+		// The declaration is refused for its type, and the name it declares is
+		// still a name this file declares: recording it here is what keeps a later
+		// use of it from being reported a second time as a name nothing declares,
+		// which would say something untrue about the source. A statement that
+		// reads it is still refused where it is written, by the type this
+		// declaration never gave it.
+		if p.peek().kind == .identifier {
+			p.declared[p.peek().text] = true
+		}
 		p.skip_declaration()
 		return stmts
 	}

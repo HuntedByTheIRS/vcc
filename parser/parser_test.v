@@ -747,6 +747,22 @@ fn test_a_name_nothing_declares_is_refused_with_the_name_and_its_location() {
 	assert spread.diagnostics[0].col == 10
 }
 
+// A name a refused declaration declares is still a name this file declares: the
+// refusal is about the type, and reporting the name again as one nothing declares
+// would say something untrue about the source. Measured, `int main(void) {
+// unsigned int u = 0; u = 1; return 0; }` was `unsupported type unsigned` and then
+// `u is used here and nothing in this file declares it`; it is one message now.
+fn test_a_name_a_refused_declaration_declares_is_not_reported_again() {
+	result := parsed('int main(void) { unsigned int u = 0; u = 1; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('unsupported type unsigned')
+	// The same at the top level, where the declarator was read before the type was
+	// refused and the name was recorded as a matter of course.
+	global := parsed('unsigned int g = 1;\nint main(void) { return g; }')
+	assert global.diagnostics.len == 1
+	assert global.diagnostics[0].msg.contains('unsupported type unsigned')
+}
+
 // One diagnostic per name, however many times it is read: three uses of a name
 // nothing declares are one missing declaration.
 fn test_an_undeclared_name_costs_one_diagnostic() {
