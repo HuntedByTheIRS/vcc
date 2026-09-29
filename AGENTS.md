@@ -56,6 +56,7 @@ so the cap turns a frozen desktop into a clean OOM with the peak reported.
 |---|---|
 | `cli/` | flags, usage, version, timings. Knows nothing about C grammar. |
 | `tokenize/` | source text in, tokens out. No parser knowledge. |
+| `diagnostics/` | what a diagnostic is: its class, the severity the command-line flags give that class, and the one place a diagnostic becomes text. The `Diagnostic` struct itself stays in `tokenize/`, where every stage finds it. |
 | `ast/` | node types only. No printing, no emission. |
 | `parser/` | tokens in, `ast` out. Never writes files. |
 | `optimizer/` | `ast` in, `ast` out. `-O` levels and the builtin table. A pass is a row in a table with the level that turns it on, so adding an optimization is a function beside the table and not a branch in the emitter. `codegen/` never asks it anything. |
