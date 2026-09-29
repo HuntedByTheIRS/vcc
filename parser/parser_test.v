@@ -7,6 +7,31 @@ fn parsed(source string) Result {
 	return parse(tokenize.lex(source).tokens)
 }
 
+// The tokens of a source as if a header had been read: the file a token came from
+// is filled in by the preprocessor for every file it reads, and this is that
+// answer without a preprocessor.
+fn parsed_from(source string, file string) Result {
+	mut tokens := tokenize.lex(source).tokens
+	for i in 0 .. tokens.len {
+		tokens[i] = tokenize.Token{
+			...tokens[i]
+			file: file
+		}
+	}
+	return parse(tokens)
+}
+
+fn test_a_diagnostic_names_the_file_its_token_came_from() {
+	// Measured: `#include <stdlib.h>` over a two-line program reported
+	// `prog.c:33:1: unsupported type unsigned`, a line the program does not have,
+	// because the parser reported a header's position under the name of the file
+	// it was handed. The preprocessor fills a token's file in, and the message
+	// names that.
+	result := parsed_from('unsigned int f() { return 1; }', '/usr/include/stdlib.h')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].file == '/usr/include/stdlib.h'
+}
+
 fn test_a_function_that_returns_a_constant() {
 	result := parsed('int main() { return 42; }')
 	assert result.diagnostics.len == 0

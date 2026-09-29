@@ -54,6 +54,11 @@ mut:
 	// is a set of names rather than the scope table because that check is about
 	// the unit and not about which block a name was visible in.
 	declared map[string]bool
+	// file is the source the tokens being read came from, which the preprocessor
+	// fills in for every file it reads. A diagnostic raised inside an included
+	// file names that file: reporting a header's line number against the name of
+	// the program that included it is a message about the wrong file.
+	file string
 }
 
 // supported_types are the ones the back end can emit today.
@@ -1043,6 +1048,12 @@ fn (mut p Parser) next() tokenize.Token {
 	if p.pos < p.tokens.len {
 		p.pos++
 	}
+	// The tokens arrive in the order the preprocessor read the files, so the one
+	// being read names the file a diagnostic raised before the next one is the
+	// file the message is about.
+	if t.file != '' {
+		p.file = t.file
+	}
 	return t
 }
 
@@ -1065,17 +1076,26 @@ fn (mut p Parser) expect_punct(text string) bool {
 }
 
 fn (mut p Parser) error_at(t tokenize.Token, msg string) {
-	p.error_span(t.line, t.col, msg)
+	// A token knows the file it came from, so a diagnostic about one names it
+	// even when the token was not read yet - the reader reports what it is
+	// looking at as often as what it just read.
+	p.report_at(t.line, t.col, if t.file != '' { t.file } else { p.file }, msg)
 }
 
 // error_span reports a diagnostic at a position that came from a node rather than
 // from a token: the argument of a call is where its own expression started, which
-// is the line and column a reader of the source will look at.
+// is the line and column a reader of the source will look at. A node carries no
+// file, so the one the reader is in is the file the message names.
 fn (mut p Parser) error_span(line int, col int, msg string) {
+	p.report_at(line, col, p.file, msg)
+}
+
+fn (mut p Parser) report_at(line int, col int, file string, msg string) {
 	p.diagnostics << tokenize.Diagnostic{
 		line: line
 		col:  col
 		msg:  msg
+		file: file
 	}
 }
 
