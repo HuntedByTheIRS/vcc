@@ -630,15 +630,46 @@ fn test_an_object_of_two_eightbytes_goes_on_the_stack_when_a_register_ran_out() 
 	os.rm(binary_six) or {}
 }
 
-// An object of more than two eightbytes is a copy in memory, and it is refused where
-// it is written rather than handed over as two of them.
-fn test_an_object_of_more_than_two_eightbytes_is_refused_by_name() {
-	source := scratch('pairwide.c')
-	binary := scratch('pairwide')
-	program := 'struct B { double a; double b; double c; };\nint f(struct B x) { return x.a > 0.0; }\nint main(void) { struct B b; b.a = 1.0; return f(b); }\n'
-	result := compile([source, '-o', binary], program)
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('at most two')
+// An object of more than two eightbytes is passed in memory: the caller puts a copy
+// of it on the stack, its words in reverse so that the first one ends up at the
+// lowest address, and the callee copies as many bytes as the object has out of the
+// stack into its own storage. That copy is what makes a parameter's writes local to
+// the call: what the caller has is a different object.
+fn test_an_object_of_more_than_two_eightbytes_is_passed_in_memory() {
+	source := scratch('memoryobject.c')
+	binary := scratch('memoryobject')
+	program := 'struct B { double a; double b; double c; };\ndouble f(struct B x) { return x.a * 100.0 + x.b * 10.0 + x.c; }\nint main(void) { struct B b; b.a = 1.0; b.b = 2.0; b.c = 3.0; return f(b); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 123
+	// An object whose size is not a multiple of eight: the last word of the copy is
+	// as wide as the bytes the object has left and no wider.
+	source_odd := scratch('memoryobjectodd.c')
+	binary_odd := scratch('memoryobjectodd')
+	program_odd := 'struct F { int a; int b; int c; int d; int e; };\nint f(struct F s) { return s.a * 100 + s.b * 10 + s.e; }\nint main(void) { struct F s; s.a = 1; s.b = 2; s.c = 3; s.d = 4; s.e = 5; return f(s); }\n'
+	odd_status := compile_and_run([source_odd, '-o', binary_odd], program_odd)
+	assert odd_status == 125
+	// Two objects in memory with a value between them, so that the order of the
+	// stack and the position each one is read at are both the convention's.
+	source_two := scratch('memoryobjecttwo.c')
+	binary_two := scratch('memoryobjecttwo')
+	program_two := 'struct S { int a; int b; int c; int d; };\nint f(struct S s, int p, struct S t) { return s.a + p + t.d * 10; }\nint main(void) { struct S s; struct S t; s.a = 1; s.b = 2; s.c = 3; s.d = 4; t.a = 1; t.b = 2; t.c = 3; t.d = 5; return f(s, 2, t); }\n'
+	two_status := compile_and_run([source_two, '-o', binary_two], program_two)
+	assert two_status == 53
+	// A parameter of such a type is storage of its own: writing to it does not write
+	// to the object the caller passed.
+	source_copy := scratch('memoryobjectcopy.c')
+	binary_copy := scratch('memoryobjectcopy')
+	program_copy := 'struct S { int a; int b; int c; int d; };\nint f(struct S s) { s.a = 9; return s.a; }\nint main(void) { struct S s; s.a = 1; s.b = 2; s.c = 3; s.d = 4; int r = f(s); return s.a * 10 + r; }\n'
+	copy_status := compile_and_run([source_copy, '-o', binary_copy], program_copy)
+	assert copy_status == 19
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	os.rm(source_odd) or {}
+	os.rm(binary_odd) or {}
+	os.rm(source_two) or {}
+	os.rm(binary_two) or {}
+	os.rm(source_copy) or {}
+	os.rm(binary_copy) or {}
 }
 
 // A function hands an object back as its bytes in the register the class names, so

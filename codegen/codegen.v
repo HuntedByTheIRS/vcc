@@ -571,12 +571,16 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// that many bytes: the value is copied into the slot rather than
 		// converted into it.
 		if param.class.bytes > 0 {
-			if param.class.count > 2 {
-				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes ${param.typ} by value, which is ${param.class.bytes} bytes or ${param.class.count} eightbytes, and this compiler hands over an aggregate of at most two')
-				return error('aggregate parameter too large')
-			}
 			object := e.declare(param.name, param.typ, 0, param.class.bytes, param.line, param.col)!
 			stacked_at := 2 * e.target.word_size + stacked * e.target.word_size
+			if param.class.count > 2 {
+				// An object of more than two eightbytes is passed in memory: the
+				// caller put a copy of it on the stack, and the parameter is
+				// storage of the layout's bytes that the copy goes into.
+				e.copy_stack_object(object, stacked_at, param.line, param.col)!
+				stacked += param.class.count
+				continue
+			}
 			if param.class.count == 2 {
 				// Two eightbytes: each arrives in a register of its own class,
 				// or both arrive as two words of the stack when either sequence
@@ -594,11 +598,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 						placed.second, param.line, param.col)!
 					continue
 				}
-				e.load_stacked_eightbyte(object, 0, e.target.word_size, stacked_at, param.line,
-					param.col)!
-				e.load_stacked_eightbyte(object, e.target.word_size,
-					param.class.bytes - e.target.word_size, stacked_at + e.target.word_size,
-					param.line, param.col)!
+				e.copy_stack_object(object, stacked_at, param.line, param.col)!
 				stacked += 2
 				continue
 			}
@@ -2614,8 +2614,17 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		class := e.aggregate_argument(call, i)
 		if c := class {
 			if c.count > 2 {
-				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${i + 1} of the call to ${call.name} is an object of ${c.bytes} bytes or ${c.count} eightbytes, and this compiler hands over an aggregate of at most two')
-				return error('aggregate argument too large')
+				// An object of more than two eightbytes is passed in memory: the
+				// convention puts no register on it at all, and the caller's copy
+				// of it goes on the stack in the order its own words are in.
+				places << ArgPlace{
+					stack:    true
+					position: stacked
+					object:   true
+					words:    c.count
+				}
+				stacked += c.count
+				continue
 			}
 			if c.count == 2 {
 				// Two eightbytes: each takes a register of its own class, and
@@ -2627,7 +2636,8 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 					places << ArgPlace{
 						floating:        c.first_floating
 						position:        placed.first
-						paired:          true
+						object:          true
+						words:           2
 						second_floating: c.second_floating
 						second_position: placed.second
 					}
@@ -2638,7 +2648,8 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				places << ArgPlace{
 					stack:    true
 					position: stacked
-					paired:   true
+					object:   true
+					words:    2
 				}
 				stacked += 2
 				continue
@@ -2661,6 +2672,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				floating: true
 				position: stacked
 				stack:    true
+				words:    1
 			}
 			stacked++
 			continue
@@ -2677,6 +2689,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			floating: false
 			position: stacked
 			stack:    true
+			words:    1
 		}
 		stacked++
 	}
@@ -2684,11 +2697,10 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
-		if place.paired {
-			// An object of two eightbytes is not read into a slot at all: both
-			// of its eightbytes are read from the object itself, after the stack
-			// this call takes has been made, so that nothing disturbs the
-			// registers they went into.
+		if place.object {
+			// An object is not read into a slot at all: its own bytes are read
+			// after the stack this call takes has been made, either into the
+			// registers it goes in or onto the stack itself.
 			continue
 		}
 		if class := e.aggregate_argument(call, i) {
@@ -2740,21 +2752,37 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			arg := call.args[i]
 			line := expr_line(arg)
 			col := expr_col(arg)
-			if place.paired {
-				// An object in memory goes on the stack in one piece: the second
-				// eightbyte is pushed first, because the stack grows down and the
-				// first eightbyte is the one the callee reads at the lower
-				// address.
-				e.address_of_object(arg, depth + i + 1)!
-				base := e.accumulator(line, col)!
-				low := e.remainder(line, col)!
-				e.append(e.target.load_indirect(base, low, e.target.word_size)!)
-				e.append(e.target.add_immediate(base, e.target.word_size))
-				high := e.scratch(line, col)!
-				e.append(e.target.load_indirect(base, high, e.target.word_size)!)
-				e.append(e.target.push_register(high))
-				e.append(e.target.push_register(low))
-				e.stack_pushed += 2 * width
+			if place.object {
+				// An object goes on the stack in one piece, its words pushed from
+				// the last one to the first: the stack grows down, so the word
+				// pushed last is the one at the lowest address, which is the
+				// object's first word. The address of the object is taken again
+				// for each word, which keeps the register the word travels in
+				// free of it, and the object's last word is only as wide as the
+				// object has left, so nothing past its end is read.
+				class := e.aggregate_argument(call, i) or {
+					e.diagnostics << problem(call.line, call.col, 'internal: an object handed over on the stack has no class in the signature of ${call.name}')
+					return error('no class')
+				}
+				mut k := place.words - 1
+				for k >= 0 {
+					offset := k * width
+					read := if offset + width > class.bytes {
+						class.bytes - offset
+					} else {
+						width
+					}
+					e.address_of_object(arg, depth + i + 1)!
+					base := e.accumulator(line, col)!
+					if offset > 0 {
+						e.append(e.target.add_immediate(base, offset))
+					}
+					value := e.scratch(line, col)!
+					e.append(e.target.load_indirect(base, value, read)!)
+					e.append(e.target.push_register(value))
+					e.stack_pushed += width
+					k--
+				}
 				continue
 			}
 			slot := e.value_slot(depth + i)
@@ -2777,7 +2805,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
-		if place.paired && !place.stack {
+		if place.object && !place.stack {
 			// The object's own bytes, read straight into the two argument
 			// registers: the second eightbyte is eight bytes further in, and the
 			// general file is handed only the bytes the object has left. An
@@ -2855,10 +2883,14 @@ struct ArgPlace {
 	// stack says the argument is handed over on the stack rather than in a
 	// register, which is what happens to the ones a sequence ran out for.
 	stack bool
-	// paired says the argument is an object of two eightbytes: the second one of
-	// them travels beside the first, in the register second_floating and
-	// second_position name, or as the stack word after it when stack is set.
-	paired          bool
+	// object says the argument is an object of an aggregate type rather than a
+	// value, which is read from its own bytes. When the object is in registers
+	// the second eightbyte of it travels in the register second_floating and
+	// second_position name; when it is on the stack it is words eight-byte words
+	// of it, which is one for a value, two for an object of two eightbytes and one
+	// per eightbyte for an object the convention passes in memory.
+	object          bool
+	words           int
 	second_floating bool
 	second_position int
 }
@@ -3015,15 +3047,30 @@ fn (mut e Emitter) store_argument_eightbyte(object Slot, offset int, width int, 
 	e.append(e.target.store_slot(base, i32(object.offset + offset), register, width)!)
 }
 
-// load_stacked_eightbyte copies one eightbyte of an object that is in memory into a
-// parameter's storage. Both classes arrive the same way, because what is in memory is
-// the object's bytes: the bits of a double are those bytes, and the general file
-// carries only as many of them as the object has left.
-fn (mut e Emitter) load_stacked_eightbyte(object Slot, offset int, width int, at int, line int, col int) !void {
-	register := e.accumulator(line, col)!
-	base := e.frame_pointer(line, col)!
-	e.append(e.target.load_slot(base, at, register, e.target.word_size)!)
-	e.append(e.target.store_slot(base, i32(object.offset + offset), register, width)!)
+// copy_stack_object copies an object that was passed in memory into the parameter's
+// storage. What is on the stack is the object's own bytes, so an eightbyte of either
+// class arrives the same way, and the bytes move as many at a time as the machine
+// moves in one instruction: eight, then four, then two, then one, which is what an
+// object whose size is not a multiple of eight needs.
+fn (mut e Emitter) copy_stack_object(object Slot, at int, line int, col int) !void {
+	mut done := 0
+	for done < object.width {
+		remaining := object.width - done
+		chunk := if remaining >= 8 {
+			8
+		} else if remaining >= 4 {
+			4
+		} else if remaining >= 2 {
+			2
+		} else {
+			1
+		}
+		register := e.accumulator(line, col)!
+		base := e.frame_pointer(line, col)!
+		e.append(e.target.load_slot(base, at + done, register, chunk)!)
+		e.append(e.target.store_slot(base, i32(object.offset + done), register, chunk)!)
+		done += chunk
+	}
 }
 
 // argument_is_double says whether an argument is handed over as a double. A
