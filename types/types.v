@@ -131,16 +131,17 @@ pub mut:
 	quals    Qualifiers
 }
 
-// Member is one member of a struct or a union. bits is the width of a bitfield
-// as it was written and 0 for a member that is not one; a bitfield of width 0
-// has no name and asks the next unit to start on a boundary.
+// Member is one member of a struct or a union. bitfield says the member was
+// written with a width, and bits is that width; a bitfield of width 0 has no name
+// and asks the next unit of its type to start where the member is.
 pub struct Member {
 pub:
-	name string
-	typ  Type
-	bits int
-	line int
-	col  int
+	name     string
+	typ      Type
+	bitfield bool
+	bits     int
+	line     int
+	col      int
 }
 
 // Param is one parameter of a function type. A parameter written with an array
