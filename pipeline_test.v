@@ -519,6 +519,20 @@ fn test_a_member_of_a_union_is_at_the_beginning_of_the_object() {
 	os.rm(binary) or {}
 }
 
+// An object of an aggregate type at the top level is storage in the image rather
+// than in a frame, and the address a member is read at is the address of that
+// storage: the object starts as zeros, the members written into it are read back
+// from a function, and a char member is a byte of the same eight.
+fn test_a_top_level_aggregate_is_storage_in_the_image() {
+	source := scratch('globalstruct.c')
+	binary := scratch('globalstruct')
+	program := 'struct A { int x; };\nstruct B { struct A a; int y; char c; };\nstruct B g;\nint main(void) { g.a.x = 5; g.y = 2; g.c = 1; return g.a.x * 100 + g.y * 10 + g.c; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 521 % 256
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // A member of a member is one object read further in, so the offsets add up: the
 // member `x` of the member `a` of `b` is at the byte `a` starts at plus the byte
 // `x` starts at inside it. The answer is 34 = 3 * 10 + 4, and a layout that put

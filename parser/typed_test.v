@@ -489,11 +489,25 @@ fn test_an_object_of_an_incomplete_tag_is_refused_by_the_tag() {
 // An object defined at the top level is storage in the image, which is laid out
 // by a path that has no room for an aggregate yet. Refusing it where it is
 // written is what keeps an object nothing uses from being dropped silently.
-fn test_an_aggregate_defined_at_the_top_level_is_refused_where_it_is_written() {
-	result := parsed('struct S { int a; };\nstruct S g;\nint main() { return 0; }')
+// An object of an aggregate type at the top level is storage in the image, and how
+// much of it is the model's layout rather than a width a spelling answers. The
+// declaration asks that question once and carries the answer, which is what the
+// image writer reserves.
+fn test_an_aggregate_at_the_top_level_carries_the_size_of_its_layout() {
+	result := checked('struct S { int a; char c; };\nstruct S g;\nint main() { return 0; }')
+	assert result.unit.globals.len == 1
+	assert result.unit.globals[0].bytes == 8
+	assert result.unit.globals[0].count == 0
+}
+
+// An array of them is a different question: the stride between elements is the
+// layout's size and the count multiplies it, which is a shape this compiler does
+// not lay out, so it is refused by name rather than sized as if a struct were a
+// scalar.
+fn test_an_array_of_aggregates_at_the_top_level_is_refused_by_name() {
+	result := parsed('struct S { int a; };\nstruct S g[2];\nint main() { return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('aggregate at the top level')
-	assert result.diagnostics[0].line == 2
+	assert result.diagnostics[0].msg.contains('an array of aggregates')
 }
 
 // A member of a member is inside the same object: the path is one Field naming the

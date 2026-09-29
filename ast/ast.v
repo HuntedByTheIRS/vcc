@@ -78,10 +78,15 @@ pub:
 // double as the eight bytes of its value.
 pub struct Global {
 pub:
-	name       string
-	typ        string
-	resolved   types.Type
-	count      int
+	name     string
+	typ      string
+	resolved types.Type
+	count    int
+	// bytes is how much storage an object of an aggregate type takes, and zero
+	// for every other kind, which is sized from its type the way it always was.
+	// An aggregate has no width a spelling answers, so the declaration asks the
+	// model's layout once, here, and every later stage reads the number.
+	bytes      int
 	init       ?i64
 	init_float ?f64
 	line       int

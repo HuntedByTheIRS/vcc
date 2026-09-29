@@ -471,12 +471,30 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if spec.clause.kind in [types.Kind.struct_, .union_] {
-			// An aggregate inside a function is a block of the frame, and the
-			// frame is where this compiler lays one out. An object at the top
-			// level is storage in the image, which is laid out by a different
-			// path that has no room for one yet. Refusing it here is what keeps
-			// an object nothing uses from being dropped without a word.
-			p.error_at(data_at, 'unsupported: ${data_name} is defined at the top level with the type ${spec.clause.describe()}, and an aggregate at the top level is storage this compiler does not lay out yet')
+			// An object of an aggregate type at the top level is storage in the
+			// image, and how much of it is a fact about the layout: the model
+			// answers the size once, here, and the image writer reserves that
+			// many zeroed bytes. Nothing in it is initialized by the
+			// definition, because C has no brace list in this reader and the
+			// members are written one at a time.
+			if data_count != 0 {
+				p.error_at(data_at, 'unsupported: ${data_name} is defined at the top level as an array of ${spec.clause.describe()}, and an array of aggregates is storage this compiler does not lay out yet')
+				return decls
+			}
+			bytes := p.aggregate_bytes(spec.clause)
+			if bytes == 0 {
+				p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${spec.clause.describe()}, and its layout is not one this compiler knows')
+				return decls
+			}
+			p.declare_name(data_name, spec.clause, data_at, true)
+			p.globals << ast.Global{
+				name:     data_name
+				typ:      data_type
+				resolved: spec.clause
+				bytes:    bytes
+				line:     data_at.line
+				col:      data_at.col
+			}
 			return decls
 		}
 		if data_defined && data_init == none && data_init_float == none {

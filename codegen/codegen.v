@@ -734,6 +734,21 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 // need it.
 fn (mut e Emitter) address_of_member(name string, offset int, through_pointer bool, line int, col int) !void {
 	slot := e.lookup(name) or {
+		// A top-level object: it has no slot in the frame, so the address of the
+		// member is the address of the object in the image plus the byte the
+		// layout gave the member. A pointer at the top level is storage the tree
+		// does not lay out, so an arrow on one cannot be reached from here.
+		// `global_of` also lays the storage out the first time the name is
+		// used, which is what an address of it needs: a reference the layout
+		// fills in is meaningless until there is an object to point at.
+		if _ := e.global_of(name) {
+			register := e.accumulator(line, col)!
+			e.reference(e.target.address_of(register, 0), .global_address, name, register.name)
+			if offset != 0 && !through_pointer {
+				e.append(e.target.add_immediate(register, offset))
+			}
+			return
+		}
 		e.diagnostics << problem(line, col, 'unsupported: ${name} is read as an object with a member, and no declaration of that name is in scope')
 		return error('unknown object')
 	}
@@ -2480,6 +2495,16 @@ fn (e Emitter) global_shape(name string) ?GlobalSlot {
 	}
 	for global in e.unit.globals {
 		if global.name == name {
+			if global.bytes > 0 {
+				// An object of an aggregate type: its storage is as many bytes
+				// as the layout says and it has no element width a load could
+				// use, which is why nothing may read the name as a value.
+				return GlobalSlot{
+					offset: 0
+					width:  global.bytes
+					count:  0
+				}
+			}
 			element := e.type_width(global.typ) or { return none }
 			return GlobalSlot{
 				offset:   0
@@ -2541,7 +2566,23 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 	shape := e.global_shape(name) or { return none }
 	element := shape.width
 	// A definition with no written count is one value, and one with a count is
-	// that many of them.
+	// that many of them. An object of an aggregate type has neither: its storage
+	// is the byte size the declaration asked the layout for, and it starts as
+	// zeros because there is nothing in the definition to write into it.
+	if object.bytes > 0 {
+		for e.program.globals_blob.len % e.target.word_size != 0 {
+			e.program.globals_blob << u8(0)
+		}
+		offset := e.program.globals_blob.len
+		e.program.globals_blob << []u8{len: object.bytes, init: u8(0)}
+		slot := GlobalSlot{
+			offset: offset
+			width:  object.bytes
+			count:  0
+		}
+		e.program.globals[name] = slot
+		return slot
+	}
 	count := if shape.count > 0 { shape.count } else { 1 }
 	for e.program.globals_blob.len % e.target.word_size != 0 {
 		e.program.globals_blob << u8(0)
