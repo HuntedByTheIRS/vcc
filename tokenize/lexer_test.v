@@ -97,3 +97,33 @@ fn test_every_input_ends_with_an_eof_token() {
 	assert lex('').tokens.len == 1
 	assert lex('').tokens[0].kind == .eof
 }
+
+fn test_a_hash_that_is_not_the_first_token_on_a_line_is_a_punctuator() {
+	// C's rule is about position rather than about the byte: `##` pastes and `#`
+	// stringizes inside a macro body, and neither opens a directive there.
+	assert texts('int x = a ## b;') == ['int', 'x', '=', 'a', '##', 'b', ';', '']
+	assert texts('int x = a # b;') == ['int', 'x', '=', 'a', '#', 'b', ';', '']
+}
+
+fn test_a_comment_does_not_move_a_directive_off_the_start_of_its_line() {
+	tokens := lex('/* a\nb */ #define N 7\n').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#define N 7'
+	assert tokens[0].line == 2
+}
+
+fn test_a_fragment_lexes_its_hashes_as_punctuators() {
+	fragment := lex_fragment('define S(x) #x')
+	assert fragment.len == 7
+	assert fragment[0].text == 'define'
+	assert fragment[5].text == '#'
+	paste := lex_fragment('define PS(a, b) a ## b')
+	assert paste[8].text == '##'
+}
+
+fn test_a_fragment_has_no_end_of_file_token() {
+	// A fragment ends where the caller's text ends, so there is nothing for an
+	// eof token to mark.
+	assert lex_fragment('').len == 0
+	assert lex_fragment('x').len == 1
+}
