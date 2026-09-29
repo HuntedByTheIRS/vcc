@@ -95,9 +95,11 @@ loader, which is what makes `puts` work without a linker.
 `optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
 spellings. What a level turns on today is one pass: a call whose value the
 compiler knows (`abs`, `labs`, `llabs`, and the reserved `__builtin_` spellings
-of each) with a literal argument folds to that value. Since the stub cannot emit
-a call at all, `-O0` leaves `abs(-7)` as a diagnostic while `-O2` turns it into
-`7`. `-fno-builtin` and `-fno-builtin-abs` take that back; a call written
+of each) with a literal argument folds to that value. A call whose value is read
+is emitted like any other expression — the result arrives in the register a value
+is expected to be in — so `-O0` makes the call and `-O2` folds it to `7`: the
+level decides whether a call the optimizer knows is folded, not whether it can be
+made. `-fno-builtin` and `-fno-builtin-abs` take the fold back; a call written
 `__builtin_abs` is an explicit request and folds at any level.
 
 `-print-ast` parses, prints the tree the emitter would be given, and stops
@@ -109,11 +111,12 @@ what a file is made of — `-MM` leaves the system headers out of it, `-MD` and
 names its target — `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
-Not implemented, in rough order of how much of the tree depends on it: a call
-whose value is used inside an expression (a call is emitted where its result is
-discarded), types and operators beyond the integer family the headers use, object
-files and relocatable output, and V's own generated C. `ROADMAP.md` maps the
-order.
+Not implemented, in rough order of how much of the tree depends on it: storage
+beyond the integer family the headers use (`char`, `double`, `struct`, arrays, and
+globals, which are not in the tree yet), more than six arguments because the
+machine passes only six in registers, a function definition that returns `void`,
+`switch`, taking the address of a local, object files and relocatable output, and
+V's own generated C. `ROADMAP.md` maps the order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a

@@ -99,6 +99,11 @@ mut:
 	// defines, so that a call in the file hands each argument over at the width
 	// the definition expects.
 	signatures map[string][]int
+	// returns is the return type of every function the file defines, which is
+	// what a call whose value is read has to be checked against: a void
+	// function's result is nothing, and a value read from a call to one would
+	// be whatever the call left in the register.
+	returns map[string]string
 	// scopes is the blocks being emitted, innermost last. A name is visible in
 	// the block it was declared in and the ones inside it, which is where a
 	// declaration gets its slot and its width from.
@@ -214,6 +219,7 @@ fn (mut e Emitter) build() ![]u8 {
 	// to hand over; a definition with a parameter this back end cannot size is
 	// left out of the table, because its own emission is where that is reported.
 	for decl in e.unit.decls {
+		e.returns[decl.name] = decl.ret
 		if decl.body.len > 0 {
 			e.program.defined[decl.name] = true
 			mut widths := []int{}
@@ -778,13 +784,21 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.emit_binary(expr, depth)!
 		}
 		ast.Call {
-			// A call is emitted where its result is discarded, which is the
-			// statement form. A call whose value is read is the shape the -O
-			// levels exist for: the optimizer's builtin table is what turns a
-			// call it knows into the value, and one it does not know is reported
-			// here rather than handed a value that only looks like the answer.
-			e.diagnostics << problem(expr.line, expr.col, 'unsupported: the call to ${expr.name} is used as a value, and a call is emitted only where its result is discarded')
-			return error('call used as a value')
+			// A call's value arrives in the register the machine returns
+			// results in, which is the register a value is expected to be in,
+			// so a call in an expression is emitted where a name would be. Its
+			// arguments are parked one level up, so that a call inside a larger
+			// expression does not hand them to the slots the expression around
+			// it is using.
+			//
+			// A function the file defines says what it returns, and a void one
+			// returns nothing: reading that as a value is reported rather than
+			// read from a register the call happened to leave something in.
+			if e.returns[expr.name] == 'void' {
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the call to ${expr.name} is used as a value, and ${expr.name} returns void')
+				return error('void value')
+			}
+			e.emit_call(expr, depth + 1)!
 		}
 	}
 }

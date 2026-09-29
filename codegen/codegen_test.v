@@ -425,23 +425,97 @@ fn test_a_non_constant_return_is_reported_with_the_name() {
 	assert emitted.diagnostics[0].msg.contains('x is not a constant')
 }
 
-// A call whose result is read is the shape the -O levels exist for: the builtin
-// table turns a call it knows into a value, and a call the emitter is handed in a
-// value position is reported rather than emitted.
-fn test_a_call_used_as_a_value_is_reported() {
-	emitted := emit(translation_unit('int main() { return f(1); }'), Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('call to f')
-	assert emitted.bytes.len == 0
+// A call whose result is read is emitted: the value arrives in the register a
+// value is expected to be in, so a call can stand where a name would. What the
+// -O levels decide is whether a call the optimizer knows is folded, not whether
+// a call can be made at all.
+fn test_a_call_can_be_the_value_of_an_expression() {
+	helper := ast.FnDecl{
+		name:   'twice'
+		ret:    'int'
+		params: [ast.Param{
+			name: 'x'
+			typ:  'int'
+		}]
+		body:   [ast.Stmt{
+			kind: .return_stmt
+			expr: binary_node('+', name_node('x'), name_node('x'))
+		}]
+	}
+	body := [
+		declaration('v', 'int', ast.Expr(ast.Call{
+			name: 'twice'
+			args: [int_argument(21)]
+		})),
+		ast.Stmt{
+			kind: .return_stmt
+			expr: binary_node('-', name_node('v'), int_argument(42))
+		},
+	]
+	emitted := emit(unit_of(body, [helper]), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
 }
 
-fn test_a_call_as_an_argument_of_another_call_is_reported() {
+// Two calls in one expression each want somewhere to park their arguments, and
+// the inner one has to park them above the outer one's: a shared slot would have
+// the outer call hand over a value the inner one overwrote.
+fn test_a_call_can_be_the_argument_of_another_call() {
+	helper := ast.FnDecl{
+		name:   'twice'
+		ret:    'int'
+		params: [ast.Param{
+			name: 'x'
+			typ:  'int'
+		}]
+		body:   [ast.Stmt{
+			kind: .return_stmt
+			expr: binary_node('+', name_node('x'), name_node('x'))
+		}]
+	}
 	body := [
-		call_statement('puts', [ast.Expr(ast.Call{ name: 'name_of', args: []ast.Expr{} })]),
+		declaration('v', 'int', ast.Expr(ast.Call{
+			name: 'twice'
+			args: [ast.Expr(ast.Call{
+				name: 'twice'
+				args: [int_argument(21)]
+			})]
+		})),
+		ast.Stmt{
+			kind: .return_stmt
+			expr: binary_node('-', name_node('v'), int_argument(84))
+		},
 	]
-	emitted := emit(program(body), Options{})
+	emitted := emit(unit_of(body, [helper]), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+}
+
+// A function that returns nothing has no value to read: the file says what each
+// function it declares returns, and a call to one that returns void, read as a
+// value, is reported rather than read from whatever the call left in the
+// register.
+fn test_a_call_to_a_void_function_used_as_a_value_is_reported() {
+	declared := ast.FnDecl{
+		name:   'nothing'
+		ret:    'void'
+		params: [ast.Param{
+			name: 'v'
+			typ:  'int'
+		}]
+	}
+	body := [
+		declaration('x', 'int', ast.Expr(ast.Call{
+			name: 'nothing'
+			args: [int_argument(1)]
+		})),
+		return_statement(0),
+	]
+	emitted := emit(unit_of(body, [declared]), Options{})
 	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('name_of')
+	assert emitted.diagnostics[0].msg.contains('returns void')
 	assert emitted.bytes.len == 0
 }
 

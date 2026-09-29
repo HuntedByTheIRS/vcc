@@ -102,24 +102,54 @@ fn test_a_level_turns_a_builtin_call_into_a_runnable_binary() {
 	os.rm(binary) or {}
 }
 
-fn test_without_a_level_the_same_call_is_a_diagnostic() {
+fn test_without_a_level_the_call_is_made() {
+	// A call whose value is read is emitted: the result arrives in the register
+	// a value is expected to be in, and abs is a library function like any
+	// other. The level decides whether a call the optimizer knows is folded,
+	// not whether it can be made.
 	source := scratch('abs_o0.c')
 	binary := scratch('abs_o0')
-	image := compile([source, '-o', binary], 'int main() { return abs(-7); }\n')
-	assert image.diagnostics.len == 1
-	assert image.diagnostics[0].msg.contains('call')
-	assert image.bytes.len == 0
+	exit_status := compile_and_run([source, '-o', binary], 'int main() { return abs(-7) - 6; }\n')
+	assert exit_status == 1
 	os.rm(source) or {}
+	os.rm(binary) or {}
 }
 
 fn test_fno_builtin_takes_the_fold_back_at_the_same_level() {
 	source := scratch('abs_nb.c')
 	binary := scratch('abs_nb')
-	image := compile(['-O2', '-fno-builtin', source, '-o', binary],
-		'int main() { return abs(-7); }\n')
-	assert image.diagnostics.len == 1
-	assert image.bytes.len == 0
+	exit_status := compile_and_run(['-O2', '-fno-builtin', source, '-o', binary],
+		'int main() { return abs(-7) - 6; }\n')
+	assert exit_status == 1
 	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_call_can_be_the_value_of_an_expression() {
+	// The result of a call arrives where a value is expected, so it can be read
+	// where a name would be; its arguments are parked above the slots the
+	// expression around it is using.
+	source := scratch('callvalue.c')
+	binary := scratch('callvalue')
+	program := 'int add(int a, int b) { return a + b; }\n' +
+		'int main() { int y = 7; int x = add(y, 3) + 2; return x - 12; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_call_can_be_the_argument_of_another_call() {
+	// Two calls in one expression each want slots for their arguments, and the
+	// inner one has to park its arguments above the outer one's.
+	source := scratch('nestedcalls.c')
+	binary := scratch('nestedcalls')
+	program := 'int add(int a, int b) { return a + b; }\n' +
+		'int main() { return add(add(1, 2), add(3, 4)) - 10; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
 }
 
 // A chain of calls is deep in the tree and flat in the grammar, which is the
