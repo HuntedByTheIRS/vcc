@@ -140,16 +140,22 @@ fn test_a_node_the_model_has_no_answer_for_is_refused_rather_than_written() {
 	// same file says `unresolved` for that node and for the name beside it,
 	// which is the printer naming what the model did not answer rather than
 	// inventing a type for it.
-	lexed := tokenize.lex('int main(void) { return missing + 0xffffffff; }')
+	lexed := tokenize.lex('int main(void) { return missing + 4294967296; }')
 	refused := parser.parse(lexed.tokens)
 	assert refused.diagnostics.len == 1
-	assert refused.diagnostics[0].msg.contains('0xffffffff')
+	assert refused.diagnostics[0].msg.contains('4294967296')
 	assert refused.diagnostics[0].line == 1
 	assert refused.diagnostics[0].col == 35
 	printed := printed_lines(refused.unit)
 	assert clause_of_declaration(printed, 'ident missing') == 'unresolved'
-	assert clause_of_declaration(printed, 'int 4294967295') == 'unresolved'
+	assert clause_of_declaration(printed, 'int 4294967296') == 'unresolved'
 	assert clause_of_declaration(printed, 'binary +') == 'unresolved'
+	// The other side of the same boundary: the two constants the description
+	// carries a width for are answered, and the printer shows the clause the
+	// model gave each of them rather than the one the spelling suggests.
+	carried := printed_lines(parsed('int main(void) { return 100000 + 0xffffffff; }'))
+	assert clause_of_declaration(carried, 'int 100000') == 'int'
+	assert clause_of_declaration(carried, 'int 4294967295') == 'unsigned int'
 	// The return type of the definition was resolved, so the function line keeps
 	// its clause and is not written off with the rest.
 	assert clause_of_declaration(printed, 'fn main() int') == 'int (void)'

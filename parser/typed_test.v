@@ -129,31 +129,47 @@ fn test_the_type_of_an_expression_is_the_type_its_operators_give_it() {
 
 fn test_a_constant_whose_type_needs_a_width_the_description_lacks_is_refused() {
 	// 42 fits in the range every int has, so the type is settled without asking
-	// the target description for a width. 0xffffffff is past it and the
-	// description this compiler has carries no width, so the model refuses, and
-	// the refusal is reported where the constant is written rather than
-	// discarded: a node left unresolved is one the emitter would have to guess a
-	// width for, which is how `return 4294967295 > 2147483647;` was emitted as
-	// an int comparison and returned 0 where ISO C and gcc return 1.
+	// the target description for a width. 100000 and 0xffffffff are past that
+	// range and are still values the four-byte integer the back end writes a
+	// constant at holds, so the description answers int and unsigned int for
+	// them. 4294967296 needs a long, whose width the description does not
+	// carry, so the model refuses, and the refusal is reported where the
+	// constant is written rather than discarded: a node left unresolved is one
+	// the emitter would have to guess a width for, which is how
+	// `return 4294967295 > 2147483647;` was emitted as an int comparison and
+	// returned 0 where ISO C and gcc return 1.
 	small := checked('int main() { return 42; }')
 	small_lit := small.unit.decls[0].body[0].expr or {
 		assert false
 		return
 	}
 	assert (small_lit as ast.IntLit).typ.same(types.int_type())
-	wide := parsed('int main() { return 0xffffffff; }')
-	assert wide.diagnostics.len == 1
-	assert wide.diagnostics[0].msg.contains('0xffffffff')
-	assert wide.diagnostics[0].line == 1
-	assert wide.diagnostics[0].col == 21
-	// The clause is the zero type: the constant is still a constant, and the
-	// diagnostic is what keeps it from being compiled at a width nothing
-	// decided.
+	wide := checked('int main() { return 0xffffffff; }')
 	wide_lit := wide.unit.decls[0].body[0].expr or {
 		assert false
 		return
 	}
-	assert (wide_lit as ast.IntLit).typ.kind == .unknown
+	assert (wide_lit as ast.IntLit).typ.same(types.unsigned_int_type())
+	big := checked('int main() { return 100000; }')
+	big_lit := big.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (big_lit as ast.IntLit).typ.same(types.int_type())
+	// Past the width the back end writes, the refusal stands.
+	refused := parsed('int main() { return 4294967296; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('4294967296')
+	assert refused.diagnostics[0].line == 1
+	assert refused.diagnostics[0].col == 21
+	// The clause is the zero type: the constant is still a constant, and the
+	// diagnostic is what keeps it from being compiled at a width nothing
+	// decided.
+	refused_lit := refused.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (refused_lit as ast.IntLit).typ.kind == .unknown
 }
 
 fn test_sizeof_is_refused_by_name_and_by_location() {

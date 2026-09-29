@@ -29,9 +29,10 @@ mut:
 	// declaration hides an outer one and gives it back when its block ends.
 	scopes types.Table
 	// representation is what the target description answered about the object
-	// representation of the C types. It answers the width of a pointer and
-	// nothing else today, so a question that needs another width is refused and
-	// the node it belongs to is left unresolved rather than guessed at.
+	// representation of the C types: the width of a pointer, and the width of
+	// the integer kinds the back end writes a constant at. A question that
+	// needs a width the description does not carry is refused and the node it
+	// belongs to is left unresolved rather than guessed at.
 	representation types.Representation
 	// pending_base is the type the specifiers just read name, for the declarator
 	// that follows them. A declarator is read in three places - a declaration, a
@@ -73,7 +74,8 @@ pub fn parse(tokens []tokenize.Token) Result {
 
 // target_representation is what the target description says about the C types.
 // The host is the target this compiler emits for, and the description answers for
-// it what it carries: the width of a pointer, and nothing else so far. A question
+// it what it carries: the width of a pointer, and the width of an int and of an
+// unsigned int, which is the width the back end writes a constant at. A question
 // the description cannot answer is refused by name, which is the difference
 // between a compiler that does not know something and one that guesses.
 fn target_representation() types.Representation {
