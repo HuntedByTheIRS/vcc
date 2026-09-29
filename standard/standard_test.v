@@ -214,3 +214,20 @@ fn test_a_row_that_is_not_implemented_yet_is_read_by_nothing() {
 	]
 	assert uses([token('_Generic')], table, asking(.c99)).len == 0
 }
+
+fn test_a_static_assertion_is_not_read_and_is_therefore_not_checked() {
+	// The row is unimplemented and unchecked because the tree does not read a
+	// static assertion: at file scope the parser refuses it, and inside a
+	// function body the statement path reads the token as a call, which is the
+	// parser's defect and not a reading the table may claim. Promoting the row
+	// would report the construct in front of that refusal, which is the noise
+	// the status rule keeps out; the day the parser reads one, the status
+	// changes and the message below is what the check will print.
+	rows := features.filter(it.spellings.contains('_Static_assert'))
+	assert rows.len == 1
+	assert rows[0].status == .unimplemented
+	assert rows[0].since == .c11
+	assert !rows[0].gnu
+	assert rows[0].pedantic == 'the _Static_assert declaration'
+	assert pedantic_messages([token('_Static_assert')], asking(.c99)).len == 0
+}

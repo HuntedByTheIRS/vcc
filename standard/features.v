@@ -123,6 +123,17 @@ pub const features = [
 		pedantic:  'the _Generic selection'
 		status:    .unimplemented
 	},
+	// _Static_assert stays unimplemented because the tree does not read a
+	// static assertion, and measured, the two positions it can be written in
+	// are not one answer. At file scope the parser refuses it and names it
+	// (`unsupported: expected a declaration, found '_Static_assert'`), which is
+	// the unimplemented rule. Inside a function body the statement path reads
+	// the token as the start of an expression, so `_Static_assert(1, "x");`
+	// compiles and becomes a call to a symbol that was never defined, which is
+	// the parser's defect — recorded for the milestone that owns statement
+	// parsing — and is not a reading this row may claim. The day the parser
+	// reads a static assertion, this row changes status and starts being
+	// checked; the phrase below is already what that message needs.
 	Feature{
 		spellings: ['_Static_assert']
 		since:     .c11
