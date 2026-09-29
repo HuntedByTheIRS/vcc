@@ -20,25 +20,25 @@ than a patch release.
 vcc is a compiler: it reads untrusted text and writes a binary. That gives it a
 different threat surface from an application, and a shorter one.
 
-- **Silent miscompilation.** Input that is valid C, accepted without a
+- A silent miscompilation is input that is valid C, accepted without a
   diagnostic, producing an artifact that behaves differently from what the
   source says. This is the worst thing a compiler can do, and a way to get a
   vulnerable program from a source file that a reviewer read and approved. A
   miscompile that only shows up under unusual input is still this.
-- **Compiler-driven code execution or file access.** A crafted C input, or a
+- Code execution or file access driven by the compiler is a crafted C input, or a
   crafted command line, that makes vcc execute a program, read a file it was
   never asked to read, or write outside the output path. Include the preprocessor
   once it exists: includes, macro expansion, and pragma handling are where a
   compiler starts touching files the input names.
-- **Memory unsafety in the compiler itself.** vcc is written in V with bounds
+- Memory unsafety in the compiler itself: vcc is written in V with bounds
   checking, but the back end does raw pointer arithmetic and offset math, and a
   hand-written ELF writer is exactly where an integer overflow turns into a bad
   write. A crash on well-formed input is a bug to file as an issue; a crash from
   input that reaches outside the compiler's own memory is this category.
-- **Input parsing with a bad trust boundary, once linking exists.** Object files
-  and archives are attacker-shaped data. Parsing ELF or `ar` containers is the
+- Input parsing with a bad trust boundary, once linking exists. Object files and
+  archives are attacker-shaped data, and parsing ELF or `ar` containers is the
   classic route from "compile this" to "run this".
-- **Reproducibility failures with a security consequence.** Output that changes
+- Reproducibility failures with a security consequence: output that changes
   between runs of the same input and flags, in a way that lets one build differ
   from the build someone verified.
 
