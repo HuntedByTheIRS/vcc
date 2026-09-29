@@ -726,6 +726,55 @@ fn test_two_floating_eightbytes_are_handed_back_in_two_registers() {
 	os.rm(binary) or {}
 }
 
+// A function that hands an object of more than two eightbytes back is given an address
+// to put it at in the first general register, and the call answers with that address.
+// The address is an argument the caller writes and the definition reads before its own
+// parameters, so every argument written in the call moves one register later.
+fn test_an_object_of_more_than_two_eightbytes_is_handed_back_through_an_address() {
+	source := scratch('memoryreturn.c')
+	binary := scratch('memoryreturn')
+	program := 'struct B { double a; double b; double c; };\nstruct B f(void) { struct B b; b.a = 1.0; b.b = 2.0; b.c = 3.0; return b; }\nint main(void) { struct B b; b = f(); return b.a * 100.0 + b.b * 10.0 + b.c; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 123
+	// The hidden address is the first general register, so a parameter written in the
+	// definition arrives in the second one and the two sequences stay in step.
+	source_args := scratch('memoryreturnargs.c')
+	binary_args := scratch('memoryreturnargs')
+	program_args := 'struct F { int a; int b; int c; int d; int e; };\nstruct F f(int p, int q) { struct F x; x.a = p; x.b = q; x.c = p + q; x.d = p * q; x.e = 7; return x; }\nint main(void) { struct F x; x = f(2, 3); return x.c * 10 + x.d; }\n'
+	args_status := compile_and_run([source_args, '-o', binary_args], program_args)
+	assert args_status == 56
+	// An object handed over in memory and an object handed back through an address in
+	// the same call: both directions at once.
+	source_both := scratch('memoryreturnboth.c')
+	binary_both := scratch('memoryreturnboth')
+	program_both := 'struct S { int a; int b; int c; int d; };\nstruct S f(struct S s) { struct S t; t.a = s.a + 1; t.b = s.b + 1; t.c = s.c + 1; t.d = s.d + 1; return t; }\nint main(void) { struct S s; s.a = 1; s.b = 2; s.c = 3; s.d = 4; struct S t; t = f(s); return t.a * 100 + t.b * 10 + t.d; }\n'
+	both_status := compile_and_run([source_both, '-o', binary_both], program_both)
+	assert both_status == 235
+	// Two of them in a row: the storage the caller lends is one slot per function,
+	// because the result of such a call cannot be an argument or a value.
+	source_two := scratch('memoryreturntwo.c')
+	binary_two := scratch('memoryreturntwo')
+	program_two := 'struct S { int a; int b; int c; int d; };\nstruct S f(int n) { struct S s; s.a = n; s.b = n * 2; s.c = n * 3; s.d = n * 4; return s; }\nint main(void) { struct S s; struct S t; s = f(1); t = f(2); return s.a * 10 + t.d; }\n'
+	two_status := compile_and_run([source_two, '-o', binary_two], program_two)
+	assert two_status == 18
+	// A top-level object takes the result the same way: the copy goes to the image.
+	source_global := scratch('memoryreturnglobal.c')
+	binary_global := scratch('memoryreturnglobal')
+	program_global := 'struct B { double a; double b; double c; };\nstruct B g;\nstruct B f(void) { struct B b; b.a = 1.0; b.b = 2.0; b.c = 3.0; return b; }\nint main(void) { g = f(); return g.a * 100.0 + g.b * 10.0 + g.c; }\n'
+	global_status := compile_and_run([source_global, '-o', binary_global], program_global)
+	assert global_status == 123
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	os.rm(source_args) or {}
+	os.rm(binary_args) or {}
+	os.rm(source_both) or {}
+	os.rm(binary_both) or {}
+	os.rm(source_two) or {}
+	os.rm(binary_two) or {}
+	os.rm(source_global) or {}
+	os.rm(binary_global) or {}
+}
+
 // One object is written into another by copying its bytes, which is what 6.5.16.1
 // gives an assignment between two objects of the same type: no conversion is
 // involved and neither object is read as a value.
@@ -737,18 +786,6 @@ fn test_one_object_is_copied_into_another() {
 	assert exit_status == 123
 	os.rm(source) or {}
 	os.rm(binary) or {}
-}
-
-// The shapes past two eightbytes are named where they are reached rather than
-// compiled into something else: an object of three eightbytes is a copy in memory
-// with a hidden pointer for a return, and this compiler hands back at most two.
-fn test_a_return_of_more_than_two_eightbytes_is_refused_by_name() {
-	source := scratch('byvaluewide.c')
-	binary := scratch('byvaluewide')
-	program := 'struct S { double a; double b; double c; };\nstruct S f(void) { struct S s; s.a = 1.0; return s; }\nint main(void) { struct S s = f(); return s.a > 0.0; }\n'
-	result := compile([source, '-o', binary], program)
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('at most two')
 }
 
 // An object takes one register of its class like a value does, so a call whose

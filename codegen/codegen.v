@@ -197,6 +197,16 @@ mut:
 	// frame_used is how many bytes of frame the function being emitted has
 	// claimed: its parameters, its locals and the slots an expression needs.
 	frame_used int
+	// hidden_bytes is the storage a call that returns an object of more than two
+	// eightbytes lends the function it calls, which is the largest such object this
+	// file declares, and zero when no such object is returned anywhere.
+	hidden_bytes int
+	// hidden is the frame slot that storage is, and the address a call is given for
+	// its result travels in the first general register.
+	hidden Slot
+	// saved_return is the frame slot a function keeps the address its caller named
+	// for its own result in, for a function that returns such an object.
+	saved_return Slot
 	// stack_pushed is how many bytes the call being emitted has pushed for the
 	// arguments its registers ran out for, and zero when it pushed none. The
 	// caller gives those bytes back once the call returns, so the frame is where
@@ -346,6 +356,12 @@ fn (mut e Emitter) build() ![]u8 {
 		e.returns[decl.name] = decl.ret
 		if decl.ret_class.bytes > 0 {
 			e.return_classes[decl.name] = decl.ret_class
+			// An object of more than two eightbytes comes back at an address the
+			// caller names, so the caller's storage for it is as large as the
+			// largest such object any declaration in this file returns.
+			if decl.ret_class.count > 2 && decl.ret_class.bytes > e.hidden_bytes {
+				e.hidden_bytes = decl.ret_class.bytes
+			}
 		}
 		if decl.body.len > 0 {
 			e.program.defined[decl.name] = true
@@ -528,10 +544,6 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// comes back in the register the class names rather than converted. An
 		// object larger than one eightbyte is two registers or a copy in memory,
 		// which is the half of this that this compiler does not hand over.
-		if decl.ret_class.count > 2 {
-			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes or ${decl.ret_class.count} eightbytes, and this compiler hands back an aggregate of at most two')
-			return error('aggregate return too large')
-		}
 		if decl.ret_class.first_floating && decl.ret_class.bytes < e.target.word_size {
 			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
 			return error('aggregate floating class width')
@@ -542,6 +554,9 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	}
 	e.returning = decl.ret
 	e.return_class = decl.ret_class
+	if e.hidden_bytes > 0 {
+		e.hidden = e.reserve(e.hidden_bytes)
+	}
 	// The prologue is what a call to this function jumps to, so the label goes
 	// in front of it.
 	e.program.labels[decl.name] = e.program.text.len
@@ -554,6 +569,21 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	frame_at := e.program.text.len + e.target.frame_immediate_offset()
 	e.append(e.target.frame_reserve(0))
 	e.push_scope()
+	if decl.ret_class.count > 2 {
+		// A function that hands an object of more than two eightbytes back is given
+		// the address to put it at in the first general register, and keeps it in the
+		// frame until the return: the object it returns is written there, and the call
+		// answers with that same address. The address is read from the register after
+		// the prologue, because the slot it is kept in is a frame slot.
+		saved := e.reserve(e.target.word_size)
+		e.saved_return = saved
+		register := e.target.arg_reg(0) or {
+			e.diagnostics << problem(decl.line, decl.col, 'internal: ${e.target.name} has no first general register for the address a returned object goes to')
+			return error('no first argument register')
+		}
+		base := e.frame_pointer(decl.line, decl.col)!
+		e.append(e.target.store_slot(base, i32(saved.offset), register, e.target.word_size)!)
+	}
 	// The parameters arrive in the machine's argument registers. They are stored
 	// into the frame on the way in, so a parameter is read exactly the way a
 	// local is, and the register is free for the expression that follows.
@@ -562,7 +592,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// arrives in the general file and a double in the floating one, each numbered
 	// from its own beginning, which is how `f(int a, double b)` finds a in the
 	// first general register and b in the first floating one.
-	mut integers := 0
+	mut integers := if decl.ret_class.count > 2 { 1 } else { 0 }
 	mut doubles := 0
 	mut stacked := 0
 	for _, param in decl.params {
@@ -756,6 +786,25 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 		return error('return with a value')
 	}
 	if e.return_class.bytes > 0 {
+		if e.return_class.count > 2 {
+			// The object goes to the address this call was given, which the function
+			// kept in the frame, and the call answers with that address in the
+			// accumulator: both addresses are parked, because a copy needs two
+			// registers and neither of them can hold an address.
+			e.address_of_object(expr, 0)!
+			source := e.value_slot(0)
+			e.store_accumulator(source, stmt.line, stmt.col)!
+			register := e.accumulator(stmt.line, stmt.col)!
+			base := e.frame_pointer(stmt.line, stmt.col)!
+			e.append(e.target.load_slot(base, i32(e.saved_return.offset), register, e.target.word_size)!)
+			destination := e.value_slot(1)
+			e.store_accumulator(destination, stmt.line, stmt.col)!
+			e.copy_address_object(source, destination, e.return_class.bytes, stmt.line, stmt.col)!
+			value := e.accumulator(stmt.line, stmt.col)!
+			e.load_argument(destination, value, e.target.word_size, stmt.line, stmt.col)!
+			e.append(e.target.frame_epilogue())
+			return
+		}
 		// The value is an object, and the machine hands it back as its bytes in
 		// the registers the classes name: the address of the object is taken and
 		// each eightbyte is read from it, which is the same bytes a caller reads
@@ -908,6 +957,12 @@ fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line in
 				e.diagnostics << problem(line, col, 'unsupported: the call to ${expr.name} hands back an object of ${class.bytes} bytes and ${width} bytes are written into this object')
 				return error('aggregate too small')
 			}
+			if class.count > 2 {
+				// The object is in the storage this call lent the function it called,
+				// and it is copied from there into the object it is assigned to.
+				e.emit_expr_at(expr, 1)!
+				return e.copy_frame_object(e.hidden, address, class.bytes, line, col)
+			}
 			e.emit_expr_at(expr, 1)!
 			base := e.scratch(line, col)!
 			e.load_argument(address, base, e.target.word_size, line, col)!
@@ -927,6 +982,16 @@ fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line in
 	e.address_of_object(expr, 1)!
 	source := e.value_slot(1)
 	e.store_accumulator(source, line, col)!
+	return e.copy_address_object(source, address, width, line, col)
+}
+
+// copy_address_object copies an object from one address to another, both parked in
+// value slots. The bytes move in the chunks the machine moves in one instruction,
+// eight then four then two then one, because an object whose size is not a multiple of
+// eight has a last chunk narrower than a word; the source's address is reloaded for
+// each chunk, so the value can travel through a register of its own and neither address
+// is held in one.
+fn (mut e Emitter) copy_address_object(source Slot, destination Slot, width int, line int, col int) !void {
 	mut done := 0
 	for done < width {
 		remaining := width - done
@@ -946,12 +1011,42 @@ fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line in
 		}
 		value := e.remainder(line, col)!
 		e.append(e.target.load_indirect(source_register, value, chunk)!)
-		destination := e.accumulator(line, col)!
-		e.load_argument(address, destination, e.target.word_size, line, col)!
+		destination_register := e.accumulator(line, col)!
+		e.load_argument(destination, destination_register, e.target.word_size, line, col)!
 		if done > 0 {
-			e.append(e.target.add_immediate(destination, done))
+			e.append(e.target.add_immediate(destination_register, done))
 		}
-		e.append(e.target.store_indirect(destination, value, chunk)!)
+		e.append(e.target.store_indirect(destination_register, value, chunk)!)
+		done += chunk
+	}
+}
+
+// copy_frame_object copies an object that is storage in the frame to an address parked
+// in a value slot, which is what writing an object a call handed back into the object it
+// is assigned to is: the caller's storage for the result is a frame slot and the
+// destination is an address the assignment already worked out.
+fn (mut e Emitter) copy_frame_object(source Slot, destination Slot, width int, line int, col int) !void {
+	mut done := 0
+	for done < width {
+		remaining := width - done
+		chunk := if remaining >= 8 {
+			8
+		} else if remaining >= 4 {
+			4
+		} else if remaining >= 2 {
+			2
+		} else {
+			1
+		}
+		base := e.frame_pointer(line, col)!
+		value := e.scratch(line, col)!
+		e.append(e.target.load_slot(base, i32(source.offset + done), value, chunk)!)
+		destination_register := e.accumulator(line, col)!
+		e.load_argument(destination, destination_register, e.target.word_size, line, col)!
+		if done > 0 {
+			e.append(e.target.add_immediate(destination_register, done))
+		}
+		e.append(e.target.store_indirect(destination_register, value, chunk)!)
 		done += chunk
 	}
 }
@@ -2598,7 +2693,16 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 // name is a symbol the loader resolves before the program starts.
 fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	mut places := []ArgPlace{cap: call.args.len}
-	mut integers := 0
+	// A call to a function that hands an object of more than two eightbytes back is
+	// given the address of this frame's storage for it in the first general register,
+	// so the arguments written in the call start one register later.
+	mut hidden := false
+	if class := e.return_classes[call.name] {
+		if class.count > 2 {
+			hidden = true
+		}
+	}
+	mut integers := if hidden { 1 } else { 0 }
 	mut doubles := 0
 	mut stacked := 0
 	for i, arg in call.args {
@@ -2800,6 +2904,16 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			e.append(e.target.push_register(register))
 			e.stack_pushed += width
 		}
+	}
+	if hidden {
+		// The address the result goes to: an ordinary argument register load is what
+		// this is, and no argument written in the call takes the first one.
+		register := e.target.arg_reg(0) or {
+			e.diagnostics << problem(call.line, call.col, 'internal: ${e.target.name} has no first general register for the address a returned object goes to')
+			return error('no first argument register')
+		}
+		base := e.frame_pointer(call.line, call.col)!
+		e.append(e.target.address_of_slot(base, e.hidden.offset, register))
 	}
 	for i, arg in call.args {
 		place := places[i]
