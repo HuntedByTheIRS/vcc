@@ -374,3 +374,30 @@ fn test_a_library_that_is_not_there_is_reported() {
 	assert image.bytes.len == 0
 	os.rm(source) or {}
 }
+
+// A double through the whole pipeline: the optimizer runs over the tree, the
+// emitter writes the floating-point instructions, the image calls into a library
+// the -l flag named, and the answer comes back through the exit status. This is
+// the combination the compiler was asked for, end to end.
+fn test_a_double_argument_reaches_a_library_call() {
+	source := scratch('sqrt.c')
+	binary := scratch('sqrt')
+	program := 'double sqrt(double x);\nint main() { int n = sqrt(2.0) * 100; return n; }\n'
+	exit_status := compile_and_run(['-lm', source, '-o', binary], program)
+	assert exit_status == 141
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The sign of a double is in the top bit of the value rather than in a bit of a
+// register the arithmetic happens to leave in a convenient place, so a negated
+// double is the case a wrong instruction shows up in first.
+fn test_a_negated_double_reaches_a_comparison_intact() {
+	source := scratch('negated.c')
+	binary := scratch('negated')
+	program := 'int main() { double a = -3.5; if (a < 0.0) { return 1; } return 2; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

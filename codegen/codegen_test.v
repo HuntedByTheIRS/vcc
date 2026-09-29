@@ -999,13 +999,16 @@ fn test_break_outside_a_loop_is_one_located_diagnostic_and_no_bytes() {
 }
 
 fn test_a_local_of_a_type_with_no_instruction_is_reported() {
+	// `float` is the type here rather than `double`, which this back end now has
+	// instructions for: what this checks is the refusal, so it names a type the
+	// emitter still has no form for.
 	body := [
-		declaration('f', 'double', int_argument(1)),
+		declaration('f', 'float', int_argument(1)),
 		return_statement(0),
 	]
 	emitted := emit(program(body), Options{})
 	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('double')
+	assert emitted.diagnostics[0].msg.contains('float')
 	assert emitted.bytes.len == 0
 }
 
@@ -1312,4 +1315,115 @@ fn find_system_library(dirs []string, name string) ?string {
 fn copy_bytes(from string, to string) {
 	bytes := os.read_bytes(from) or { panic(err) }
 	os.write_file_array(to, bytes) or { panic(err) }
+}
+
+// A double is a value the floating-point registers hold and their instructions
+// compute. These tests read it back the way a program does: the image is emitted,
+// run, and its exit status is the value truncated to an int where the language
+// converts it. The number each one asserts is what the arithmetic gives, so a
+// wrong instruction in the register file shows up as a wrong answer.
+fn test_a_double_is_computed_in_the_floating_register_file() {
+	emitted := emit(translation_unit('int main() { double x = 1.5; double y = 2.5; double z = x * y; int n = z * 10; return n; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 37
+}
+
+fn test_a_double_is_passed_and_returned_in_the_floating_registers() {
+	// The arguments of a call and the value a function returns travel in the
+	// floating file, which is a sequence of its own: a double is not passed in an
+	// integer register, and a call with both kinds of argument numbers the two
+	// sequences separately.
+	emitted := emit(translation_unit('double twice(double x) { return x + x; } int main() { double v = 3.25; int n = twice(v) * 4; return n; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 26
+}
+
+fn test_a_double_comparison_answers_the_int_a_branch_reads() {
+	// A comparison of two doubles reads the flags the floating compare leaves,
+	// which are not the integer ones: the sign of a double lives in the top bit of
+	// its value, and the branch is the artifact that says whether the answer was
+	// read from the right place.
+	negative := emit(translation_unit('int main() { double a = -3.5; if (a < 0.0) { return 1; } return 2; }'),
+		Options{})
+	assert negative.diagnostics.len == 0
+	assert run_image(negative.bytes) == 1
+	positive := emit(translation_unit('int main() { double a = 3.5; if (a < 0.0) { return 1; } return 2; }'),
+		Options{})
+	assert positive.diagnostics.len == 0
+	assert run_image(positive.bytes) == 2
+	// The same comparison written as a value rather than as a branch reads the
+	// same flags.
+	as_a_value := emit(translation_unit('int main() { double a = -3.5; int b = a < 0.0; return b; }'),
+		Options{})
+	assert as_a_value.diagnostics.len == 0
+	assert run_image(as_a_value.bytes) == 1
+}
+
+fn test_each_element_of_an_array_of_doubles_is_its_own_value() {
+	// A counted slot keeps the class of its elements, and that class is what
+	// decides between the eight-byte move and the integer load and store: with it
+	// lost, every element was written as the truncation of its value and read back
+	// as an integer, which made all three of them the same number.
+	emitted := emit(translation_unit('int main() { double a[3]; a[0] = 1.5; a[1] = 2.25; a[2] = a[0] + a[1]; int n = a[2] * 4; return n; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 15
+}
+
+fn test_each_element_of_a_top_level_array_of_doubles_is_its_own_value() {
+	// The same class question for an array defined at the top level, where the
+	// address of an element is the address of the object plus an offset rather
+	// than a place in the frame.
+	emitted := emit(translation_unit('double top[3]; int main() { top[0] = 1.5; top[1] = 2.25; int n = (top[0] + top[1]) * 4; return n; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 15
+}
+
+fn test_a_top_level_double_holds_its_initializer_in_the_image() {
+	// The initializer of an object at the top level is the eight bytes of its
+	// value rather than the two's complement of an integer, and a store to the
+	// object goes through the same class.
+	emitted := emit(translation_unit('double g = 1.25; int main() { g = g + 2.0; int n = g * 4; return n; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 13
+	// An integer initializer for a double object is that integer's value as a
+	// double, which is the conversion an assignment makes.
+	whole := emit(translation_unit('double g = 3; int main() { int n = g * 2; return n; }'), Options{})
+	assert whole.diagnostics.len == 0
+	assert run_image(whole.bytes) == 6
+}
+
+fn test_a_double_and_an_int_convert_both_ways() {
+	emitted := emit(translation_unit('int main() { int n = 7; double d = n; d = d / 2.0; int r = d * 2; return r; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
+}
+
+fn test_the_logical_not_of_a_double_is_a_comparison_with_zero() {
+	// `!d` compares the value with zero, and zero comes from the exclusive-or of a
+	// register with itself. That instruction is the packed-double one and not the
+	// scalar one, whose prefix is not an instruction at all: a program with the
+	// scalar prefix in it died on an illegal instruction the first time a `!` was
+	// evaluated.
+	nonzero := emit(translation_unit('int main() { double d = 1.5; return !d; }'), Options{})
+	assert nonzero.diagnostics.len == 0
+	assert run_image(nonzero.bytes) == 0
+	zero := emit(translation_unit('int main() { double d = 0.0; return !d; }'), Options{})
+	assert zero.diagnostics.len == 0
+	assert run_image(zero.bytes) == 1
+}
+
+fn test_a_double_returning_function_with_no_return_statement_answers_zero() {
+	// Running off the end of a function that returns a double answers zero in the
+	// register the caller reads. The language leaves this undefined, so what this
+	// test records is what this compiler does with it.
+	emitted := emit(translation_unit('double f(void) { int x = 1; } int main() { double v = f(); return v == 0.0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
 }

@@ -346,6 +346,12 @@ fn patch(mut image []u8, program Program, target backend.Target, sections Sectio
 				}
 				replacement = target.address_of(register, disp)
 			}
+			.float_constant {
+				register := target.float_reg(fixup.register) or {
+					return error('no floating-point register named ${fixup.register} to read a constant into')
+				}
+				replacement = target.load_double_constant(register, disp)!
+			}
 			.global_address {
 				register := target.reg(fixup.register) or {
 					return error('no register named ${fixup.register} to compute an address into')
@@ -388,6 +394,14 @@ fn referent_of(program Program, sections Sections, fixup Fixup) !int {
 		.take_address {
 			return sections.strings + (program.strings[fixup.name] or {
 				return error('no string ${fixup.name} in the image')
+			})
+		}
+		.float_constant {
+			// A floating constant is eight bytes in the same read-only data a
+			// string lives in, so the section is the same one and only the
+			// table it was interned in differs.
+			return sections.strings + (program.doubles[fixup.name] or {
+				return error('no floating constant ${fixup.name} in the image')
 			})
 		}
 		.global_address {

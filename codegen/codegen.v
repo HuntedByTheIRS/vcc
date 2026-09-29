@@ -2,6 +2,7 @@ module codegen
 
 import ast
 import backend
+import math
 import tokenize
 
 // Options is what the caller asks for. An empty target means the machine this
@@ -51,6 +52,7 @@ enum FixupKind {
 	branch_zero    // the same jump, taken when the value last tested was zero
 	branch_nonzero // and when it was not
 	global_address // the address of an object defined at the top level
+	float_constant // a double the instruction reads out of the read-only data
 }
 
 // Program is what one translation unit became: machine code, the strings it
@@ -81,6 +83,12 @@ mut:
 	// starts in it.
 	string_blob []u8
 	strings     map[string]int
+	// doubles is the same storage again for the eight bytes of a floating
+	// constant, keyed by the bit pattern rather than by the bytes, so that two
+	// constants that are the same double are one entry the way two identical
+	// strings are. A double is read out of the image and never written, which
+	// is what lets it live beside the strings.
+	doubles map[string]int
 	// globals_blob is the storage of the objects defined at the top level, and
 	// globals is where each one starts in it. It is a second blob rather than a
 	// part of the strings because a global is written as well as read, and
@@ -92,17 +100,22 @@ mut:
 
 // GlobalSlot is where a top-level object lives in the image and how wide it is:
 // the offset of its first element in globals_blob, the width of one element, and
-// the count of elements it was defined with.
+// the count of elements it was defined with. floating says the object holds
+// doubles, which is a different instruction for every read and write of it.
 struct GlobalSlot {
-	offset int
-	width  int
-	count  int
+	offset   int
+	width    int
+	count    int
+	floating bool
 }
 
 // Slot is where a local or a parameter lives: a displacement from the frame
 // pointer, and the width of the value in it. The width is what keeps an int and
 // a pointer apart, since a value read or written at the other width is a value
-// from a neighbouring slot rather than a wrong answer.
+// from a neighbouring slot rather than a wrong answer. A double is eight bytes
+// like a pointer, so the width alone cannot tell those two apart either, and
+// `floating` is what does: it says which of the machine's two value files the
+// slot is read and written through.
 struct Slot {
 	offset int
 	width  int
@@ -110,6 +123,9 @@ struct Slot {
 	// holds one value. An array's slot is the address of its first element, and
 	// width is the width of one element of it.
 	count int
+	// floating is set for a slot holding a double, which is a value the machine
+	// moves with a different instruction than an integer of the same width.
+	floating bool
 }
 
 // LoopLabels are the two places a loop's body can leave by: where the loop ends,
@@ -138,6 +154,13 @@ mut:
 	// defines, so that a call in the file hands each argument over at the width
 	// the definition expects.
 	signatures map[string][]int
+	// float_params says, for the same functions, which parameters are doubles.
+	// The width cannot answer that on its own: a double is eight bytes and so is
+	// a pointer, and the two travel through different registers.
+	float_params map[string][]bool
+	// returning is the return type of the function being emitted, as it was
+	// written, which is what a return statement's value is converted to.
+	returning string
 	// returns is the return type of every function the file defines, which is
 	// what a call whose value is read has to be checked against: a void
 	// function's result is nothing, and a value read from a call to one would
@@ -204,12 +227,6 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	// Nothing is written from a tree the model did not type. The check runs
 	// before the layout, so a tree it refuses produces no image at all.
 	emitter.refuse_unresolved() or {
-		return Result{
-			target:      target
-			diagnostics: emitter.diagnostics
-		}
-	}
-	emitter.refuse_floating_initializers() or {
 		return Result{
 			target:      target
 			diagnostics: emitter.diagnostics
@@ -292,16 +309,19 @@ fn (mut e Emitter) build() ![]u8 {
 		if decl.body.len > 0 {
 			e.program.defined[decl.name] = true
 			mut widths := []int{}
+			mut classes := []bool{}
 			mut sized := true
 			for param in decl.params {
 				if width := e.type_width(param.typ) {
 					widths << width
+					classes << e.writes_a_double(param.typ)
 				} else {
 					sized = false
 				}
 			}
 			if sized {
 				e.signatures[decl.name] = widths
+				e.float_params[decl.name] = classes
 			}
 		}
 	}
@@ -346,19 +366,6 @@ fn (mut e Emitter) build() ![]u8 {
 fn (mut e Emitter) refuse_unresolved() !void {
 	for decl in e.unit.decls {
 		e.check_statements(decl.body, 0)!
-	}
-}
-
-// refuse_floating_initializers reports every top-level object whose initializer
-// is a floating constant. The image holds the two's complement of an integer, so
-// a definition that became a different number would be a program that says one
-// thing and does another; it is refused instead.
-fn (mut e Emitter) refuse_floating_initializers() !void {
-	for global in e.unit.globals {
-		if _ := global.init_float {
-			e.diagnostics << problem(global.line, global.col, 'unsupported: ${global.name} is initialized with a floating constant, and this back end writes integer initializers only')
-			return error('floating initializer')
-		}
 	}
 }
 
@@ -462,10 +469,11 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// A definition returns a value the caller reads or nothing at all. There is
 	// no third answer the machine has a place for: the result register holds
 	// what a call leaves there, and a void function leaves nothing to read.
-	if decl.ret != 'int' && decl.ret != 'void' {
-		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int and void are implemented')
+	if decl.ret != 'int' && decl.ret != 'void' && decl.ret != 'double' {
+		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, double and void are implemented')
 		return error('unsupported return type')
 	}
+	e.returning = decl.ret
 	// The prologue is what a call to this function jumps to, so the label goes
 	// in front of it.
 	e.program.labels[decl.name] = e.program.text.len
@@ -481,18 +489,44 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// The parameters arrive in the machine's argument registers. They are stored
 	// into the frame on the way in, so a parameter is read exactly the way a
 	// local is, and the register is free for the expression that follows.
-	for i, param in decl.params {
+	//
+	// There are two sequences of them and a parameter belongs to one: an int
+	// arrives in the general file and a double in the floating one, each numbered
+	// from its own beginning, which is how `f(int a, double b)` finds a in the
+	// first general register and b in the first floating one.
+	mut integers := 0
+	mut doubles := 0
+	for _, param in decl.params {
 		slot := e.declare(param.name, param.typ, 0, param.line, param.col)!
-		register := e.target.arg_reg(i) or {
-			e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes more than ${i} parameters, and the machine passes only ${i} of them in registers')
+		if slot.floating {
+			register := e.target.float_arg_reg(doubles) or {
+				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes more than ${doubles} doubles, and the machine passes only that many in registers')
+				return error('too many parameters')
+			}
+			e.store_double_register(slot, register, param.line, param.col)!
+			doubles++
+			continue
+		}
+		register := e.target.arg_reg(integers) or {
+			e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes more than ${integers} parameters, and the machine passes only ${integers} of them in registers')
 			return error('too many parameters')
 		}
 		e.store_register(slot, register, param.line, param.col)!
+		integers++
 	}
 	returned := e.emit_statements(decl.body)!
 	if !returned {
-		result := e.accumulator(decl.line, decl.col)!
-		e.append(e.target.move_immediate32(result, 0)!)
+		if decl.ret == 'double' {
+			// A function that falls off its end returns zero, and zero as a
+			// double is the floating-point register file's own zero rather than
+			// the integer one: the caller reads the value out of the other
+			// register, and an int zero there would be whatever the body left.
+			register := e.float_accumulator(decl.line, decl.col)!
+			e.append(e.target.zero_double(register)!)
+		} else {
+			result := e.accumulator(decl.line, decl.col)!
+			e.append(e.target.move_immediate32(result, 0)!)
+		}
 		e.append(e.target.frame_epilogue())
 	}
 	e.pop_scope()
@@ -561,14 +595,37 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 
 // emit_return writes the value into the register a function's results arrive in
 // and closes the frame. Every return leaves the same way, whatever the function
-// did before it.
+// did before it. The value is converted to the function's return type where the
+// two are different classes, which is the same conversion a call makes for an
+// argument: `return 1;` in a function returning a double returns 1.0, and
+// `return 1.5;` in one returning an int returns 1.
 fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 	expr := stmt.expr or {
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: return without a value in a function that returns int')
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: return without a value in a function that returns ${e.returning}')
 		return error('return without a value')
 	}
+	if e.returning == 'void' {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: return with a value in a function that returns void')
+		return error('return with a value')
+	}
 	e.emit_expr(expr)!
+	e.convert_to_return(expr, stmt.line, stmt.col)!
 	e.append(e.target.frame_epilogue())
+}
+
+// convert_to_return makes the value being returned the class the function
+// returns. Both directions are conversions the language defines, and the one that
+// is refused is a pointer: a function returning an int or a double has no
+// conversion to make from an address, and the answer would be half of it or an
+// address that is no longer one.
+fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
+	if e.returning == 'double' {
+		return e.convert_to_double(expr, line, col)
+	}
+	if e.floating_of(expr) {
+		return e.convert_to_int(expr, line, col)
+	}
+	return
 }
 
 // emit_var_decl gives a declaration its slot in the frame and, when it has one,
@@ -637,6 +694,25 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			address := e.value_slot(0)
 			e.store_accumulator(address, stmt.line, stmt.col)!
 			e.emit_expr_at(expr, 1)!
+			address_register := e.scratch(stmt.line, stmt.col)!
+			if object.floating {
+				if !e.floating_of(expr) && e.is_a_pointer(expr) {
+					e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored in an element that holds a double, and there is no conversion between them')
+					return error('pointer into a double')
+				}
+				e.convert_to_double(expr, stmt.line, stmt.col)!
+				value := e.float_accumulator(stmt.line, stmt.col)!
+				e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+				e.append(e.target.store_double_indirect(address_register, value)!)
+				return
+			}
+			if e.floating_of(expr) {
+				e.convert_to_int(expr, stmt.line, stmt.col)!
+				value := e.accumulator(stmt.line, stmt.col)!
+				e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+				e.append(e.target.store_indirect(address_register, value, object.width)!)
+				return
+			}
 			if width := e.width_of(expr) {
 				if width != object.width && !(object.width == 1 && width == 4) {
 					e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${stmt.target}, which holds ${object.width}')
@@ -647,7 +723,6 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				return error('unknown width')
 			}
 			value := e.accumulator(stmt.line, stmt.col)!
-			address_register := e.scratch(stmt.line, stmt.col)!
 			e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 			e.append(e.target.store_indirect(address_register, value, object.width)!)
 			return
@@ -666,6 +741,29 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	e.emit_expr_at(expr, 1)!
+	address_register := e.scratch(stmt.line, stmt.col)!
+	if slot.floating {
+		// An element of an array of doubles: the value is converted to a double
+		// if it is not one, and written with the instruction that moves eight
+		// bytes of a double rather than with the integer store, which would
+		// write half of it.
+		if !e.floating_of(expr) && e.is_a_pointer(expr) {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored in an element that holds a double, and there is no conversion between them')
+			return error('pointer into a double')
+		}
+		e.convert_to_double(expr, stmt.line, stmt.col)!
+		value := e.float_accumulator(stmt.line, stmt.col)!
+		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+		e.append(e.target.store_double_indirect(address_register, value)!)
+		return
+	}
+	if e.floating_of(expr) {
+		e.convert_to_int(expr, stmt.line, stmt.col)!
+		value := e.accumulator(stmt.line, stmt.col)!
+		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+		e.append(e.target.store_indirect(address_register, value, slot.width)!)
+		return
+	}
 	width := e.width_of(expr) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 		return error('unknown width')
@@ -675,7 +773,6 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		return error('width mismatch')
 	}
 	value := e.accumulator(stmt.line, stmt.col)!
-	address_register := e.scratch(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 	e.append(e.target.store_indirect(address_register, value, slot.width)!)
 }
@@ -707,7 +804,7 @@ fn (mut e Emitter) emit_if(stmt ast.Stmt) !bool {
 		return error('if without a condition')
 	}
 	e.emit_expr(cond)!
-	e.emit_test(stmt.line, stmt.col)!
+	e.emit_test(e.floating_of(cond), stmt.line, stmt.col)!
 	else_label := e.label()
 	e.branch(.branch_zero, else_label, stmt.line, stmt.col)!
 	then_returned := e.emit_branch_body(stmt.then_body)!
@@ -746,7 +843,7 @@ fn (mut e Emitter) emit_while(stmt ast.Stmt) !void {
 	continue_to := if stmt.step.len > 0 { step } else { top }
 	e.place(top)
 	e.emit_expr(cond)!
-	e.emit_test(stmt.line, stmt.col)!
+	e.emit_test(e.floating_of(cond), stmt.line, stmt.col)!
 	e.branch(.branch_zero, end, stmt.line, stmt.col)!
 	// The body can leave by jumping to either end of the loop, so both labels
 	// are known while it is emitted.
@@ -790,10 +887,10 @@ fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
 }
 
 // declare gives a name a slot and makes it visible in the block being emitted.
-// The width is the width of the type as it was written: an int is four bytes and
-// a pointer is the machine's word. A type that is neither is reported where it
-// was written, because storing it at a width that happens to fit would make
-// every value it touches silently wrong.
+// The width is the width of the type as it was written: an int is four bytes, a
+// pointer is the machine's word and a double is eight. A type that is none of
+// those is reported where it was written, because storing it at a width that
+// happens to fit would make every value it touches silently wrong.
 //
 // A declaration with a count is an array: it takes a block of storage, one
 // element after another, and what the name is worth in an expression is the
@@ -807,14 +904,15 @@ fn (mut e Emitter) declare(name string, written string, count int, line int, col
 		}
 	}
 	width := e.type_width(written) or {
-		e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints, chars and pointers only')
+		e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints, chars, doubles and pointers only')
 		return error('unsupported type')
 	}
 	slot := if count > 0 { e.reserve(count * width) } else { e.reserve(width) }
 	block := Slot{
-		offset: slot.offset
-		width:  width
-		count:  count
+		offset:   slot.offset
+		width:    width
+		count:    count
+		floating: e.writes_a_double(written)
 	}
 	e.scopes[e.scopes.len - 1][name] = block
 	return block
@@ -824,8 +922,9 @@ fn (mut e Emitter) declare(name string, written string, count int, line int, col
 // four bytes; a char is one, which is the width of its slot and of the byte the
 // machine stores into it, while every read of it widens to an int (see
 // width_of); a pointer is the machine's word, which is what makes `char *` and
-// `char **` read and write the same way. Everything else is a type this back end
-// has no instruction for.
+// `char **` read and write the same way; and a double is eight bytes, which is
+// what the machine moves with one instruction. Everything else is a type this
+// back end has no instruction for.
 fn (e Emitter) type_width(written string) ?int {
 	if written == 'int' {
 		return 4
@@ -833,10 +932,21 @@ fn (e Emitter) type_width(written string) ?int {
 	if written == 'char' {
 		return 1
 	}
+	if written == 'double' {
+		return 8
+	}
 	if written.contains('*') {
 		return e.target.word_size
 	}
 	return none
+}
+
+// writes_a_double says whether a type as it was written names a double, which is
+// the one type this back end moves through the floating-point register file. The
+// spelling is what a declaration carries, so this is where a declaration decides
+// which file its storage is read and written through.
+fn (e Emitter) writes_a_double(written string) bool {
+	return written == 'double'
 }
 
 // reserve claims a place in the frame for one value. Offsets count down from the
@@ -920,8 +1030,22 @@ fn (mut e Emitter) branch(kind FixupKind, name string, line int, col int) !void 
 
 // emit_test compares the accumulator with zero, which is all a branch needs told:
 // the conditional jumps read the zero flag the comparison leaves.
-fn (mut e Emitter) emit_test(line int, col int) !void {
+//
+// A double is tested the same way through the other file, but the comparison
+// that produces the flag is a different one and the flags it leaves mean
+// something else: a NaN is not equal to zero, so it is true as a condition, and
+// only the pair of flags `not equal or unordered` reads that. The register is
+// cleared by exclusive-or with itself rather than read from memory, so this costs
+// no constant.
+fn (mut e Emitter) emit_test(floating bool, line int, col int) !void {
 	register := e.accumulator(line, col)!
+	if floating {
+		zero := e.float_scratch(line, col)!
+		value := e.float_accumulator(line, col)!
+		other := e.scratch(line, col)!
+		e.append(e.target.zero_double(zero)!)
+		e.append(e.target.double_comparison('!=', value, zero, register, other)!)
+	}
 	e.append(e.target.test(register)!)
 }
 
@@ -987,13 +1111,224 @@ fn (mut e Emitter) load_argument(slot Slot, register backend.Register, width int
 	e.append(e.target.load_slot(base, slot.offset, register, width)!)
 }
 
+// float_accumulator is the register a double is computed in, and float_scratch is
+// where the right-hand value of an operation on two of them waits. They are the
+// same two roles the general register file has, in the machine's other file: a
+// value in flight is in one of the two accumulators depending on its type, which
+// is what the `floating` flag on a slot and the clause on an expression say.
+fn (mut e Emitter) float_accumulator(line int, col int) !backend.Register {
+	return e.target.float_return() or {
+		e.diagnostics << problem(line, col, "${e.target.name}: the machine's table has no floating-point result register, and a double has nowhere to be computed")
+		return error('no floating result register')
+	}
+}
+
+fn (mut e Emitter) float_scratch(line int, col int) !backend.Register {
+	return e.target.float_scratch() or {
+		e.diagnostics << problem(line, col, "${e.target.name}: the machine's table has no floating-point scratch register for the second half of an operation")
+		return error('no floating scratch register')
+	}
+}
+
+// store_double_register writes one floating-point register into a slot.
+fn (mut e Emitter) store_double_register(slot Slot, register backend.Register, line int, col int) !void {
+	base := e.frame_pointer(line, col)!
+	e.append(e.target.store_double_slot(base, slot.offset, register)!)
+}
+
+// store_double_accumulator writes the floating-point accumulator into a slot,
+// and load_double_accumulator reads one back. They are store_accumulator and
+// load_accumulator one file over: the slot holds a double, so the eight bytes
+// move with the instruction that moves a double.
+fn (mut e Emitter) store_double_accumulator(slot Slot, line int, col int) !void {
+	register := e.float_accumulator(line, col)!
+	e.store_double_register(slot, register, line, col)!
+}
+
+fn (mut e Emitter) load_double_accumulator(slot Slot, line int, col int) !void {
+	register := e.float_accumulator(line, col)!
+	base := e.frame_pointer(line, col)!
+	e.append(e.target.load_double_slot(base, slot.offset, register)!)
+}
+
+// load_double_argument reads an argument slot into the floating-point register
+// that carries its position. It mirrors load_argument, and a double is always
+// eight bytes wide, so there is no promotion to take into account here.
+fn (mut e Emitter) load_double_argument(slot Slot, register backend.Register, line int, col int) !void {
+	base := e.frame_pointer(line, col)!
+	e.append(e.target.load_double_slot(base, slot.offset, register)!)
+}
+
+// floating_of says whether an expression is a double, which is what decides
+// which register file its value travels in and which instruction computes it: a
+// constant written as one, a name whose storage holds one, a call that returns
+// one, and an operation on one, while a comparison answers an int however its
+// operands are spelled.
+//
+// The clause the parser resolved is the answer where there is one. An operation
+// is asked its own type rather than its operands, which is the difference between
+// one lookup and a descent per term: measured, the chain `1 + 1 + ... + 1` of
+// twenty thousand terms is folded into one constant by the emitter, and asking its
+// operands term by term instead took the stack out in this function before the
+// fold could run.
+//
+// A tree assembled by hand carries no clause, so the shape is asked instead, down
+// to the depth the emitter's own walk stops at: a floating constant is a double, a
+// name is a double if its slot is, and a call is a double if the function returns
+// one. A tree this reader cannot type is then not a tree that can take the stack
+// out either.
+fn (e Emitter) floating_of(expr ast.Expr) bool {
+	return e.floating_at(expr, 0)
+}
+
+fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
+	if depth > max_emit_depth {
+		return false
+	}
+	return match expr {
+		ast.FloatLit {
+			true
+		}
+		ast.Ident {
+			if slot := e.lookup(expr.name) {
+				// The name of an array is the address of its first element,
+				// which is a pointer and not a double, however its elements
+				// are read.
+				slot.count == 0 && slot.floating
+			} else {
+				e.global_is_double(expr.name)
+			}
+		}
+		ast.Unary {
+			// The sign change and the unary plus preserve the type; the
+			// logical not and the complement produce an int, and the type the
+			// parser resolved says which one this is.
+			if expr.typ.kind != .unknown {
+				return expr.typ.is_floating()
+			}
+			(expr.op == '-' || expr.op == '+') && e.floating_at(expr.expr, depth + 1)
+		}
+		ast.Binary {
+			if expr.op in ['==', '!=', '<', '>', '<=', '>=', '&&', '||'] {
+				false
+			} else if expr.typ.kind != .unknown {
+				// Both operands of an arithmetic operator have one class after
+				// the usual conversions, so the node's own type answers for the
+				// whole chain.
+				expr.typ.is_floating()
+			} else {
+				e.floating_at(expr.left, depth + 1) || e.floating_at(expr.right, depth + 1)
+			}
+		}
+		ast.Index {
+			// An element of an array of doubles is a double, and the array it
+			// belongs to is what says so: a counted slot or a top-level object
+			// with a double element type. An element of a char array is the int
+			// the load widens it to, so it is not.
+			if slot := e.lookup(expr.name) {
+				slot.count > 0 && slot.floating
+			} else {
+				e.global_element_is_double(expr.name)
+			}
+		}
+		ast.Call {
+			e.returns[expr.name] == 'double'
+		}
+		else {
+			false
+		}
+	}
+}
+
+// convert_to_double makes sure the value just computed is a double, widening the
+// int in the accumulator when it is not. It is the C conversion between an
+// integer type and a floating one, applied where the language asks for it: an
+// operand of an operation the other side made floating, a value stored into a
+// slot that holds a double, an argument a parameter is a double for, and the
+// value a function returning a double returns.
+fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
+	if e.floating_of(expr) {
+		return
+	}
+	if e.is_a_pointer(expr) {
+		// A pointer is not an arithmetic type, so there is no conversion to
+		// make and a value that quietly became a double would be an address the
+		// program can no longer follow.
+		e.diagnostics << problem(line, col, 'unsupported: a pointer is not converted to a double')
+		return error('pointer to double')
+	}
+	integer := e.accumulator(line, col)!
+	double_register := e.float_accumulator(line, col)!
+	e.append(e.target.int_to_double(double_register, integer)!)
+}
+
+// convert_to_int is the other direction: the double in the floating-point
+// accumulator is truncated towards zero into the int in the general one, which is
+// what the language defines an integer conversion from a floating type to do. A
+// value out of range is not reported, because the conversion's result is
+// undefined for one and the instruction's answer is what every compiler on this
+// machine gives.
+fn (mut e Emitter) convert_to_int(expr ast.Expr, line int, col int) !void {
+	if !e.floating_of(expr) {
+		return
+	}
+	double_register := e.float_accumulator(line, col)!
+	integer := e.accumulator(line, col)!
+	e.append(e.target.double_to_int(integer, double_register)!)
+}
+
+// is_a_pointer says whether an expression is a pointer: the width of a word that
+// is not a double is one, and a string is the address of its bytes.
+fn (e Emitter) is_a_pointer(expr ast.Expr) bool {
+	if expr.typ.kind == .pointer || expr.typ.is_array() {
+		return true
+	}
+	if expr is ast.StrLit {
+		return true
+	}
+	if e.floating_of(expr) {
+		return false
+	}
+	if expr is ast.Ident {
+		if slot := e.lookup(expr.name) {
+			return slot.count > 0
+		}
+		if object := e.global_shape(expr.name) {
+			return object.count > 0
+		}
+	}
+	return false
+}
+
 // store_value writes the accumulator into a slot, after checking that the value
 // is one the slot can hold. A constant is written at the width of the slot,
 // because a constant is the one value that says nothing about its own width
 // (`char *p = 0` is a zero of pointer width). Any other value has to have the
 // slot's width already: storing a pointer in four bytes or an int in eight is a
 // wrong value rather than a narrow one.
+//
+// A slot holding a double is the exception to that, and the reason the check is
+// written around the conversion: the language converts an integer to a double
+// and a double to an integer where one is stored in the other, which is a
+// different value of a different width rather than a wrong one, so the value is
+// converted first and the width it had no longer describes it. A pointer is one
+// of the two conversions that does not exist, and it is refused by name.
 fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !void {
+	floating := e.floating_of(expr)
+	if slot.floating {
+		if !floating && e.is_a_pointer(expr) {
+			e.diagnostics << problem(line, col, 'unsupported: a pointer is stored in a slot that holds a double, and there is no conversion between them')
+			return error('pointer into a double')
+		}
+		e.convert_to_double(expr, line, col)!
+		e.store_double_accumulator(slot, line, col)!
+		return
+	}
+	if floating {
+		e.convert_to_int(expr, line, col)!
+		e.store_accumulator(slot, line, col)!
+		return
+	}
 	if e.constant(expr) == none {
 		width := e.width_of(expr) or {
 			e.diagnostics << problem(line, col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
@@ -1037,19 +1372,21 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		return
 	}
 	match expr {
-		ast.FloatLit {
-			// A floating constant is a node the reader produces now, and this
-			// back end has no instruction for one yet. Naming it here is what
-			// keeps the walk from falling through to a narrower emit and giving
-			// the program a value it did not write.
-			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.text} is a floating constant, and this back end has no instruction for one yet')
-			return error('unsupported floating constant')
-		}
 		ast.IntLit {
 			// An integer literal is a constant, so the walk above has already
 			// answered for it; this is the same answer for a reader who wonders.
 			register := e.accumulator(expr.line, expr.col)!
 			e.append(e.target.move_immediate32(register, u32(expr.value))!)
+		}
+		ast.FloatLit {
+			// A floating constant is eight bytes of read-only data and an
+			// instruction that says where they are. The machine has no form of
+			// a floating move that takes the value in the instruction, so the
+			// bytes go in the image and are read from it, which is also what
+			// makes two constants with the same value one entry.
+			e.intern_double(expr.value)
+			register := e.float_accumulator(expr.line, expr.col)!
+			e.reference(e.target.load_double_constant(register, 0)!, .float_constant, float_key(expr.value), register.name)
 		}
 		ast.Ident {
 			slot := e.lookup(expr.name) or {
@@ -1065,6 +1402,15 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 						// element.
 						return
 					}
+					if object.floating {
+						// A double is read through its address with the
+						// instruction that moves one, and the address is in
+						// the general file, so nothing is disturbed by reading
+						// into the floating one.
+						double_register := e.float_accumulator(expr.line, expr.col)!
+						e.append(e.target.load_double_indirect(register, double_register)!)
+						return
+					}
 					e.append(e.target.load_indirect(register, register, object.width)!)
 					return
 				}
@@ -1078,6 +1424,10 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				register := e.accumulator(expr.line, expr.col)!
 				base := e.frame_pointer(expr.line, expr.col)!
 				e.append(e.target.address_of_slot(base, slot.offset, register))
+				return
+			}
+			if slot.floating {
+				e.load_double_accumulator(slot, expr.line, expr.col)!
 				return
 			}
 			e.load_accumulator(slot, expr.line, expr.col)!
@@ -1135,6 +1485,11 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 					base := e.scratch(expr.line, expr.col)!
 					e.reference(e.target.address_of(base, 0), .global_address, expr.name, base.name)
 					e.append(e.target.address_of_element(base, register, object.width, 0, register)!)
+					if object.floating {
+						double_register := e.float_accumulator(expr.line, expr.col)!
+						e.append(e.target.load_double_indirect(register, double_register)!)
+						return
+					}
 					e.append(e.target.load_indirect(register, register, object.width)!)
 					return
 				}
@@ -1149,6 +1504,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			base := e.frame_pointer(expr.line, expr.col)!
 			register := e.accumulator(expr.line, expr.col)!
 			e.append(e.target.address_of_element(base, register, slot.width, slot.offset, register)!)
+			if slot.floating {
+				// An element of an array of doubles: the address is in a general
+				// register and the value is read into a floating-point one, which
+				// is the same split the load of a double global makes.
+				double_register := e.float_accumulator(expr.line, expr.col)!
+				e.append(e.target.load_double_indirect(register, double_register)!)
+				return
+			}
 			e.append(e.target.load_indirect(register, register, slot.width)!)
 		}
 	}
@@ -1211,7 +1574,18 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// read at all, and what is taken is where it lives.
 		return e.emit_address(unary)
 	}
-	if width := e.width_of(unary.expr) {
+	floating := e.floating_of(unary.expr)
+	if floating {
+		// Three operators have a meaning for a double: the sign change, the
+		// unary plus that computes nothing, and the logical not, which asks
+		// whether the value is zero. The complement is a bit operation on an
+		// integer, and ISO C refuses it on a floating operand rather than
+		// defining one.
+		if unary.op != '+' && unary.op != '-' && unary.op != '!' {
+			e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes an integer operand, and this one is a double')
+			return error('operator on a double')
+		}
+	} else if width := e.width_of(unary.expr) {
 		if width != 4 && unary.op != '+' {
 			e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes an int, and this one is a pointer')
 			return error('non-int operand')
@@ -1222,13 +1596,34 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 	match unary.op {
 		'+' {}
 		'-' {
-			e.append(e.target.negate(register)!)
+			if floating {
+				// The machine negates an integer and has no instruction that
+				// negates a double, so the sign bit is flipped through a
+				// general register. Subtracting from zero would round a
+				// signalling NaN into a quiet one and turn -0.0 into 0.0,
+				// neither of which is the value the operator asks for.
+				e.append(e.target.negate_double(e.float_accumulator(unary.line, unary.col)!, register)!)
+			} else {
+				e.append(e.target.negate(register)!)
+			}
 		}
 		'~' {
 			e.append(e.target.complement(register)!)
 		}
 		'!' {
-			e.append(e.target.logical_not(register)!)
+			if floating {
+				// `!d` is one exactly when d compares equal to zero, and the
+				// comparison against zero is the one that answers it: a NaN is
+				// not equal to zero, so the answer there is zero, which is what
+				// the language says it is.
+				zero := e.float_scratch(unary.line, unary.col)!
+				value := e.float_accumulator(unary.line, unary.col)!
+				other := e.scratch(unary.line, unary.col)!
+				e.append(e.target.zero_double(zero)!)
+				e.append(e.target.double_comparison('==', value, zero, register, other)!)
+			} else {
+				e.append(e.target.logical_not(register)!)
+			}
 		}
 		else {
 			e.diagnostics << problem(unary.line, unary.col, 'unsupported unary operator ${unary.op}')
@@ -1245,6 +1640,14 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 //
 // The two short-circuit operators are not that shape: which side is computed
 // depends on the other one, so they are written as a branch.
+//
+// Each step of the chain is computed in the file its result belongs to: an
+// arithmetic step with a double on either side is a double and lands in the
+// floating-point file, a comparison lands in the general one as an int, and a
+// step of two integers is unchanged. Which file the value being carried up the
+// spine is in is tracked as the chain is folded, because a step that converts
+// changes it: `1 + 2.5` widens the int on the way, and `d + 1 + 2` has a double
+// under it rather than an int.
 fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 	if binary.op == '&&' || binary.op == '||' {
 		return e.emit_short_circuit(binary, depth)
@@ -1275,7 +1678,24 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		// right side can call a function, and a call is free to use the
 		// accumulator and the scratch register both. The slot is at this level of
 		// nesting, and everything the right side computes lands above it.
+		//
+		// What is in the accumulator at this point is the step's left operand,
+		// because the spine was built by walking left: the last step of the
+		// chain has the innermost expression under it, and every step before
+		// that one has the step after it. That is what the conversion asks
+		// about, and it is why the class of the value being carried does not
+		// have to be tracked here.
 		slot := e.value_slot(depth)
+		if e.computed_in_doubles(step) {
+			e.convert_to_double(step.left, step.line, step.col)!
+			e.store_double_accumulator(slot, step.line, step.col)!
+			e.emit_expr_at(step.right, depth + 1)!
+			e.convert_to_double(step.right, step.line, step.col)!
+			e.move_double_to_scratch(step.line, step.col)!
+			e.load_double_accumulator(slot, step.line, step.col)!
+			e.apply_double(step)!
+			continue
+		}
 		e.store_accumulator(slot, step.line, step.col)!
 		e.emit_expr_at(step.right, depth + 1)!
 		e.move_to_scratch(step.line, step.col)!
@@ -1284,17 +1704,74 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 	}
 }
 
+// computed_in_doubles says whether a step's operands are computed as doubles.
+// The language's usual arithmetic conversions make a step with a double on
+// either side a double step, whether the operator is arithmetic or a comparison:
+// `d < 1` compares a double with the int widened to one, and answers with an int.
+// A step that is neither a comparison nor one of the four arithmetic operators is
+// refused where it is folded, because the operators that need integer operands
+// do not have a floating form the language defines.
+fn (e Emitter) computed_in_doubles(step ast.Binary) bool {
+	floating := e.floating_of(step.left) || e.floating_of(step.right)
+	if !floating {
+		return false
+	}
+	return step.op == '+' || step.op == '-' || step.op == '*' || step.op == '/'
+		|| step.op in ['==', '!=', '<', '>', '<=', '>=']
+}
+
+// apply_double does the operation the tree asked for with both values in the
+// floating-point file, the left in the accumulator and the right in the scratch
+// register, and leaves a double in the accumulator or an int there when the
+// operator was a comparison.
+fn (mut e Emitter) apply_double(step ast.Binary) !void {
+	value := e.float_accumulator(step.line, step.col)!
+	other := e.float_scratch(step.line, step.col)!
+	match step.op {
+		'+', '-', '*', '/' {
+			e.append(e.target.double_arithmetic(step.op, value, other)!)
+		}
+		'==', '!=', '<', '>', '<=', '>=' {
+			// The answer to a comparison is an int, so it is read out of the
+			// flags into the general register file: the floating-point one
+			// holds values and not truth values.
+			integer := e.accumulator(step.line, step.col)!
+			byte_scratch := e.scratch(step.line, step.col)!
+			e.append(e.target.double_comparison(step.op, value, other, integer, byte_scratch)!)
+		}
+		else {
+			e.diagnostics << problem(step.line, step.col, 'unsupported: ${step.op} takes integer operands, and one of these is a double')
+			return error('operator on a double')
+		}
+	}
+}
+
+// move_double_to_scratch puts the floating-point accumulator into the
+// floating-point scratch register, which is where the operation that is about to
+// be applied expects the right-hand value.
+fn (mut e Emitter) move_double_to_scratch(line int, col int) !void {
+	result := e.float_accumulator(line, col)!
+	other := e.float_scratch(line, col)!
+	e.append(e.target.move_double(other, result)!)
+}
+
 // check_int_operands reports an operand that is not an int. The operators
 // emitted here compute with four-byte values; a pointer on either side is a
 // different operation, an address plus a distance or two addresses compared, and
 // computing it at the width of whatever the other side was would be a wrong
-// program rather than a wrong answer.
+// program rather than a wrong answer. A double is the one eight-byte value that
+// is not a pointer: it is computed by the other path in emit_binary, so it is
+// passed over here rather than reported.
 fn (mut e Emitter) check_int_operands(binary ast.Binary) !void {
 	for operand in [binary.left, binary.right] {
+		if e.floating_of(operand) {
+			continue
+		}
 		if width := e.width_of(operand) {
 			if width != 4 {
-				// Eight bytes is the width of a pointer and the only other width
-				// this back end has, so the diagnostic can say what it is.
+				// Eight bytes that are not a double is the width of a pointer
+				// and the only other width this back end has, so the diagnostic
+				// can say what it is.
 				e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} takes int operands, and this one is a pointer')
 				return error('non-int operand')
 			}
@@ -1355,7 +1832,7 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 	// The jump the left side takes when it has already settled the answer: out
 	// of an and when it is false, out of an or when it is true.
 	e.emit_expr_at(binary.left, depth + 1)!
-	e.emit_test(binary.line, binary.col)!
+	e.emit_test(e.floating_of(binary.left), binary.line, binary.col)!
 	if is_and {
 		e.branch(.branch_zero, settles, binary.line, binary.col)!
 	} else {
@@ -1363,7 +1840,7 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 	}
 	// The left side did not settle it, so the right side is the answer.
 	e.emit_expr_at(binary.right, depth + 1)!
-	e.emit_test(binary.line, binary.col)!
+	e.emit_test(e.floating_of(binary.right), binary.line, binary.col)!
 	if is_and {
 		e.branch(.branch_zero, settles, binary.line, binary.col)!
 	} else {
@@ -1390,14 +1867,14 @@ fn (mut e Emitter) move_to_scratch(line int, col int) !void {
 // the honest answer for an expression this back end cannot size.
 fn (e Emitter) width_of(expr ast.Expr) ?int {
 	return match expr {
-		ast.FloatLit {
-			// A floating constant is a node the reader produces now and this
-			// back end has no width for it: the refusal is the emitter's, at the
-			// constant, where it is emitted.
-			none
-		}
 		ast.IntLit {
 			4
+		}
+		ast.FloatLit {
+			// A floating constant is a double: the eight bytes of one live in
+			// the image and the instruction reads them into a floating-point
+			// register.
+			8
 		}
 		ast.StrLit {
 			// The value of a string is the address of its bytes.
@@ -1429,9 +1906,14 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			}
 		}
 		ast.Call {
-			// A call's value has the width the language returns it with, which
-			// is four bytes: the only return width this back end emits.
-			4
+			// A call's value has the width the language returns it with: a
+			// double is eight bytes, and everything else this back end emits is
+			// four.
+			if e.returns[expr.name] == 'double' {
+				8
+			} else {
+				4
+			}
 		}
 		ast.Index {
 			// An element is the width of an element of the array it belongs to,
@@ -1460,6 +1942,12 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 		ast.Binary {
 			if expr.op in ['==', '!=', '<', '>', '<=', '>=', '&&', '||'] {
 				4
+			} else if e.floating_of(expr) {
+				// An arithmetic step with a double on either side is a double,
+				// whichever class the other operand was: the two widths are not
+				// equal in the tree, and the value the step produces is one
+				// double either way.
+				8
 			} else {
 				left := e.width_of(expr.left) or { return none }
 				right := e.width_of(expr.right) or { return none }
@@ -1572,25 +2060,79 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 // storing each finished argument and loading the registers at the end is what
 // keeps one argument from landing on another.
 //
+// Where an argument goes is decided before it is evaluated, because the machine
+// has two argument sequences and an argument belongs to one of them: an int is
+// passed in the general file and a double in the floating-point one, and each
+// file numbers its own arguments from the beginning. `printf("%f", x)` is the
+// shape that shows it: the format string is the first general argument and the
+// double is also the first argument of the floating file.
+//
 // A name the file defines is called by its distance in the code, so a call to a
 // function in the same translation unit binds to that definition; every other
 // name is a symbol the loader resolves before the program starts.
 fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
+	mut places := []ArgPlace{cap: call.args.len}
+	mut integers := 0
+	mut doubles := 0
 	for i, arg in call.args {
-		if e.target.arg_reg(i) == none {
-			e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} has more than ${i} arguments, and the machine has no register for another one')
+		if e.argument_is_double(call, i, arg) {
+			if e.target.float_arg_reg(doubles) == none {
+				e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} passes more than ${doubles} doubles, and the machine has no register for another one')
+				return error('too many arguments')
+			}
+			places << ArgPlace{
+				floating: true
+				position: doubles
+			}
+			doubles++
+			continue
+		}
+		if e.target.arg_reg(integers) == none {
+			e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} has more than ${integers} arguments, and the machine has no register for another one')
 			return error('too many arguments')
 		}
-		e.emit_expr_at(arg, depth + i + 1)!
-		e.store_accumulator(e.value_slot(depth + i), expr_line(arg), expr_col(arg))!
+		places << ArgPlace{
+			floating: false
+			position: integers
+		}
+		integers++
 	}
 	for i, arg in call.args {
-		register := e.target.arg_reg(i) or {
-			e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} has more than ${i} arguments, and the machine has no register for another one')
+		place := places[i]
+		line := expr_line(arg)
+		col := expr_col(arg)
+		if place.floating {
+			e.emit_expr_at(arg, depth + i + 1)!
+			e.convert_to_double(arg, line, col)!
+			e.store_double_accumulator(e.value_slot(depth + i), line, col)!
+			continue
+		}
+		e.emit_expr_at(arg, depth + i + 1)!
+		// A double handed to a parameter that is not one is truncated to the
+		// integer the parameter holds, which is the conversion the language
+		// defines between the two classes.
+		e.convert_to_int(arg, line, col)!
+		e.store_accumulator(e.value_slot(depth + i), line, col)!
+	}
+	for i, arg in call.args {
+		place := places[i]
+		line := expr_line(arg)
+		col := expr_col(arg)
+		slot := e.value_slot(depth + i)
+		if place.floating {
+			register := e.target.float_arg_reg(place.position) or {
+				e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} passes more doubles than the machine has registers for')
+				return error('too many arguments')
+			}
+			e.load_double_argument(slot, register, line, col)!
+			continue
+		}
+		register := e.target.arg_reg(place.position) or {
+			e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} has more arguments than the machine has registers for')
 			return error('too many arguments')
 		}
-		width := e.passed_width(call, i, arg)!
-		e.load_argument(e.value_slot(depth + i), register, width, expr_line(arg), expr_col(arg))!
+		width := e.passed_width(call, i, arg, place.floating)!
+		e.load_argument(slot, register, width, line, col)!
 	}
 	if call.name in e.program.defined {
 		e.reference(e.target.call_near(0), .call_local, call.name, '')
@@ -1598,14 +2140,33 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	}
 	e.import_symbol(call.name)
 	// A library function this compiler has no prototype for may be variadic, and
-	// the machine's convention wants the number of vector arguments in the low
-	// byte of the result register before a call like that. Zero is what a call
-	// with no vector arguments says, and printf reads it. The count goes in after
-	// the argument registers are loaded, because loading them is the last thing
-	// that could disturb it.
+	// the machine's convention wants the number of vector registers the call uses
+	// in the low byte of the result register before a call like that. A call with
+	// no doubles says zero, and printf reads the count to decide whether it has
+	// floating arguments to fetch. The count goes in after the argument registers
+	// are loaded, because loading them is the last thing that could disturb it.
 	result := e.accumulator(call.line, call.col)!
-	e.append(e.target.move_immediate32(result, 0)!)
+	e.append(e.target.move_immediate32(result, u32(doubles))!)
 	e.reference(e.target.call_slot(0), .call_import, call.name, '')
+}
+
+// ArgPlace is where one argument is passed: which of the machine's two files
+// carries it, and its position in that file's own sequence of arguments.
+struct ArgPlace {
+	floating bool
+	position int
+}
+
+// argument_is_double says whether an argument is handed over as a double. A
+// function this file defines says so itself, parameter by parameter; a library
+// function has no prototype here, so the argument's own type is the answer.
+fn (e Emitter) argument_is_double(call ast.Call, position int, arg ast.Expr) bool {
+	if classes := e.float_params[call.name] {
+		if position < classes.len {
+			return classes[position]
+		}
+	}
+	return e.floating_of(arg)
 }
 
 // passed_width is the width one argument is handed over at. A function this file
@@ -1614,8 +2175,27 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 // not the parameter's is reported where it is written: a pointer passed where an
 // int is expected would hand over one half of itself, and nothing later would
 // notice.
-fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr) !int {
+//
+// The class is the exception again: an argument that is a double and a parameter
+// that is not are converted rather than refused, so the width the value had
+// before the conversion is not the width it is handed over at. The one case that
+// is refused is a double where the parameter holds an address, because there is
+// no conversion between a floating type and a pointer and the bits would arrive
+// as an address the program can no longer follow.
+fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr, floating bool) !int {
+	if floating {
+		return e.target.word_size
+	}
 	actual := e.width_of(arg)
+	if e.floating_of(arg) {
+		if widths := e.signatures[call.name] {
+			if position < widths.len && widths[position] == e.target.word_size {
+				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a double and the parameter holds an address, and there is no conversion between them')
+				return error('double into a pointer')
+			}
+		}
+		return 4
+	}
 	if widths := e.signatures[call.name] {
 		if position < widths.len {
 			expected := widths[position]
@@ -1655,13 +2235,41 @@ fn (e Emitter) global_shape(name string) ?GlobalSlot {
 		if global.name == name {
 			element := e.type_width(global.typ) or { return none }
 			return GlobalSlot{
-				offset: 0
-				width:  element
-				count:  if global.count > 0 { global.count } else { 0 }
+				offset:   0
+				width:    element
+				count:    if global.count > 0 { global.count } else { 0 }
+				floating: e.writes_a_double(global.typ)
 			}
 		}
 	}
 	return none
+}
+
+// global_is_double says whether a top-level object was defined as a double. A
+// read of the name has to go through the floating-point file, and the tree says
+// so before the storage has been laid out, so this asks the declaration rather
+// than the blob.
+fn (e Emitter) global_is_double(name string) bool {
+	for global in e.unit.globals {
+		if global.name == name {
+			// An array's name is an address, so only an object that holds one
+			// double is read as one.
+			return global.count == 0 && e.writes_a_double(global.typ)
+		}
+	}
+	return false
+}
+
+// global_element_is_double is the same question about one element of a top-level
+// array: `a[0]` is a double when a is an array of doubles, which is the class the
+// element is read and written with.
+fn (e Emitter) global_element_is_double(name string) bool {
+	for global in e.unit.globals {
+		if global.name == name {
+			return global.count > 0 && e.writes_a_double(global.typ)
+		}
+	}
+	return false
 }
 
 // global_of is the storage a top-level object has in the image, laid out the
@@ -1693,6 +2301,14 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 	}
 	offset := e.program.globals_blob.len
 	e.program.globals_blob << []u8{len: count * element, init: u8(0)}
+	if value := object.init_float {
+		// The initializer of a double is the eight bytes of its value, which is
+		// the same little-endian image the instruction that reads one expects.
+		bits := math.f64_bits(value)
+		for i in 0 .. element {
+			e.program.globals_blob[offset + i] = u8((bits >> (8 * i)) & 0xff)
+		}
+	}
 	if value := object.init {
 		// The initializer is a constant, written the way the machine holds a
 		// value of that width: little-endian, two's complement.
@@ -1701,9 +2317,10 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 		}
 	}
 	slot := GlobalSlot{
-		offset: offset
-		width:  element
-		count:  shape.count
+		offset:   offset
+		width:    element
+		count:    shape.count
+		floating: shape.floating
 	}
 	e.program.globals[name] = slot
 	return slot
@@ -1719,19 +2336,41 @@ fn (mut e Emitter) assign_global(stmt ast.Stmt, object GlobalSlot, expr ast.Expr
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	e.emit_expr_at(expr, 1)!
-	if width := e.width_of(expr) {
-		if width != object.width && !(object.width == 1 && width == 4) {
-			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into ${stmt.target}, which holds ${object.width}')
-			return error('width mismatch')
-		}
-	} else {
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
-		return error('unknown width')
-	}
-	value := e.accumulator(stmt.line, stmt.col)!
+	e.convert_for_global(expr, object, stmt.line, stmt.col)!
 	address_register := e.scratch(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+	if object.floating {
+		value := e.float_accumulator(stmt.line, stmt.col)!
+		e.append(e.target.store_double_indirect(address_register, value)!)
+		return
+	}
+	value := e.accumulator(stmt.line, stmt.col)!
 	e.append(e.target.store_indirect(address_register, value, object.width)!)
+}
+
+// convert_for_global makes a value the class of a top-level object's storage and
+// checks that the two can be one another at all. It is the same question a store
+// into a local asks, with a different shape to the storage.
+fn (mut e Emitter) convert_for_global(expr ast.Expr, object GlobalSlot, line int, col int) !void {
+	if object.floating {
+		if !e.floating_of(expr) && e.is_a_pointer(expr) {
+			e.diagnostics << problem(line, col, 'unsupported: a pointer is stored in a top-level object that holds a double, and there is no conversion between them')
+			return error('pointer into a double')
+		}
+		return e.convert_to_double(expr, line, col)
+	}
+	if e.floating_of(expr) {
+		return e.convert_to_int(expr, line, col)
+	}
+	if width := e.width_of(expr) {
+		if width != object.width && !(object.width == 1 && width == 4) {
+			e.diagnostics << problem(line, col, 'unsupported: a value of ${width} bytes is stored into an object that holds ${object.width}')
+			return error('width mismatch')
+		}
+		return
+	}
+	e.diagnostics << problem(line, col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
+	return error('unknown width')
 }
 
 // intern puts a string literal into the image's read-only data once. Two
@@ -1743,6 +2382,33 @@ fn (mut e Emitter) intern(text string) {
 	e.program.strings[text] = e.program.string_blob.len
 	e.program.string_blob << text.bytes()
 	e.program.string_blob << u8(0) // the terminator a library function reads to
+}
+
+// float_key is the key one double is interned under: the text of the eight bytes
+// it is made of. Two constants with the same bit pattern are one entry, and two
+// that are equal as numbers are one entry too, since a double has one bit pattern
+// per value. The key is the bits rather than the decimal spelling because the
+// decimal spelling of `1.5` and of `1.50` is two strings and the value is one.
+fn float_key(value f64) string {
+	return '${math.f64_bits(value)}'
+}
+
+// intern_double puts the eight bytes of a floating constant into the image's
+// read-only data once and answers with the key it landed under. The bytes are
+// little-endian, which is how the machine reads the eight bytes of a double out
+// of memory, and nothing pads the entry: the instruction that reads one does not
+// require an aligned address, so a constant can follow a string literal.
+fn (mut e Emitter) intern_double(value f64) string {
+	key := float_key(value)
+	if key in e.program.doubles {
+		return key
+	}
+	e.program.doubles[key] = e.program.string_blob.len
+	bits := math.f64_bits(value)
+	for i in 0 .. 8 {
+		e.program.string_blob << u8((bits >> (8 * i)) & 0xff)
+	}
+	return key
 }
 
 // append puts finished instruction bytes into the text.
@@ -1787,8 +2453,8 @@ fn wrap_mul(a i64, b i64) i64 {
 // which node it turned out to be.
 fn expr_line(expr ast.Expr) int {
 	return match expr {
-		ast.FloatLit { expr.line }
 		ast.IntLit { expr.line }
+		ast.FloatLit { expr.line }
 		ast.StrLit { expr.line }
 		ast.Ident { expr.line }
 		ast.Unary { expr.line }
@@ -1800,8 +2466,8 @@ fn expr_line(expr ast.Expr) int {
 
 fn expr_col(expr ast.Expr) int {
 	return match expr {
-		ast.FloatLit { expr.col }
 		ast.IntLit { expr.col }
+		ast.FloatLit { expr.col }
 		ast.StrLit { expr.col }
 		ast.Ident { expr.col }
 		ast.Unary { expr.col }
