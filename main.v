@@ -90,8 +90,12 @@ fn main() {
 		name:   'preprocess'
 		micros: time.since(started).microseconds()
 	}
-	report(path, processed.diagnostics)
-	if processed.diagnostics.len > 0 {
+	// A warning is reported and the compile goes on; an error ends it. The
+	// difference is asked of the diagnostics themselves rather than counted, so
+	// that a stage which hands back a warning is not mistaken for a stage that
+	// failed.
+	report(path, processed.diagnostics, opts.inhibit_warnings)
+	if tokenize.errors(processed.diagnostics).len > 0 {
 		exit(1)
 	}
 	if opts.preprocess {
@@ -104,8 +108,8 @@ fn main() {
 		name:   'parse'
 		micros: time.since(started).microseconds()
 	}
-	report(path, parsed.diagnostics)
-	if parsed.diagnostics.len > 0 {
+	report(path, parsed.diagnostics, opts.inhibit_warnings)
+	if tokenize.errors(parsed.diagnostics).len > 0 {
 		exit(1)
 	}
 	started = time.now()
@@ -129,8 +133,8 @@ fn main() {
 		name:   'emit'
 		micros: time.since(started).microseconds()
 	}
-	report(path, image.diagnostics)
-	if image.diagnostics.len > 0 {
+	report(path, image.diagnostics, opts.inhibit_warnings)
+	if tokenize.errors(image.diagnostics).len > 0 {
 		exit(1)
 	}
 	out_path := if opts.output != '' {
@@ -204,12 +208,22 @@ fn print_tokens(tokens []tokenize.Token) {
 	}
 }
 
-fn report(path string, diagnostics []tokenize.Diagnostic) {
+fn report(path string, diagnostics []tokenize.Diagnostic, inhibit_warnings bool) {
 	for diagnostic in diagnostics {
+		if diagnostic.warning && inhibit_warnings {
+			// `-w` is the command line asking not to be told. The warning is
+			// still a warning and the compile still succeeds; it is only not
+			// printed.
+			continue
+		}
 		// A diagnostic raised inside an included file names that file; the one
 		// the compiler was handed is the fallback for everything else.
 		where := if diagnostic.file != '' { diagnostic.file } else { path }
-		eprintln('${where}:${diagnostic.line}:${diagnostic.col}: ${diagnostic.msg}')
+		mut label := ''
+		if diagnostic.warning {
+			label = 'warning: '
+		}
+		eprintln('${where}:${diagnostic.line}:${diagnostic.col}: ${label}${diagnostic.msg}')
 	}
 }
 

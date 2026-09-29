@@ -613,3 +613,15 @@ fn test_a_pragma_written_by_a_macro_is_read_and_left_out() {
 	// Anything else after the name is not the operator, and the name is a name.
 	assert processed('int _Pragma;\n') == ['int', '_Pragma', ';']
 }
+
+fn test_a_warning_is_reported_and_the_read_goes_on() {
+	// A warning is a program saying something about itself — a header being
+	// read in a configuration it was not written for says it this way. The
+	// program is not wrong, so the compile it is part of does not stop.
+	result := preprocess('${hash}warning this build has no such feature\nint x;\n', 'test.c',
+		Options{})
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].warning
+	assert result.diagnostics[0].msg.contains('no such feature')
+	assert result.tokens.map(it.text) == ['int', 'x', ';']
+}

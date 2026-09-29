@@ -671,7 +671,14 @@ fn (mut p Processor) text_directive(tok tokenize.Token, name string, args string
 		'define' { p.define(tok, args) }
 		'undef' { p.undef(tok, args) }
 		'error' { p.problem(tok, '#error ${args.trim_space()}') }
-		'warning' { p.problem(tok, '#warning ${args.trim_space()}') }
+		'warning' {
+			// A warning is the one diagnostic a program is allowed to have and
+			// still be compiled: it is a program saying something about itself,
+			// which is what a header does when it is read in a configuration it
+			// was not written for.
+			text := args.trim_space()
+			p.warn(tok, if text == '' { 'a warning with nothing to say' } else { text })
+		}
 		'include' { p.include(tok, args, false) }
 		'include_next' { p.include(tok, args, true) }
 		'line' { p.line_directive(tok, args) }
@@ -766,6 +773,18 @@ fn (mut p Processor) emit(tok tokenize.Token) {
 
 fn (mut p Processor) problem(tok tokenize.Token, msg string) {
 	p.problem_at(p.file_name(tok), tok.line, tok.col, msg)
+}
+
+// warn is a diagnostic that does not stop the compile: the program is wrong
+// about nothing, it is saying something the compiler should pass on.
+fn (mut p Processor) warn(tok tokenize.Token, msg string) {
+	p.diagnostics << tokenize.Diagnostic{
+		line:    tok.line
+		col:     tok.col
+		msg:     msg
+		file:    p.file_name(tok)
+		warning: true
+	}
 }
 
 fn (mut p Processor) problem_at(file string, line int, col int, msg string) {

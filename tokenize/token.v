@@ -48,6 +48,23 @@ pub:
 	col  int
 	msg  string
 	file string
+	// warning says the compiler noticed something and the program is still
+	// allowed to be whatever it is. An error is a diagnostic that is not a
+	// warning, and only errors stop a compile.
+	warning bool
+}
+
+// errors are the diagnostics that stop the compiler: everything that is not a
+// warning. A stage that hands back warnings has not failed, and counting the
+// diagnostics instead of asking which kind they are is how that gets confused.
+pub fn errors(diagnostics []Diagnostic) []Diagnostic {
+	mut out := []Diagnostic{}
+	for diagnostic in diagnostics {
+		if !diagnostic.warning {
+			out << diagnostic
+		}
+	}
+	return out
 }
 
 pub fn (d Diagnostic) str() string {

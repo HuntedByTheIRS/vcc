@@ -16,3 +16,24 @@ fn test_a_diagnostic_carries_an_empty_file_by_default() {
 	assert diagnostics.len == 1
 	assert diagnostics[0].file == ''
 }
+
+fn test_errors_leaves_the_warnings_out() {
+	// What stops a compile is an error. A stage that hands back a warning has
+	// not failed, and a count of the diagnostics cannot tell the two apart.
+	diagnostics := [
+		Diagnostic{
+			line: 1
+			col:  1
+			msg:  'an error'
+		},
+		Diagnostic{
+			line:    2
+			col:     1
+			msg:     'a warning'
+			warning: true
+		},
+	]
+	assert errors(diagnostics).len == 1
+	assert errors(diagnostics)[0].msg == 'an error'
+	assert errors([]Diagnostic{}).len == 0
+}
