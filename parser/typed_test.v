@@ -416,13 +416,20 @@ fn test_the_float_family_is_refused_by_name_and_by_location() {
 	// DELIVERABLE 2's own test: a float the back end has no form for is refused
 	// by name and location rather than misread as something the emitter does
 	// have a form for.
-	for spelled in ['float', 'double'] {
-		result := parsed('${spelled} f(void) { return 0; }')
-		assert result.diagnostics.len == 1
-		assert result.diagnostics[0].msg == 'unsupported type ${spelled}'
-		assert result.diagnostics[0].line == 1
-		assert result.diagnostics[0].col == 1
-	}
+	//
+	// `double` is no longer in this list, and that is a change in what is true
+	// rather than in what is checked: the back end has instructions for a
+	// double, so a definition that returns one is a definition and not a
+	// refusal. `float` is still refused, by the same reader, at the same place.
+	result := parsed('float f(void) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'unsupported type float'
+	assert result.diagnostics[0].line == 1
+	assert result.diagnostics[0].col == 1
+	// The type is one this reader has a spelling and a width for, which is what
+	// makes it the back end's to refuse and not the reader's.
+	widened := parsed('double f(void) { return 0; }')
+	assert widened.diagnostics.len == 0
 	// `long double` is one type written as two words, so the refusal names it
 	// rather than the first word of it.
 	wide := parsed('long double f(void) { return 0; }')
@@ -460,4 +467,59 @@ fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
 	assert wider.diagnostics.len == 1
 	assert wider.diagnostics[0].msg == 'unsupported type unsigned'
 	assert wider.diagnostics[0].line == 1
+}
+
+fn test_a_floating_constant_is_typed_as_the_double_it_is() {
+	// 6.4.4.2 makes the spelling decide the class and the class decides the type:
+	// a decimal constant with a point or an exponent is a floating one, and a
+	// double is the one floating type this back end has instructions for.
+	decl := first('double half(void) { return 1.5; }')
+	assert decl.ret_type.same(types.double_type())
+	returned := decl.body[0].expr or {
+		assert false
+		return
+	}
+	half := returned as ast.FloatLit
+	assert half.value == 1.5
+	assert half.text == '1.5'
+	assert half.typ.same(types.double_type())
+	// An exponent is a floating constant with no point in it at all, and its
+	// value is the one the exponent names rather than the digits before it.
+	exponent := first('double big(void) { return 1e3; }')
+	numeric := exponent.body[0].expr or {
+		assert false
+		return
+	}
+	assert (numeric as ast.FloatLit).value == 1000.0
+}
+
+fn test_a_floating_suffix_is_refused_by_the_type_it_names() {
+	// A suffix is not dropped: `1.5f` names a float and `1.5L` a long double, and
+	// reading either as a double would give the program a type it did not ask
+	// for. The refusal names the type, at the constant as it was written.
+	narrow := parsed('double f(void) { return 1.5f; }')
+	assert narrow.diagnostics.len == 1
+	assert narrow.diagnostics[0].msg.contains('float literal')
+	assert narrow.diagnostics[0].col == 25
+	long_double := parsed('double f(void) { return 1.5L; }')
+	assert long_double.diagnostics.len == 1
+	assert long_double.diagnostics[0].msg.contains('long double literal')
+}
+
+fn test_a_mixed_operation_is_a_double_on_both_sides() {
+	// The usual conversions give an int and a double one common type, and the
+	// node keeps it: what the emitter reads is the node's own class, which is
+	// what keeps a long chain from having to be walked one term at a time.
+	result := checked('double f(void) { int n = 2; return n + 1e3; }')
+	returned := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	sum := returned as ast.Binary
+	assert sum.op == '+'
+	assert sum.typ.same(types.double_type())
+	// The int operand keeps the type it was declared with, and the conversion to
+	// a double is what the emitter makes of the operation.
+	assert (sum.left as ast.Ident).typ.same(types.int_type())
+	assert (sum.right as ast.FloatLit).typ.same(types.double_type())
 }

@@ -362,6 +362,11 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 		ast.IntLit {
 			return expr
 		}
+		ast.FloatLit {
+			// A floating constant is a value nothing in this file changes, like
+			// the integer one beside it.
+			return expr
+		}
 		ast.Ident {
 			return expr
 		}

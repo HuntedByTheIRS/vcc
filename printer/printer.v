@@ -180,6 +180,11 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 		ast.IntLit {
 			out << '${indent}int ${expr.value} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
+		ast.FloatLit {
+			// The value is printed as a double rather than as the spelling it
+			// was written with, because what the emitter reads is the value.
+			out << '${indent}double ${expr.value} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+		}
 		ast.Ident {
 			out << '${indent}ident ${expr.name} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}

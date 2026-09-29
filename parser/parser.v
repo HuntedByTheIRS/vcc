@@ -57,7 +57,7 @@ mut:
 }
 
 // supported_types are the ones the back end can emit today.
-const supported_types = ['int', 'char', 'void']
+const supported_types = ['int', 'char', 'void', 'double']
 
 // max_expression_depth bounds parenthesised nesting. The C standard asks a
 // compiler for 63 levels; past this the parser reports instead of following the
@@ -297,7 +297,7 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_expression(expr.left, mut reported)
 			p.check_undeclared_expression(expr.right, mut reported)
 		}
-		ast.IntLit, ast.StrLit {}
+		ast.IntLit, ast.StrLit, ast.FloatLit {}
 	}
 }
 
@@ -429,6 +429,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Ident { expr.name }
 		ast.Index { '${expr.name}[...]' }
 		ast.IntLit { expr.text }
+		ast.FloatLit { expr.text }
 		ast.StrLit { 'a string literal' }
 		ast.Call { 'a call to ${expr.name}' }
 		ast.Unary { 'a value with ${expr.op} applied to it' }
@@ -506,6 +507,22 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	t := p.peek()
 	if t.kind == .number {
 		p.next()
+		// The spelling decides whether this is a floating constant or an
+		// integer one, so the two readers are reached from here rather than
+		// one of them guessing at the other's input.
+		if is_floating_constant(t.text) {
+			value := parse_floating_literal(t.text) or {
+				p.error_at(t, err.msg())
+				return error('bad floating literal')
+			}
+			return ast.Expr(ast.FloatLit{
+				value: value
+				text:  t.text
+				typ:   p.floating_type(t, value)
+				line:  t.line
+				col:   t.col
+			})
+		}
 		value := parse_integer_literal(t.text) or {
 			p.error_at(t, err.msg())
 			return error('bad integer literal')
@@ -652,6 +669,23 @@ fn (mut p Parser) constant_type(at tokenize.Token, value i64) types.Type {
 		p.error_at(at, err.msg())
 		return types.Type{}
 	}
+}
+
+// floating_type is the type a floating constant has. 6.4.4.2 makes that a
+// question about the suffix: a constant with no suffix is a double, and the two
+// suffixes name types this compiler does not have, so the reader refuses them
+// where the constant is written rather than choosing between three types here.
+// A constant with no suffix is therefore a double, which is the type this
+// compiler emits.
+fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
+	if value != value {
+		// A NaN is what a conversion that ran out of range produces, and the
+		// constant it came from was a number the program wrote. Saying so at
+		// the constant is better than emitting a NaN where a number was.
+		p.error_at(at, '${at.text}: the constant is out of range for a double')
+		return types.Type{}
+	}
+	return types.double_type()
 }
 
 // string_literal_type is the type of a string literal: an array of char holding

@@ -1,5 +1,7 @@
 module parser
 
+import strconv
+
 // Literal conversion. Both of these report instead of guessing: a constant that
 // does not fit, or a digit that is not valid for the base it was written in, is
 // exactly the kind of thing a compiler must not quietly turn into a number.
@@ -61,6 +63,97 @@ fn parse_integer_literal(text string) !i64 {
 		}
 		value = value * i64(base) + i64(digit)
 	}
+	return value
+}
+
+// is_floating_constant says whether a numeric token names a floating constant
+// rather than an integer one. 6.4.4.2 makes that a question about the spelling
+// and not about the value: a decimal constant is floating when it has a point or
+// an exponent, so `1.0` and `1e3` are floating and `1` is not. A hexadecimal
+// constant is decided by its `p` exponent instead, and those are refused by name
+// in the integer reader, so this reads past them rather than calling `0x1E` a
+// decimal constant with an exponent.
+fn is_floating_constant(text string) bool {
+	if text.len > 1 && text[0] == `0` && (text[1] == `x` || text[1] == `X`) {
+		return false
+	}
+	return text.contains('.') || text.contains('e') || text.contains('E')
+}
+
+// parse_floating_literal reads a decimal floating constant into the double it
+// names. A suffix is refused by name rather than dropped, because the two
+// suffixes that exist name types this compiler does not have yet, and reading
+// `1.5f` as a double would give the program a type it did not ask for. The
+// value itself is converted exactly: the digits between the point and the
+// exponent are the sign of a decimal fraction, and the conversion is the one
+// that rounds to nearest.
+fn parse_floating_literal(text string) !f64 {
+	mut body := text
+	if body.len > 0 {
+		last := body[body.len - 1]
+		if last == `f` || last == `F` {
+			return error('${text}: a float literal names a type this compiler does not implement, and reading it as a double would change its value')
+		}
+		if last == `l` || last == `L` {
+			return error('${text}: a long double literal names a type this compiler does not implement')
+		}
+	}
+	if body == '' {
+		return error('${text}: not a floating constant')
+	}
+	// The point may be the first or the last character, and 6.4.4.2 allows
+	// both: `.5` and `5.` are floating constants, and `5.` is not the integer
+	// 5 followed by nothing.
+	mut digits := 0
+	mut points := 0
+	mut exponents := 0
+	for i, ch in body {
+		if ch == `.` {
+			points++
+			continue
+		}
+		if ch == `e` || ch == `E` {
+			exponents++
+			continue
+		}
+		if ch == `+` || ch == `-` {
+			// A sign is part of the constant only when it follows the
+			// exponent marker; anywhere else it is a token of its own and the
+			// lexer would not have put it in this one.
+			if i == 0 || (body[i - 1] != `e` && body[i - 1] != `E`) {
+				return error('${text}: not a floating constant')
+			}
+			continue
+		}
+		if ch < `0` || ch > `9` {
+			return error('${text}: ${ch.ascii_str()} is not part of a floating constant')
+		}
+		digits++
+	}
+	if digits == 0 {
+		return error('${text}: not a floating constant')
+	}
+	if points > 1 || exponents > 1 {
+		return error('${text}: not a floating constant')
+	}
+	if exponents == 1 {
+		// The exponent needs digits after it, and an exponent part is what
+		// makes `1e` a mistake rather than the integer 1.
+		for i, ch in body {
+			if ch == `e` || ch == `E` {
+				rest := body[i + 1..]
+				mut start := 0
+				if rest.len > 0 && (rest[0] == `+` || rest[0] == `-`) {
+					start = 1
+				}
+				if rest.len <= start {
+					return error('${text}: an exponent with no digits')
+				}
+				break
+			}
+		}
+	}
+	value := strconv.atof64(body) or { return error('${text}: not a floating constant') }
 	return value
 }
 

@@ -1018,6 +1018,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		return
 	}
 	match expr {
+		ast.FloatLit {
+			// A floating constant is a node the reader produces now, and this
+			// back end has no instruction for one yet. Naming it here is what
+			// keeps the walk from falling through to a narrower emit and giving
+			// the program a value it did not write.
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.text} is a floating constant, and this back end has no instruction for one yet')
+			return error('unsupported floating constant')
+		}
 		ast.IntLit {
 			// An integer literal is a constant, so the walk above has already
 			// answered for it; this is the same answer for a reader who wonders.
@@ -1363,6 +1371,12 @@ fn (mut e Emitter) move_to_scratch(line int, col int) !void {
 // the honest answer for an expression this back end cannot size.
 fn (e Emitter) width_of(expr ast.Expr) ?int {
 	return match expr {
+		ast.FloatLit {
+			// A floating constant is a node the reader produces now and this
+			// back end has no width for it: the refusal is the emitter's, at the
+			// constant, where it is emitted.
+			none
+		}
 		ast.IntLit {
 			4
 		}
@@ -1754,6 +1768,7 @@ fn wrap_mul(a i64, b i64) i64 {
 // which node it turned out to be.
 fn expr_line(expr ast.Expr) int {
 	return match expr {
+		ast.FloatLit { expr.line }
 		ast.IntLit { expr.line }
 		ast.StrLit { expr.line }
 		ast.Ident { expr.line }
@@ -1766,6 +1781,7 @@ fn expr_line(expr ast.Expr) int {
 
 fn expr_col(expr ast.Expr) int {
 	return match expr {
+		ast.FloatLit { expr.col }
 		ast.IntLit { expr.col }
 		ast.StrLit { expr.col }
 		ast.Ident { expr.col }

@@ -71,15 +71,21 @@ pub:
 // makes an array of that many elements. The initializer is a constant, which is
 // what a file-scope definition may have: none means the storage starts zeroed,
 // which is what an object without an initializer is defined to hold.
+//
+// An object holding a double has its constant in `init_float` and one of any
+// other type has it in `init`, because the two are written into the image as
+// different bytes: an integer in two's complement at the width of its type, and a
+// double as the eight bytes of its value.
 pub struct Global {
 pub:
-	name     string
-	typ      string
-	resolved types.Type
-	count    int
-	init     ?i64
-	line     int
-	col      int
+	name       string
+	typ        string
+	resolved   types.Type
+	count      int
+	init       ?i64
+	init_float ?f64
+	line       int
+	col        int
 }
 
 pub enum StmtKind {
@@ -151,7 +157,7 @@ pub:
 // type of the constant, a name the type it was declared with, an operator the
 // type its operands convert to. Where the model has no answer the clause is
 // unresolved, and the printer says nothing about it.
-pub type Expr = Binary | Unary | IntLit | Ident | Call | StrLit | Index
+pub type Expr = Binary | Unary | IntLit | FloatLit | Ident | Call | StrLit | Index
 
 // Index is one element of an array, written `a[i]`: the name of the array and
 // the expression that says which element. An element of a named array is the one
@@ -177,6 +183,20 @@ pub:
 	typ  types.Type
 	line int
 	col  int
+}
+
+// FloatLit is one floating constant. value is the double it names, which is what
+// a constant with a decimal point or an exponent has unless a suffix says
+// otherwise, and text is the spelling it was written with. A constant that is
+// too large for a double, or one written with a suffix this compiler does not
+// implement, is refused where it is read rather than rounded here.
+pub struct FloatLit {
+pub:
+	value f64
+	text  string
+	typ   types.Type
+	line  int
+	col   int
 }
 
 // StrLit is one string literal. value is the bytes it names with the escapes
