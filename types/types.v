@@ -464,6 +464,12 @@ fn (t Type) describe_unqualified() string {
 			if t.variadic {
 				parts << '...'
 			}
+			if parts.len == 0 {
+				// An empty list written as a prototype names no parameters,
+				// which is `(void)`; a list that named nothing at all says
+				// nothing about a call and is written `()` above.
+				return '${out} (void)'
+			}
 			return '${out} (${parts.join(', ')})'
 		}
 		.struct_ { return if t.tag == '' { 'struct <anonymous>' } else { 'struct ${t.tag}' } }
@@ -725,6 +731,17 @@ pub fn union_type(tag string, members []Member) Type {
 		tag:      tag
 		members:  members
 		complete: true
+	}
+}
+
+// incomplete_tag is a tag that was declared and not defined: `struct _IO_FILE;`
+// says the name exists and nothing more. A pointer to it can be declared and an
+// object of it cannot, which is exactly what `complete` says, and the kind is the
+// keyword the declaration wrote.
+pub fn incomplete_tag(kind Kind, tag string) Type {
+	return Type{
+		kind: kind
+		tag:  tag
 	}
 }
 

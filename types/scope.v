@@ -20,6 +20,10 @@ pub enum Storage {
 	extern_
 	static_
 	register_
+	// thread_ is `_Thread_local` or the GNU `__thread`. It is a storage
+	// duration and not a linkage: it changes nothing about which name sees
+	// which declaration, so it reads with the others here and nowhere else.
+	thread_
 }
 
 // Linkage is what 6.2.2 gives a name: how it is known to the rest of the program,
@@ -129,14 +133,27 @@ pub fn (t Table) lookup_here(name string) ?Symbol {
 // redeclaration. Two declarations of one name in one scope are one name, and
 // whether they are compatible is the question their reader asks.
 pub fn (mut t Table) declare(symbol Symbol) ?Symbol {
+	return t.declare_at(t.scopes.len - 1, symbol)
+}
+
+// declare_at_file_scope writes a declaration into the file scope rather than the
+// innermost one. It is for a name whose type this reader could only read from its
+// spelling, which says nothing about which block it was written in.
+pub fn (mut t Table) declare_at_file_scope(symbol Symbol) ?Symbol {
+	return t.declare_at(0, symbol)
+}
+
+// declare_at records a declaration in one scope and answers with the declaration
+// it replaces there, if there was one. A second declaration of a name does not
+// un-define it: a declaration that promises and a definition that follows are one
+// object.
+fn (mut t Table) declare_at(index int, symbol Symbol) ?Symbol {
 	mut previous := ?Symbol(none)
-	if earlier := t.scopes[t.scopes.len - 1].symbols[symbol.name] {
+	if earlier := t.scopes[index].symbols[symbol.name] {
 		previous = earlier
 	}
-	// A second declaration of a name does not un-define it: a declaration that
-	// promises and a definition that follows are one object.
 	defined := if earlier := previous { earlier.defined || symbol.defined } else { symbol.defined }
-	t.scopes[t.scopes.len - 1].symbols[symbol.name] = Symbol{
+	t.scopes[index].symbols[symbol.name] = Symbol{
 		...symbol
 		defined: defined
 	}

@@ -1,6 +1,5 @@
 module types
 
-import backend
 import measured
 
 // One assertion per rule of clause 6.3 that this milestone implements.
@@ -50,13 +49,6 @@ fn only_reason(to Type, from Type, constant_zero bool, needle string) bool {
 	return reason(to, from, constant_zero).contains(needle)
 }
 
-// partial_description is what the parser gets today: backend answers the pointer
-// and names every scalar kind as missing, so a rule that needs a width has no
-// answer rather than a guessed one.
-fn partial_description() Representation {
-	return from_target(backend.host() or { backend.Target{} }).representation
-}
-
 fn test_the_integer_promotions_of_6_3_1_1() {
 	assert promote(bool_type()) == 'int'
 	assert promote(char_type()) == 'int'
@@ -82,7 +74,7 @@ fn test_the_integer_promotions_of_6_3_1_1() {
 // refusal that names what it would have to carry.
 fn test_the_unsigned_short_promotion_is_decided_by_the_widths() {
 	assert promote(unsigned_short_type()) == 'int'
-	refused := integer_promotion(unsigned_short_type(), partial_description()) or {
+	refused := integer_promotion(unsigned_short_type(), measured.partial()) or {
 		assert err.msg().contains('unsigned short')
 		assert err.msg().contains('width of int')
 		return
@@ -140,7 +132,7 @@ fn test_a_conversion_this_milestone_has_no_arithmetic_for_is_refused() {
 	}
 	assert unknown_sum.kind == .unknown
 	// unsigned short + int needs a promotion that needs the widths.
-	refused := usual_arithmetic_conversions(unsigned_short_type(), int_type(), partial_description()) or {
+	refused := usual_arithmetic_conversions(unsigned_short_type(), int_type(), measured.partial()) or {
 		assert err.msg().contains('width')
 		return
 	}
@@ -160,7 +152,7 @@ fn test_decay_of_6_3_2_1() {
 	assert const_element.describe() == 'const int *'
 	// A function becomes a pointer to itself.
 	function_pointer := decay(function_type(int_type(), [], false, true))
-	assert function_pointer.describe() == 'int () *'
+	assert function_pointer.describe() == 'int (void) *'
 	// A type that is neither is left alone, which is what makes the call safe
 	// where no decay happens: `&a` is a pointer to the array and `sizeof a` is
 	// the size of the array, and neither of them asks for a decay. A string
@@ -253,7 +245,7 @@ fn test_a_narrowing_integer_conversion_is_not_value_preserving() {
 		return
 	}
 	// A width the description does not carry is a refusal rather than a guess.
-	refused := value_preserving(long_type(), int_type(), partial_description()) or {
+	refused := value_preserving(long_type(), int_type(), measured.partial()) or {
 		assert err.msg().contains('width')
 		return
 	}

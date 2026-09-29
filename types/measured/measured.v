@@ -1,5 +1,6 @@
 module measured
 
+import backend
 import types
 
 // The object representation of this target, written down so that the tests assert
@@ -66,4 +67,23 @@ pub fn representation() types.Representation {
 		sizes:  sizes
 		aligns: aligns
 	}
+}
+
+// partial is the representation the compiler actually has while it reads: the
+// target description answers the width of a pointer and nothing else, so every
+// other kind is missing and the model refuses a question that needs a width
+// rather than guessing one. The tests use it to check that a refusal names the
+// fact it is missing.
+pub fn partial() types.Representation {
+	target := backend.host() or {
+		return types.Representation{
+			sizes:  {
+				types.Kind.pointer: 8
+			}
+			aligns: {
+				types.Kind.pointer: 8
+			}
+		}
+	}
+	return types.from_target(target).representation
 }

@@ -125,7 +125,9 @@ fn test_a_parameter_of_an_array_or_function_type_is_adjusted() {
 	mut f := function_type(int_type(), [], false, true)
 	f = adjust_parameter(f)
 	assert f.is_pointer()
-	assert f.describe() == 'int () *'
+	// The list was written as a prototype naming no parameters, which is
+	// `(void)`; a list that named nothing at all is written `()`.
+	assert f.describe() == 'int (void) *'
 	// A plain scalar parameter is left alone.
 	assert adjust_parameter(int_type()).same(int_type())
 }
