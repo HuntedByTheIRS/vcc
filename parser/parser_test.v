@@ -517,6 +517,94 @@ fn test_an_else_with_no_if_is_reported() {
 	assert result.diagnostics[0].msg.contains('else with no if')
 }
 
+// A for is a block holding its initializer and a while, and the while's body is
+// the loop body with the step after it. The tree has no for node, so this is
+// the shape a reader of the tree sees.
+fn test_a_for_is_a_block_holding_a_while() {
+	result := parsed('int main() { int i = 0; for (i = 0; i < 3; i = i + 1) x = i; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	loop := body[1]
+	assert loop.kind == .block
+	assert loop.body.len == 2
+	assert loop.body[0].kind == .assign
+	assert loop.body[0].target == 'i'
+	spelled := loop.body[1]
+	assert spelled.kind == .while_stmt
+	cond := spelled.cond or {
+		assert false
+		return
+	}
+	assert cond is ast.Binary
+	assert (cond as ast.Binary).op == '<'
+	assert spelled.body.len == 2
+	assert spelled.body[0].kind == .assign
+	assert spelled.body[0].target == 'x'
+	step := spelled.body[1]
+	assert step.kind == .assign
+	assert step.target == 'i'
+	value := step.expr or {
+		assert false
+		return
+	}
+	assert value is ast.Binary
+	assert (value as ast.Binary).op == '+'
+}
+
+fn test_a_for_may_declare_its_counter() {
+	result := parsed('int main() { for (int i = 0; i < 3; i = i + 1) ; return 0; }')
+	assert result.diagnostics.len == 0
+	loop := result.unit.decls[0].body[0]
+	assert loop.kind == .block
+	assert loop.body.len == 2
+	assert loop.body[0].kind == .var_decl
+	assert loop.body[0].decl_name == 'i'
+	spelled := loop.body[1]
+	assert spelled.kind == .while_stmt
+	// The body was the empty statement, so all the loop runs is the step.
+	assert spelled.body.len == 1
+	assert spelled.body[0].kind == .assign
+	assert spelled.body[0].target == 'i'
+}
+
+// A loop with no condition runs until a break. The language says a missing
+// condition is a nonzero constant, so the condition the tree spells is 1, which
+// is the same loop in the shape this tree has.
+fn test_a_for_with_no_condition_spells_the_constant() {
+	result := parsed('int main() { for (;;) { break; } return 0; }')
+	assert result.diagnostics.len == 0
+	loop := result.unit.decls[0].body[0]
+	assert loop.kind == .block
+	assert loop.body.len == 1
+	spelled := loop.body[0]
+	assert spelled.kind == .while_stmt
+	cond := spelled.cond or {
+		assert false
+		return
+	}
+	assert cond is ast.IntLit
+	assert (cond as ast.IntLit).value == 1
+	assert spelled.body.len == 1
+	assert spelled.body[0].kind == .block
+	assert spelled.body[0].body[0].kind == .break_stmt
+}
+
+fn test_a_for_may_be_the_body_of_another_for() {
+	result := parsed('int main() { for (i = 0; i < 2; i = i + 1) for (j = 0; j < 2; j = j + 1) x = i; return 0; }')
+	assert result.diagnostics.len == 0
+	outer := result.unit.decls[0].body[0]
+	assert outer.kind == .block
+	assert outer.body.len == 2
+	assert outer.body[1].kind == .while_stmt
+	spelled := outer.body[1]
+	assert spelled.body.len == 2
+	inner := spelled.body[0]
+	assert inner.kind == .block
+	assert inner.body.len == 2
+	assert inner.body[0].kind == .assign
+	assert inner.body[1].kind == .while_stmt
+}
+
 fn test_an_unterminated_block_is_reported_once() {
 	result := parsed('int main() { return 1;')
 	assert result.diagnostics.len == 1

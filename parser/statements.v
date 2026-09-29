@@ -40,6 +40,9 @@ fn (mut p Parser) parse_statement() ![]ast.Stmt {
 		if t.text == 'while' {
 			return p.parse_while_statement()
 		}
+		if t.text == 'for' {
+			return p.parse_for_statement()
+		}
 		if t.text == 'break' || t.text == 'continue' {
 			return p.parse_loop_jump(t)
 		}
@@ -267,6 +270,89 @@ fn (mut p Parser) parse_loop_jump(t tokenize.Token) []ast.Stmt {
 	}
 	return [ast.Stmt{
 		kind: .continue_stmt
+		line: t.line
+		col:  t.col
+	}]
+}
+
+// parse_for_statement reads `for (A; B; C) D` and writes the loop it means: a
+// block holding A, then a while whose condition is B and whose body is D with C
+// after it. The tree has a while and no for, so a reader that never saw the
+// source is reading a loop that runs the step at the end of every round, which
+// is what a for does. The condition and the step are the ones that were written,
+// in the order they were written.
+//
+// A missing A or C is nothing, and nothing is written for it. A missing B is a
+// loop only a break ends: the language says the condition is a nonzero constant
+// there, so the tree spells it 1, which is the same loop in the shape this tree
+// has.
+fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
+	t := p.next() // for
+	if !p.expect_punct('(') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	mut head := []ast.Stmt{}
+	if p.at_punct(';') {
+		p.next()
+	} else if p.starts_declaration(p.peek()) {
+		// `for (int i = 0; ...)`: the declaration reader stops after the `;`
+		// that every header has, which is where the condition starts.
+		head = p.parse_local_declaration()
+	} else {
+		stmt := p.parse_expression_statement() or {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		if !p.expect_punct(';') {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		head << stmt
+	}
+	mut cond := ast.Expr(ast.IntLit{
+		value: 1
+		text:  '1'
+		line:  t.line
+		col:   t.col
+	})
+	if !p.at_punct(';') {
+		cond = p.parse_expression() or {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+	}
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	mut step := []ast.Stmt{}
+	if !p.at_punct(')') {
+		stmt := p.parse_expression_statement() or {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		step << stmt
+	}
+	if !p.expect_punct(')') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	body := p.parse_control_body()!
+	mut loop_body := body.clone()
+	loop_body << step
+	loop := ast.Stmt{
+		kind: .while_stmt
+		cond: cond
+		body: loop_body
+		line: t.line
+		col:  t.col
+	}
+	mut block := head.clone()
+	block << loop
+	return [ast.Stmt{
+		kind: .block
+		body: block
 		line: t.line
 		col:  t.col
 	}]
