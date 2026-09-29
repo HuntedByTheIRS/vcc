@@ -227,12 +227,21 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	// Nothing is written from a tree the model did not type. The check runs
 	// before the layout, so a tree it refuses produces no image at all.
 	emitter.refuse_unresolved() or {
+		if emitter.diagnostics.len == 0 {
+			emitter.diagnostics << problem(1, 1, 'internal: the tree could not be checked: ${err.msg()}')
+		}
 		return Result{
 			target:      target
 			diagnostics: emitter.diagnostics
 		}
 	}
 	image := emitter.build() or {
+		// A stage that failed without reporting why still owes a message: an
+		// empty output file that says nothing is the worst outcome available,
+		// and it is what an error raised past a diagnostic produces.
+		if emitter.diagnostics.len == 0 {
+			emitter.diagnostics << problem(1, 1, 'internal: the image could not be produced: ${err.msg()}')
+		}
 		return Result{
 			target:      target
 			diagnostics: emitter.diagnostics
