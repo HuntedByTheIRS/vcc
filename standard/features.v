@@ -64,12 +64,22 @@ pub const features = [
 		pedantic:  'an attribute on a declarator'
 		status:    .implemented
 	},
+	// The asm row's phrase has to be true of both constructs the spelling
+	// marks, because the check finds a row by token text and cannot tell them
+	// apart: a statement-level `__asm__ volatile ("" : "+r"(x));` is an asm
+	// statement, and `int g(void) __asm__("g_alias");` is an assembler name on
+	// a declarator. gcc 16.2.1 has no wording to borrow for either shape: it
+	// exits 0 with empty stderr on both of them under `-std=c99 -pedantic` and
+	// under `-std=c99 -pedantic-errors`, and its C front end carries no such
+	// message at all, because the double-underscore spelling is in the
+	// reserved namespace and needs no extension. So the phrase names the two
+	// shapes instead of borrowing the name of one of them.
 	Feature{
 		spellings: ['__asm__', '__asm']
 		since:     .none
 		gnu:       true
 		extension: ''
-		pedantic:  'an assembler name on a declarator'
+		pedantic:  'an asm statement or an assembler name on a declarator'
 		status:    .implemented
 	},
 	Feature{

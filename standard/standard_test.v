@@ -120,6 +120,23 @@ fn test_a_gnu_construct_is_pedantic_in_a_strict_mode() {
 	assert messages[0].file == 'f.c'
 }
 
+fn test_the_asm_row_names_every_shape_the_spelling_marks() {
+	// The check matches the token text, and the token opens both an asm
+	// statement and an assembler name on a declarator, so a phrase that names
+	// only the declarator names something a statement-level use does not have.
+	tokens := [token('int'), token('x'), token('__asm__'), token('volatile')]
+	messages := pedantic_messages(tokens, asking(.c99))
+	assert messages.len == 1
+	assert messages[0].msg == 'ISO C99 forbids an asm statement or an assembler name on a declarator'
+	assert messages[0].line == 1
+	// A declaration with an asm name gets the same phrase, which is the other
+	// shape it has to be true of.
+	declarator := [token('int'), token('g'), token('('), token('void'), token(')'), token('__asm__')]
+	declared := pedantic_messages(declarator, asking(.c99))
+	assert declared.len == 1
+	assert declared[0].msg == messages[0].msg
+}
+
 fn test_a_gnu_dialect_takes_its_own_extensions() {
 	tokens := [token('__attribute__'), token('__asm__')]
 	assert pedantic_messages(tokens, asking(.gnu99)).len == 0
