@@ -328,6 +328,78 @@ fn test_a_compound_assignment_with_no_form_is_reported() {
 	assert result.unit.decls[0].body[1].kind == .return_stmt
 }
 
+// A condition is written with the operators C compares with, and they bind the
+// way C binds them: the arithmetic first, then the comparisons, then the two
+// that join conditions.
+fn test_a_comparison_binds_looser_than_arithmetic() {
+	result := parsed('int main() { return 1 + 2 < 3 * 4; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	binary := expr as ast.Binary
+	assert binary.op == '<'
+	assert binary.left is ast.Binary
+	assert (binary.left as ast.Binary).op == '+'
+	assert binary.right is ast.Binary
+	assert (binary.right as ast.Binary).op == '*'
+}
+
+fn test_an_equality_binds_looser_than_a_comparison() {
+	result := parsed('int main() { return a == b < c; }')
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	binary := expr as ast.Binary
+	assert binary.op == '=='
+	assert binary.right is ast.Binary
+	assert (binary.right as ast.Binary).op == '<'
+}
+
+fn test_the_operators_that_join_conditions_bind_loosest() {
+	result := parsed('int main() { return a && b || c != d; }')
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	binary := expr as ast.Binary
+	assert binary.op == '||'
+	assert binary.left is ast.Binary
+	assert (binary.left as ast.Binary).op == '&&'
+	assert binary.right is ast.Binary
+	assert (binary.right as ast.Binary).op == '!='
+}
+
+fn test_a_negation_is_a_unary_node() {
+	result := parsed('int main() { return !x; }')
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Unary
+	assert (expr as ast.Unary).op == '!'
+}
+
+// The second token is what tells an assignment from a comparison, so `==` is
+// read as the operator it is and the statement stays an expression.
+fn test_an_expression_that_compares_is_not_an_assignment() {
+	result := parsed('int main() { int x = 1; x == 1; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .expr_stmt
+	expr := body[1].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	assert (expr as ast.Binary).op == '=='
+}
+
 fn test_an_unterminated_block_is_reported_once() {
 	result := parsed('int main() { return 1;')
 	assert result.diagnostics.len == 1

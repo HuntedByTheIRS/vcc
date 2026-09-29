@@ -297,13 +297,19 @@ fn (mut p Parser) parse_arguments() ![]ast.Expr {
 	}
 }
 
-// binary_precedence is the binding strength of an operator the stub folds. An
+// binary_precedence is the binding strength of an operator the tree has a node
+// for. The order is C's: `*` binds tighter than `+`, `+` tighter than the four
+// comparisons, those tighter than `==`, and `&&` tighter than `||`. An
 // operator that is not in the table stops the expression, and the caller
 // diagnoses whatever it stopped on.
 fn binary_precedence(op string) int {
 	return match op {
-		'*', '/', '%' { 5 }
-		'+', '-' { 4 }
+		'||' { 3 }
+		'&&' { 4 }
+		'==', '!=' { 5 }
+		'<', '>', '<=', '>=' { 6 }
+		'+', '-' { 7 }
+		'*', '/', '%' { 8 }
 		else { 0 }
 	}
 }
