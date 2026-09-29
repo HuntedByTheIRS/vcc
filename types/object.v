@@ -279,6 +279,13 @@ pub fn from_target(target backend.Target) Description {
 	// The width every integer constant is written at, and the unsigned reading
 	// of the same four bytes: `4294967295U` is an unsigned int whose value the
 	// back end holds at that width.
+	// A char is one byte, which the back end already has a form for: a char lives
+	// in one byte of its slot and is an int when it is read. The width is asked
+	// for by the layout of an aggregate with a char member, where a member's
+	// width is what decides the offset of the member after it. Measured on this
+	// target with gcc 16.2.1, `sizeof(char)` is 1 with an alignment of 1.
+	sizes[Kind.char_] = 1
+	aligns[Kind.char_] = 1
 	sizes[Kind.int_] = 4
 	aligns[Kind.int_] = 4
 	sizes[Kind.unsigned_int] = 4

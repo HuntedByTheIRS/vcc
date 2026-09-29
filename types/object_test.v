@@ -310,9 +310,15 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	// width for a long, a float or an aggregate, and a question that needs one
 	// is refused rather than answered with a number that would be a machine
 	// fact in the wrong module.
+	//
+	// A char is carried, and the question that needs it is the layout of an
+	// aggregate: where the member after a char member starts is the char's width
+	// and nothing else's. The back end has a form for one already, since a char
+	// is a byte in its slot and an int when it is read, so the width is one the
+	// model can give out truthfully.
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
-		if kind != .int_ && kind != .unsigned_int && kind != .double {
+		if kind != .int_ && kind != .unsigned_int && kind != .double && kind != .char_ {
 			expected_missing << kind
 		}
 	}
@@ -320,6 +326,10 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert !description.missing.contains(Kind.int_)
 	assert !description.missing.contains(Kind.unsigned_int)
 	assert !description.missing.contains(Kind.pointer)
+	// Measured with gcc 16.2.1 on this target: `sizeof(char)` is 1 with an
+	// alignment of 1.
+	assert description.representation.size_of(char_type()) or { -1 } == 1
+	assert description.representation.align_of(char_type()) or { -1 } == 1
 	// The double is carried because the back end moves one, and the two numbers
 	// are the measured ones rather than a guess: `sizeof(double)` is 8 with an
 	// alignment of 8 on this target.
