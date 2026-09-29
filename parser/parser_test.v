@@ -123,6 +123,65 @@ fn test_an_unsupported_type_names_the_type() {
 	assert result.diagnostics[0].line == 1
 }
 
+// `sizeof` is an operator and not a call, and what it answers is a constant the
+// emitter writes: the size of a type is a fact about the target and the standard
+// makes it an integer constant expression, so the operand is never evaluated.
+// Measured against gcc 16.2.1 on this machine, `sizeof(char)`, `sizeof(int)`,
+// `sizeof(double)` and `sizeof(char *) * 4` are 1, 4, 8 and 32, and `sizeof "vcc"`
+// is 4: the literal is an array of four chars and `sizeof` does not decay it.
+fn test_sizeof_answers_the_size_of_a_type() {
+	result := parsed('int main(void) { return sizeof(char) * 4; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	binary := expr as ast.Binary
+	assert binary.op == '*'
+	assert binary.typ.describe() == 'int'
+	left := binary.left as ast.IntLit
+	right := binary.right as ast.IntLit
+	assert left.value == 1
+	assert right.value == 4
+}
+
+// An operand that is an expression is sized from the type it has, and a string
+// literal keeps its array type: what was written is four bytes, not the address
+// an array's name is worth in every other expression.
+fn test_sizeof_of_an_expression_is_the_size_of_its_type() {
+	result := parsed('int main(void) { double d = 0; return sizeof d + sizeof "vcc"; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	binary := expr as ast.Binary
+	assert (binary.left as ast.IntLit).value == 8
+	assert (binary.right as ast.IntLit).value == 4
+}
+
+// A size this compiler cannot answer is refused where the operator is written,
+// and the refusal names what it was looking at.
+fn test_sizeof_of_a_type_with_no_size_is_refused() {
+	result := parsed('int main(void) { return sizeof(void); }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('sizeof asks how many bytes void takes')
+	assert result.diagnostics[0].line == 1
+}
+
+// The operand of `sizeof` is a type name or an expression, and `x` is a name
+// here rather than a type: `sizeof (x)` sizes the variable.
+fn test_sizeof_of_a_parenthesised_name_is_the_size_of_the_variable() {
+	result := parsed('int main(void) { char x = 0; return sizeof(x); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert (expr as ast.IntLit).value == 1
+}
+
 // A definition of an object at the top level is storage the image holds: the
 // type, how many elements and the constant it starts at are what the back end
 // lays out from, and a body reads the name like any other.

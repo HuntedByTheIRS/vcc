@@ -610,6 +610,13 @@ fn (p Parser) is_unresolved(expr ast.Expr) bool {
 
 fn (mut p Parser) parse_unary() !ast.Expr {
 	t := p.peek()
+	// `sizeof` binds as tightly as the prefix operators and not as tightly as a
+	// call, so it is read here and not where a name is: `sizeof(char) * 4` is
+	// four times the size of a char, and `sizeof x + 1` adds one to the size of
+	// x, which is the grammar the standard writes for an operator.
+	if t.kind == .identifier && t.text == 'sizeof' {
+		return p.parse_sizeof(t)
+	}
 	// `&` is here with the other prefix operators: it is one, and it binds as
 	// tightly as they do - `&x + 1` is the address of x plus one. Whether what
 	// follows is something with an address is the back end's question, since
@@ -626,6 +633,72 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 		})
 	}
 	return p.parse_primary()
+}
+
+// max_size_constant is the largest value the back end writes a constant at,
+// because an integer constant is one four-byte immediate. A size past it is
+// refused rather than written as the half of itself that fits.
+const max_size_constant = 2147483647
+
+// parse_sizeof reads `sizeof` and its operand, which is a type name or an
+// expression, and answers how many bytes the operand's type takes.
+//
+// The answer is a constant: the size of a type is a fact about the target, and
+// the standard makes it an integer constant expression, so a program that writes
+// one is emitted as the value it computed to and the operand is never evaluated.
+//
+// The constant is an int, where the standard says size_t. size_t is unsigned
+// long on this target and the value model carries one integer width, four bytes:
+// a clause of unsigned long would be a claim that the value in the register is
+// eight bytes wide, which is not something this back end can make true. A size
+// that no int holds is refused by name rather than narrowed.
+//
+// The operand is not decayed: `sizeof buf` for `char buf[16]` is sixteen, which
+// is the size of the array and not of the address an array's name is worth
+// everywhere else in an expression.
+fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
+	p.next() // sizeof
+	mut spelling := ''
+	mut size := 0
+	if p.at_punct('(') && p.starts_declaration(p.peek_at(1)) {
+		// The operand is written as a type, which is the one operand that says
+		// nothing about a value.
+		p.next() // (
+		name := p.parse_type_name(0)!
+		if !p.expect_punct(')') {
+			return error('unclosed sizeof')
+		}
+		spelling = name.spelling
+		size = p.representation.size_of(name.typ) or {
+			p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler has no size for it')
+			return error('no size for the type')
+		}
+	} else {
+		operand := p.parse_unary()!
+		spelling = describe_operand(operand)
+		if p.is_unresolved(operand) {
+			// The operand was refused where it was written, and its type is
+			// the one the reader never resolved. Naming the operand is what
+			// says which size could not be answered.
+			p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler did not resolve its type')
+			return error('no type for the operand')
+		}
+		size = p.representation.size_of(operand.typ) or {
+			p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler has no size for ${operand.typ.describe()}')
+			return error('no size for the operand')
+		}
+	}
+	if size > max_size_constant {
+		p.error_at(at, 'unsupported: ${spelling} is ${size} bytes, and this compiler writes an integer constant at four bytes')
+		return error('size past an int')
+	}
+	return ast.Expr(ast.IntLit{
+		value: i64(size)
+		text:  'sizeof(${spelling})'
+		typ:   types.int_type()
+		line:  at.line
+		col:   at.col
+	})
 }
 
 fn (mut p Parser) parse_primary() !ast.Expr {
@@ -678,16 +751,6 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
-		if t.text == 'sizeof' {
-			// `sizeof` is an operator, and the spelling is not a function: read
-			// as a call it produced a reference to a symbol nothing defines,
-			// and the program died at load with `undefined symbol: sizeof`.
-			// Refusing it by name at its own location is what this compiler can
-			// honestly do until the milestone that owns the operator
-			// implements it.
-			p.error_at(t, 'unsupported: sizeof is an operator this compiler does not read yet')
-			return error('sizeof')
-		}
 		if p.at_punct('(') {
 			args := p.parse_arguments()!
 			return ast.Expr(ast.Call{

@@ -1073,6 +1073,37 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 	return d
 }
 
+// TypeName is a type name as it was written: what it resolved to, how it is
+// spelled in a diagnostic, and where it started. It is what a cast and the
+// operand of `sizeof` read, and neither of them declares anything, so the
+// spelling is kept beside the type rather than looked up again.
+struct TypeName {
+	typ      types.Type
+	spelling string
+	at       tokenize.Token
+}
+
+// parse_type_name reads a type name: the specifiers of a declaration and a
+// declarator with no name in it. It is the shape `(char *)` and `sizeof(int)`
+// share, which is why it is here beside the declarator rather than in the
+// expression reader: it is the declaration grammar with the name left out.
+fn (mut p Parser) parse_type_name(depth int) !TypeName {
+	start := p.peek()
+	spec := p.parse_decl_specifiers(depth)!
+	d := p.parse_declarator(depth)!
+	if d.name.len > 0 {
+		// A type name has no declarator that names anything: `(int x)` is not a
+		// cast, and reading it as one would silently drop the name.
+		p.error_at(d.name_at, 'unsupported: a type name is read here, and ${d.name} names an object')
+		return error('a name in a type name')
+	}
+	return TypeName{
+		typ:      p.declared_type(spec.clause, d)
+		spelling: p.spelling_of(spec, d.stars)
+		at:       start
+	}
+}
+
 // declared_type is the type a specifier and a declarator together name. The
 // declarator grammar applies its pieces in the order it read them: the stars bind
 // first and each binds to what is left, an array suffix makes an array of that,

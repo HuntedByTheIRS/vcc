@@ -74,6 +74,18 @@ fn test_reading_the_source_from_standard_input_is_offered_by_the_parser() {
 	assert opts.inputs == ['-']
 }
 
+// `sizeof` is answered by the parser, so what the program is emitted with is the
+// number and not a call: the exit status is the size of a double plus the size of
+// a char, which is nine on this target.
+fn test_sizeof_is_the_constant_the_program_returns() {
+	source := scratch('sizes.c')
+	binary := scratch('sizes')
+	exit_status := compile_and_run([source, '-o', binary], 'int main() { return sizeof(double) + sizeof(char); }\n')
+	assert exit_status == 9
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_an_unsupported_construct_exits_non_zero_without_writing_output() {
 	source := scratch('bad.c')
 	binary := scratch('bad')

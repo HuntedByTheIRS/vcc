@@ -175,27 +175,36 @@ fn test_a_constant_whose_type_needs_a_width_the_description_lacks_is_refused() {
 	assert (refused_lit as ast.IntLit).typ.kind == .unknown
 }
 
-fn test_sizeof_is_refused_by_name_and_by_location() {
+fn test_sizeof_answers_a_value_and_a_type_where_it_was_refused_by_name() {
 	// `sizeof` is an operator, and reading the spelling as a call produced a
 	// reference to a symbol nothing defines: `int main(void) { int a[4]; return
 	// sizeof(a); }` compiled into a binary that died at load with `undefined
-	// symbol: sizeof`. It is refused by name at its own token instead, both
-	// spellings, and what it is written with is not read as an argument list.
+	// symbol: sizeof`. The operator is read now: both spellings answer sixteen,
+	// which is the four ints of the array, and the clause is int.
 	for source in [
 		'int main() { int a[4]; return sizeof(a); }',
 		'int main() { int a[4]; return sizeof a; }',
 	] {
 		result := parsed(source)
-		assert result.diagnostics.len == 1
-		assert result.diagnostics[0].msg.contains('sizeof')
-		assert result.diagnostics[0].line == 1
-		assert result.diagnostics[0].col == 31
+		assert result.diagnostics.len == 0
+		expr := result.unit.decls[0].body[1].expr or {
+			assert false
+			return
+		}
+		answer := expr as ast.IntLit
+		assert answer.value == 16
+		assert answer.typ.describe() == 'int'
+		assert answer.line == 1
 	}
-	// The refusal does not swallow the rest of the file: the next declaration is
-	// read and carries its own clause.
+	// The operand is read where it is written and not as an argument list, and
+	// the declaration after it is read as it always was.
 	after := parsed('int main() { int x = sizeof(int); return x; }')
-	assert after.diagnostics.len == 1
-	assert after.diagnostics[0].col == 22
+	assert after.diagnostics.len == 0
+	initializer := after.unit.decls[0].body[0].init or {
+		assert false
+		return
+	}
+	assert (initializer as ast.IntLit).value == 4
 	assert after.unit.decls.len == 1
 }
 
