@@ -207,14 +207,26 @@ fn test_an_aggregate_is_the_same_type_by_its_tag_and_the_members_under_it() {
 	assert s.is_aggregate() && s.is_complete()
 }
 
-fn test_compatibility_is_sameness_with_the_character_exception() {
+fn test_compatibility_is_sameness() {
 	assert int_type().compatible(int_type())
 	assert !int_type().compatible(unsigned_int_type())
-	// 6.2.7 makes char compatible with both of its signedness spellings.
-	assert char_type().compatible(signed_char_type())
-	assert char_type().compatible(unsigned_char_type())
-	assert signed_char_type().compatible(char_type())
+	// The three character types are three distinct types (6.2.5p15), and the
+	// mixes are refused rather than allowed: measured, gcc 16.2.1 reports
+	// `conflicting types for f1` for `void f1(char *); void f1(unsigned char *);`
+	// and `pointer targets in passing argument 1 of wants differ in signedness`
+	// for a `char *` argument to a parameter of `unsigned char *`.
+	assert !char_type().compatible(signed_char_type())
+	assert !char_type().compatible(unsigned_char_type())
+	assert !signed_char_type().compatible(char_type())
 	assert !signed_char_type().compatible(unsigned_char_type())
+	// Each of them is compatible with itself, which is what makes a string
+	// literal fit a `char *` parameter.
+	assert char_type().compatible(char_type())
+	assert signed_char_type().compatible(signed_char_type())
+	assert unsigned_char_type().compatible(unsigned_char_type())
+	// A pointer to an unsigned char does not accept a pointer to a char, which
+	// is the same rule one level down.
+	assert !pointer_to(unsigned_char_type()).compatible(pointer_to(char_type()))
 	// An unresolved type is compatible with nothing, itself included, because it
 	// is the absence of an answer rather than a type.
 	unknown := Type{}

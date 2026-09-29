@@ -365,21 +365,20 @@ fn same_pointer(a &Type, b &Type) bool {
 }
 
 // compatible is the relation 6.2.7 asks about: two types are compatible when
-// they are the same type, and the standard's own special cases are here. `char`
-// is compatible with both `signed char` and `unsigned char`, an unknown type is
-// compatible with nothing including itself, and an opaque type is compatible
-// with the same name rather than with any other.
+// they are the same type, and the standard's own special cases are here. An
+// unknown type is compatible with nothing including itself, and an opaque type
+// is compatible with the same name rather than with any other.
+//
+// `char`, `signed char` and `unsigned char` are three distinct types (6.2.5p15)
+// and are not interchangeable here. Measured, gcc 16.2.1 refuses all three
+// mixes: `void f1(char *); void f1(unsigned char *);` is `conflicting types for
+// f1`, and passing a `char *` where an `unsigned char *` is wanted is `pointer
+// targets in passing argument 1 of wants differ in signedness`.
 pub fn (t Type) compatible(other Type) bool {
 	if t.kind == .unknown || other.kind == .unknown {
 		return false
 	}
 	if t.same(other) {
-		return true
-	}
-	if t.kind == .char_ && (other.kind == .signed_char || other.kind == .unsigned_char) {
-		return true
-	}
-	if other.kind == .char_ && (t.kind == .signed_char || t.kind == .unsigned_char) {
 		return true
 	}
 	return false
