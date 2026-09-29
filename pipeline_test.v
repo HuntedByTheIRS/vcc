@@ -389,6 +389,84 @@ fn test_a_double_argument_reaches_a_library_call() {
 	os.rm(binary) or {}
 }
 
+// The machine passes six ints and eight doubles in registers. Past those the
+// arguments go on the stack, in the order they were written, and the callee reads
+// them from the frame it was entered with. Ten ints is four of them on the stack.
+fn test_a_call_past_the_sixth_argument_passes_the_rest_on_the_stack() {
+	source := scratch('stackargs.c')
+	binary := scratch('stackargs')
+	program := 'int add10(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j) { return a + b + c + d + e + f + g + h + i + j; }\nint main(void) { return add10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 55
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A sum cannot tell one argument from another, so this is the case that catches a
+// reversed stack: the seventh, eighth and ninth parameters have to arrive as 7, 8
+// and 9, and the answer changes if any two of them swap.
+fn test_the_stack_arguments_arrive_in_the_order_they_were_written() {
+	source := scratch('stackorder.c')
+	binary := scratch('stackorder')
+	program := 'int f9(int a, int b, int c, int d, int e, int f, int g, int h, int i) { return g * 100 + h * 10 + i; }\nint main(void) { return f9(1, 2, 3, 4, 5, 6, 7, 8, 9); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 789 % 256
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// Two arguments of one call can be on the stack for two different reasons, and
+// the two sequences run out separately: six ints use the general registers and
+// nine doubles use all eight of the floating ones, so the ninth double is the one
+// the stack carries.
+fn test_an_argument_past_the_floating_registers_is_on_the_stack() {
+	source := scratch('stackdoubles.c')
+	binary := scratch('stackdoubles')
+	program := 'double d9(double a, double b, double c, double d, double e, double f, double g, double h, double i) { return a + b + c + d + e + f + g + h + i; }\nint main(void) { return d9(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0) * 2; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 90
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A call that runs out of both sequences at once: the ints past the sixth are on
+// the stack, and so is the double past the eighth, each read back as its own type.
+fn test_both_sequences_can_overflow_in_one_call() {
+	source := scratch('stackmixed.c')
+	binary := scratch('stackmixed')
+	program := 'int f(int a, int b, int c, int d, int e, int f, double g, double h, double i, double j, double k, double l, double m, double n, double o) { return a + b + c + d + e + f + g + h * 2 + i * 3 + j * 4 + k * 5 + l * 6 + m * 7 + n * 8 + o * 9; }\nint main(void) { return f(1, 1, 1, 1, 1, 1, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 51
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A library function is called the same way, and a variadic one reads the
+// arguments the registers did not carry by walking the stack: seven ints after the
+// format string is one past the registers.
+fn test_a_variadic_library_call_past_the_registers_runs() {
+	source := scratch('stackprintf.c')
+	binary := scratch('stackprintf')
+	program := 'int printf(const char *fmt, ...);\nint main(void) { printf("%d %d %d %d %d %d %d\\n", 1, 2, 3, 4, 5, 6, 7); return 0; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The stack a call took comes back with the call, so the next call in the same
+// body and the slots of the frame are where they were: a loop calling a function
+// with seven arguments five times is five times the same answer.
+fn test_the_stack_a_call_took_comes_back_before_the_next_call() {
+	source := scratch('stackloop.c')
+	binary := scratch('stackloop')
+	program := 'int add7(int a, int b, int c, int d, int e, int f, int g) { return a + b + c + d + e + f + g; }\nint main(void) { int total = 0; int i = 0; while (i < 5) { total = total + add7(i, i, i, i, i, i, i); i = i + 1; } return total; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 70
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // An object of a struct type is a block of the frame, and a member of it is read
 // and written at the offset the layout gave it. The program is run, so what is
 // checked is the bytes and not the tree: three members of three widths, each

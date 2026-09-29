@@ -554,15 +554,21 @@ fn test_a_call_argument_that_is_not_a_constant_is_reported() {
 	assert emitted.bytes.len == 0
 }
 
-fn test_more_arguments_than_the_machine_has_registers_is_reported() {
+// Seven arguments where the machine has six registers is not a refusal: the
+// seventh is pushed and the callee reads it. What is emitted is an image, and the
+// instruction that takes the stack back is there, because a frame that gives the
+// stack away and never takes it back would corrupt the call after it.
+fn test_more_arguments_than_the_machine_has_registers_is_passed_on_the_stack() {
 	mut args := []ast.Expr{}
 	for i in 0 .. 7 {
 		args << int_argument(i64(i))
 	}
 	emitted := emit(program([call_statement('puts', args)]), Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('more than 6')
-	assert emitted.bytes.len == 0
+	assert emitted.diagnostics.len == 0
+	assert emitted.bytes.len > 0
+	// `push rax` is the byte 0x50; the machine code holds one for the seventh
+	// argument.
+	assert emitted.bytes.contains(u8(0x50))
 }
 
 fn test_an_expression_statement_that_is_not_a_call_is_reported() {
@@ -1026,16 +1032,18 @@ fn test_an_operation_on_a_pointer_is_reported() {
 
 // More parameters than the machine passes in registers: the rest would have to
 // be read off the stack, and that is said rather than emitted.
-fn test_more_parameters_than_the_machine_has_registers_is_reported() {
+// A definition with more parameters than the machine has registers reads the
+// extra ones from the frame it was entered with, sixteen bytes past the frame
+// pointer counting the saved frame pointer and the return address.
+fn test_more_parameters_than_the_machine_has_registers_are_read_from_the_stack() {
 	mut params := []ast.Param{}
 	for i in 0 .. 7 {
 		params << param('p${i}', 'int')
 	}
 	helper := function_in_file('many', params, [return_statement(0)])
 	emitted := emit(unit_of([return_statement(0)], [helper]), Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('more than 6')
-	assert emitted.bytes.len == 0
+	assert emitted.diagnostics.len == 0
+	assert emitted.bytes.len > 0
 }
 
 // A program header the way the kernel reads it, so a test can say what the image

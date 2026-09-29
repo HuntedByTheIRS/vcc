@@ -180,6 +180,11 @@ mut:
 	// frame_used is how many bytes of frame the function being emitted has
 	// claimed: its parameters, its locals and the slots an expression needs.
 	frame_used int
+	// stack_pushed is how many bytes the call being emitted has pushed for the
+	// arguments its registers ran out for, and zero when it pushed none. The
+	// caller gives those bytes back once the call returns, so the frame is where
+	// it was and the slots keep their offsets.
+	stack_pushed int
 	// values is the scratch area, one slot per level of expression nesting,
 	// where a half-finished value waits while the other half is computed.
 	values []Slot
@@ -512,26 +517,41 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// first general register and b in the first floating one.
 	mut integers := 0
 	mut doubles := 0
+	mut stacked := 0
 	for _, param in decl.params {
-		// A parameter is one value in a register, and an object of an
-		// aggregate type passed by value is not one value this back end hands
-		// over: its spelling reaches `type_width` and is refused there by name.
+		// A parameter is one value in a register or one on the stack, and an
+		// object of an aggregate type passed by value is neither: its spelling
+		// reaches `type_width` and is refused there by name.
 		slot := e.declare(param.name, param.typ, 0, 0, param.line, param.col)!
+		// The arguments a sequence ran out for arrive on the stack, and where
+		// they are is the caller's side of the same rule: the first one the
+		// caller pushed is at the return address, so sixteen bytes past the
+		// frame pointer counting the frame pointer and the return address, and
+		// the ones after it follow one machine word apart.
+		at := 2 * e.target.word_size + stacked * e.target.word_size
 		if slot.floating {
-			register := e.target.float_arg_reg(doubles) or {
-				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes more than ${doubles} doubles, and the machine passes only that many in registers')
-				return error('too many parameters')
+			if register := e.target.float_arg_reg(doubles) {
+				e.store_double_register(slot, register, param.line, param.col)!
+				doubles++
+				continue
 			}
-			e.store_double_register(slot, register, param.line, param.col)!
-			doubles++
+			double_register := e.float_accumulator(param.line, param.col)!
+			base := e.frame_pointer(param.line, param.col)!
+			e.append(e.target.load_double_slot(base, at, double_register)!)
+			e.store_double_register(slot, double_register, param.line, param.col)!
+			stacked++
 			continue
 		}
-		register := e.target.arg_reg(integers) or {
-			e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes more than ${integers} parameters, and the machine passes only ${integers} of them in registers')
-			return error('too many parameters')
+		if register := e.target.arg_reg(integers) {
+			e.store_register(slot, register, param.line, param.col)!
+			integers++
+			continue
 		}
+		register := e.accumulator(param.line, param.col)!
+		base := e.frame_pointer(param.line, param.col)!
+		e.append(e.target.load_slot(base, at, register, slot.width)!)
 		e.store_register(slot, register, param.line, param.col)!
-		integers++
+		stacked++
 	}
 	returned := e.emit_statements(decl.body)!
 	if !returned {
@@ -2220,28 +2240,43 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	mut places := []ArgPlace{cap: call.args.len}
 	mut integers := 0
 	mut doubles := 0
+	mut stacked := 0
 	for i, arg in call.args {
+		// The two sequences run out separately: a call with six ints and nine
+		// doubles has three doubles on the stack and every int in a register.
+		// The ones a sequence ran out for go on the stack in the order they
+		// were written, which is the order the callee reads them in.
 		if e.argument_is_double(call, i, arg) {
-			if e.target.float_arg_reg(doubles) == none {
-				e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} passes more than ${doubles} doubles, and the machine has no register for another one')
-				return error('too many arguments')
+			if e.target.float_arg_reg(doubles) != none {
+				places << ArgPlace{
+					floating: true
+					position: doubles
+				}
+				doubles++
+				continue
 			}
 			places << ArgPlace{
 				floating: true
-				position: doubles
+				position: stacked
+				stack:    true
 			}
-			doubles++
+			stacked++
 			continue
 		}
-		if e.target.arg_reg(integers) == none {
-			e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} has more than ${integers} arguments, and the machine has no register for another one')
-			return error('too many arguments')
+		if e.target.arg_reg(integers) != none {
+			places << ArgPlace{
+				floating: false
+				position: integers
+			}
+			integers++
+			continue
 		}
 		places << ArgPlace{
 			floating: false
-			position: integers
+			position: stacked
+			stack:    true
 		}
-		integers++
+		stacked++
 	}
 	for i, arg in call.args {
 		place := places[i]
@@ -2260,11 +2295,49 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		e.convert_to_int(arg, line, col)!
 		e.store_accumulator(e.value_slot(depth + i), line, col)!
 	}
+	// The arguments past the registers go on the stack, and the convention puts
+	// the first of them where the call's own stack pointer is: they are pushed in
+	// reverse, so the one written first is the one the callee finds first, and one
+	// word is taken first when an odd number of them is pushed so that the call is
+	// made with the stack aligned as the convention requires.
+	if stacked > 0 {
+		width := e.target.word_size
+		if stacked % 2 == 1 {
+			e.append(e.target.frame_reserve(u32(width)))
+			e.stack_pushed += width
+		}
+		for i := places.len - 1; i >= 0; i-- {
+			place := places[i]
+			if !place.stack {
+				continue
+			}
+			arg := call.args[i]
+			line := expr_line(arg)
+			col := expr_col(arg)
+			slot := e.value_slot(depth + i)
+			// A double in a slot is eight bytes of a value, and handing it over
+			// on the stack is moving those eight bytes: the bits are pushed
+			// through a general register, because the machine has no push from
+			// the floating file.
+			pushed_width := if place.floating {
+				e.target.word_size
+			} else {
+				e.passed_width(call, i, arg, false)!
+			}
+			register := e.accumulator(line, col)!
+			e.load_argument(slot, register, pushed_width, line, col)!
+			e.append(e.target.push_register(register))
+			e.stack_pushed += width
+		}
+	}
 	for i, arg in call.args {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
 		slot := e.value_slot(depth + i)
+		if place.stack {
+			continue
+		}
 		if place.floating {
 			register := e.target.float_arg_reg(place.position) or {
 				e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} passes more doubles than the machine has registers for')
@@ -2282,6 +2355,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	}
 	if call.name in e.program.defined {
 		e.reference(e.target.call_near(0), .call_local, call.name, '')
+		e.release_call_stack()
 		return
 	}
 	e.import_symbol(call.name)
@@ -2294,13 +2368,31 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	result := e.accumulator(call.line, call.col)!
 	e.append(e.target.move_immediate32(result, u32(doubles))!)
 	e.reference(e.target.call_slot(0), .call_import, call.name, '')
+	e.release_call_stack()
+}
+
+// release_call_stack gives back the stack a call took for the arguments its
+// registers ran out for. It runs after the call and not before it, because the
+// arguments have to still be on the stack when the callee reads them; that is
+// the one ordering this has to get right, and the machine code says so when it
+// is wrong.
+fn (mut e Emitter) release_call_stack() {
+	if e.stack_pushed > 0 {
+		e.append(e.target.stack_release(u32(e.stack_pushed)))
+		e.stack_pushed = 0
+	}
 }
 
 // ArgPlace is where one argument is passed: which of the machine's two files
 // carries it, and its position in that file's own sequence of arguments.
 struct ArgPlace {
 	floating bool
+	// position is the register in the argument's own sequence, or the byte
+	// offset from the stack pointer when stack is set.
 	position int
+	// stack says the argument is handed over on the stack rather than in a
+	// register, which is what happens to the ones a sequence ran out for.
+	stack bool
 }
 
 // argument_is_double says whether an argument is handed over as a double. A
