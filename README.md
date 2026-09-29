@@ -94,7 +94,10 @@ loader, which is what makes `puts` work without a linker. A frame holds ints,
 pointers and chars — a char is one byte in its slot and an int when it is read,
 which is where the language's promotion of it happens. An array is a block of
 that frame and its name is the address of its first element, so `puts(buf)`
-passes the bytes themselves.
+passes the bytes themselves. An object defined at the top level is storage the
+image holds instead: one blob laid out beside the code, with the constant it
+starts at written into it, and every function that names it reads and writes the
+same bytes.
 
 `optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
 spellings. What a level turns on today is one pass: a call whose value the
@@ -115,12 +118,12 @@ what a file is made of — `-MM` leaves the system headers out of it, `-MD` and
 names its target — `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
-Not implemented, in rough order of how much of the tree depends on it: `double`,
-`struct` and globals, which are not in the tree yet; more than six arguments
-because the machine passes only six in registers; a function definition that
-returns `void`; `switch`; taking the address of a local; an array with an
-initializer or more than one size; object files and relocatable output; and V's
-own generated C. `ROADMAP.md` maps the order.
+Not implemented, in rough order of how much of the tree depends on it: `double`
+and `struct`, which are not in the tree yet; more than six arguments because the
+machine passes only six in registers; a function definition that returns `void`;
+`switch`; taking the address of a local; an array with an initializer or more
+than one size; a pointer defined at the top level; object files and relocatable
+output; and V's own generated C. `ROADMAP.md` maps the order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a

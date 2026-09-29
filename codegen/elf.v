@@ -84,6 +84,9 @@ struct Sections {
 	text    int
 	dynstr  int
 	strings int
+	// globals is the storage of the objects defined at the top level: the only
+	// part of the image the program writes to as it runs.
+	globals int
 	dynsym  int
 	hash    int
 	got     int
@@ -118,6 +121,7 @@ fn executable(program Program, target backend.Target) ![]u8 {
 	put(mut image, sections.text, program.text)
 	put(mut image, sections.dynstr, dynstr)
 	put(mut image, sections.strings, program.string_blob)
+	put(mut image, sections.globals, program.globals_blob)
 	emit_symbols(mut image, program, sections, symbol_names)
 	emit_hash(mut image, program, sections)
 	emit_relocations(mut image, program, sections, base)
@@ -140,6 +144,8 @@ fn layout(program Program, target backend.Target, interp_len int, dynstr_len int
 	offset = align(offset + dynstr_len, 8)
 	strings := offset
 	offset = align(offset + program.string_blob.len, 8)
+	globals := offset
+	offset = align(offset + program.globals_blob.len, 8)
 	dynsym := offset
 	offset = align(offset + (program.imports.len + 1) * elf_symbol_size, 8)
 	hash := offset
@@ -155,6 +161,7 @@ fn layout(program Program, target backend.Target, interp_len int, dynstr_len int
 		text:    text
 		dynstr:  dynstr
 		strings: strings
+		globals: globals
 		dynsym:  dynsym
 		hash:    hash
 		got:     got
@@ -312,6 +319,12 @@ fn patch(mut image []u8, program Program, target backend.Target, sections Sectio
 				}
 				replacement = target.address_of(register, disp)
 			}
+			.global_address {
+				register := target.reg(fixup.register) or {
+					return error('no register named ${fixup.register} to compute an address into')
+				}
+				replacement = target.address_of(register, disp)
+			}
 			.jump_local {
 				replacement = target.jump(disp)
 			}
@@ -349,6 +362,11 @@ fn referent_of(program Program, sections Sections, fixup Fixup) !int {
 			return sections.strings + (program.strings[fixup.name] or {
 				return error('no string ${fixup.name} in the image')
 			})
+		}
+		.global_address {
+			return sections.globals + (program.globals[fixup.name] or {
+				return error('no global ${fixup.name} in the image')
+			}).offset
 		}
 	}
 }

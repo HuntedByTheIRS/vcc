@@ -43,6 +43,7 @@ enum FixupKind {
 	jump_local     // a jump to a label inside the function being emitted
 	branch_zero    // the same jump, taken when the value last tested was zero
 	branch_nonzero // and when it was not
+	global_address // the address of an object defined at the top level
 }
 
 // Program is what one translation unit became: machine code, the strings it
@@ -67,6 +68,22 @@ mut:
 	// starts in it.
 	string_blob []u8
 	strings     map[string]int
+	// globals_blob is the storage of the objects defined at the top level, and
+	// globals is where each one starts in it. It is a second blob rather than a
+	// part of the strings because a global is written as well as read, and
+	// because a string is interned for the bytes it holds while a global is
+	// interned for the name it was defined with.
+	globals_blob []u8
+	globals      map[string]GlobalSlot
+}
+
+// GlobalSlot is where a top-level object lives in the image and how wide it is:
+// the offset of its first element in globals_blob, the width of one element, and
+// the count of elements it was defined with.
+struct GlobalSlot {
+	offset int
+	width  int
+	count  int
 }
 
 // Slot is where a local or a parameter lives: a displacement from the frame
@@ -428,6 +445,11 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 		return e.assign_element(stmt, subscript, expr)
 	}
 	target := e.lookup(stmt.target) or {
+		// A top-level object is written through its address in the image, the
+		// same way a local is written through its place in the frame.
+		if object := e.global_of(stmt.target) {
+			return e.assign_global(stmt, object, expr)
+		}
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
 	}
@@ -443,6 +465,37 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 // address was in.
 fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Expr) !void {
 	slot := e.lookup(stmt.target) or {
+		// A top-level array is addressed from its storage in the image instead
+		// of from the frame: the address of the object is what the element is an
+		// offset from.
+		if object := e.global_of(stmt.target) {
+			if object.count == 0 {
+				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned an element of it, and it is not an array')
+				return error('not an array')
+			}
+			e.emit_expr_at(subscript, 0)!
+			register := e.accumulator(stmt.line, stmt.col)!
+			base := e.scratch(stmt.line, stmt.col)!
+			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, base.name)
+			e.append(e.target.address_of_element(base, register, object.width, 0, register)!)
+			address := e.value_slot(0)
+			e.store_accumulator(address, stmt.line, stmt.col)!
+			e.emit_expr_at(expr, 1)!
+			if width := e.width_of(expr) {
+				if width != object.width && !(object.width == 1 && width == 4) {
+					e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${stmt.target}, which holds ${object.width}')
+					return error('width mismatch')
+				}
+			} else {
+				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
+				return error('unknown width')
+			}
+			value := e.accumulator(stmt.line, stmt.col)!
+			address_register := e.scratch(stmt.line, stmt.col)!
+			e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+			e.append(e.target.store_indirect(address_register, value, object.width)!)
+			return
+		}
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
 	}
@@ -836,6 +889,21 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		}
 		ast.Ident {
 			slot := e.lookup(expr.name) or {
+				// Not a local: a top-level object is storage the image holds,
+				// and its name is the address of that storage. What is read is
+				// the value at the width the object was defined with, which is
+				// the same load an element of an array takes.
+				if object := e.global_of(expr.name) {
+					register := e.accumulator(expr.line, expr.col)!
+					e.reference(e.target.address_of(register, 0), .global_address, expr.name, register.name)
+					if object.count > 0 {
+						// The name of an array is the address of its first
+						// element.
+						return
+					}
+					e.append(e.target.load_indirect(register, register, object.width)!)
+					return
+				}
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a constant and is not a local of this function')
 				return error('unknown name')
 			}
@@ -887,6 +955,25 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			// element of a char array arrives as the int the language promotes
 			// it to.
 			slot := e.lookup(expr.name) or {
+				// A top-level array: its storage is in the image, so the
+				// address of an element is an offset from the address of the
+				// object rather than from the frame.
+				if object := e.global_of(expr.name) {
+					if object.count == 0 {
+						e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is read as an array, and it is not one')
+						return error('not an array')
+					}
+					e.emit_expr_at(expr.index, depth + 1)!
+					register := e.accumulator(expr.line, expr.col)!
+					// The address of the object goes into the scratch register
+					// after the index is computed, so that the index expression
+					// cannot overwrite it on the way.
+					base := e.scratch(expr.line, expr.col)!
+					e.reference(e.target.address_of(base, 0), .global_address, expr.name, base.name)
+					e.append(e.target.address_of_element(base, register, object.width, 0, register)!)
+					e.append(e.target.load_indirect(register, register, object.width)!)
+					return
+				}
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a local of this function')
 				return error('unknown name')
 			}
@@ -1095,7 +1182,18 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			e.target.word_size
 		}
 		ast.Ident {
-			slot := e.lookup(expr.name) or { return none }
+			slot := e.lookup(expr.name) or {
+				// A top-level object: an array's name is the address of its
+				// first element, a char is the int it is read as, and anything
+				// else is as wide as it was defined.
+				if object := e.global_shape(expr.name) {
+					if object.count > 0 {
+						return e.target.word_size
+					}
+					return if object.width == 1 { 4 } else { object.width }
+				}
+				return none
+			}
 			// An array's name is the address of its first element, which is a
 			// pointer. A char in an expression is an int: the language promotes
 			// it, and the load that reads it is where that happens, so the width
@@ -1317,6 +1415,97 @@ fn (mut e Emitter) import_symbol(name string) {
 	if name !in e.program.imports {
 		e.program.imports << name
 	}
+}
+
+// global_shape is what a top-level object's declaration says about its storage:
+// the width of one element and how many there are. It asks the tree rather than
+// the image, so an expression can ask it while it is being sized, before anything
+// has needed the address of the object and laid the storage out.
+fn (e Emitter) global_shape(name string) ?GlobalSlot {
+	if slot := e.program.globals[name] {
+		return slot
+	}
+	for global in e.unit.globals {
+		if global.name == name {
+			element := e.type_width(global.typ) or { return none }
+			return GlobalSlot{
+				offset: 0
+				width:  element
+				count:  if global.count > 0 { global.count } else { 0 }
+			}
+		}
+	}
+	return none
+}
+
+// global_of is the storage a top-level object has in the image, laid out the
+// first time the name is used: the bytes of its constant initializer, or zeros,
+// at the width of one element, with every object starting at a word boundary so
+// that a word-sized value is never halfway into the one before it. The address of
+// a global is not known while the code is emitted - the image is laid out
+// afterwards - so every use of it is a reference the layout fills in, which is
+// the same mechanism a string literal is addressed by.
+fn (mut e Emitter) global_of(name string) ?GlobalSlot {
+	if slot := e.program.globals[name] {
+		return slot
+	}
+	mut definition := ?ast.Global(none)
+	for global in e.unit.globals {
+		if global.name == name {
+			definition = global
+			break
+		}
+	}
+	object := definition or { return none }
+	shape := e.global_shape(name) or { return none }
+	element := shape.width
+	// A definition with no written count is one value, and one with a count is
+	// that many of them.
+	count := if shape.count > 0 { shape.count } else { 1 }
+	for e.program.globals_blob.len % e.target.word_size != 0 {
+		e.program.globals_blob << u8(0)
+	}
+	offset := e.program.globals_blob.len
+	e.program.globals_blob << []u8{len: count * element, init: u8(0)}
+	if value := object.init {
+		// The initializer is a constant, written the way the machine holds a
+		// value of that width: little-endian, two's complement.
+		for i in 0 .. element {
+			e.program.globals_blob[offset + i] = u8((u64(value) >> (8 * i)) & 0xff)
+		}
+	}
+	slot := GlobalSlot{
+		offset: offset
+		width:  element
+		count:  shape.count
+	}
+	e.program.globals[name] = slot
+	return slot
+}
+
+// assign_global writes a value into the storage of a top-level object: the
+// address of it is loaded out of the image, parked in a scratch slot while the
+// value is computed - the value can read the object again - and then the value is
+// written through the address.
+fn (mut e Emitter) assign_global(stmt ast.Stmt, object GlobalSlot, expr ast.Expr) !void {
+	register := e.accumulator(stmt.line, stmt.col)!
+	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, register.name)
+	address := e.value_slot(0)
+	e.store_accumulator(address, stmt.line, stmt.col)!
+	e.emit_expr_at(expr, 1)!
+	if width := e.width_of(expr) {
+		if width != object.width && !(object.width == 1 && width == 4) {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into ${stmt.target}, which holds ${object.width}')
+			return error('width mismatch')
+		}
+	} else {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
+		return error('unknown width')
+	}
+	value := e.accumulator(stmt.line, stmt.col)!
+	address_register := e.scratch(stmt.line, stmt.col)!
+	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.store_indirect(address_register, value, object.width)!)
 }
 
 // intern puts a string literal into the image's read-only data once. Two

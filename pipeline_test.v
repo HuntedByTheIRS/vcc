@@ -282,3 +282,29 @@ fn test_a_char_array_is_a_string_where_a_pointer_is_expected() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+fn test_a_top_level_object_is_storage_every_function_shares() {
+	source := scratch('globals.c')
+	binary := scratch('globals')
+	program := 'int counter = 3;\n' +
+		'int total;\n' +
+		'int bump(int by) { counter = counter + by; return counter; }\n' +
+		'int main() { total = 10; return bump(4) + total - 17; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_char_array_at_the_top_level_is_a_string() {
+	source := scratch('globalstring.c')
+	binary := scratch('globalstring')
+	program := 'int puts(char *s);\n' +
+		'char message[6];\n' +
+		'int main() { message[0] = 72; message[1] = 105; message[2] = 0;\n' +
+		' puts(message); return message[1] - 105; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
