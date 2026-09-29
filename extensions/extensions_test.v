@@ -1,5 +1,7 @@
 module extensions
 
+import cli
+
 // flags reads a list of arguments that are the extension flags, which is what a
 // caller holding only those flags has. Every one of them has to be accepted:
 // the point of the helper is that a flag which is not an extension flag is a
@@ -129,4 +131,28 @@ fn test_a_flag_that_is_not_ours_is_left_to_the_command_line() {
 fn test_the_flags_are_recorded_as_they_were_written() {
 	o := flags(['-fvcc-exts=auto', '-fno-vcc-exts=auto'])
 	assert o.recorded == ['-fvcc-exts=auto', '-fno-vcc-exts=auto']
+}
+
+// The command line is where the two halves of the flag family have to add up:
+// `cli/` reads the spellings and this module looks the names up, so the check
+// starts from a real argument list with other flags around it.
+fn test_the_command_line_parses_the_flag_family() {
+	opts := cli.parse(['-std=c99', '-fvcc-exts=all', '-fno-vcc-exts=x', 'src.c', '-o', 'out'])!
+	assert opts.inputs == ['src.c']
+	assert !opts.vcc_extensions.enabled('x')
+	for row in registry {
+		assert opts.vcc_extensions.enabled(row.name)
+	}
+	assert opts.vcc_extensions.enabled_names() == registry.map(it.name)
+	// Read and acted on, so not in the list of flags that were passed over.
+	assert !opts.ignored.contains('-fvcc-exts=all')
+	assert !opts.ignored.contains('-fno-vcc-exts=x')
+}
+
+fn test_the_command_line_refuses_a_name_it_does_not_have() {
+	if _ := cli.parse(['-fvcc-exts=aotu', 'src.c']) {
+		assert false, 'a name this compiler does not have is not accepted'
+	} else {
+		assert err.msg().contains('aotu')
+	}
 }
