@@ -285,6 +285,30 @@ fn test_a_declaration_initializer_is_checked_like_an_assignment() {
 	assert literal.unit.decls.len == 1
 }
 
+// 6.3.2.3 asks for the value of an integer constant expression and not for the way
+// it is spelled, so the question is asked of the value. Measured, gcc 16.2.1 under
+// `-std=c99` accepts `h(1 - 1)` for a parameter of type `int (*)(void)`, which this
+// compiler refused while the answer was the literal alone.
+fn test_the_null_pointer_constant_is_the_value_of_an_expression() {
+	accepted := parsed('int h(int (*fp)(void));\nint g(void) { return 0; }\nint main(void) { return h(1 - 1); }')
+	assert accepted.diagnostics.len == 0
+	// The other side of the same rule: the same spelling with a value that is not
+	// zero is not a null pointer constant.
+	refused := parsed('int main(void) { int *p = 1 - 2; return 0; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('only an integer constant of value zero')
+	// A value that is only known at run time is not a constant expression, whatever
+	// it happens to hold: the question is about the expression and not about a value.
+	run_time := parsed('int main(void) { int n = 0; int *p = n - n; return 0; }')
+	assert run_time.diagnostics.len == 1
+	// The arithmetic of two constants folds the same way, and the initializer shape
+	// emits the zero it folds to: measured, `int main(void) { int *p = 1 - 1; if (p)
+	// { return 3; } return 7; }` builds a binary that returns 7, which is what gcc's
+	// binary returns.
+	folded := parsed('int main(void) { int *p = 3 / 4; int *q = 2 * 0; return 0; }')
+	assert folded.diagnostics.len == 0
+}
+
 fn test_the_null_pointer_constant_is_the_one_integer_a_pointer_takes() {
 	// Zero is a null pointer constant and converts to any pointer; one is not,
 	// and an argument that is a plain integer is a constraint violation.

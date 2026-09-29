@@ -732,14 +732,70 @@ fn (mut p Parser) call_type(name tokenize.Token, args []ast.Expr) types.Type {
 
 // is_null_constant says whether an expression is the integer constant expression
 // with the value 0 that 6.3.2.3 calls a null pointer constant, which is the one
-// integer a pointer may be initialized with. A character constant of value zero is
-// one too, and so is either of those with a sign written in front of it.
+// integer a pointer may be initialized with. The clause asks for the value of the
+// expression and not for the way it is spelled, so `0`, `-0`, `2 - 2` and `3 / 4`
+// are the same answer to the question here. Measured, gcc 16.2.1 under `-std=c99`
+// accepts `h(1 - 1)` for a parameter of type `int (*)(void)`, which this compiler
+// refused while the question was asked of the literal alone.
 fn is_null_constant(expr ast.Expr) bool {
-	return match expr {
-		ast.IntLit { expr.value == 0 }
-		ast.Unary { expr.op in ['+', '-'] && is_null_constant(expr.expr) }
-		else { false }
+	value := constant_value(expr) or { return false }
+	return value == 0
+}
+
+// constant_value is the value of an integer constant expression this reader
+// evaluates while it reads: a literal, a literal with a sign in front of it, and
+// the arithmetic of two values. The five operators are the ones the tree has a
+// precedence for, which is the arithmetic this compiler reads at all.
+//
+// An expression that is not one of those answers none, which says that this is not
+// a constant expression the compiler can evaluate - not that it has no value. A
+// name, a call and a cast all answer none, so a pointer is still never initialized
+// with something that only has a value at run time.
+fn constant_value(expr ast.Expr) ?i64 {
+	if expr is ast.IntLit {
+		return expr.value
 	}
+	if expr is ast.Unary {
+		operand := constant_value(expr.expr) or { return none }
+		if expr.op == '-' {
+			return -operand
+		}
+		if expr.op == '+' {
+			return operand
+		}
+		return none
+	}
+	if expr is ast.Binary {
+		left := constant_value(expr.left) or { return none }
+		right := constant_value(expr.right) or { return none }
+		match expr.op {
+			'+' {
+				return left + right
+			}
+			'-' {
+				return left - right
+			}
+			'*' {
+				return left * right
+			}
+			'/' {
+				if right == 0 {
+					return none
+				}
+				return left / right
+			}
+			'%' {
+				if right == 0 {
+					return none
+				}
+				return left % right
+			}
+			else {
+				return none
+			}
+		}
+	}
+	return none
 }
 
 // binary_precedence is the binding strength of an operator the tree has a node
