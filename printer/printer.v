@@ -94,6 +94,12 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 		dump_statements(stmt.body, depth + 1, mut out)
 		dump_statements(stmt.then_body, depth + 1, mut out)
 		dump_statements(stmt.else_body, depth + 1, mut out)
+		if stmt.step.len > 0 {
+			// The step of a loop is written under its own heading, because it
+			// is a part of the loop and not a part of the body.
+			out << '${indent}step'
+			dump_statements(stmt.step, depth + 1, mut out)
+		}
 	}
 }
 

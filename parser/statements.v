@@ -339,12 +339,14 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 		return []ast.Stmt{}
 	}
 	body := p.parse_control_body()!
-	mut loop_body := body.clone()
-	loop_body << step
+	// The step is the loop's own third part rather than the body's last
+	// statement: a continue has to reach it, and a continue at the end of the
+	// body would jump over a statement written inside the body.
 	loop := ast.Stmt{
 		kind: .while_stmt
 		cond: cond
-		body: loop_body
+		body: body
+		step: step
 		line: t.line
 		col:  t.col
 	}

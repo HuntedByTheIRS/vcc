@@ -78,6 +78,13 @@ pub:
 	cond ?Expr
 	// body is the contents of a block, or the body of a loop.
 	body []Stmt
+	// step is what a loop runs at the end of every turn before going round
+	// again: the third part of a `for`, and empty for a `while`. It belongs to
+	// the loop and not to the body, because a continue has to reach it — as the
+	// body's last statement it would be jumped over by every continue above it,
+	// and a loop whose counter only advances in its last statement would never
+	// end.
+	step []Stmt
 	// then_body and else_body are the two branches of an if. The else is empty
 	// when it was not written.
 	then_body []Stmt

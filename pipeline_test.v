@@ -170,3 +170,32 @@ fn test_print_ast_writes_nothing() {
 	assert !os.exists(binary)
 	os.rm(source) or {}
 }
+
+fn test_a_continue_runs_the_step_of_a_for() {
+	// A continue jumps to the step, so the counter still advances and the loop
+	// ends. With the step at the end of the body it would jump past it and the
+	// loop would never advance — the guard below is there so that a loop that
+	// went wrong fails this test instead of hanging it.
+	source := scratch('continued.c')
+	binary := scratch('continued')
+	program := 'int main() {\n' +
+		'  int total = 0;\n' +
+		'  int guard = 0;\n' +
+		'  int j = 0;\n' +
+		'  for (j = 1; j <= 3; j = j + 1) {\n' +
+		'    guard = guard + 1;\n' +
+		'    if (guard == 100) {\n' +
+		'      break;\n' +
+		'    }\n' +
+		'    if (j == 2) {\n' +
+		'      continue;\n' +
+		'    }\n' +
+		'    total = total + j;\n' +
+		'  }\n' +
+		'  return total - 4;\n' +
+		'}\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

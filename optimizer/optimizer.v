@@ -303,6 +303,7 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 			target:    stmt.target
 			cond:      cond
 			body:      rewrite_body(stmt.body, opts)
+			step:      rewrite_body(stmt.step, opts)
 			then_body: rewrite_body(stmt.then_body, opts)
 			else_body: rewrite_body(stmt.else_body, opts)
 			line:      stmt.line

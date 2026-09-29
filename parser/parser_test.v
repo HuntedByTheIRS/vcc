@@ -517,9 +517,9 @@ fn test_an_else_with_no_if_is_reported() {
 	assert result.diagnostics[0].msg.contains('else with no if')
 }
 
-// A for is a block holding its initializer and a while, and the while's body is
-// the loop body with the step after it. The tree has no for node, so this is
-// the shape a reader of the tree sees.
+// A for is a block holding its initializer and a while, and the while's step is
+// the third part of the for. The tree has no for node, so this is the shape a
+// reader of the tree sees.
 fn test_a_for_is_a_block_holding_a_while() {
 	result := parsed('int main() { int i = 0; for (i = 0; i < 3; i = i + 1) x = i; return 0; }')
 	assert result.diagnostics.len == 0
@@ -537,10 +537,10 @@ fn test_a_for_is_a_block_holding_a_while() {
 	}
 	assert cond is ast.Binary
 	assert (cond as ast.Binary).op == '<'
-	assert spelled.body.len == 2
+	assert spelled.body.len == 1
 	assert spelled.body[0].kind == .assign
 	assert spelled.body[0].target == 'x'
-	step := spelled.body[1]
+	step := spelled.step[0]
 	assert step.kind == .assign
 	assert step.target == 'i'
 	value := step.expr or {
@@ -561,10 +561,12 @@ fn test_a_for_may_declare_its_counter() {
 	assert loop.body[0].decl_name == 'i'
 	spelled := loop.body[1]
 	assert spelled.kind == .while_stmt
-	// The body was the empty statement, so all the loop runs is the step.
-	assert spelled.body.len == 1
-	assert spelled.body[0].kind == .assign
-	assert spelled.body[0].target == 'i'
+	// The body was the empty statement, which is not kept, so all the loop runs
+	// is the step.
+	assert spelled.body.len == 0
+	assert spelled.step.len == 1
+	assert spelled.step[0].kind == .assign
+	assert spelled.step[0].target == 'i'
 }
 
 // A loop with no condition runs until a break. The language says a missing
@@ -597,12 +599,18 @@ fn test_a_for_may_be_the_body_of_another_for() {
 	assert outer.body.len == 2
 	assert outer.body[1].kind == .while_stmt
 	spelled := outer.body[1]
-	assert spelled.body.len == 2
+	assert spelled.body.len == 1
 	inner := spelled.body[0]
 	assert inner.kind == .block
 	assert inner.body.len == 2
 	assert inner.body[0].kind == .assign
 	assert inner.body[1].kind == .while_stmt
+	// Each loop keeps its own step: the inner one advances j and the outer one
+	// advances i.
+	assert inner.body[1].step.len == 1
+	assert inner.body[1].step[0].target == 'j'
+	assert spelled.step.len == 1
+	assert spelled.step[0].target == 'i'
 }
 
 fn test_an_unterminated_block_is_reported_once() {
@@ -615,4 +623,24 @@ fn test_an_empty_file_parses_to_nothing() {
 	result := parsed('')
 	assert result.diagnostics.len == 0
 	assert result.unit.decls.len == 0
+}
+
+fn test_a_for_keeps_its_step_out_of_its_body() {
+	// The third part of a for is a part of the loop, not a statement at the end
+	// of the body: a continue has to reach it, and a continue above a statement
+	// inside the body would jump over it.
+	result := parsed('int main() { int j = 0; for (j = 0; j < 3; j = j + 1) { j = j; } }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	// The declaration, then the block the loop was written in with its
+	// initializer and the loop itself.
+	loop := body[1].body[1]
+	assert loop.kind == .while_stmt
+	// The braces are a block of their own, so the body is one block and the
+	// step is the increment that used to sit inside it.
+	assert loop.body.len == 1
+	assert loop.body[0].kind == .block
+	assert loop.body[0].body[0].kind == .assign
+	assert loop.step.len == 1
+	assert loop.step[0].kind == .assign
 }

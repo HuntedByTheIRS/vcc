@@ -472,6 +472,13 @@ fn (mut e Emitter) emit_while(stmt ast.Stmt) !void {
 	}
 	top := e.label()
 	end := e.label()
+	// A continue goes to the step, which is the third part of a for and nothing
+	// at all in a while: with no step written it lands on the test, which is
+	// what going round again means there. Emitting the step at the end of the
+	// body instead would read the same and be wrong — every continue above it
+	// would jump past the statement that advances the loop.
+	step := e.label()
+	continue_to := if stmt.step.len > 0 { step } else { top }
 	e.place(top)
 	e.emit_expr(cond)!
 	e.emit_test(stmt.line, stmt.col)!
@@ -480,10 +487,16 @@ fn (mut e Emitter) emit_while(stmt ast.Stmt) !void {
 	// are known while it is emitted.
 	e.loops << LoopLabels{
 		break_to:    end
-		continue_to: top
+		continue_to: continue_to
 	}
 	e.emit_branch_body(stmt.body)!
 	e.loops.pop()
+	if stmt.step.len > 0 {
+		// The step runs in the loop's own scope, which is where C puts it: the
+		// names a for declares in its head are the names its step writes to.
+		e.place(step)
+		_ := e.emit_statements(stmt.step)!
+	}
 	e.jump(top)!
 	e.place(end)
 }

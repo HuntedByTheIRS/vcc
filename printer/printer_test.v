@@ -107,3 +107,11 @@ fn test_a_long_chain_is_printed_without_recursing() {
 		assert line.len <= 2 * max_indent + 32
 	}
 }
+
+fn test_the_step_of_a_loop_has_its_own_heading() {
+	dumped := lines(tree('int main() { int j = 0; for (j = 0; j < 3; j = j + 1) { j = j; } }'))
+	assert dumped.any(it.contains('step'))
+	// A while has no step, so nothing in its dump says step.
+	while_dump := lines(tree('int main() { int j = 0; while (j < 3) { j = j + 1; } }'))
+	assert !while_dump.any(it.contains('step'))
+}
