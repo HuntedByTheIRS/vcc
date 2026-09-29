@@ -243,3 +243,18 @@ fn test_a_parameter_survives_the_optimizer() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+fn test_a_char_local_and_a_char_parameter_run() {
+	// Both ends of a char are the machine's byte: the value is cut to a byte
+	// when it is stored, and read back as the int the language promotes it to.
+	source := scratch('chars.c')
+	binary := scratch('chars')
+	program := 'int addc(char a, char b) { return a + b; }\n' +
+		'int main() { char c = 65; char d = 300; int sum = c + 1;\n' +
+		' sum = sum + (d - 44);\n' +
+		' return sum + (addc(200, 100) - 44) - 66; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

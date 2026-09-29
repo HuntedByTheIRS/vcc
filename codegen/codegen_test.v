@@ -1080,3 +1080,64 @@ fn read_string(bytes []u8, offset int) string {
 	}
 	return bytes[offset..end].bytestr()
 }
+
+// A char is one byte in the frame and an int in an expression: the load widens
+// what it read, so adding one to a number needs nothing else, and a value too
+// large for the byte is stored as its low byte, which is what the language's
+// assignment to a char does.
+fn test_a_char_local_is_a_byte_that_widens_when_it_is_read() {
+	body := [
+		declaration('c', 'char', int_argument(65)),
+		declaration('sum', 'int', int_argument(0)),
+		assignment('sum', binary_node('+', name_node('sum'), binary_node('-', name_node('c'), int_argument(65)))),
+		declaration('d', 'char', int_argument(300)),
+		assignment('sum', binary_node('+', name_node('sum'), binary_node('-', name_node('d'), int_argument(44)))),
+		declaration('e', 'char', int_argument(-1)),
+		assignment('sum', binary_node('+', name_node('sum'), binary_node('+', name_node('e'), int_argument(1)))),
+		ast.Stmt{
+			kind: .return_stmt
+			expr: name_node('sum')
+		},
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+}
+
+// A char parameter arrives in a register that carries a machine word: the frame
+// keeps the low byte of it, and the argument side reads the byte and widens it,
+// so a char whose value is negative is handed over as the number it is.
+fn test_a_char_parameter_keeps_its_value_and_its_sign() {
+	helper := ast.FnDecl{
+		name:   'addc'
+		ret:    'int'
+		params: [
+			ast.Param{
+				name: 'a'
+				typ:  'char'
+			},
+			ast.Param{
+				name: 'b'
+				typ:  'char'
+			},
+		]
+		body:   [ast.Stmt{
+			kind: .return_stmt
+			expr: binary_node('+', name_node('a'), name_node('b'))
+		}]
+	}
+	body := [
+		ast.Stmt{
+			kind: .return_stmt
+			expr: binary_node('-', ast.Expr(ast.Call{
+				name: 'addc'
+				args: [int_argument(200), int_argument(100)]
+			}), int_argument(44))
+		},
+	]
+	emitted := emit(unit_of(body, [helper]), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+}

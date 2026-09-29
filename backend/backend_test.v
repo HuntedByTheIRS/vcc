@@ -106,9 +106,21 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 		0xff]
 	assert arch.store_slot(rbp, -8, edi, 8) or { panic(err) } == [u8(0x48), 0x89, 0xbd, 0xf8, 0xff,
 		0xff, 0xff]
-	// A width that is neither an int nor a pointer is refused: a char slot moved
-	// at four bytes would read a neighbour.
-	assert arch.load_slot(rbp, -8, eax, 1) or { []u8{} }.len == 0
+	// A byte: a store of the low byte, and a load that widens what it read, so
+	// that a char read out of the frame is the int the language promotes it to.
+	// The prefix is written even when the low three bits could name a register
+	// without it, because those bits name a different register when it is
+	// missing.
+	assert arch.load_slot(rbp, -8, eax, 1) or { panic(err) } == [u8(0x40), 0x0f, 0xbe, 0x85, 0xf8,
+		0xff, 0xff, 0xff]
+	assert arch.store_slot(rbp, -8, eax, 1) or { panic(err) } == [u8(0x40), 0x88, 0x85, 0xf8, 0xff,
+		0xff, 0xff]
+	assert arch.store_slot(rbp, -8, edi, 1) or { panic(err) } == [u8(0x40), 0x88, 0xbd, 0xf8, 0xff,
+		0xff, 0xff]
+	// A width that is neither a byte, an int nor a pointer is refused: two bytes
+	// is a value this back end has no instruction for, and moving it at four
+	// would read a neighbour.
+	assert arch.load_slot(rbp, -8, eax, 2) or { []u8{} }.len == 0
 }
 
 fn test_the_frame_instructions_are_the_bytes_the_machine_reads() {

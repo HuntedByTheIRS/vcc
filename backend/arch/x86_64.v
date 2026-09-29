@@ -193,9 +193,12 @@ pub const remainder_reg = 'edx'
 // load_slot and store_slot move a value between a register and the frame. The
 // displacement is written in the wide form always: the frame is still growing
 // while the body is emitted, so the length of an access must not depend on how
-// big it ends up. The width is the width of the value, four bytes for an int and
+// big it ends up. The width is the width of the value: four bytes for an int and
 // eight for a pointer, because a move at the other width would read or write a
-// neighbouring slot.
+// neighbouring slot, and one byte for a char, which the machine has a byte move
+// for and a byte load that widens what it reads to the width of the register it
+// lands in. That load is where C's promotion of a char to an int happens, and it
+// is why a char read out of the frame can be added to an int as it stands.
 pub fn load_slot(base Register, disp i32, dst Register, width int) ![]u8 {
 	return slot_move(base, disp, dst, width, false)
 }
@@ -205,10 +208,10 @@ pub fn store_slot(base Register, disp i32, src Register, width int) ![]u8 {
 }
 
 fn slot_move(base Register, disp i32, operand Register, width int, store bool) ![]u8 {
-	if width != 4 && width != 8 {
+	if width != 1 && width != 4 && width != 8 {
 		return error('${name}: a value of ${width} bytes is not one this machine moves through the frame')
 	}
-	mut out := []u8{cap: 7}
+	mut out := []u8{cap: 8}
 	mut rex := u8(0x40)
 	if width == 8 {
 		rex |= 0x08 // REX.W: the value is a wide one
@@ -219,11 +222,26 @@ fn slot_move(base Register, disp i32, operand Register, width int, store bool) !
 	if base.code >= 8 {
 		rex |= 0x01 // REX.B: the base is one of those too
 	}
-	if rex != 0x40 {
+	// A byte operand is named by the low three bits of the register code, and
+	// without a REX byte those three bits name only the four byte registers of
+	// the first four: the prefix is what makes 4 to 7 name spl, bpl, sil and dil
+	// instead. It is always written when the value is a byte, because a prefix
+	// that only says where the registers are is legal, and a missing one would
+	// silently name a different register.
+	if width == 1 || rex != 0x40 {
 		out << rex
 	}
-	opcode := if store { u8(0x89) } else { u8(0x8b) } // the move, in one direction or the other
-	out << opcode
+	if store {
+		// A byte store, or a four- or eight-byte one.
+		out << u8(if width == 1 { 0x88 } else { 0x89 })
+	} else if width == 1 {
+		// Two bytes of opcode: the byte load that widens its operand, so that
+		// what lands in the register is the value the language means.
+		out << u8(0x0f)
+		out << u8(0xbe)
+	} else {
+		out << u8(0x8b) // the move, in one direction or the other
+	}
 	out << u8(0x80 | ((operand.code & 0x07) << 3) | 0x05) // mod 10, rm 101: [base + disp32]
 	value := u32(disp)
 	out << u8(value & 0xff)

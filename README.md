@@ -90,7 +90,9 @@ miscompiled.
 
 The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
 `_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
-loader, which is what makes `puts` work without a linker.
+loader, which is what makes `puts` work without a linker. A frame holds ints,
+pointers and chars — a char is one byte in its slot and an int when it is read,
+which is where the language's promotion of it happens.
 
 `optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
 spellings. What a level turns on today is one pass: a call whose value the
@@ -112,7 +114,7 @@ names its target — `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
 Not implemented, in rough order of how much of the tree depends on it: storage
-beyond the integer family the headers use (`char`, `double`, `struct`, arrays, and
+beyond a byte and the machine's int and word (`double`, `struct`, arrays, and
 globals, which are not in the tree yet), more than six arguments because the
 machine passes only six in registers, a function definition that returns `void`,
 `switch`, taking the address of a local, object files and relocatable output, and

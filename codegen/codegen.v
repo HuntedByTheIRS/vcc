@@ -552,12 +552,17 @@ fn (mut e Emitter) declare(name string, written string, line int, col int) !Slot
 }
 
 // type_width is the width of a value of a type as the source wrote it. An int is
-// four bytes; a pointer is the machine's word, which is what makes `char *` and
+// four bytes; a char is one, which is the width of its slot and of the byte the
+// machine stores into it, while every read of it widens to an int (see
+// width_of); a pointer is the machine's word, which is what makes `char *` and
 // `char **` read and write the same way. Everything else is a type this back end
 // has no instruction for.
 fn (e Emitter) type_width(written string) ?int {
 	if written == 'int' {
 		return 4
+	}
+	if written == 'char' {
+		return 1
 	}
 	if written.contains('*') {
 		return e.target.word_size
@@ -701,9 +706,15 @@ fn (mut e Emitter) load_accumulator(slot Slot, line int, col int) !void {
 }
 
 // load_argument reads one argument slot into the register that carries that
-// position, at the width the argument is passed at.
+// position, at the width the argument is passed at. A char argument is read at
+// its own width whatever width the call asks for, because the read is what
+// widens it: four bytes from a one-byte slot would take the padding with them.
 fn (mut e Emitter) load_argument(slot Slot, register backend.Register, width int, line int, col int) !void {
 	base := e.frame_pointer(line, col)!
+	if slot.width == 1 {
+		e.append(e.target.load_slot(base, slot.offset, register, 1)!)
+		return
+	}
 	e.append(e.target.load_slot(base, slot.offset, register, width)!)
 }
 
@@ -719,7 +730,7 @@ fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !voi
 			e.diagnostics << problem(line, col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 			return error('unknown width')
 		}
-		if width != slot.width {
+		if width != slot.width && !(slot.width == 1 && width == 4) {
 			e.diagnostics << problem(line, col, 'unsupported: a value of ${width} bytes is stored into a slot of ${slot.width}')
 			return error('width mismatch')
 		}
@@ -996,7 +1007,14 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 		}
 		ast.Ident {
 			slot := e.lookup(expr.name) or { return none }
-			slot.width
+			// A char in an expression is an int: the language promotes it, and
+			// the load that reads it is where that happens, so the width of the
+			// value is the width of the read rather than the width of the slot.
+			if slot.width == 1 {
+				4
+			} else {
+				slot.width
+			}
 		}
 		ast.Call {
 			// A call is never a value here (the emitter reports one that is),
