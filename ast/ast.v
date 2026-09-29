@@ -11,6 +11,10 @@ module ast
 pub struct TranslationUnit {
 pub:
 	decls []FnDecl
+	// globals are the objects defined at the top level: storage that lives in
+	// the image rather than in any function's frame, and that every function
+	// reads and writes by name.
+	globals []Global
 }
 
 pub struct FnDecl {
@@ -29,6 +33,21 @@ pub:
 }
 
 // Param is one parameter of a function: its name and its type as written. The
+// Global is one object defined at the top level. The type is written the way a
+// declaration writes it, and a count above zero makes it an array of that many
+// elements. The initializer is a constant, which is what a file-scope definition
+// may have: none means the storage starts zeroed, which is what an object
+// without an initializer is defined to hold.
+pub struct Global {
+pub:
+	name  string
+	typ   string
+	count int
+	init  ?i64
+	line  int
+	col   int
+}
+
 // types this compiler knows are the ones its back end has instructions for, and
 // a type it does not know is diagnosed where it is written rather than guessed
 // at here.

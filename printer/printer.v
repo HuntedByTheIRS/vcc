@@ -26,6 +26,18 @@ const max_indent = 32
 // behavior with no diagnostic at the call site.
 pub fn render(unit ast.TranslationUnit) string {
 	mut out := []string{}
+	for global in unit.globals {
+		mut line := 'global ${global.name} ${global.typ}'
+		if global.count > 0 {
+			line += '[${global.count}]'
+		}
+		if init := global.init {
+			line += ' = ${init}'
+		} else {
+			line += ' (zeroed)'
+		}
+		out << '${line} at ${global.line}:${global.col}'
+	}
 	if unit.decls.len == 0 {
 		out << '(no declarations)'
 	}

@@ -98,10 +98,20 @@ fn test_an_unsupported_type_names_the_type() {
 	assert result.diagnostics[0].line == 1
 }
 
-fn test_a_variable_declaration_says_function_definitions_are_what_exists() {
-	result := parsed('int x;')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('only function definitions')
+// A definition of an object at the top level is storage the image holds: the
+// type, how many elements and the constant it starts at are what the back end
+// lays out from, and a body reads the name like any other.
+fn test_a_definition_of_an_object_carries_its_type_and_constant() {
+	result := parsed('int counter = -3; char buf[16]; int total;')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 3
+	assert result.unit.globals[0].name == 'counter'
+	assert result.unit.globals[0].typ == 'int'
+	assert result.unit.globals[0].init or { 0 } == -3
+	assert result.unit.globals[1].name == 'buf'
+	assert result.unit.globals[1].count == 16
+	assert result.unit.globals[1].init == ?i64(none)
+	assert result.unit.globals[2].init == ?i64(none)
 }
 
 // The statement is skipped to its semicolon, so the return after it parses and

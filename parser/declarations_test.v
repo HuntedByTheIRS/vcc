@@ -122,17 +122,23 @@ fn test_an_extern_object_is_read_and_dropped() {
 }
 
 // An initializer makes the declaration a definition even when it says extern,
-// and a definition is storage this compiler cannot emit yet.
-fn test_an_extern_object_with_an_initializer_is_a_definition() {
+// and a definition is storage the image holds. A brace list is not a number this
+// compiler can write into the image, so the definition is reported rather than
+// laid out as something it is not.
+fn test_an_extern_object_with_a_brace_initializer_is_reported() {
 	result := declarations_of('extern int table[4] = { 1, 2, 3, 4 };')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('only function definitions')
+	assert result.diagnostics[0].msg.contains('not a number')
+	assert result.unit.globals.len == 0
 }
 
-fn test_a_definition_of_an_object_is_still_reported() {
-	result := declarations_of('int counter;')
+// A pointer at the top level is a relocation this compiler does not write yet,
+// so the definition is reported instead of laid out as a wrong number.
+fn test_a_pointer_defined_at_the_top_level_is_reported() {
+	result := declarations_of('char *message = 0;')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('only function definitions')
+	assert result.diagnostics[0].msg.contains('pointer')
+	assert result.unit.globals.len == 0
 }
 
 fn test_a_definition_keeps_its_parameters() {

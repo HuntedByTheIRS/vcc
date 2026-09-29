@@ -170,6 +170,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut data_defined := false
 	mut data_name := ''
 	mut data_at := spec.start
+	// What a definition of an object at the top level needs to be laid out: the
+	// type and the count as written, and the constant it starts at. They are
+	// kept aside from the declarator because the declarator is gone by the time
+	// the declaration is known to be a definition - it is the `=` or the `;`
+	// that decides that.
+	mut data_type := ''
+	mut data_stars := 0
+	mut data_count := 0
+	mut data_init := ?i64(none)
 	for {
 		d := p.parse_declarator(0) or {
 			p.skip_declaration()
@@ -230,12 +239,16 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_seen = true
 				data_name = d.name
 				data_at = if d.name.len > 0 { d.name_at } else { spec.start }
+				data_type = spec.type_spelling(d.stars)
+				data_stars = d.stars
+				data_count = d.array_count
 			}
 			if p.at_punct('=') {
 				// An initializer makes it a definition even when the
 				// declaration says extern: the object has to live somewhere.
 				data_defined = true
 				p.next()
+				data_init = p.file_scope_constant()
 				p.skip_to_separator() or {
 					p.skip_declaration()
 					return decls
@@ -266,9 +279,64 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// somewhere else, and this compiler has no storage to give it.
 			return decls
 		}
-		p.error_at(data_at, 'unsupported: only function definitions are implemented, so a declaration of ${data_name} has nowhere to go')
+		if data_stars > 0 {
+			p.error_at(data_at, 'unsupported: ${data_name} is a pointer, and a pointer defined at the top level is storage this compiler does not lay out yet')
+			return decls
+		}
+		// The type of an object defined at the top level is the same question a
+		// definition's return type is: storage the program has to find room for,
+		// so the answer is the same helper. A prototype can promise anything; a
+		// definition cannot promise a type this back end has no width for.
+		if offender := unsupported_type_word(spec) {
+			p.error_at(data_at, 'unsupported type ${offender}')
+			return decls
+		}
+		if data_defined && data_init == none {
+			p.error_at(data_at, 'unsupported: ${data_name} is initialized with something that is not a number, and only a number can be written into the image so far')
+			return decls
+		}
+		if data_name.len == 0 {
+			p.error_at(data_at, 'unsupported: a definition of an object at the top level needs a name')
+			return decls
+		}
+		// A definition of an object: storage the image holds, which every
+		// function reads and writes by name. Everything the back end needs to
+		// lay the bytes out is known here - the type, how many elements, and the
+		// constant the storage starts at - so no later stage has to ask.
+		p.globals << ast.Global{
+			name:  data_name
+			typ:   data_type
+			count: data_count
+			init:  data_init
+			line:  data_at.line
+			col:   data_at.col
+		}
 	}
 	return decls
+}
+
+// file_scope_constant reads the initializer a file-scope definition may have: a
+// number, signed, which is the only shape the language allows there anyway.
+// Anything else - a string, a brace list, an expression - reads as none, and the
+// caller reports it: what is written into the image is a constant, and a
+// constant is what can be written.
+fn (mut p Parser) file_scope_constant() ?i64 {
+	sign := if p.at_punct('-') {
+		p.next()
+		-1
+	} else if p.at_punct('+') {
+		p.next()
+		1
+	} else {
+		1
+	}
+	if p.peek().kind != .number {
+		return none
+	}
+	t := p.peek()
+	p.next()
+	value := parse_integer_literal(t.text) or { return none }
+	return sign * value
 }
 
 // check_definition reports what keeps a definition from being emitted. A
@@ -300,16 +368,19 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 // program has to find room for; a prototype is a promise, and a promise is not
 // asked.
 fn unsupported_type_word(spec DeclSpec) ?string {
-	if spec.words.len == 0 {
+	// The words a type is made of, not the storage class in front of them: an
+	// `extern` or a `static` is not a type, and reporting one as an unsupported
+	// type would be reporting the wrong word for the right reason.
+	if spec.type_words.len == 0 {
 		return none
 	}
-	if spec.words.len == 1 && spec.words[0] in supported_types {
+	if spec.type_words.len == 1 && spec.type_words[0] in supported_types {
 		return none
 	}
-	if spec.words.len > 1 && spec.words[0] in supported_types {
-		return spec.words[1]
+	if spec.type_words.len > 1 && spec.type_words[0] in supported_types {
+		return spec.type_words[1]
 	}
-	return spec.words[0]
+	return spec.type_words[0]
 }
 
 // parse_decl_specifiers reads the words in front of a declarator. It accepts

@@ -276,7 +276,8 @@ fn fold_builtin_calls(unit ast.TranslationUnit, opts Options) ast.TranslationUni
 		}
 	}
 	return ast.TranslationUnit{
-		decls: decls
+		decls:   decls
+		globals: unit.globals
 	}
 }
 

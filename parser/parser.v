@@ -27,6 +27,11 @@ mut:
 	// depth counts open parentheses. The grammar recurses only through them, so
 	// this is the one number that keeps a hostile file from running the stack out.
 	depth int
+	// globals is every object this file defined at the top level, in the order
+	// the definitions were read. A declaration returns functions, because only
+	// functions are code; the objects are collected here and travel with the
+	// tree, since a body reads them by name.
+	globals []ast.Global
 }
 
 // supported_types are the ones the back end can emit today.
@@ -76,7 +81,8 @@ fn (mut p Parser) parse_unit() ast.TranslationUnit {
 		decls << p.parse_declaration()
 	}
 	return ast.TranslationUnit{
-		decls: decls
+		decls:   decls
+		globals: p.globals
 	}
 }
 
