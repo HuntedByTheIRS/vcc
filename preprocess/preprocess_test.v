@@ -1,5 +1,7 @@
 module preprocess
 
+import os
+
 // The tests drive the preprocessor the way main.v does and read the stream it
 // produces, because that stream is the product: everything downstream is
 // somebody else's stage.
@@ -86,10 +88,134 @@ fn test_error_stops_the_stream_with_its_message() {
 	assert messages[0].contains('this cannot be compiled')
 }
 
-fn test_an_include_is_not_pretended_to_work() {
-	messages := diagnostics_of('#include <stdio.h>\n')
+fn test_an_include_is_diagnosed_when_it_cannot_be_found() {
+	messages := diagnostics_of('#include <no-such-header-anywhere.h>\n')
 	assert messages.len == 1
-	assert messages[0].contains('#include')
+	assert messages[0].contains('no-such-header-anywhere.h')
+}
+
+// The include tests need real files, so they write a small tree and read it
+// back: where a header is found is the whole point of the search order, and
+// there is no way to test that without putting one somewhere.
+fn fixture_directory() string {
+	dir := os.join_path(os.temp_dir(), 'vcc-preprocess-test-${os.getpid()}')
+	os.mkdir_all(dir) or {}
+	return dir
+}
+
+fn test_an_angled_include_is_read_from_the_standard_directories() {
+	dir := fixture_directory()
+	header := os.join_path(dir, 'angled.h')
+	os.write_file(header, 'int from_header;\n') or {}
+	result := preprocess('#include <angled.h>\n', os.join_path(dir, 'main.c'), Options{
+		standard_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int', 'from_header', ';']
+	// Every token says which file it was written in, including the ones that
+	// were written in a header.
+	assert result.tokens[0].file == header
+}
+
+fn test_a_quoted_include_is_looked_for_beside_the_file_that_wrote_it_first() {
+	dir := fixture_directory()
+	beside := os.join_path(dir, 'main.c')
+	os.write_file(os.join_path(dir, 'twice.h'), 'int beside;\n') or {}
+	other := os.join_path(dir, 'other')
+	os.mkdir_all(other) or {}
+	os.write_file(os.join_path(other, 'twice.h'), 'int from_elsewhere;\n') or {}
+	quoted := preprocess('#include "twice.h"\n', beside, Options{
+		include_dirs:  [other]
+		standard_dirs: [other]
+	})
+	assert quoted.diagnostics.len == 0
+	assert quoted.tokens.map(it.text) == ['int', 'beside', ';']
+	angled := preprocess('#include <twice.h>\n', beside, Options{
+		include_dirs:  [other]
+		standard_dirs: [other]
+	})
+	assert angled.diagnostics.len == 0
+	assert angled.tokens.map(it.text) == ['int', 'from_elsewhere', ';']
+}
+
+fn test_an_i_directory_is_searched_for_both_spellings() {
+	dir := fixture_directory()
+	headers := os.join_path(dir, 'i-headers')
+	os.mkdir_all(headers) or {}
+	os.write_file(os.join_path(headers, 'given.h'), 'int given;\n') or {}
+	for name in ['"given.h"', '<given.h>'] {
+		result := preprocess('#include ${name}\n', os.join_path(dir, 'main.c'), Options{
+			include_dirs: [headers]
+		})
+		assert result.diagnostics.len == 0
+		assert result.tokens.map(it.text) == ['int', 'given', ';']
+	}
+}
+
+fn test_a_header_name_with_a_slash_is_read_as_one_name() {
+	// `#include <bits/types.h>` is lexed as several tokens — a name, a slash,
+	// a name and a dot — and the characters between the brackets are the name
+	// of the file.
+	dir := fixture_directory()
+	bits := os.join_path(dir, 'bits')
+	os.mkdir_all(bits) or {}
+	os.write_file(os.join_path(bits, 'types.h'), 'int typed;\n') or {}
+	result := preprocess('#include <bits/types.h>\n', os.join_path(dir, 'main.c'), Options{
+		standard_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int', 'typed', ';']
+}
+
+fn test_an_include_guard_keeps_the_second_read_out() {
+	dir := fixture_directory()
+	os.write_file(os.join_path(dir, 'guarded.h'), '#ifndef GUARDED_H\n#define GUARDED_H\nint once;\n#endif\n') or {}
+	source := '#include <guarded.h>\n#include <guarded.h>\n'
+	result := preprocess(source, os.join_path(dir, 'main.c'), Options{
+		standard_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int', 'once', ';']
+}
+
+fn test_pragma_once_keeps_the_second_read_out() {
+	dir := fixture_directory()
+	os.write_file(os.join_path(dir, 'once.h'), '#pragma once\nint once;\n') or {}
+	source := '#include <once.h>\n#include <once.h>\n'
+	result := preprocess(source, os.join_path(dir, 'main.c'), Options{
+		standard_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int', 'once', ';']
+}
+
+fn test_a_file_that_includes_itself_stops_at_the_depth_limit() {
+	// With no guard, a file that includes itself is a loop. The preprocessor
+	// has to say so rather than find out how much memory the machine has.
+	dir := fixture_directory()
+	header := os.join_path(dir, 'loop.h')
+	os.write_file(header, '#include <loop.h>\n') or {}
+	result := preprocess('#include <loop.h>\n', os.join_path(dir, 'main.c'), Options{
+		standard_dirs: [dir]
+	})
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('${max_include_depth}')
+}
+
+fn test_an_include_in_a_branch_that_was_not_taken_is_not_read() {
+	assert processed('#if 0\n#include <no-such-header-anywhere.h>\n#endif\nint x;\n') == [
+		'int',
+		'x',
+		';',
+	]
+}
+
+fn test_an_include_is_not_read_from_the_conditional_it_skips() {
+	// The follow-up to the test above: the file is read when the branch is
+	// taken, so the only thing keeping the missing header out of the
+	// diagnostics is the conditional.
+	messages := diagnostics_of('#if 1\n#include <no-such-header-anywhere.h>\n#endif\n')
+	assert messages.len == 1
 }
 
 fn test_a_function_like_macro_is_diagnosed_where_it_is_used() {

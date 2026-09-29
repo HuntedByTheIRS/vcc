@@ -25,6 +25,10 @@ pub mut:
 	output       string
 	run_args     []string
 	include_dirs []string
+	// nostdinc is -nostdinc: do not look in the standard directories at all,
+	// which is what a build says when it is compiling against a C library that
+	// is not the one the machine's headers describe.
+	nostdinc     bool
 	library_dirs []string
 	libraries    []string
 	defines      []string
@@ -153,6 +157,8 @@ pub fn parse(args []string) !Options {
 			opts.include_dirs << cursor.value_of('')!
 		} else if arg.starts_with('-I') {
 			opts.include_dirs << arg[2..]
+		} else if arg == '-nostdinc' {
+			opts.nostdinc = true
 		} else if arg == '-D' {
 			opts.defines << cursor.value_of('')!
 		} else if arg.starts_with('-D') {
@@ -258,6 +264,7 @@ pub fn usage(all bool) string {
 	out << '  -fno-builtin  do not compute calls to library functions the compiler knows'
 	out << '  -fno-builtin-NAME  the same for one function'
 	out << '  -Idir -Dname -Uname -Ldir -llib -x type -o outfile'
+	out << '  -nostdinc     do not search the standard directories for headers'
 	out << '  -std=version  -std version   recorded; one subset is accepted either way'
 	if all {
 		out << ''
@@ -267,7 +274,8 @@ pub fn usage(all bool) string {
 		out << '                        today is one subset, so the flag changes nothing yet'
 		out << '  -fwrapv -fPIC -w -g   accepted and ignored'
 		out << '  -Werror=name          accepted and ignored'
-		out << '  -Btcc -Idir -Ldir     accepted; -I and -L paths are recorded, -B is not used yet'
+		out << '  -Btcc -Idir -Ldir     accepted; -I directories are searched for headers,'
+		out << '                        -L paths are recorded, -B is not used yet'
 		out << '  -bt25 -Wl,...         accepted and ignored, as a non-tcc compiler must'
 		out << '  -print-ast            nothing is written and nothing is linked; the dump is'
 		out << '                        the tree after the optimizer, which is what the emitter'
@@ -276,7 +284,8 @@ pub fn usage(all bool) string {
 		out << '                        and -O1 upwards turns on the passes that exist'
 		out << '  -fno-builtin          calls to abs and friends stay calls; the reserved'
 		out << '                        __builtin_ spellings still fold'
-		out << '  -DGC_THREADS=1 ...    recorded; nothing is preprocessed yet'
+		out << '  -Dname=value -Uname  in force before the source is read, as if written'
+		out << '                        above it as #define and #undef'
 		out << '  @listfile             expanded before anything else'
 		out << '  -                     read the source from standard input'
 		out << 'The V toolchain also hands the compiler its own GC library,'

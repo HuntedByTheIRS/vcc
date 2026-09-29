@@ -1,5 +1,6 @@
 module preprocess
 
+import os
 import tokenize
 
 // The preprocessor reads a file and everything it includes and hands the parser
@@ -9,10 +10,9 @@ import tokenize
 // It drives the lexer rather than the other way around, because the unit of
 // work is a file. One file is lexed, an #include line opens another, and the
 // tokens that come out carry the file, line and column of the text they were
-// written at, which is what a diagnostic has to point at.
-//
-// Nothing here writes or reads the disk yet: #include is a diagnostic until the
-// commit that gives it a search path and a file stack.
+// written at, which is what a diagnostic has to point at. An include is an
+// insertion and not a call: the file goes on a stack and the text after the
+// #include waits until the file's last token has been read.
 
 pub struct Options {
 pub mut:
@@ -22,7 +22,19 @@ pub mut:
 	// table before the first file is read.
 	defines   []string
 	undefines []string
+	// standard_dirs are the system directories, searched for either spelling
+	// after the -I ones. They arrive from the command line because where a
+	// machine keeps its headers is the command line's business — -nostdinc is
+	// the same decision — and what belongs here is only the order they are
+	// searched in.
+	standard_dirs []string
 }
+
+// max_include_depth is how many files may be open at once before the
+// preprocessor decides the includes are not going to end. A file that includes
+// itself with no guard is a loop, and the alternative to a limit is running out
+// of memory instead of saying so.
+const max_include_depth = 200
 
 // Result is a preprocess of one translation unit: the stream the parser
 // consumes, plus everything that went wrong on the way.
@@ -35,8 +47,9 @@ pub:
 // preprocess reads one source file into the token stream the parser takes.
 pub fn preprocess(source string, path string, opts Options) Result {
 	mut p := Processor{
-		macros: map[string]Macro{}
-		opts:   opts
+		macros:     map[string]Macro{}
+		once_files: map[string]bool{}
+		opts:       opts
 	}
 	p.apply_command_line_defines()
 	p.push(path, source)
@@ -82,6 +95,10 @@ mut:
 	frames       []Frame
 	macros       map[string]Macro
 	conditionals []Conditional
+	// once_files are the files that asked to be read at most once, which is
+	// what `#pragma once` says. An include guard has no entry here: it is
+	// macro state, and the macro table already keeps that.
+	once_files map[string]bool
 	// expanding is the stack of macro names being expanded right now. A name
 	// already on it is left alone, which is what keeps `#define A B` beside
 	// `#define B A` from expanding forever.
@@ -121,6 +138,111 @@ fn (mut p Processor) apply_command_line_defines() {
 			p.macros.delete(name)
 		}
 	}
+}
+
+// include is one #include line. It works out which file the line names, finds
+// it, and opens it — nothing is written for the line itself, because an include
+// is an insertion: the file's tokens take the line's place in the stream.
+fn (mut p Processor) include(tok tokenize.Token, args string) {
+	if p.frames.len >= max_include_depth {
+		p.problem(tok, 'includes are ${max_include_depth} files deep and still going; a file that includes itself with nothing to stop it is the shape of this')
+		return
+	}
+	mut tokens := tokenize.lex_fragment(args)
+	if tokens.len > 0 && tokens[0].kind == .identifier {
+		// A computed include: `#include NAME`, where NAME is a macro that
+		// stands for the name of the file. The expansion is the same one the
+		// text gets, so what is read here is what would have been written.
+		mut expanded := []tokenize.Token{}
+		for t in tokens {
+			expanded << p.expand(t)
+		}
+		tokens = expanded.clone()
+	}
+	if tokens.len == 0 {
+		p.problem(tok, '#include names no file')
+		return
+	}
+	mut name := ''
+	mut angled := false
+	if tokens[0].kind == .string {
+		name = unquoted_name(tokens[0].text)
+	} else if tokens[0].kind == .punct && tokens[0].text == '<' {
+		angled = true
+		// What is between the angle brackets was lexed as several tokens —
+		// `bits/types.h` is a name, a slash, a name and a dot — and C says the
+		// characters between the brackets are the name of the file.
+		mut i := 1
+		for i < tokens.len && !(tokens[i].kind == .punct && tokens[i].text == '>') {
+			name += tokens[i].text
+			i++
+		}
+		if i >= tokens.len {
+			p.problem(tok, '#include has a < with no >')
+			return
+		}
+	} else {
+		p.problem(tok, '#include wants a "file" or a <file>, not ${tokens[0].text}')
+		return
+	}
+	if name == '' {
+		p.problem(tok, '#include names no file')
+		return
+	}
+	from := p.frames.last().path
+	path := p.find_include(name, angled, from) or {
+		p.problem(tok, 'cannot find ${include_name(name, angled)}; looked in ${p.searched_dirs(angled, from).join(', ')}')
+		return
+	}
+	if path in p.once_files {
+		// The file asked for `#pragma once` when it was read before.
+		return
+	}
+	source := os.read_file(path) or {
+		p.problem(tok, 'cannot read ${path}')
+		return
+	}
+	p.push(path, source)
+}
+
+// find_include looks for a header the way C says to: one written with quotes is
+// looked for beside the file that wrote the line before it is looked for
+// anywhere else, one written with angle brackets is not, and after that both
+// come to the -I directories and then the standard ones.
+fn (mut p Processor) find_include(name string, angled bool, from string) ?string {
+	for dir in p.searched_dirs(angled, from) {
+		candidate := os.join_path(dir, name)
+		if os.is_file(candidate) {
+			return candidate
+		}
+	}
+	return none
+}
+
+fn (p Processor) searched_dirs(angled bool, from string) []string {
+	mut dirs := []string{}
+	if !angled {
+		dirs << os.dir(from)
+	}
+	dirs << p.opts.include_dirs
+	dirs << p.opts.standard_dirs
+	return dirs
+}
+
+// unquoted_name takes the quotes off `"file.h"`. C says the characters between
+// the quotes are the name of the file, with no escape processing of the kind a
+// string literal gets.
+fn unquoted_name(text string) string {
+	if text.len >= 2 && text[0] == `"` && text[text.len - 1] == `"` {
+		return text[1..text.len - 1]
+	}
+	return text
+}
+
+// include_name spells a header name the way the line did, which is how a
+// diagnostic about it should say it.
+fn include_name(name string, angled bool) string {
+	return if angled { '<${name}>' } else { '"${name}"' }
 }
 
 fn (mut p Processor) push(path string, source string) {
@@ -375,13 +497,18 @@ fn (mut p Processor) text_directive(tok tokenize.Token, name string, args string
 		'undef' { p.undef(tok, args) }
 		'error' { p.problem(tok, '#error ${args.trim_space()}') }
 		'warning' { p.problem(tok, '#warning ${args.trim_space()}') }
-		'include' { p.problem(tok, 'unsupported: #include is not implemented yet') }
+		'include' { p.include(tok, args) }
 		'include_next' { p.problem(tok, 'unsupported: #include_next is not implemented yet') }
 		'line' { p.problem(tok, 'unsupported: #line is not implemented yet') }
 		'pragma' {
-			// #pragma once is one of the two ways a header says it may be read
-			// only once, and the include machinery is what has to remember it.
-			// Nothing else pragmas say is the compiler's business yet.
+			// `#pragma once` is a file saying it may be read at most once, which
+			// is one of the two ways a header does that; the other is the
+			// include guard, which needs no code at all because it is macro
+			// state and the macro table already keeps it. Every other pragma is
+			// something this compiler has nothing to say about yet.
+			if args.trim_space() == 'once' {
+				p.once_files[p.frames.last().path] = true
+			}
 		}
 		else {
 			if name == '' {

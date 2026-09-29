@@ -43,10 +43,17 @@ fn main() {
 		println('optimize: ${opts.optimization.summary()}')
 		println('standard: ${standard_line(opts.standard)}')
 		if opts.include_dirs.len == 0 {
-			println('include: (the standard directories, which are not used yet)')
+			println('include: (the -I directories, none given)')
 		}
 		for dir in opts.include_dirs {
 			println('include: ${dir}')
+		}
+		if opts.nostdinc {
+			println('include: (the standard directories, which -nostdinc turns off)')
+		} else {
+			for dir in standard_include_dirs() {
+				println('include: ${dir} (standard)')
+			}
 		}
 		return
 	}
@@ -74,9 +81,10 @@ fn main() {
 	// Lexing happens inside the preprocessor, which is the stage that knows
 	// which file it is reading and what to do with the directives it finds.
 	processed := preprocess.preprocess(source, path, preprocess.Options{
-		include_dirs: opts.include_dirs
-		defines:      opts.defines
-		undefines:    opts.undefines
+		include_dirs:  opts.include_dirs
+		defines:       opts.defines
+		undefines:     opts.undefines
+		standard_dirs: if opts.nostdinc { []string{} } else { standard_include_dirs() }
 	})
 	phases << cli.Phase{
 		name:   'preprocess'
@@ -208,4 +216,47 @@ fn report(path string, diagnostics []tokenize.Diagnostic) {
 fn abort(message string) {
 	eprintln('vcc: ${message}')
 	exit(1)
+}
+
+// standard_include_dirs are the directories searched for <stdio.h> after the -I
+// ones, unless -nostdinc says not to search any. They are the host's, because
+// this compiler brings no headers of its own: what it compiles against is the C
+// library the machine already has, and the headers that describe it.
+//
+// The compiler's own headers live with the GCC that ships them — stddef.h and
+// stdarg.h, which every standard header expects to find — one directory per
+// version, and the newest one is the one meant to be read. A machine can carry
+// headers for more than one target side by side there (a cross compiler, a
+// mingw toolchain); only the directories whose names describe the target being
+// compiled for are read, so a cross compiler's stddef.h is never picked up
+// because its name happens to sort last.
+fn standard_include_dirs() []string {
+	target := backend.host() or { return []string{} }
+	mut dirs := []string{}
+	dirs << '/usr/local/include'
+	mut gcc_dirs := []string{}
+	for machine in os.ls('/usr/lib/gcc') or { []string{} } {
+		if !machine.contains(target.arch) || !machine.contains(target.os) {
+			continue
+		}
+		for version in os.ls('/usr/lib/gcc/${machine}') or { []string{} } {
+			candidate := '/usr/lib/gcc/${machine}/${version}/include'
+			if os.is_dir(candidate) {
+				gcc_dirs << candidate
+			}
+		}
+	}
+	gcc_dirs.sort()
+	if gcc_dirs.len > 0 {
+		dirs << gcc_dirs.last()
+	}
+	// Debian and its relatives keep the architecture's own headers in a
+	// directory named after the target; on a machine that has no such split
+	// this simply does not exist.
+	arch_dir := '/usr/include/${target.arch}-${target.os}-gnu'
+	if os.is_dir(arch_dir) {
+		dirs << arch_dir
+	}
+	dirs << '/usr/include'
+	return dirs
 }
