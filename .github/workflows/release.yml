@@ -1,0 +1,69 @@
+name: release
+
+# A tag publishes a compiler: the artifact is built, put through the same gate a
+# pull request goes through, run once, and only then attached to a release. The
+# version in the binary has to agree with the tag, because a compiler that
+# reports the wrong version is a compiler V will key its cached builds against
+# incorrectly (see "What a drop-in has to satisfy" in README.md).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  V_COMMIT: 74e5877545e6182d75fb12b72b9925e80b07a9bc
+  V_DIR: /opt/v
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: build V at the pinned commit
+        run: |
+          git clone --quiet https://github.com/vlang/v "$V_DIR"
+          git -C "$V_DIR" checkout --quiet "$V_COMMIT"
+          make -C "$V_DIR"
+          echo "$V_DIR" >> "$GITHUB_PATH"
+          "$V_DIR/v" version
+
+      - name: gate
+        run: v run tools/gate.vsh
+
+      - name: the binary agrees with the tag
+        run: |
+          v -o vcc .
+          tag="${GITHUB_REF_NAME#v}"
+          built="$(./vcc --version | awk '{print $2}')"
+          if [ "$tag" != "$built" ]; then
+            echo "the tag says ${tag} and the binary says ${built}; bump cli/version in cli/cli.v" >&2
+            exit 1
+          fi
+
+      - name: the binary does what it says
+        run: |
+          printf 'int main() { return 7; }\n' > seven.c
+          ./vcc seven.c -o seven
+          ./seven
+          status=$?
+          rm -f seven.c seven
+          if [ "$status" -ne 7 ]; then
+            echo "the compiled program exited ${status}, and its source says 7" >&2
+            exit 1
+          fi
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha256sum vcc > vcc.sha256
+          gh release create "$GITHUB_REF_NAME" vcc vcc.sha256 \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

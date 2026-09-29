@@ -1,0 +1,87 @@
+name: ci
+
+# The gate this repository runs locally, run again where it cannot be skipped:
+# formatting, the pure-V rule, the build, the test suite, and the links between
+# the documents. `tools/README.md` says what each step checks.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The V this tree is built and tested with, as a commit rather than a release
+  # tag on purpose: the 0.5.2 release cannot compile this tree at all. Its
+  # checker rejects a `for {}` that returns from every path
+  # (parser/parser.v, parse_parameters and parse_arguments), which the compiler
+  # after it accepts. V moves quickly, so this is bumped deliberately, with the
+  # tree re-verified against the commit it moves to.
+  V_COMMIT: 74e5877545e6182d75fb12b72b9925e80b07a9bc
+  V_DIR: /opt/v
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: build V at the pinned commit
+        run: |
+          git clone --quiet https://github.com/vlang/v "$V_DIR"
+          git -C "$V_DIR" checkout --quiet "$V_COMMIT"
+          make -C "$V_DIR"
+          echo "$V_DIR" >> "$GITHUB_PATH"
+          "$V_DIR/v" version
+
+      - name: gate
+        run: |
+          v version
+          v run tools/gate.vsh
+
+      # The numbers are recorded, not gated. A shared runner's wall time is not
+      # a budget anyone can hold a pull request to, and the workload that will
+      # decide this project is the V self-build, which no milestone reaches yet
+      # (ROADMAP M6). Until then the point is that the harness runs and the
+      # number is written down somewhere other than a terminal.
+      - name: benchmark
+        continue-on-error: true
+        run: |
+          {
+            echo '### benchmark on this runner'
+            echo '```'
+            v run tools/bench.vsh --terms 20000 --runs 3 2>&1 || echo 'the harness could not run'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  master:
+    name: newer V (allowed to fail)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # V master is not the version this tree promises to build with. Running it
+    # anyway is how the next bump is noticed before it is a surprise rather than
+    # after it is an outage.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: build V master
+        run: |
+          git clone --quiet --depth 1 https://github.com/vlang/v "$V_DIR"
+          make -C "$V_DIR"
+          echo "$V_DIR" >> "$GITHUB_PATH"
+          v version
+
+      - name: build and test
+        run: |
+          v -o vcc .
+          v test .
