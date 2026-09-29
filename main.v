@@ -3,11 +3,14 @@ module main
 import backend
 import cli
 import codegen
+import diagnostics
+import extensions
 import optimizer
 import os
 import parser
 import preprocess
 import printer
+import standard
 import time
 import tokenize
 
@@ -41,7 +44,9 @@ fn main() {
 		}
 		println('target: ${target.name}')
 		println('optimize: ${opts.optimization.summary()}')
-		println('standard: ${standard_line(opts.standard)}')
+		println('standard: ${standard_line(opts)}')
+		println('extensions: ${extensions_line(opts.vcc_extensions)}')
+		println('recorded: ${recorded_line(opts.ignored)}')
 		if opts.include_dirs.len == 0 {
 			println('include: (the -I directories, none given)')
 		}
@@ -82,7 +87,7 @@ fn main() {
 	// which file it is reading and what to do with the directives it finds.
 	processed := preprocess.preprocess(source, path, preprocess.Options{
 		include_dirs:   opts.include_dirs
-		defines:        opts.defines
+		defines:        language_defines(opts)
 		undefines:      opts.undefines
 		standard_dirs:  if opts.nostdinc { []string{} } else { standard_include_dirs() }
 		preludes:       opts.preludes
@@ -92,12 +97,41 @@ fn main() {
 		name:   'preprocess'
 		micros: time.since(started).microseconds()
 	}
-	// A warning is reported and the compile goes on; an error ends it. The
-	// difference is asked of the diagnostics themselves rather than counted, so
-	// that a stage which hands back a warning is not mistaken for a stage that
-	// failed.
-	report(path, processed.diagnostics, opts.inhibit_warnings)
-	if tokenize.errors(processed.diagnostics).len > 0 {
+	// A warning is reported and the compile goes on; an error ends it, and so
+	// does a warning the command line promoted. Which is which is asked of the
+	// diagnostic and of the policy rather than counted, so that a stage which
+	// hands back a warning is not mistaken for a stage that failed.
+	//
+	// A run that only asks what the file is made of — -M without -MD, -E, -dM —
+	// has no compile for that promotion to stop, and its answer is the whole
+	// point of the command: a build that passes a promotion flag to a dependency
+	// step, which is harmless under gcc and was harmless here before these flags
+	// existed, must still get its rule. Measured, gcc reports and writes in that
+	// run: `gcc -M -std=c99 -Werror=cpp` over a file carrying a `#warning` exits
+	// 0 with the rule and empty stderr, `-dM` exits 0 with the macros, and `-E`
+	// writes the stream, where the same command line without a read-only switch
+	// exits 1. So both stages of such a run — the preprocessor's own report here
+	// and the dialect check below — are reported under the policy a read-only
+	// run is reported under, which keeps a message a flag asked for printed and
+	// takes its verdict back. A compile keeps the policy the command line gave,
+	// so there a promotion still ends it.
+	reading_only := (opts.deps && !opts.deps_compile) || opts.preprocess || opts.dump_macros
+	policy := if reading_only { opts.warnings.without_promotion() } else { opts.warnings }
+	if report(path, processed.diagnostics, policy) > 0 {
+		exit(1)
+	}
+	// The dialect check runs over the stream the preprocessor produced, which is
+	// the one place the whole program is in a single list. It reports the
+	// constructs the selected mode does not allow and refuses nothing; a message
+	// the flags promoted is the only way it can stop a compile. It is reported
+	// under the same policy as the stage above, so the two stages of a read-only
+	// run agree and neither of them can drop the answer.
+	pedantic := standard.pedantic_messages(processed.tokens, standard.Question{
+		mode:         opts.dialect
+		extensions:   opts.vcc_extensions.enabled_names()
+		system_files: system_files(processed.files)
+	})
+	if report(path, pedantic, policy) > 0 {
 		exit(1)
 	}
 	// -M and -dM answer a question about the read and stop there: a build tool
@@ -126,8 +160,7 @@ fn main() {
 		name:   'parse'
 		micros: time.since(started).microseconds()
 	}
-	report(path, parsed.diagnostics, opts.inhibit_warnings)
-	if tokenize.errors(parsed.diagnostics).len > 0 {
+	if report(path, parsed.diagnostics, opts.warnings) > 0 {
 		exit(1)
 	}
 	started = time.now()
@@ -151,8 +184,7 @@ fn main() {
 		name:   'emit'
 		micros: time.since(started).microseconds()
 	}
-	report(path, image.diagnostics, opts.inhibit_warnings)
-	if tokenize.errors(image.diagnostics).len > 0 {
+	if report(path, image.diagnostics, opts.warnings) > 0 {
 		exit(1)
 	}
 	out_path := if opts.output != '' {
@@ -176,18 +208,80 @@ fn main() {
 	}
 }
 
-// read_source takes the path or the source itself, so a pipeline that feeds the
-// compiler on standard input works the way it does with tcc.
-// standard_line reports what -std bought, which today is a record and nothing
-// else: the subset this compiler accepts is the same one whatever is named, and
-// claiming otherwise would be a promise the parser does not keep.
-fn standard_line(standard string) string {
-	if standard == '' {
-		return '(none asked for; V passes -std=gnu11)'
+// language_defines are the -D arguments the compiler hands the preprocessor: the
+// macros the selected mode adds, and then the ones the command line wrote. That
+// order is what makes a -D win over the mode, the way it wins over a built-in in
+// gcc. -undef takes the mode's macros away with every other macro that describes
+// the target.
+fn language_defines(opts cli.Options) []string {
+	if opts.undef_builtins {
+		return opts.defines
 	}
-	return '${standard} (recorded; the accepted language does not change with it yet)'
+	// The mode's macros come first, so a -D on the command line still wins over
+	// them: a mode is a built-in, and the command line is not.
+	mut out := []string{}
+	out << preprocess.standard_defines(opts.dialect)
+	out << opts.defines
+	return out
 }
 
+// system_files is the set of files the dialect check stays out of: the headers
+// that came from the standard directories, which nobody in the build wrote and
+// nobody in the build can fix.
+fn system_files(files []preprocess.SourceFile) map[string]bool {
+	mut out := map[string]bool{}
+	for file in files {
+		if file.system {
+			out[file.path] = true
+		}
+	}
+	return out
+}
+
+// standard_line is what -vv says about the dialect: the spelling the command line
+// wrote and the mode it names, so that a build reading the output can tell what
+// the flag bought.
+fn standard_line(opts cli.Options) string {
+	match opts.dialect {
+		.none { return '(none asked for; V passes -std=gnu11, which is recorded and not refused)' }
+		.other {
+			return '${opts.standard} (a spelling this compiler does not implement; recorded, never refused)'
+		}
+		else {
+			return '${opts.standard} (mode ${opts.dialect.spelling()}, ${opts.dialect.standard_name()})'
+		}
+	}
+}
+
+// extensions_line is what -vv says about the vendor extensions: which are on, and
+// which names exist, so that one command answers what -fvcc-exts= did.
+fn extensions_line(chosen extensions.Options) string {
+	if chosen.enabled_names().len == 0 {
+		return 'none enabled (the names it has are ${extension_names()}; none is honored yet)'
+	}
+	return '${chosen.enabled_names().join(', ')} enabled (of ${extension_names()}; nothing is honored yet)'
+}
+
+fn extension_names() string {
+	mut names := []string{}
+	for row in extensions.registry {
+		names << row.name
+	}
+	return names.join(', ')
+}
+
+// recorded_line is what -vv says about the flags the compiler accepted and did
+// not act on. They are all there, so a build can see that a flag it passed was
+// recorded rather than honored.
+fn recorded_line(ignored []string) string {
+	if ignored.len == 0 {
+		return '(nothing: every flag was acted on)'
+	}
+	return ignored.join(' ')
+}
+
+// read_source takes the path or the source itself, so a pipeline that feeds the
+// compiler on standard input works the way it does with tcc.
 fn read_source(path string) !string {
 	if path == '-' {
 		return os.get_raw_stdin().bytestr()
@@ -326,23 +420,36 @@ fn print_macros(macros []preprocess.Macro) {
 	}
 }
 
-fn report(path string, diagnostics []tokenize.Diagnostic, inhibit_warnings bool) {
-	for diagnostic in diagnostics {
-		if diagnostic.warning && inhibit_warnings {
-			// `-w` is the command line asking not to be told. The warning is
-			// still a warning and the compile still succeeds; it is only not
-			// printed.
+// severity_of is where a diagnostic meets the command line. An error is an error
+// whatever the flags say, because nothing silences something that is wrong, and
+// a warning carries its class, which is what the policy answers for.
+fn severity_of(diagnostic tokenize.Diagnostic, policy diagnostics.Policy) diagnostics.Severity {
+	if !diagnostic.warning {
+		return .error
+	}
+	return policy.severity(diagnostic.class)
+}
+
+// report prints the diagnostics a stage handed back and answers how many of them
+// are errors: a diagnostic that is wrong on its own, and a warning the command
+// line promoted to one. What is not printed is a class the flags silenced, which
+// is a warning the compiler still counted and a compile that still succeeded.
+fn report(path string, raised []tokenize.Diagnostic, policy diagnostics.Policy) int {
+	mut errors := 0
+	for diagnostic in raised {
+		severity := severity_of(diagnostic, policy)
+		if severity == .silent {
 			continue
 		}
 		// A diagnostic raised inside an included file names that file; the one
 		// the compiler was handed is the fallback for everything else.
 		where := if diagnostic.file != '' { diagnostic.file } else { path }
-		mut label := ''
-		if diagnostic.warning {
-			label = 'warning: '
+		eprintln(diagnostics.render(where, diagnostic.line, diagnostic.col, severity, diagnostic.msg))
+		if severity == .error {
+			errors++
 		}
-		eprintln('${where}:${diagnostic.line}:${diagnostic.col}: ${label}${diagnostic.msg}')
 	}
+	return errors
 }
 
 fn abort(message string) {
