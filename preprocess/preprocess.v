@@ -54,8 +54,10 @@ pub fn preprocess(source string, path string, opts Options) Result {
 	mut p := Processor{
 		macros:     map[string]Macro{}
 		once_files: map[string]bool{}
+		main_path:  path
 		opts:       opts
 	}
+	p.define_builtins()
 	p.apply_command_line_defines()
 	p.push(path, source)
 	p.run()
@@ -104,6 +106,9 @@ mut:
 	// what `#pragma once` says. An include guard has no entry here: it is
 	// macro state, and the macro table already keeps that.
 	once_files map[string]bool
+	// main_path is the file the compiler was handed, which is what
+	// __BASE_FILE__ names however deep an include is being read.
+	main_path string
 	// expanding is the stack of macro names being expanded right now. A name
 	// already on it is left alone, which is what keeps `#define A B` beside
 	// `#define B A` from expanding forever.
@@ -163,11 +168,7 @@ fn (mut p Processor) include(tok tokenize.Token, args string) {
 		// A computed include: `#include NAME`, where NAME is a macro that
 		// stands for the name of the file. The expansion is the same one the
 		// text gets, so what is read here is what would have been written.
-		mut expanded := []tokenize.Token{}
-		for t in tokens {
-			expanded << p.expand(t)
-		}
-		tokens = expanded.clone()
+		tokens = p.expand_all(tokens)
 	}
 	if tokens.len == 0 {
 		p.problem(tok, '#include names no file')
@@ -279,36 +280,34 @@ fn (mut p Processor) run() {
 			p.pop(i)
 			continue
 		}
-		tok := p.frames[i].tokens[p.frames[i].pos]
-		p.frames[i].pos++
-		if tok.kind == .eof {
-			p.pop(i)
-			continue
+		// One run of text: everything up to the next directive or the end of
+		// the file. It is expanded as a run rather than a token at a time,
+		// because that is what lets a use reach past itself for its arguments
+		// and what lets the text after a replacement finish a use that the
+		// replacement started.
+		mut segment := []tokenize.Token{}
+		for p.frames[i].pos < p.frames[i].tokens.len {
+			t := p.frames[i].tokens[p.frames[i].pos]
+			if t.kind == .directive || t.kind == .eof {
+				break
+			}
+			segment << t
+			p.frames[i].pos++
 		}
-		if tok.kind == .directive {
-			p.directive(tok)
-			continue
-		}
-		if !p.reading() {
-			continue
-		}
-		// A function-like macro takes the tokens after its name as arguments,
-		// and those tokens are in the file being read: this is the one place
-		// where a macro use reaches past itself.
-		if tok.kind == .identifier && tok.text in p.macros {
-			macro := p.macros[tok.text]
-			if macro.takes_arguments() {
-				use_args := p.collect_arguments(p.frames[i].tokens, p.frames[i].pos, tok)
-				if use_args.called {
-					for expanded in p.expand_call(tok, macro, use_args) {
-						p.emit(expanded)
-					}
-					p.frames[i].pos = use_args.next
-					continue
-				}
+		if segment.len > 0 && p.reading() {
+			for expanded in p.expand_all(segment) {
+				p.emit(expanded)
 			}
 		}
-		p.text(tok)
+		if p.frames[i].pos < p.frames[i].tokens.len {
+			tok := p.frames[i].tokens[p.frames[i].pos]
+			p.frames[i].pos++
+			if tok.kind == .eof {
+				p.pop(i)
+				continue
+			}
+			p.directive(tok)
+		}
 	}
 }
 
@@ -605,56 +604,9 @@ fn (mut p Processor) undef(tok tokenize.Token, args string) {
 	}
 }
 
-// text is one token of the file being read, or of a macro body, which is the
-// same thing once a name has been replaced. What a token stands for is decided
-// by expand(), and this writes the answer out.
-fn (mut p Processor) text(tok tokenize.Token) {
-	for expanded in p.expand(tok) {
-		p.emit(expanded)
-	}
-}
-
-// expand returns the tokens a token stands for: itself, unless it names an
-// object-like macro, in which case it is the macro's replacement tokens with
-// their own names expanded in turn.
-//
-// The result is a value rather than something written out, because the
-// controlling expression of an #if needs the same expansion without the text
-// reaching the output.
-fn (mut p Processor) expand(tok tokenize.Token) []tokenize.Token {
-	if tok.kind != .identifier || tok.text !in p.macros {
-		return [tok]
-	}
-	macro := p.macros[tok.text]
-	if macro.takes_arguments() {
-		// A function-like macro's name is a use of it only when a ( follows,
-		// and the reader that sees the ( is the one holding the rest of the
-		// text. A token that got this far is a name in the middle of the text,
-		// and a name is what it stays.
-		return [tok]
-	}
-	if tok.text in p.expanding {
-		// The name is being expanded right now, so this occurrence is the text
-		// it stands for and not another expansion.
-		return [tok]
-	}
-	p.expanding << tok.text
-	mut out := []tokenize.Token{}
-	for body_token in macro.body {
-		out << p.expand(tokenize.Token{
-			kind: body_token.kind
-			text: body_token.text
-			// Tokens out of a macro body are reported where the macro was used,
-			// which is what the standard asks a diagnostic to say.
-			line: tok.line
-			col:  tok.col
-			file: tok.file
-		})
-	}
-	p.expanding.delete(p.expanding.len - 1)
-	return out
-}
-
+// emit is where every token that reaches the parser goes: the file it came
+// from is the file being read when it was written out, which is the frame on
+// top of the stack.
 fn (mut p Processor) emit(tok tokenize.Token) {
 	where := if p.frames.len > 0 { p.frames.last().path } else { tok.file }
 	p.out << tokenize.Token{

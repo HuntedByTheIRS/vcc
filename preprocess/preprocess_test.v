@@ -433,3 +433,38 @@ fn test_a_second_else_has_nothing_left_to_say() {
 	assert messages.len == 1
 	assert messages[0].contains('#else after #else')
 }
+
+fn test_the_macros_that_describe_the_target_are_defined_before_anything_is_read() {
+	// These are the macros a header asks what machine it is on. Without them
+	// gcc's own headers fall back to their own guesses, which work but are
+	// spelled differently, and a header that branches on a macro nobody
+	// defined takes a path nobody tested.
+	assert processed('#if __STDC__\nint x;\n#endif\n') == ['int', 'x', ';']
+	assert processed('#ifdef __x86_64__\nint x;\n#endif\n') == ['int', 'x', ';']
+	assert processed('#ifdef __linux__\nint x;\n#endif\n') == ['int', 'x', ';']
+	assert processed('__SIZE_TYPE__') == ['unsigned', 'long']
+	assert processed('__STDC_VERSION__') == ['199901L']
+}
+
+fn test_a_command_line_define_wins_over_a_builtin_one() {
+	result := preprocess('__SIZE_TYPE__', 'test.c', Options{
+		defines: ['__SIZE_TYPE__=int']
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int']
+}
+
+fn test_an_undefine_takes_a_builtin_away() {
+	assert processed('#undef __STDC__\n#ifdef __STDC__\nint x;\n#endif\n') == []
+}
+
+fn test_the_line_and_the_file_are_where_they_were_written() {
+	assert processed('\n\n__LINE__') == ['3']
+	assert processed('__FILE__') == ['"test.c"']
+	assert processed('#define HERE __LINE__\nHERE\nHERE\n') == ['2', '3']
+}
+
+fn test_a_header_can_ask_about_a_construct_and_be_told_no() {
+	assert processed('#if __has_attribute(__nothrow__)\nint x;\n#endif\n') == []
+	assert processed('#ifdef __has_attribute\nint x;\n#endif\n') == ['int', 'x', ';']
+}

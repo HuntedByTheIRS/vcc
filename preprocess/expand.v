@@ -97,7 +97,22 @@ fn (mut p Processor) expand_all(tokens []tokenize.Token) []tokenize.Token {
 	mut i := 0
 	for i < tokens.len {
 		tok := tokens[i]
-		if tok.kind != .identifier || tok.text !in p.macros {
+		if tok.kind != .identifier {
+			out << tok
+			i++
+			continue
+		}
+		if tok.text !in p.macros {
+			// __LINE__ and __FILE__ are the macros whose value is where they
+			// were written, and a program that defined one of them itself has
+			// the macro table answering for it instead.
+			if builtin := p.dynamic_builtin(tok) {
+				for t in builtin {
+					out << t
+				}
+				i++
+				continue
+			}
 			out << tok
 			i++
 			continue
