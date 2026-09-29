@@ -56,6 +56,12 @@ pub fn syscall_args_regs(machine string) []string {
 // alone means by exit.
 pub const exit_syscall = 'exit'
 
+// interpreter is the dynamic loader the kernel hands a program to when the
+// program names one. A shared library is not mapped by the kernel and ld.so is
+// not something a program can call before it exists: the path is the one link
+// between an image and the library it runs against.
+pub const interpreter = '/lib64/ld-linux-x86-64.so.2'
+
 // page_size is the alignment a loadable segment needs. load_base is where the
 // first one is mapped, and it is a system's number because the kernel is what
 // decides how low a program may be loaded.
