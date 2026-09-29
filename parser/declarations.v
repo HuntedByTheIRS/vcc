@@ -107,11 +107,18 @@ fn (s DeclSpec) type_spelling(stars int) string {
 // declarator has no name, which is what a bare type and a parameter may have.
 struct Declarator {
 mut:
-	name        string
-	name_at     tokenize.Token
-	stars       int
-	star_at     tokenize.Token
-	array_at    tokenize.Token
+	name     string
+	name_at  tokenize.Token
+	stars    int
+	star_at  tokenize.Token
+	array_at tokenize.Token
+	// array_count is how many elements the first `[...]` suffix asked for, and
+	// zero when the suffix did not write a size this reader could read — an
+	// empty pair of brackets, or something that was not a number. array_dims
+	// counts the suffixes: a declarator may write more than one, and only the
+	// first is a shape this tree has.
+	array_count int
+	array_dims  int
 	is_function bool
 	// params are the parameters this declarator names, in the order they were
 	// written. Every function declarator is read for them and the ones that
@@ -510,7 +517,11 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			if d.array_at.line == 0 {
 				d.array_at = p.peek()
 			}
-			p.parse_array_suffix()!
+			d.array_dims++
+			count := p.parse_array_suffix()!
+			if d.array_dims == 1 {
+				d.array_count = int(count)
+			}
 			continue
 		}
 		if p.at_punct('(') {
@@ -624,9 +635,40 @@ fn (mut params Params) note_problem(problem string, at tokenize.Token) {
 // cannot read as an expression yet. So the region is scanned to its bracket and
 // nothing in it is evaluated; what matters is that the suffix ends where it
 // says it ends.
-fn (mut p Parser) parse_array_suffix() ! {
+fn (mut p Parser) parse_array_suffix() !i64 {
 	open := p.next() // [
-	return p.skip_balanced(open)
+	if p.peek().kind == .number {
+		// The size of an array as it is written in a body is a number: the
+		// preprocessor has already replaced the names that stand for one, so
+		// what arrives here is the number itself.
+		size := p.next()
+		if p.at_punct(']') {
+			p.next()
+			value := parse_integer_literal(size.text) or {
+				p.error_at(size, err.msg())
+				return error('bad array size')
+			}
+			if value > 0 {
+				return value
+			}
+			// A size that is written and cannot be held — `int a[0]` — reads as
+			// no size at all, and the reader that asked for one says so.
+			return 0
+		}
+		// The bound goes on after the number, so it is an expression, and an
+		// expression is not a size this reader reads: the region is scanned to
+		// its bracket and the size is left unread. A body reports that as an
+		// array without one, and a declaration in a header is skipped, which is
+		// what makes `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]`
+		// read as the member of a struct that it is.
+		p.skip_balanced(open)!
+		return 0
+	}
+	// An empty pair of brackets, or a bound that is not a number at all: the
+	// region is read past, and the reader that asked for the size decides
+	// whether it needed one.
+	p.skip_balanced(open)!
+	return 0
 }
 
 // skip_to_separator consumes the rest of a declaration that is scanned rather

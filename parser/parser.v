@@ -234,6 +234,24 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 				col:  t.col
 			})
 		}
+		if p.at_punct('[') {
+			// One element of an array, read where a value is expected. The
+			// subscript is an expression of its own, so `a[i + 1]` and
+			// `a[b[0]]` are both the shape this reads.
+			p.next()
+			index := p.parse_expression()!
+			if !p.at_punct(']') {
+				p.error_at(p.peek(), 'unsupported: expected ] after the index of an element, found ${describe(p.peek())}')
+				return error('expected ]')
+			}
+			p.next()
+			return ast.Expr(ast.Index{
+				name:  t.text
+				index: index
+				line:  t.line
+				col:   t.col
+			})
+		}
 		return ast.Expr(ast.Ident{
 			name: t.text
 			line: t.line

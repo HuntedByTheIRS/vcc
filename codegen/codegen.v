@@ -399,6 +399,13 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 // storage and nothing else, which is what C says it is: the slot is there for
 // whatever the function writes into it next.
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
+	if stmt.decl_count > 0 {
+		// An array is storage with a size, and a frame slot is one value wide:
+		// reserving one for an array of sixteen would be a wrong program built
+		// out of a construct nobody agreed to hold.
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is an array of ${stmt.decl_count}, and an array is not a shape this back end reserves yet')
+		return error('array declaration')
+	}
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.line, stmt.col)!
 	init := stmt.init or { return }
 	e.emit_expr(init)!
@@ -409,6 +416,13 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 // The name has to be in scope: an assignment to a name that was never declared
 // has nowhere to go, and a guessed slot would be someone else's variable.
 fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
+	if stmt.index != none {
+		// A subscript writes through an address, which is a computation this
+		// back end does not do yet: writing to the array instead would be a
+		// wrong program rather than a missing one.
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an element of ${stmt.target} is written, and an element is not a place this back end writes to yet')
+		return error('array element')
+	}
 	target := e.lookup(stmt.target) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')

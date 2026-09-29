@@ -260,13 +260,13 @@ fn test_a_local_declaration_with_an_unsupported_type_is_reported() {
 	assert result.unit.decls[0].body[0].kind == .return_stmt
 }
 
-// An array is a shape the tree has no node for, and the bound is a constant
-// expression this parser does not read. The declaration is reported and dropped
-// rather than half-kept.
-fn test_a_local_declaration_of_an_array_is_reported() {
-	result := parsed('int main() { char buf[10]; return 0; }')
+// A body's array declaration keeps the size it was given, so what is left to
+// report is a size this reader cannot read as one: a name, a computation, or an
+// empty pair of brackets. The declaration is dropped rather than half-kept.
+fn test_a_local_array_whose_size_is_not_a_number_is_reported() {
+	result := parsed('int main() { int a[n]; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('array declarations')
+	assert result.diagnostics[0].msg.contains('needs a size')
 	assert result.unit.decls[0].body.len == 1
 }
 
@@ -643,4 +643,71 @@ fn test_a_for_keeps_its_step_out_of_its_body() {
 	assert loop.body[0].body[0].kind == .assign
 	assert loop.step.len == 1
 	assert loop.step[0].kind == .assign
+}
+
+// An array in a body is storage with a size, and the size is a number by the
+// time this reader sees it: the preprocessor has already replaced the names that
+// stand for one.
+fn test_an_array_declaration_keeps_its_size() {
+	result := parsed('int main() { char buf[16]; int a[4]; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 3
+	assert body[0].kind == .var_decl
+	assert body[0].decl_type == 'char'
+	assert body[0].decl_name == 'buf'
+	assert body[0].decl_count == 16
+	assert body[1].decl_type == 'int'
+	assert body[1].decl_count == 4
+	assert body[2].decl_count == 0
+}
+
+fn test_an_element_of_an_array_is_read_and_written() {
+	result := parsed('int main() { int a[4]; a[0] = 5; int x = a[2] + a[0]; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .assign
+	assert body[1].target == 'a'
+	index := body[1].index or {
+		assert false
+		return
+	}
+	assert index is ast.IntLit
+	assert (index as ast.IntLit).value == 0
+	init := body[2].init or {
+		assert false
+		return
+	}
+	assert init is ast.Binary
+	binary := init as ast.Binary
+	assert binary.left is ast.Index
+	element := binary.left as ast.Index
+	assert element.name == 'a'
+	assert (element.index as ast.IntLit).value == 2
+}
+
+fn test_a_compound_assignment_to_an_element_reads_the_element() {
+	result := parsed('int main() { int a[4]; a[2] += 3; return a[2]; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .assign
+	assert body[1].index != none
+	value := body[1].expr or {
+		assert false
+		return
+	}
+	assert value is ast.Binary
+	assert (value as ast.Binary).left is ast.Index
+}
+
+fn test_an_array_declaration_without_a_size_is_reported() {
+	result := parsed('int main() { char buf[]; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('needs a size')
+}
+
+fn test_two_sizes_of_an_array_are_reported() {
+	result := parsed('int main() { int a[2][3]; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('only one size')
 }

@@ -121,7 +121,36 @@ fn (p Parser) starts_assignment() bool {
 		return false
 	}
 	next := p.peek_at(1)
-	return next.kind == .punct && next.text in assignment_operators
+	if next.kind == .punct && next.text in assignment_operators {
+		return true
+	}
+	// `a[i] = v` starts with a name and a subscript, and the subscript can hold
+	// anything, so the tokens are scanned to the bracket that closes it: the
+	// operator after that is what says whether this is an assignment. Nothing is
+	// consumed here — it is a lookahead, and the reading happens once.
+	if next.kind == .punct && next.text == '[' {
+		mut depth := 0
+		mut ahead := 1
+		for {
+			t := p.peek_at(ahead)
+			if t.kind == .eof {
+				return false
+			}
+			if t.kind == .punct {
+				if t.text == '[' {
+					depth++
+				} else if t.text == ']' {
+					depth--
+					if depth == 0 {
+						after := p.peek_at(ahead + 1)
+						return after.kind == .punct && after.text in assignment_operators
+					}
+				}
+			}
+			ahead++
+		}
+	}
+	return false
 }
 
 // parse_assignment reads `name = expr`. C makes an assignment an expression;
@@ -131,18 +160,29 @@ fn (p Parser) starts_assignment() bool {
 // expression reader reports it where it stopped.
 fn (mut p Parser) parse_assignment() !ast.Stmt {
 	t := p.next() // the name
+	mut index := ?ast.Expr(none)
+	if p.at_punct('[') {
+		p.next()
+		index = p.parse_expression() or { return error('bad subscript') }
+		if !p.at_punct(']') {
+			p.error_at(p.peek(), 'unsupported: expected ] after the index of an element, found ${describe(p.peek())}')
+			return error('expected ]')
+		}
+		p.next()
+	}
 	op := p.next() // = or a compound spelling
 	if op.text == '=' {
 		expr := p.parse_expression()!
 		return ast.Stmt{
 			kind:   .assign
 			target: t.text
+			index:  index
 			expr:   expr
 			line:   t.line
 			col:    t.col
 		}
 	}
-	return p.parse_compound_assignment(t, op)
+	return p.parse_compound_assignment(t, op, index)
 }
 
 // parse_compound_assignment reads `name += expr`, and `name -= expr` because it
@@ -152,20 +192,32 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 // instead: a compound operator stands for one the expression grammar does not
 // read as a binary operator either, so expanding it would be inventing a form
 // nobody has agreed on.
-fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.Token) !ast.Stmt {
+fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.Token, index ?ast.Expr) !ast.Stmt {
 	arithmetic := op.text[..op.text.len - 1]
 	if arithmetic !in ['+', '-'] {
 		p.error_at(op, 'unsupported: the compound assignment ${op.text} is not implemented')
 		return error('compound assignment')
 	}
 	right := p.parse_expression()!
+	// What the assignment reads is the target itself, and for an element that is
+	// the element rather than the array: the subscript is written into the tree
+	// again, so that `a[i] += 1` means `a[i] = a[i] + 1`.
+	mut left := ast.Expr(ast.Ident{
+		name: target.text
+		line: target.line
+		col:  target.col
+	})
+	if subscript := index {
+		left = ast.Expr(ast.Index{
+			name:  target.text
+			index: subscript
+			line:  target.line
+			col:   target.col
+		})
+	}
 	value := ast.Expr(ast.Binary{
 		op:    arithmetic
-		left:  ast.Expr(ast.Ident{
-			name: target.text
-			line: target.line
-			col:  target.col
-		})
+		left:  left
 		right: right
 		line:  op.line
 		col:   op.col
@@ -173,6 +225,7 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 	return ast.Stmt{
 		kind:   .assign
 		target: target.text
+		index:  index
 		expr:   value
 		line:   target.line
 		col:    target.col
@@ -402,8 +455,13 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			p.skip_declaration()
 			return stmts
 		}
-		if d.array_at.line > 0 {
-			p.error_at(d.array_at, 'unsupported: array declarations are not implemented')
+		if d.array_dims > 1 {
+			p.error_at(d.array_at, 'unsupported: only one size of an array is implemented, and this declarator writes ${d.array_dims}')
+			p.skip_declaration()
+			return stmts
+		}
+		if d.array_dims == 1 && d.array_count <= 0 {
+			p.error_at(d.array_at, 'unsupported: an array declaration in a body needs a size that is a number and more than zero')
 			p.skip_declaration()
 			return stmts
 		}
@@ -421,12 +479,13 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			}
 		}
 		stmts << ast.Stmt{
-			kind:      .var_decl
-			init:      init
-			decl_name: d.name
-			decl_type: spec.type_spelling(d.stars)
-			line:      d.name_at.line
-			col:       d.name_at.col
+			kind:       .var_decl
+			init:       init
+			decl_name:  d.name
+			decl_type:  spec.type_spelling(d.stars)
+			decl_count: d.array_count
+			line:       d.name_at.line
+			col:        d.name_at.col
 		}
 		if p.at_punct(',') {
 			p.next()
