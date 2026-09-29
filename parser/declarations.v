@@ -376,14 +376,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				// diagnostic is what stops it being compiled.
 				if d.name.len > 0 {
 					decls << ast.FnDecl{
-						name:     d.name
-						ret:      p.spelling_of(spec, d.stars)
-						ret_type: p.pointer_type(spec.clause, d)
-						resolved: p.declared_type(spec.clause, d)
-						params:   d.params
-						body:     statements
-						line:     d.name_at.line
-						col:      d.name_at.col
+						name:      d.name
+						ret:       p.spelling_of(spec, d.stars)
+						ret_type:  p.pointer_type(spec.clause, d)
+						resolved:  p.declared_type(spec.clause, d)
+						ret_class: p.eightbyte_of(spec.clause)
+						params:    d.params
+						body:      statements
+						line:      d.name_at.line
+						col:       d.name_at.col
 					}
 				}
 				return decls

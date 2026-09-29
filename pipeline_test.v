@@ -560,6 +560,53 @@ fn test_a_small_object_and_a_top_level_object_are_handed_over_by_value() {
 	os.rm(binary) or {}
 }
 
+// A function hands an object back as its bytes in the register the class names, so
+// the caller reads that register: assigning it into another object of the type is
+// the same eight bytes, and a struct of one double comes back where a double comes
+// back. The declaration of a local with such an initializer is the same copy into
+// the storage the declaration just claimed.
+fn test_an_object_is_handed_back_from_a_function() {
+	source := scratch('byvaluereturn.c')
+	binary := scratch('byvaluereturn')
+	program := 'struct S { int a; int b; };\nstruct S f(void) { struct S s; s.a = 1; s.b = 2; return s; }\nint main(void) { struct S s = f(); struct S t; t = f(); return s.a * 100 + s.b * 10 + t.a; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 121 % 256
+	source_double := scratch('byvaluereturndouble.c')
+	binary_double := scratch('byvaluereturndouble')
+	program_double := 'struct D { double d; };\nstruct D f(void) { struct D x; x.d = 2.5; return x; }\nint main(void) { struct D y; y = f(); return y.d * 2.0; }\n'
+	double_status := compile_and_run([source_double, '-o', binary_double], program_double)
+	assert double_status == 5
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	os.rm(source_double) or {}
+	os.rm(binary_double) or {}
+}
+
+// One object is written into another by copying its bytes, which is what 6.5.16.1
+// gives an assignment between two objects of the same type: no conversion is
+// involved and neither object is read as a value.
+fn test_one_object_is_copied_into_another() {
+	source := scratch('byvaluecopy.c')
+	binary := scratch('byvaluecopy')
+	program := 'struct S { int a; int b; char c; };\nint main(void) { struct S s; struct S t; s.a = 1; s.b = 2; s.c = 3; t = s; return t.a * 100 + t.b * 10 + t.c; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 123
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The shapes past one eightbyte are named where they are reached rather than
+// compiled into something else: an object of twelve bytes is two registers or a
+// copy in memory, and this compiler hands back one eightbyte.
+fn test_an_object_of_more_than_one_eightbyte_is_refused_by_name() {
+	source := scratch('byvaluewide.c')
+	binary := scratch('byvaluewide')
+	program := 'struct S { int a; int b; int c; };\nstruct S f(void) { struct S s; s.a = 1; return s; }\nint main(void) { struct S s = f(); return s.a; }\n'
+	result := compile([source, '-o', binary], program)
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('one eightbyte')
+}
+
 // An object takes one register of its class like a value does, so a call whose
 // argument registers run out hands the object over on the stack: six ints and an
 // object is the object past the last general register, and seven objects are six

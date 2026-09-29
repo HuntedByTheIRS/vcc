@@ -103,9 +103,13 @@ mut:
 // the count of elements it was defined with. floating says the object holds
 // doubles, which is a different instruction for every read and write of it.
 struct GlobalSlot {
-	offset   int
-	width    int
-	count    int
+	offset int
+	width  int
+	count  int
+	// object says the storage is an object of an aggregate type rather than a
+	// value: one object is as many bytes as the layout said and an array of them
+	// is that many per element, and nothing reads one as a value.
+	object   bool
 	floating bool
 }
 
@@ -178,6 +182,9 @@ mut:
 	// returning is the return type of the function being emitted, as it was
 	// written, which is what a return statement's value is converted to.
 	returning string
+	// return_class is how the function being emitted hands its value back, and
+	// zero for a function that returns a value of its own width or nothing.
+	return_class ast.Eightbyte
 	// returns is the return type of every function the file defines, which is
 	// what a call whose value is read has to be checked against: a void
 	// function's result is nothing, and a value read from a call to one would
@@ -516,11 +523,22 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// A definition returns a value the caller reads or nothing at all. There is
 	// no third answer the machine has a place for: the result register holds
 	// what a call leaves there, and a void function leaves nothing to read.
-	if decl.ret != 'int' && decl.ret != 'void' && decl.ret != 'double' {
+	if decl.ret_class.bytes > 0 {
+		// A function may hand an object of an aggregate type back, and the value
+		// comes back in the register the class names rather than converted. An
+		// object larger than one eightbyte is two registers or a copy in memory,
+		// which is the half of this that this compiler does not hand over.
+		if decl.ret_class.bytes > e.target.word_size
+			|| (decl.ret_class.floating && decl.ret_class.bytes != e.target.word_size) {
+			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes, and this compiler hands back an aggregate of one eightbyte')
+			return error('aggregate return too large')
+		}
+	} else if decl.ret != 'int' && decl.ret != 'void' && decl.ret != 'double' {
 		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, double and void are implemented')
 		return error('unsupported return type')
 	}
 	e.returning = decl.ret
+	e.return_class = decl.ret_class
 	// The prologue is what a call to this function jumps to, so the label goes
 	// in front of it.
 	e.program.labels[decl.name] = e.program.text.len
@@ -713,6 +731,22 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: return with a value in a function that returns void')
 		return error('return with a value')
 	}
+	if e.return_class.bytes > 0 {
+		// The value is an object, and the machine hands it back as its bytes in
+		// the register the class names: the address of the object is taken and
+		// the eightbyte is read from it, which is the same eight bytes a caller
+		// reads out of that register.
+		e.address_of_object(expr, 0)!
+		base := e.accumulator(stmt.line, stmt.col)!
+		if e.return_class.floating {
+			double_register := e.float_accumulator(stmt.line, stmt.col)!
+			e.append(e.target.load_double_indirect(base, double_register)!)
+		} else {
+			e.append(e.target.load_indirect(base, base, e.return_class.bytes)!)
+		}
+		e.append(e.target.frame_epilogue())
+		return
+	}
 	e.emit_expr(expr)!
 	e.convert_to_return(expr, stmt.line, stmt.col)!
 	e.append(e.target.frame_epilogue())
@@ -741,12 +775,18 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.line, stmt.col)!
 	init := stmt.init or { return }
 	if slot.bytes > 0 {
-		// An object of an aggregate type is a block of the frame, and the value
-		// of an initializer for one would have to be copied into it. A member
-		// written one at a time is the shape this back end has, and an
-		// initializer with braces is refused where it is read.
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is an object of an aggregate type declared with an initializer, and initializing one is not implemented')
-		return error('aggregate initializer')
+		// An object of an aggregate type declared with an initializer takes the
+		// value of another object of its type, or the value a call hands back:
+		// the same copy the assignment makes, into the storage the declaration
+		// just claimed.
+		declared := ast.Stmt{
+			kind:   .assign
+			target: stmt.decl_name
+			expr:   init
+			line:   stmt.line
+			col:    stmt.col
+		}
+		return e.assign_object_local(declared, slot)
 	}
 	if stmt.decl_count > 0 {
 		// An array is storage, and the elements of it are whatever the frame
@@ -777,13 +817,110 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 		// A top-level object is written through its address in the image, the
 		// same way a local is written through its place in the frame.
 		if object := e.global_of(stmt.target) {
+			if object.object && object.count == 0 {
+				return e.assign_object_global(stmt, object)
+			}
 			return e.assign_global(stmt, object, expr)
 		}
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
 	}
+	if target.bytes > 0 {
+		return e.assign_object_local(stmt, target)
+	}
 	e.emit_expr(expr)!
 	e.store_value(target, expr, stmt.line, stmt.col)!
+}
+
+// assign_object_local writes an object into a local object: the destination's
+// address is the frame's address plus the slot's offset, parked in a value slot
+// while the value is read.
+fn (mut e Emitter) assign_object_local(stmt ast.Stmt, target Slot) !void {
+	expr_value := stmt.expr or { return error('assignment without a value') }
+	register := e.accumulator(stmt.line, stmt.col)!
+	frame := e.frame_pointer(stmt.line, stmt.col)!
+	e.append(e.target.address_of_slot(frame, target.offset, register))
+	address := e.value_slot(0)
+	e.store_accumulator(address, stmt.line, stmt.col)!
+	return e.assign_object(address, target.width, expr_value, stmt.line, stmt.col)
+}
+
+// assign_object_global writes an object into a top-level object: the destination's
+// address is in the image, so it is a reference the layout fills in rather than an
+// offset from the frame.
+fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object GlobalSlot) !void {
+	expr_value := stmt.expr or { return error('assignment without a value') }
+	register := e.accumulator(stmt.line, stmt.col)!
+	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, register.name)
+	address := e.value_slot(0)
+	e.store_accumulator(address, stmt.line, stmt.col)!
+	return e.assign_object(address, object.width, expr_value, stmt.line, stmt.col)
+}
+
+// assign_object writes one object of an aggregate type into the storage at an
+// address the caller has already parked in a slot.
+//
+// The value is one of two things. A call to a function that hands an object back
+// leaves its bytes in the register the class names, so the call is emitted here and
+// the register is stored. Anything else is an object of the same type, which is a
+// copy of its bytes: the source's address is taken and the bytes are read from it.
+// The destination's address is loaded into a scratch register last, because that is
+// the register the store goes through and reading the value must not disturb it.
+fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line int, col int) !void {
+	if expr is ast.Call {
+		if class := e.return_classes[expr.name] {
+			// The value arrives in the register the class names, which is one
+			// eightbyte: an object larger than that is not handed back at all.
+			if width > e.target.word_size {
+				e.diagnostics << problem(line, col, 'unsupported: a call hands back an object of ${class.bytes} bytes and ${width} bytes are written into this object, and this compiler hands back an aggregate of one eightbyte')
+				return error('aggregate too large')
+			}
+			e.emit_expr_at(expr, 1)!
+			base := e.scratch(line, col)!
+			e.load_argument(address, base, e.target.word_size, line, col)!
+			if class.floating {
+				value := e.float_accumulator(line, col)!
+				e.append(e.target.store_double_indirect(base, value)!)
+				return
+			}
+			value := e.accumulator(line, col)!
+			e.append(e.target.store_indirect(base, value, width)!)
+			return
+		}
+	}
+	// An object of the same type: a copy of its bytes, which is what the language
+	// asks for and what the machine does in chunks it can move in one instruction.
+	// Neither object is read as a value, so an object of any size is copied.
+	e.address_of_object(expr, 1)!
+	source := e.value_slot(1)
+	e.store_accumulator(source, line, col)!
+	mut done := 0
+	for done < width {
+		remaining := width - done
+		chunk := if remaining >= 8 {
+			8
+		} else if remaining >= 4 {
+			4
+		} else if remaining >= 2 {
+			2
+		} else {
+			1
+		}
+		source_register := e.scratch(line, col)!
+		e.load_argument(source, source_register, e.target.word_size, line, col)!
+		if done > 0 {
+			e.append(e.target.add_immediate(source_register, done))
+		}
+		value := e.remainder(line, col)!
+		e.append(e.target.load_indirect(source_register, value, chunk)!)
+		destination := e.accumulator(line, col)!
+		e.load_argument(address, destination, e.target.word_size, line, col)!
+		if done > 0 {
+			e.append(e.target.add_immediate(destination, done))
+		}
+		e.append(e.target.store_indirect(destination, value, chunk)!)
+		done += chunk
+	}
 }
 
 // assign_member writes a value into one member of an object. The address of the
@@ -1380,6 +1517,16 @@ fn (mut e Emitter) scratch(line int, col int) !backend.Register {
 	}
 }
 
+// remainder is the third register an operation needs when the accumulator and the
+// scratch one are each holding something else: a copy of an object moves its bytes
+// through a register of its own while the two addresses are loaded again.
+fn (mut e Emitter) remainder(line int, col int) !backend.Register {
+	return e.target.remainder() or {
+		e.diagnostics << problem(line, col, "${e.target.name}: the machine's table has no third register for a copy that holds two addresses")
+		return error('no remainder register')
+	}
+}
+
 // store_register writes a register into a slot at the slot's width.
 fn (mut e Emitter) store_register(slot Slot, register backend.Register, line int, col int) !void {
 	base := e.frame_pointer(line, col)!
@@ -1538,7 +1685,10 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 			e.writes_a_double(expr.spelling)
 		}
 		ast.Call {
-			e.returns[expr.name] == 'double'
+			// A call that hands an object back hands its bytes over in the
+			// register its class names, so the floating class is the same answer
+			// as a function that returns a double.
+			e.returns[expr.name] == 'double' || e.return_classes[expr.name].floating
 		}
 		else {
 			false
@@ -2701,6 +2851,7 @@ fn (e Emitter) global_shape(name string) ?GlobalSlot {
 					offset: 0
 					width:  global.bytes
 					count:  global.count
+					object: true
 				}
 			}
 			element := e.type_width(global.typ) or { return none }
@@ -2781,6 +2932,7 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 			offset: offset
 			width:  object.bytes
 			count:  object.count
+			object: true
 		}
 		e.program.globals[name] = slot
 		return slot
