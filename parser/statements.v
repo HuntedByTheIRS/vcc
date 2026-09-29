@@ -487,7 +487,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		p.next()
 		return stmts
 	}
-	if offender := unsupported_type_word(spec) {
+	if offender := p.unsupported_type_word(spec) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
 		// The declaration is refused for its type, and the name it declares is
 		// still a name this file declares: recording it here is what keeps a later
@@ -553,7 +553,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			kind:       .var_decl
 			init:       init
 			decl_name:  d.name
-			decl_type:  spec.type_spelling(d.stars)
+			decl_type:  p.spelling_of(spec, d.stars)
 			decl_count: d.array_count
 			line:       d.name_at.line
 			col:        d.name_at.col

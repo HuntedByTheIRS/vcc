@@ -397,19 +397,36 @@ fn test_a_typedef_makes_a_name_a_type_for_the_rest_of_the_file() {
 	// parameter of `count` is an int.
 	result := checked('typedef int count;\nint take(count n);')
 	assert result.unit.decls.len == 1
-	assert result.unit.decls[0].params[0].typ == 'count'
+	// The type is spelled as the type the name stands for, because the frame the
+	// emitter lays out is sized from the spelling: `count` is an int, and a
+	// parameter is storage the back end has to find a width for.
+	assert result.unit.decls[0].params[0].typ == 'int'
 	assert result.unit.decls[0].params[0].resolved.same(types.int_type())
 	assert result.unit.decls[0].resolved.describe() == 'int (int)'
 }
 
-fn test_a_definition_spelled_with_a_typedef_name_is_refused_where_it_is_written() {
-	// The model resolves the name; the emitter reads the spelling, and a spelling
-	// it has no width for is refused rather than emitted as something else. A
-	// definition is storage, so this is a refusal and not a promise.
-	result := parsed('typedef int count;\nint main() { int c = 1; count n = 2; return c; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg == 'unsupported type count'
-	assert result.diagnostics[0].line == 2
+fn test_a_definition_spelled_with_a_typedef_name_is_the_definition_it_names() {
+	// A definition is storage, and storage is sized from the spelling of its
+	// type. A name that stands for a type the emitter has a form for is that
+	// form, so `count n = 2;` declares an int and not a type of its own.
+	result := parsed('typedef int count;\nint main() { int c = 1; count n = 2; return c + n; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].body[1].decl_type == 'int'
+}
+
+fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type() {
+	// The name is not what is asked about, the type it names is: `Big` is a
+	// `long` here, and a `long` is a type this compiler has no width for. The
+	// refusal names `long` rather than `Big`, and it happens at the declaration,
+	// which is where the object is defined and not only where something uses it.
+	wider := parsed('typedef long Big;\nBig x;')
+	assert wider.diagnostics.len == 1
+	assert wider.diagnostics[0].msg == 'unsupported type long'
+	assert wider.diagnostics[0].line == 2
+	// A parameter is the same question, asked where the call's frame is laid out.
+	parameter := parsed('typedef long Big;\nint f(Big b) { return 0; }')
+	assert parameter.diagnostics.len == 1
+	assert parameter.diagnostics[0].msg.contains('unsupported type long')
 }
 
 fn test_the_float_family_is_refused_by_name_and_by_location() {

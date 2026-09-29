@@ -117,7 +117,11 @@ fn test_a_typedef_name_is_a_type_for_the_rest_of_the_file() {
 	assert result.diagnostics.len == 0
 	assert result.unit.decls.len == 2
 	assert result.unit.decls[0].name == 'span'
-	assert result.unit.decls[0].ret == 'size_t'
+	// The return type is spelled as the type the name stands for, because the
+	// value a function returns is sized from that spelling. A prototype promises
+	// rather than defines, so nothing is refused here; what is kept is the type
+	// the emitter would be handed if the function were defined.
+	assert result.unit.decls[0].ret == 'unsigned long'
 }
 
 fn test_an_extern_object_is_read_and_dropped() {

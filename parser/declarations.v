@@ -183,16 +183,51 @@ fn (p Parser) name_clause(name string) types.Type {
 	return types.opaque_type(name)
 }
 
+// alias_spelling is the type a name this file declared as a type stands for,
+// written the way this compiler writes a type: with `typedef int T;`, a
+// declaration of `T x` declares an int, and with `typedef char *String;`, a
+// declaration of `String *p` declares a pointer to a char pointer.
+//
+// Everything after the declaration reads a type as the words the source wrote, so
+// an alias is spelled out where the declaration is read rather than carried as a
+// name every later stage would have to look up. A name that is not a typedef
+// answers none and stands as written.
+fn (p Parser) alias_spelling(name string) ?string {
+	if symbol := p.scopes.lookup(name) {
+		if symbol.is_typedef() && symbol.typ.kind != .unknown {
+			return symbol.typ.describe()
+		}
+	}
+	return none
+}
+
+// spelling_of is the type a declaration was written with, with a name this file
+// declared as a type spelled out as the type it names.
+fn (p Parser) spelling_of(spec DeclSpec, stars int) string {
+	if spec.type_words.len == 1 {
+		if spelling := p.alias_spelling(spec.type_words[0]) {
+			return with_stars(spelling, stars)
+		}
+	}
+	return spec.type_spelling(stars)
+}
+
+// with_stars is a type written with the pointer stars the declarator put in front
+// of the name.
+fn with_stars(text string, stars int) string {
+	if stars > 0 {
+		return text + ' ' + '*'.repeat(stars)
+	}
+	return text
+}
+
 // type_spelling is the type as it was written, with the pointer stars the
 // declarator put in front of the name. The stars go down as one run, which is
 // how a type is written: `char **argv` is a pointer to a pointer, and `char * *`
 // is not what the file says.
 fn (s DeclSpec) type_spelling(stars int) string {
 	mut text := if s.type_words.len > 0 { s.type_words.join(' ') } else { s.words.join(' ') }
-	if stars > 0 {
-		text += ' ' + '*'.repeat(stars)
-	}
-	return text
+	return with_stars(text, stars)
 }
 
 // Declarator is what one declarator says: the name it gives, the pointer stars
@@ -342,7 +377,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				if d.name.len > 0 {
 					decls << ast.FnDecl{
 						name:     d.name
-						ret:      spec.type_spelling(d.stars)
+						ret:      p.spelling_of(spec, d.stars)
 						ret_type: p.pointer_type(spec.clause, d)
 						resolved: p.declared_type(spec.clause, d)
 						params:   d.params
@@ -364,7 +399,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			if !spec.is_typedef {
 				decls << ast.FnDecl{
 					name:     d.name
-					ret:      spec.type_spelling(d.stars)
+					ret:      p.spelling_of(spec, d.stars)
 					ret_type: p.pointer_type(spec.clause, d)
 					resolved: p.declared_type(spec.clause, d)
 					params:   d.params
@@ -378,7 +413,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_seen = true
 				data_name = d.name
 				data_at = if d.name.len > 0 { d.name_at } else { spec.start }
-				data_type = spec.type_spelling(d.stars)
+				data_type = p.spelling_of(spec, d.stars)
 				data_stars = d.stars
 				data_count = d.array_count
 				data_clause = p.declared_type(spec.clause, d)
@@ -431,7 +466,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		// definition's return type is: storage the program has to find room for,
 		// so the answer is the same helper. A prototype can promise anything; a
 		// definition cannot promise a type this back end has no width for.
-		if offender := unsupported_type_word(spec) {
+		if offender := p.unsupported_type_word(spec) {
 			p.error_at(data_at, 'unsupported type ${offender}')
 			return decls
 		}
@@ -574,7 +609,7 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 		p.error_at(spec.start, 'unsupported: ${spec.clause.describe()} is a type this compiler does not emit yet, so a function cannot return it')
 		return
 	}
-	if offender := unsupported_type_word(spec) {
+	if offender := p.unsupported_type_word(spec) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
 		return
 	}
@@ -585,6 +620,31 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	if d.param_problem.len > 0 {
 		p.error_at(d.param_at, d.param_problem)
 	}
+}
+
+// word_problem is the word of a type this compiler does not read, or none when
+// the word names a type it does.
+//
+// A name this file declared as a type is asked about the type it names rather
+// than about itself: `typedef long Big; Big x;` is a `long x`, and this compiler
+// has no form for one either way, so the refusal names `long`. Answering none for
+// the name would move the question to the back end, which only asks it for an
+// object something uses, and an unused object of a type with no form would then
+// be dropped without a word.
+fn (p Parser) word_problem(word string) ?string {
+	if word in supported_types {
+		return none
+	}
+	if spelling := p.alias_spelling(word) {
+		words := spelling.split(' ')
+		if words.len > 0 && words[0] in supported_types {
+			return none
+		}
+		if words.len > 0 {
+			return words[0]
+		}
+	}
+	return word
 }
 
 // unsupported_type_word is the word among a declaration's specifiers that keeps
@@ -601,17 +661,17 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 // named in full where the answer is about the construct rather than about the
 // word: the parameter list names what a parameter was declared with, and a
 // complex type is refused by name below.
-fn unsupported_type_word(spec DeclSpec) ?string {
+fn (p Parser) unsupported_type_word(spec DeclSpec) ?string {
 	// The words a type is made of, not the storage class in front of them: an
 	// `extern` or a `static` is not a type, and reporting one as an unsupported
 	// type would be reporting the wrong word for the right reason.
 	if spec.type_words.len == 0 {
 		return none
 	}
-	if spec.type_words.len == 1 && spec.type_words[0] in supported_types {
-		return none
+	if spec.type_words.len == 1 {
+		return p.word_problem(spec.type_words[0])
 	}
-	if spec.type_words.len > 1 && spec.type_words[0] in supported_types {
+	if spec.type_words[0] in supported_types {
 		return spec.type_words[1]
 	}
 	return spec.type_words[0]
@@ -994,19 +1054,27 @@ fn (p Parser) declared_type(base types.Type, d Declarator) types.Type {
 	return typ
 }
 
-// type_params is the parameters of a declarator as the type model wants them. The
-// tree keeps a parameter with the type as it was written, because that is what a
-// definition's frame is laid out from; the type keeps the one the model resolved.
 // parameter_spelling is the type a parameter was declared with, written the way
 // it was written: the type words joined, and the storage class and qualifiers in
-// front of them left out, since those are not the type.
-fn parameter_spelling(spec DeclSpec) string {
+// front of them left out, since those are not the type. A name this file declared
+// as a type is spelled as the type it names, so the message says which type has
+// no form rather than which name the parameter used for it, which is the same
+// answer a definition of an object gets.
+fn (p Parser) parameter_spelling(spec DeclSpec) string {
+	if spec.type_words.len == 1 {
+		if spelling := p.alias_spelling(spec.type_words[0]) {
+			return spelling
+		}
+	}
 	if spec.type_words.len == 0 {
 		return spec.words.join(' ')
 	}
 	return spec.type_words.join(' ')
 }
 
+// type_params is the parameters of a declarator as the type model wants them. The
+// tree keeps a parameter with the type as it was written, because that is what a
+// definition's frame is laid out from; the type keeps the one the model resolved.
 fn type_params(params []ast.Param) []types.Param {
 	mut out := []types.Param{cap: params.len}
 	for param in params {
@@ -1166,7 +1234,7 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 				}
 			} else {
 				params.params << ast.Param{
-					typ:      spec.type_spelling(0)
+					typ:      p.spelling_of(spec, 0)
 					resolved: spec.clause
 					line:     spec.start.line
 					col:      spec.start.col
@@ -1177,7 +1245,7 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			d := p.parse_declarator(depth + 1)!
 			params.params << ast.Param{
 				name:     d.name
-				typ:      spec.type_spelling(d.stars)
+				typ:      p.spelling_of(spec, d.stars)
 				resolved: p.declared_type(spec.clause, d)
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
@@ -1189,10 +1257,10 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
 			} else if d.array_at.line > 0 {
 				params.note_problem('unsupported: array parameters are not implemented', d.array_at)
-			} else if !(spec.words.len == 1 && spec.words[0] in supported_types) {
+			} else if !p.parameter_type_is_known(spec) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.
-				params.note_problem('unsupported type ${parameter_spelling(spec)}', spec.start)
+				params.note_problem('unsupported type ${p.parameter_spelling(spec)}', spec.start)
 			}
 		}
 		if p.at_punct(',') {
@@ -1206,6 +1274,16 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 		p.error_at(p.peek(), 'unsupported: expected , or ) in the parameter list, found ${describe(p.peek())}')
 		return error('parameter list')
 	}
+}
+
+// parameter_type_is_known says whether a parameter's type is one this reader can
+// name: a word of the language, or a single name this file declared as a type,
+// which answers as the type it names.
+fn (p Parser) parameter_type_is_known(spec DeclSpec) bool {
+	if spec.words.len != 1 {
+		return false
+	}
+	return p.word_problem(spec.words[0]) == none
 }
 
 fn (mut params Params) note_problem(problem string, at tokenize.Token) {
