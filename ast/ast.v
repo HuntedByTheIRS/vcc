@@ -50,7 +50,7 @@ pub:
 	params []Param
 	// ret_class is how the value this function returns is handed back, and zero
 	// for a function that returns a value of its own width or nothing at all.
-	ret_class Eightbyte
+	ret_class Class
 	// body is empty for a declaration without a definition.
 	body []Stmt
 	line int
@@ -60,16 +60,27 @@ pub:
 // Param is one parameter of a function: its name, the type as written, and what
 // the type model resolved that spelling to. A parameter is stored with the
 // adjustment 6.7.5.3 asks for, so one written as an array is a pointer here.
-// Eightbyte is how an object of an aggregate type is handed over by value on this
-// machine: how many bytes it is, and whether the class of its first eightbyte is
-// the floating-point one. An object of one eightbyte travels in one register, so
-// the size and the class are the two facts a caller and a callee each need.
-// bytes is zero for anything that is not an object of an aggregate type, which is
-// handed over as a value of its own width.
-pub struct Eightbyte {
+// Class is how an object of an aggregate type is handed over by value on this
+// machine. The convention splits an object into eightbytes of eight bytes each and
+// gives every one of them a class, which is the register file that carries it, so
+// an object of sixteen bytes or fewer is one or two registers and nothing else has
+// to be known about it. A caller and a callee each read the same class from the
+// declaration, which is why it travels with the declaration and not with an
+// expression.
+//
+// bytes is the size of the object, and zero for anything that is not an object of
+// an aggregate type, which is handed over as a value of its own width. count is how
+// many eightbytes the object was split into, and is three or more for an object
+// larger than two of them, which is the case this compiler does not hand over.
+// first_floating and second_floating say which file carries each of the first two
+// eightbytes: the floating-point one when every member the eightbyte covers is a
+// double, and the general one otherwise.
+pub struct Class {
 pub:
-	bytes    int
-	floating bool
+	bytes           int
+	count           int
+	first_floating  bool
+	second_floating bool
 }
 
 pub struct Param {
@@ -79,7 +90,7 @@ pub:
 	resolved types.Type
 	// class is how an object of an aggregate type is handed over, and zero for a
 	// parameter that is a value.
-	class Eightbyte
+	class Class
 	line  int
 	col   int
 }

@@ -490,23 +490,59 @@ fn test_an_object_of_an_incomplete_tag_is_refused_by_the_tag() {
 // by a path that has no room for an aggregate yet. Refusing it where it is
 // written is what keeps an object nothing uses from being dropped silently.
 // A parameter that is an object of an aggregate type is storage of the layout's
-// size in the frame of the call, and it arrives as its bytes: how many bytes and
-// the class of its one eightbyte are what the declaration carries, so a call and a
-// definition agree without either asking the other.
+// size in the frame of the call, and it arrives as its bytes: how many bytes it is
+// and which register file carries each of its eightbytes are what the declaration
+// carries, so a call and a definition agree without either asking the other.
 fn test_a_parameter_of_an_aggregate_type_carries_how_it_is_handed_over() {
 	decl := first('struct S { int a; int b; };\nint f(struct S s) { return s.a; }')
 	assert decl.params.len == 1
 	assert decl.params[0].class.bytes == 8
-	assert !decl.params[0].class.floating
+	assert decl.params[0].class.count == 1
+	assert !decl.params[0].class.first_floating
 	// An object whose members are all doubles is handed over in the floating-point
-	// file, which is the class the convention gives an eightbyte of doubles.
+	// file, which is the class the convention gives an eightbyte of doubles. The
+	// second eightbyte is not read at all when there is only one.
 	doubles := first('struct D { double d; };\nint f(struct D x) { return 0; }')
 	assert doubles.params[0].class.bytes == 8
-	assert doubles.params[0].class.floating
-	// An object larger than one eightbyte is two of them or a copy in memory, and
-	// the size it carries is what says so.
+	assert doubles.params[0].class.count == 1
+	assert doubles.params[0].class.first_floating
+	// An object of more than one eightbyte carries the class of each: a pointer
+	// and an int are two eightbytes the general file carries, and two doubles are
+	// two the floating-point file carries.
 	wide := first('struct W { int a; int b; int c; };\nint f(struct W w) { return 0; }')
 	assert wide.params[0].class.bytes == 12
+	assert wide.params[0].class.count == 2
+	assert !wide.params[0].class.first_floating
+	assert !wide.params[0].class.second_floating
+	pair := first('struct P { int *p; int n; };\nint f(struct P x) { return 0; }')
+	assert pair.params[0].class.count == 2
+	assert !pair.params[0].class.first_floating
+	both := first('struct T { double x; double y; };\nint f(struct T x) { return 0; }')
+	assert both.params[0].class.bytes == 16
+	assert both.params[0].class.count == 2
+	assert both.params[0].class.first_floating
+	assert both.params[0].class.second_floating
+	// An eightbyte carrying both a double and something else is the general one,
+	// and so is one that only holds the bytes between members.
+	mixed := first('struct M { double d; int i; };\nint f(struct M x) { return 0; }')
+	assert mixed.params[0].class.count == 2
+	assert mixed.params[0].class.first_floating
+	assert !mixed.params[0].class.second_floating
+	hole := first('struct H { char c; double d; };\nint f(struct H x) { return 0; }')
+	assert hole.params[0].class.count == 2
+	assert hole.params[0].class.first_floating == false
+	assert hole.params[0].class.second_floating
+	// A member that is itself an object of an aggregate type is read at the bottom
+	// of the layout: a struct of one double in a struct of one of them carries the
+	// floating-point class through.
+	nested := first('struct D { double d; };\nstruct N { struct D a; };\nint f(struct N x) { return 0; }')
+	assert nested.params[0].class.count == 1
+	assert nested.params[0].class.first_floating
+	// An object larger than two eightbytes is a copy in memory, and how many
+	// eightbytes it is says so.
+	beyond := first('struct B { double a; double b; double c; };\nint f(struct B x) { return 0; }')
+	assert beyond.params[0].class.bytes == 24
+	assert beyond.params[0].class.count == 3
 }
 
 // A tag that was declared and never defined has no size and no class, so a

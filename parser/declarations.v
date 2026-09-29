@@ -380,7 +380,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						ret:       p.spelling_of(spec, d.stars)
 						ret_type:  p.pointer_type(spec.clause, d)
 						resolved:  p.declared_type(spec.clause, d)
-						ret_class: p.eightbyte_of(spec.clause)
+						ret_class: p.class_of(spec.clause)
 						params:    d.params
 						body:      statements
 						line:      d.name_at.line
@@ -403,7 +403,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					ret:       p.spelling_of(spec, d.stars)
 					ret_type:  p.pointer_type(spec.clause, d)
 					resolved:  p.declared_type(spec.clause, d)
-					ret_class: p.eightbyte_of(spec.clause)
+					ret_class: p.class_of(spec.clause)
 					params:    d.params
 					body:      []ast.Stmt{}
 					line:      d.name_at.line
@@ -1292,7 +1292,7 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 				name:     d.name
 				typ:      p.spelling_of(spec, d.stars)
 				resolved: resolved
-				class:    p.eightbyte_of(resolved)
+				class:    p.class_of(resolved)
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
@@ -1339,33 +1339,100 @@ fn (p Parser) parameter_type_is_known(spec DeclSpec) bool {
 	return p.word_problem(spec.words[0]) == none
 }
 
-// eightbyte_of is how an object of an aggregate type is handed over by value on
-// this machine, and zero for anything else.
+// class_of is how an object of an aggregate type is handed over by value on this
+// machine, and zero for anything else.
 //
-// One eightbyte is what this compiler hands over: an object of eight bytes or
-// fewer travels in one register, and the class of that eightbyte is the
-// floating-point one when every member of it is a double and the general one
-// otherwise, which is what the convention says for an eightbyte carrying both.
-// An object larger than that is two eightbytes or a copy in memory, which is the
-// next piece of this and not this one; it answers with its size so that the
-// refusal can name how many bytes it is.
-fn (p Parser) eightbyte_of(declared types.Type) ast.Eightbyte {
+// The convention splits an object into eightbytes of eight bytes each, in order,
+// and gives every one of them a class: the floating-point file when every member
+// that eightbyte covers is a double, and the general file otherwise. The class of
+// each eightbyte is what a caller and a callee need, so both are read here once and
+// travel with the declaration. An object larger than two eightbytes answers with its
+// size and its count so that the refusal can name how large it is, because that
+// object is a copy in memory and no register carries it.
+fn (p Parser) class_of(declared types.Type) ast.Class {
 	if declared.kind !in [types.Kind.struct_, .union_] {
-		return ast.Eightbyte{}
+		return ast.Class{}
 	}
 	bytes := p.aggregate_bytes(declared)
 	if bytes == 0 {
-		return ast.Eightbyte{}
+		return ast.Class{}
 	}
-	mut floating := declared.members.len > 0
-	for member in declared.members {
-		if member.typ.kind != .double {
-			floating = false
+	count := (bytes + 7) / 8
+	return ast.Class{
+		bytes:           bytes
+		count:           count
+		first_floating:  p.eightbyte_is_floating(declared, 0)
+		second_floating: count == 2 && p.eightbyte_is_floating(declared, 1)
+	}
+}
+
+// EightbyteCover is what a byte range of an object covers: whether a member of the
+// object has bytes in the range at all, and whether a member in it is anything but
+// a double.
+struct EightbyteCover {
+mut:
+	covered bool
+	other   bool
+}
+
+// eightbyte_is_floating says whether a register of the floating-point file carries
+// the eightbyte that starts at `which` eightbytes into an object: every member that
+// eightbyte covers is a double, and a member covers it.
+//
+// An eightbyte carrying a member that is not a double is carried by the general
+// file, which is what the convention says for an eightbyte that is both; so is an
+// eightbyte no member covers, because the padding bytes in it are not a double and
+// a register of the general file carries anything this compiler lays out.
+fn (p Parser) eightbyte_is_floating(declared types.Type, which int) bool {
+	mut cover := EightbyteCover{}
+	p.note_eightbyte(declared, 0, which * 8, which * 8 + 8, mut cover)
+	return cover.covered && !cover.other
+}
+
+// note_eightbyte marks what a byte range of an object covers. A member that is
+// itself an object of an aggregate type is walked into, because the range carries
+// the members at the bottom of the layout and not the object that holds them; an
+// element of an array likewise, one element at a time.
+fn (p Parser) note_eightbyte(declared types.Type, base int, low int, high int, mut cover EightbyteCover) {
+	layout := p.representation.layout(declared) or { return }
+	for i, member in declared.members {
+		if i >= layout.offsets.len {
+			break
 		}
+		p.note_member(member.typ, base + layout.offsets[i], low, high, mut cover)
 	}
-	return ast.Eightbyte{
-		bytes:    bytes
-		floating: floating
+}
+
+// note_member marks what the bytes of one member cover, given where the member
+// starts. A member whose bytes lie entirely outside the range covers nothing in it,
+// and a member that lies across a boundary covers both eightbytes it lies in, which
+// is how a double that straddled one would be classified and how an object of an
+// aggregate type is.
+fn (p Parser) note_member(typ types.Type, start int, low int, high int, mut cover EightbyteCover) {
+	size := p.representation.size_of(typ) or { return }
+	if size <= 0 || start + size <= low || start >= high {
+		return
+	}
+	if typ.kind in [types.Kind.struct_, .union_] {
+		p.note_eightbyte(typ, start, low, high, mut cover)
+		return
+	}
+	if typ.kind == .array {
+		element := typ.element() or { return }
+		element_size := p.representation.size_of(element) or { return }
+		if element_size <= 0 {
+			return
+		}
+		mut at := start
+		for at < start + size {
+			p.note_member(element, at, low, high, mut cover)
+			at += element_size
+		}
+		return
+	}
+	cover.covered = true
+	if typ.kind != .double {
+		cover.other = true
 	}
 }
 

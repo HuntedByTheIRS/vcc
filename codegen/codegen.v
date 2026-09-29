@@ -174,17 +174,17 @@ mut:
 	// of one eightbyte is handed over as its bytes in one register rather than
 	// as a value, so a call has to know which parameters those are, and zero
 	// bytes means the parameter is a value.
-	aggregate_params map[string][]ast.Eightbyte
+	aggregate_params map[string][]ast.Class
 	// return_classes says, for the same functions, which of them hand an object
 	// of an aggregate type back, and how many bytes of one. The value comes back
 	// in the register its class names rather than converted.
-	return_classes map[string]ast.Eightbyte
+	return_classes map[string]ast.Class
 	// returning is the return type of the function being emitted, as it was
 	// written, which is what a return statement's value is converted to.
 	returning string
 	// return_class is how the function being emitted hands its value back, and
 	// zero for a function that returns a value of its own width or nothing.
-	return_class ast.Eightbyte
+	return_class ast.Class
 	// returns is the return type of every function the file defines, which is
 	// what a call whose value is read has to be checked against: a void
 	// function's result is nothing, and a value read from a call to one would
@@ -351,7 +351,7 @@ fn (mut e Emitter) build() ![]u8 {
 			e.program.defined[decl.name] = true
 			mut widths := []int{}
 			mut classes := []bool{}
-			mut aggregates := []ast.Eightbyte{}
+			mut aggregates := []ast.Class{}
 			mut sized := true
 			for param in decl.params {
 				// A parameter that is an object of an aggregate type is handed
@@ -360,11 +360,11 @@ fn (mut e Emitter) build() ![]u8 {
 				// needs, and both come from the declaration.
 				if param.class.bytes > 0 {
 					widths << param.class.bytes
-					classes << param.class.floating
+					classes << param.class.first_floating
 					aggregates << param.class
 					continue
 				}
-				aggregates << ast.Eightbyte{}
+				aggregates << ast.Class{}
 				if width := e.type_width(param.typ) {
 					widths << width
 					classes << e.writes_a_double(param.typ)
@@ -529,7 +529,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// object larger than one eightbyte is two registers or a copy in memory,
 		// which is the half of this that this compiler does not hand over.
 		if decl.ret_class.bytes > e.target.word_size
-			|| (decl.ret_class.floating && decl.ret_class.bytes != e.target.word_size) {
+			|| (decl.ret_class.first_floating && decl.ret_class.bytes != e.target.word_size) {
 			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes, and this compiler hands back an aggregate of one eightbyte')
 			return error('aggregate return too large')
 		}
@@ -572,13 +572,13 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes ${param.typ} by value, which is ${param.class.bytes} bytes, and this compiler hands over an aggregate of one eightbyte')
 				return error('aggregate parameter too large')
 			}
-			if param.class.floating && param.class.bytes != e.target.word_size {
+			if param.class.first_floating && param.class.bytes != e.target.word_size {
 				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes ${param.typ} by value, which is ${param.class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
 				return error('aggregate floating class width')
 			}
 			object := e.declare(param.name, param.typ, 0, param.class.bytes, param.line, param.col)!
 			stacked_at := 2 * e.target.word_size + stacked * e.target.word_size
-			if param.class.floating {
+			if param.class.first_floating {
 				if register := e.target.float_arg_reg(doubles) {
 					e.store_double_register(object, register, param.line, param.col)!
 					doubles++
@@ -738,7 +738,7 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 		// reads out of that register.
 		e.address_of_object(expr, 0)!
 		base := e.accumulator(stmt.line, stmt.col)!
-		if e.return_class.floating {
+		if e.return_class.first_floating {
 			double_register := e.float_accumulator(stmt.line, stmt.col)!
 			e.append(e.target.load_double_indirect(base, double_register)!)
 		} else {
@@ -878,7 +878,7 @@ fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line in
 			e.emit_expr_at(expr, 1)!
 			base := e.scratch(line, col)!
 			e.load_argument(address, base, e.target.word_size, line, col)!
-			if class.floating {
+			if class.first_floating {
 				value := e.float_accumulator(line, col)!
 				e.append(e.target.store_double_indirect(base, value)!)
 				return
@@ -933,7 +933,7 @@ fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line in
 // the signature the declaration gave, so a call to a function this file defines
 // knows; a call to a name nothing declares has no signature, and an object is
 // refused there rather than handed to a function whose convention is unknown.
-fn (e Emitter) aggregate_argument(call ast.Call, position int) ?ast.Eightbyte {
+fn (e Emitter) aggregate_argument(call ast.Call, position int) ?ast.Class {
 	if classes := e.aggregate_params[call.name] {
 		if position < classes.len && classes[position].bytes > 0 {
 			return classes[position]
@@ -1688,7 +1688,7 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 			// A call that hands an object back hands its bytes over in the
 			// register its class names, so the floating class is the same answer
 			// as a function that returns a double.
-			e.returns[expr.name] == 'double' || e.return_classes[expr.name].floating
+			e.returns[expr.name] == 'double' || e.return_classes[expr.name].first_floating
 		}
 		else {
 			false
@@ -2587,7 +2587,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		mut floating := e.argument_is_double(call, i, arg)
 		if c := class {
-			floating = c.floating
+			floating = c.first_floating
 		}
 		if floating {
 			if e.target.float_arg_reg(doubles) != none {
@@ -2632,7 +2632,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// floating file, which is the same eight bytes.
 			e.address_of_object(arg, depth + i + 1)!
 			base := e.accumulator(line, col)!
-			if class.floating {
+			if class.first_floating {
 				double_register := e.float_accumulator(line, col)!
 				e.append(e.target.load_double_indirect(base, double_register)!)
 				e.store_double_accumulator(e.value_slot(depth + i), line, col)!
@@ -2785,7 +2785,7 @@ fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr, float
 	// value of some width: the two are the same type or the type checker refused
 	// the call, and what travels is the object's bytes.
 	if class := e.aggregate_argument(call, position) {
-		if class.floating && class.bytes != e.target.word_size {
+		if class.first_floating && class.bytes != e.target.word_size {
 			e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is an object of ${class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
 			return error('aggregate floating class width')
 		}
