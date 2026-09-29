@@ -312,7 +312,7 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	// fact in the wrong module.
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
-		if kind != .int_ && kind != .unsigned_int {
+		if kind != .int_ && kind != .unsigned_int && kind != .double {
 			expected_missing << kind
 		}
 	}
@@ -320,8 +320,17 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert !description.missing.contains(Kind.int_)
 	assert !description.missing.contains(Kind.unsigned_int)
 	assert !description.missing.contains(Kind.pointer)
+	// The double is carried because the back end moves one, and the two numbers
+	// are the measured ones rather than a guess: `sizeof(double)` is 8 with an
+	// alignment of 8 on this target.
+	assert !description.missing.contains(Kind.double)
+	assert description.representation.size_of(double_type()) or { -1 } == 8
+	assert description.representation.align_of(double_type()) or { -1 } == 8
+	assert measured.representation().size_of(double_type()) or { -1 } == 8
+	assert measured.representation().align_of(double_type()) or { -1 } == 8
 	assert description.representation.size_of(long_double_type()) == none
 	assert description.representation.size_of(long_type()) == none
+	assert description.representation.size_of(float_type()) == none
 	// The description and the measured table agree about every entry both of
 	// them carry, which is what keeps the two numbers in the description from
 	// drifting away from what gcc says the target is.

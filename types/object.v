@@ -264,6 +264,13 @@ pub:
 // character constant is an int (6.4.4.4), so no rule here asks for a char's
 // width; the character types are added to the description with the kinds that
 // need them.
+//
+// A double is carried for the same reason the int is: the back end has the
+// instruction for it, so the model can answer a question about its width
+// truthfully. Measured on this target with gcc 16.2.1, `sizeof(double)` is 8
+// with an alignment of 8, and `codegen`'s `movsd` moves exactly those eight
+// bytes. `float` and `long double` stay out because the back end emits neither,
+// and a width it cannot move is a width the model must not hand out.
 pub fn from_target(target backend.Target) Description {
 	mut sizes := map[Kind]int{}
 	mut aligns := map[Kind]int{}
@@ -276,6 +283,8 @@ pub fn from_target(target backend.Target) Description {
 	aligns[Kind.int_] = 4
 	sizes[Kind.unsigned_int] = 4
 	aligns[Kind.unsigned_int] = 4
+	sizes[Kind.double] = 8
+	aligns[Kind.double] = 8
 	mut missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in sizes {
