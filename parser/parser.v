@@ -37,6 +37,12 @@ const supported_types = ['int', 'char', 'void']
 // recursion until the stack runs out.
 const max_expression_depth = 200
 
+// statement_keywords are the statements this compiler does not implement. They
+// are named so that `if (x) return;` is reported as an unsupported statement
+// rather than as an expression that went wrong at its first parenthesis.
+const statement_keywords = ['if', 'else', 'while', 'do', 'for', 'switch', 'case', 'default', 'goto',
+	'break', 'continue']
+
 // parse reads a token stream into a translation unit.
 pub fn parse(tokens []tokenize.Token) Result {
 	mut p := Parser{
@@ -179,8 +185,9 @@ fn (mut p Parser) parse_parameters() ! {
 	}
 }
 
-// parse_block reads `{ ... }`. Only the statements the stub understands are
-// compiled; anything else is reported where it starts and ends that declaration.
+// parse_block reads `{ ... }`. Only return statements and expressions have a
+// form in the back end; a statement it cannot read is reported where it starts
+// and skipped, so the statements after it still parse.
 fn (mut p Parser) parse_block() ![]ast.Stmt {
 	open := p.peek()
 	if !p.at_punct('{') {
@@ -247,8 +254,38 @@ fn (mut p Parser) parse_block() ![]ast.Stmt {
 			}
 			continue
 		}
-		p.error_at(t, 'unsupported statement starting at ${describe(t)}: the stub compiles return statements only')
-		p.skip_statement()
+		// A statement that starts with a type name declares an object or a
+		// type. Neither has anywhere to go until there are frames and a type
+		// table, and reading it as an expression would turn `size_t n;` into a
+		// call to size_t, so it is reported here instead.
+		if t.kind == .identifier && t.text in type_keywords {
+			p.error_at(t, 'unsupported statement starting at ${describe(t)}: a declaration inside a function has nowhere to go yet')
+			p.skip_statement()
+			continue
+		}
+		if t.kind == .identifier && t.text in statement_keywords {
+			p.error_at(t, 'unsupported statement starting at ${describe(t)}: only return statements and expressions are implemented')
+			p.skip_statement()
+			continue
+		}
+		// Anything else is an expression evaluated for what it does, which is
+		// what a call written as a statement is. An expression that does not
+		// parse is reported by the expression reader and the statement is
+		// skipped, so one unsupported construct produces one diagnostic.
+		expr := p.parse_expression() or {
+			p.skip_statement()
+			continue
+		}
+		if !p.expect_punct(';') {
+			p.skip_statement()
+			continue
+		}
+		stmts << ast.Stmt{
+			kind: .expr_stmt
+			expr: expr
+			line: t.line
+			col:  t.col
+		}
 	}
 	return stmts
 }
@@ -373,8 +410,17 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		})
 	}
 	if t.kind == .string {
-		p.error_at(t, 'unsupported: string literals are not implemented')
-		return error('string literal')
+		p.next()
+		value := parse_string_literal(t.text) or {
+			p.error_at(t, err.msg())
+			return error('bad string literal')
+		}
+		return ast.Expr(ast.StrLit{
+			value: value
+			text:  t.text
+			line:  t.line
+			col:   t.col
+		})
 	}
 	if t.kind == .punct && t.text == '(' {
 		p.next()

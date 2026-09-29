@@ -104,20 +104,63 @@ fn test_a_variable_declaration_says_function_definitions_are_what_exists() {
 	assert result.diagnostics[0].msg.contains('only function definitions')
 }
 
+// The statement is skipped to its semicolon, so the return after it parses and
+// the file produces exactly one diagnostic. A statement this compiler has no
+// form for is what that path is for.
 fn test_one_unsupported_statement_does_not_cascade() {
-	// The statement is skipped to its semicolon, so the return after it parses
-	// and the file produces exactly one diagnostic.
-	result := parsed('int main() { printf("hi"); return 0; }')
+	result := parsed('int main() { while (1) ; return 0; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('unsupported statement')
 	assert result.unit.decls.len == 1
 	assert result.unit.decls[0].body.len == 1
 }
 
-fn test_a_string_literal_is_reported_rather_than_parsed() {
-	result := parsed('int main() { return "x"; }')
+// The statement is an expression evaluated for what it does, which is what a
+// call written as a statement is. It parses now, and the return after it is the
+// second statement rather than the first.
+fn test_an_expression_statement_parses() {
+	result := parsed('int main() { printf("hi"); return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 2
+	assert body[0].kind == .expr_stmt
+	expr := body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Call
+	assert (expr as ast.Call).name == 'printf'
+	assert body[1].kind == .return_stmt
+}
+
+fn test_a_string_literal_keeps_its_bytes_and_its_spelling() {
+	result := parsed('int main() { return "x\\ty"; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.StrLit
+	literal := expr as ast.StrLit
+	assert literal.value == 'x	y'
+	assert literal.text == '"x\\ty"'
+}
+
+fn test_a_string_literal_carries_every_escape_a_character_constant_takes() {
+	result := parsed('int main() { puts("a\\x41\\102\\n\\\\"); return 0; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	args := (expr as ast.Call).args
+	assert (args[0] as ast.StrLit).value == 'aAB\n\\'
+}
+
+fn test_an_escape_that_names_more_than_a_byte_is_reported() {
+	result := parsed('int main() { puts("\\x1ff"); return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('string literals')
+	assert result.diagnostics[0].msg.contains('not a byte')
 }
 
 fn test_a_bad_integer_literal_is_reported() {
