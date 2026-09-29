@@ -123,13 +123,50 @@ fn reachable_statements(body []ast.Stmt) []ast.Stmt {
 // fold evaluates a constant expression. Signed arithmetic wraps, because that is
 // what V's generated C is compiled with and what the C standard calls undefined
 // but every C compiler on the machines this targets does anyway.
+//
+// The left spine of an operator chain is walked with a loop, and only genuinely
+// nested expressions recurse. `1 + 1 + 1 ...` is one node deep in the grammar and
+// thousands deep in the tree, so a recursive fold turns a long constant
+// expression into a stack overflow: the benchmark harness found that at about
+// three thousand terms, which is a size a generated program reaches without trying.
 fn fold(expr ast.Expr, mut diagnostics []tokenize.Diagnostic) !i64 {
+	return fold_at(expr, 0, mut diagnostics)
+}
+
+// max_fold_depth is the nesting the fold will follow. Parentheses are the only
+// way to get deeper, and no real expression comes close to this, so anything past
+// it is reported rather than allowed to run the stack out.
+const max_fold_depth = 200
+
+fn fold_at(expr ast.Expr, depth int, mut diagnostics []tokenize.Diagnostic) !i64 {
+	if depth > max_fold_depth {
+		diagnostics << problem(1, 1,
+			'expression is nested more than ${max_fold_depth} levels deep, which the stub does not fold')
+		return error('expression nested too deeply')
+	}
+	mut spine := []ast.Binary{}
+	mut node := expr
+	for node is ast.Binary {
+		binary := node as ast.Binary
+		spine << binary
+		node = binary.left
+	}
+	mut value := fold_leaf(node, depth + 1, mut diagnostics)!
+	for i := spine.len - 1; i >= 0; i-- {
+		binary := spine[i]
+		right := fold_at(binary.right, depth + 1, mut diagnostics)!
+		value = apply_binary(binary, value, right, mut diagnostics)!
+	}
+	return value
+}
+
+fn fold_leaf(expr ast.Expr, depth int, mut diagnostics []tokenize.Diagnostic) !i64 {
 	match expr {
 		ast.IntLit {
 			return expr.value
 		}
 		ast.Unary {
-			operand := fold(expr.expr, mut diagnostics)!
+			operand := fold_at(expr.expr, depth + 1, mut diagnostics)!
 			return match expr.op {
 				'-' { wrap_sub(i64(0), operand) }
 				'+' { operand }
@@ -149,34 +186,7 @@ fn fold(expr ast.Expr, mut diagnostics []tokenize.Diagnostic) !i64 {
 			}
 		}
 		ast.Binary {
-			left := fold(expr.left, mut diagnostics)!
-			right := fold(expr.right, mut diagnostics)!
-			return match expr.op {
-				'+' { wrap_add(left, right) }
-				'-' { wrap_sub(left, right) }
-				'*' { wrap_mul(left, right) }
-				'/' {
-					if right == 0 {
-						diagnostics << problem(expr.line, expr.col,
-							'division by zero in a constant expression')
-						return error('division by zero')
-					}
-					left / right
-				}
-				'%' {
-					if right == 0 {
-						diagnostics << problem(expr.line, expr.col,
-							'remainder by zero in a constant expression')
-						return error('remainder by zero')
-					}
-					left % right
-				}
-				else {
-					diagnostics << problem(expr.line, expr.col,
-						'unsupported binary operator ${expr.op}')
-					return error('unsupported binary operator')
-				}
-			}
+			return fold_at(expr, depth + 1, mut diagnostics)
 		}
 		ast.Ident {
 			diagnostics << problem(expr.line, expr.col,
@@ -187,6 +197,37 @@ fn fold(expr ast.Expr, mut diagnostics []tokenize.Diagnostic) !i64 {
 			diagnostics << problem(expr.line, expr.col,
 				'unsupported: the call to ${expr.name} cannot be folded; calls are not implemented')
 			return error('call in a constant expression')
+		}
+	}
+}
+
+// apply_binary does the arithmetic for one operator, with the checks that keep a
+// constant expression from silently holding a wrong value.
+fn apply_binary(binary ast.Binary, left i64, right i64, mut diagnostics []tokenize.Diagnostic) !i64 {
+	return match binary.op {
+		'+' { wrap_add(left, right) }
+		'-' { wrap_sub(left, right) }
+		'*' { wrap_mul(left, right) }
+		'/' {
+			if right == 0 {
+				diagnostics << problem(binary.line, binary.col,
+					'division by zero in a constant expression')
+				return error('division by zero')
+			}
+			left / right
+		}
+		'%' {
+			if right == 0 {
+				diagnostics << problem(binary.line, binary.col,
+					'remainder by zero in a constant expression')
+				return error('remainder by zero')
+			}
+			left % right
+		}
+		else {
+			diagnostics << problem(binary.line, binary.col,
+				'unsupported binary operator ${binary.op}')
+			return error('unsupported binary operator')
 		}
 	}
 }

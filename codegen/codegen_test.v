@@ -88,6 +88,23 @@ fn test_a_call_in_a_constant_expression_is_reported() {
 	assert emitted.diagnostics[0].msg.contains('f')
 }
 
+// A long constant chain used to take the stack out: the fold recursed once per
+// term, and about three thousand terms is a size generated code reaches without
+// trying. The benchmark harness found it; this keeps it found.
+fn test_a_long_constant_chain_folds() {
+	mut terms := []string{}
+	mut expected := i64(0)
+	for i in 0 .. 20000 {
+		value := (i % 97) + 1
+		terms << '${value}'
+		expected = (expected + value) & 0xff
+	}
+	source := 'int main() { return ${terms.join(' + ')}; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == int(expected)
+}
+
 fn test_a_body_with_work_in_it_is_reported() {
 	emitted := emit(translation_unit('int main() { return 1; return 2; }'), Options{})
 	assert emitted.diagnostics.len == 1
