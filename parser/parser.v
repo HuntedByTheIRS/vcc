@@ -431,11 +431,21 @@ fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) 
 // goes in and `b.a.x` comes back as one Field naming `b` at the byte `x` sits at.
 // It is what both a value read and an assignment to a member go through, because
 // the two ask the same question of the same path.
-fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through_pointer bool) !ast.Field {
+fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through_pointer bool, index ?ast.Expr) !ast.Field {
 	mut aggregate := p.scopes.lookup(base) or {
 		p.error_at(base_at, 'unsupported: ${base} is read as an object with a member, and no declaration of that name is in scope')
 		return error('unknown object')
 	}.typ
+	if index != none {
+		// `s[i].a` reads the member of the element the index names, so the type
+		// the member is looked up in is the element's type, not the array's. The
+		// stride between elements is the size of that type, which the field's
+		// declaration carried and the back end scales an index by.
+		aggregate = aggregate.element() or {
+			p.error_at(base_at, 'unsupported: ${base} is read as an array, and its declaration is not one')
+			return error('not an array')
+		}
+	}
 	if through_pointer {
 		// `p->a` is the member of the object `p` points at, so the type the first
 		// member is looked up in is the one the pointer's base names. A name that
@@ -448,9 +458,9 @@ fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through
 		}
 		aggregate = pointed_at
 	}
-	mut member := p.parse_member(base, aggregate, 0, '', through_pointer)!
+	mut member := p.parse_member(base, aggregate, 0, '', through_pointer, index)!
 	for p.at_punct('.') {
-		member = p.parse_member(base, member.typ, member.offset, member.member, false)!
+		member = p.parse_member(base, member.typ, member.offset, member.member, false, index)!
 	}
 	return member
 }
@@ -470,7 +480,7 @@ fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through
 // diagnostic names the whole path. A member of a member is one object read further
 // in, because a member of an object is inside the object, and a name written at the
 // end of a path is one Field and not a chain of reads.
-fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path string, through_pointer bool) !ast.Field {
+fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path string, through_pointer bool, index ?ast.Expr) !ast.Field {
 	dot := p.next() // .
 	if p.peek().kind != .identifier {
 		p.error_at(p.peek(), 'unsupported: expected a member name after ., found ${describe(p.peek())}')
@@ -482,14 +492,14 @@ fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path
 		p.error_at(dot, 'unsupported: ${base}${if path == '' { '' } else { '.' + path }} is declared ${aggregate.describe()}, and a member is read from an object whose type has members')
 		return error('not an aggregate')
 	}
-	mut index := -1
+	mut at := -1
 	for i, member in aggregate.members {
 		if member.name == name.text {
-			index = i
+			at = i
 			break
 		}
 	}
-	if index < 0 {
+	if at < 0 {
 		p.error_at(name, 'unsupported: ${aggregate.describe()} has no member called ${name.text}')
 		return error('unknown member')
 	}
@@ -497,11 +507,12 @@ fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path
 		p.error_at(name, 'unsupported: the members of ${aggregate.describe()} are not a layout this compiler knows, so the member ${name.text} cannot be read')
 		return error('no layout')
 	}
-	member := aggregate.members[index]
+	member := aggregate.members[at]
 	return ast.Field{
 		name:            base
+		index:           index
 		member:          written
-		offset:          into + layout.offsets[index]
+		offset:          into + layout.offsets[at]
 		spelling:        member.typ.describe()
 		typ:             member.typ
 		through_pointer: through_pointer
@@ -515,6 +526,14 @@ fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path
 // the model gave is that many bytes; everything else answers zero, which is what
 // a declaration of a scalar asks for and never looks at.
 fn (p Parser) aggregate_bytes(declared types.Type) int {
+	if declared.is_array() {
+		// An array of aggregates is a stride and a count: one element is as many
+		// bytes as the layout says, and the count is what the declarator wrote, so
+		// the stride is the size of the element's type and the frame scales an
+		// index by it.
+		element := declared.element() or { return 0 }
+		return p.aggregate_bytes(element)
+	}
 	if declared.kind !in [types.Kind.struct_, .union_] || !declared.is_complete() {
 		return 0
 	}
@@ -685,16 +704,23 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 				return error('expected ]')
 			}
 			p.next()
+			element := p.index_type(t)
+			if p.at_punct('.') || p.at_punct('->') {
+				// A member of an element of an array: the object is the element
+				// the index names, so the path carries the index and the stride
+				// between elements is the size of one element's type.
+				return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'), index)!)
+			}
 			return ast.Expr(ast.Index{
 				name:  t.text
 				index: index
-				typ:   p.index_type(t)
+				typ:   element
 				line:  t.line
 				col:   t.col
 			})
 		}
 		if p.at_punct('.') || p.at_punct('->') {
-			return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'))!)
+			return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'), ?ast.Expr(none))!)
 		}
 		typ := p.resolve(t.text)
 		return ast.Expr(ast.Ident{

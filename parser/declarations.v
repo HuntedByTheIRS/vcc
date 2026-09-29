@@ -477,20 +477,21 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// many zeroed bytes. Nothing in it is initialized by the
 			// definition, because C has no brace list in this reader and the
 			// members are written one at a time.
-			if data_count != 0 {
-				p.error_at(data_at, 'unsupported: ${data_name} is defined at the top level as an array of ${spec.clause.describe()}, and an array of aggregates is storage this compiler does not lay out yet')
-				return decls
-			}
 			bytes := p.aggregate_bytes(spec.clause)
 			if bytes == 0 {
 				p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${spec.clause.describe()}, and its layout is not one this compiler knows')
 				return decls
 			}
-			p.declare_name(data_name, spec.clause, data_at, true)
+			// An array of aggregates is that many bytes per element and as many
+			// elements as the declarator wrote: the size travels here and the count
+			// travels beside it, which is what the image reserves and what an index
+			// scales by.
+			p.declare_name(data_name, data_clause, data_at, true)
 			p.globals << ast.Global{
 				name:     data_name
 				typ:      data_type
 				resolved: spec.clause
+				count:    data_count
 				bytes:    bytes
 				line:     data_at.line
 				col:      data_at.col

@@ -214,7 +214,8 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			// The offset is printed because it is the part of the node the
 			// source does not say: `x.b` is where the layout put b, and that
 			// number is what the emitter reads.
-			out << '${indent}member ${expr.name}.${expr.member} at +${expr.offset} bytes, ${expr.spelling}, at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			object := if _ := expr.index { '${expr.name}[...]' } else { expr.name }
+			out << '${indent}member ${object}.${expr.member} at +${expr.offset} bytes, ${expr.spelling}, at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
 	}
 }

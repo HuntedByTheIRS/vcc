@@ -133,21 +133,10 @@ fn (p Parser) starts_assignment() bool {
 	// three tokens say whether this is an assignment to a member: the operator
 	// after the member is the one that writes.
 	if next.kind == .punct && (next.text == '.' || next.text == '->') {
-		// One member is one name, and a path of members is one name per dot, so
-		// the `.<name>` pairs are walked to the token after the last of them:
-		// that token says whether this writes a member.
-		mut at := 2
-		for {
-			if p.peek_at(at).kind != .identifier {
-				return false
-			}
-			after := p.peek_at(at + 1)
-			if after.kind == .punct && after.text == '.' {
-				at += 2
-				continue
-			}
-			return after.kind == .punct && after.text in assignment_operators
-		}
+		// One member is one name, and a path of members is one name per dot or
+		// arrow, so the pairs are walked to the token after the last of them: that
+		// token says whether this writes a member.
+		return p.assignment_after(1)
 	}
 	if next.kind == .punct && next.text == '[' {
 		mut depth := 0
@@ -163,8 +152,11 @@ fn (p Parser) starts_assignment() bool {
 				} else if t.text == ']' {
 					depth--
 					if depth == 0 {
-						after := p.peek_at(ahead + 1)
-						return after.kind == .punct && after.text in assignment_operators
+						// What follows the element is either the operator or a
+						// member path that leads to one: `a[i] = v` and
+						// `a[i].m = v` are both writes to an element's worth of
+						// storage.
+						return p.assignment_after(ahead + 1)
 					}
 				}
 			}
@@ -172,6 +164,25 @@ fn (p Parser) starts_assignment() bool {
 		}
 	}
 	return false
+}
+
+// assignment_after says whether the tokens from `at` on are any number of
+// `.<name>` or `-><name>` pairs followed by an assignment operator. It is a
+// lookahead and not a reading: a member path is one name per step, and the
+// operator after the last step is what says the statement writes through it.
+fn (p Parser) assignment_after(at int) bool {
+	mut ahead := at
+	for {
+		head := p.peek_at(ahead)
+		if head.kind == .punct && (head.text == '.' || head.text == '->') {
+			if p.peek_at(ahead + 1).kind != .identifier {
+				return false
+			}
+			ahead += 2
+			continue
+		}
+		return head.kind == .punct && head.text in assignment_operators
+	}
 }
 
 // parse_assignment reads `name = expr`. C makes an assignment an expression;
@@ -192,11 +203,18 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 			return error('expected ]')
 		}
 		p.next()
-	} else if p.at_punct('.') {
-		field = p.parse_member_path(t.text, t, arrow)!
-	} else if p.at_punct('->') {
-		arrow = true
-		field = p.parse_member_path(t.text, t, true)!
+		// A member of an element of an array is the same object read further in:
+		// the index names which element, and the member is read from that
+		// element, so the field carries the index and the index is no longer a
+		// target of its own.
+		if p.at_punct('.') || p.at_punct('->') {
+			arrow = p.at_punct('->')
+			field = p.parse_member_path(t.text, t, arrow, index)!
+			index = ?ast.Expr(none)
+		}
+	} else if p.at_punct('.') || p.at_punct('->') {
+		arrow = p.at_punct('->')
+		field = p.parse_member_path(t.text, t, arrow, ?ast.Expr(none))!
 	}
 	op := p.next() // = or a compound spelling
 	if op.text == '=' {
@@ -597,6 +615,9 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			// something derived from it: `struct S x;` is the object, and
 			// `struct S *p;` is one word holding an address, which the back end
 			// sizes from the spelling.
+			// An array of aggregates carries the size of one element here, and
+			// the count it was declared with travels beside it: the frame reserves
+			// the product, and an index scales by the size of one element.
 			bytes:      p.aggregate_bytes(p.declared_type(spec.clause, d))
 			line:       d.name_at.line
 			col:        d.name_at.col

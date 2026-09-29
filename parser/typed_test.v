@@ -500,14 +500,15 @@ fn test_an_aggregate_at_the_top_level_carries_the_size_of_its_layout() {
 	assert result.unit.globals[0].count == 0
 }
 
-// An array of them is a different question: the stride between elements is the
-// layout's size and the count multiplies it, which is a shape this compiler does
-// not lay out, so it is refused by name rather than sized as if a struct were a
-// scalar.
-fn test_an_array_of_aggregates_at_the_top_level_is_refused_by_name() {
-	result := parsed('struct S { int a; };\nstruct S g[2];\nint main() { return 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('an array of aggregates')
+// An array of aggregates is a stride and a count: the stride is the layout's size
+// of one element, which the index scales by, and the count is what the declarator
+// wrote. Both travel with the declaration, so the image reserves the product and
+// an element is read at an offset a non-power-of-two stride reaches by a multiply.
+fn test_an_array_of_aggregates_carries_the_stride_and_the_count() {
+	result := checked('struct S { int a; char c; };\nstruct S g[3];\nint main() { return 0; }')
+	assert result.unit.globals.len == 1
+	assert result.unit.globals[0].bytes == 8
+	assert result.unit.globals[0].count == 3
 }
 
 // A member of a member is inside the same object: the path is one Field naming the

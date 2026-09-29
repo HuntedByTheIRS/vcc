@@ -732,7 +732,58 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 // byte is added to it. The address is left in the accumulator rather than stored,
 // because the reader loads through it and the writer stores it where the value will
 // need it.
-fn (mut e Emitter) address_of_member(name string, offset int, through_pointer bool, line int, col int) !void {
+fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, through_pointer bool, depth int, line int, col int) !void {
+	if element := index {
+		// One element of an array of objects: the address of the element is the
+		// address of the array plus the index scaled by the size of one element,
+		// and for an aggregate that size is the layout's, which is why the
+		// element's width travels in the slot. The member is read at that
+		// address plus its own offset into the element.
+		//
+		// The index is computed before the array's address is taken, so the index
+		// expression cannot overwrite the address on the way, which is the same
+		// order the element read uses. The array's address goes into a scratch
+		// register and not the frame pointer, because a stride the scaled address
+		// cannot write is a multiply followed by an add, and the add must not
+		// move the frame pointer out from under the rest of the function.
+		e.emit_expr_at(element, depth + 1)!
+		register := e.accumulator(line, col)!
+		base := e.scratch(line, col)!
+		mut stride := 0
+		if slot := e.lookup(name) {
+			if slot.count == 0 {
+				e.diagnostics << problem(line, col, 'unsupported: ${name} is read as an array, and it is not one')
+				return error('not an array')
+			}
+			stride = slot.width
+			frame := e.frame_pointer(line, col)!
+			e.append(e.target.address_of_slot(frame, slot.offset, base))
+		} else if object := e.global_of(name) {
+			if object.count == 0 {
+				e.diagnostics << problem(line, col, 'unsupported: ${name} is read as an array, and it is not one')
+				return error('not an array')
+			}
+			stride = object.width
+			e.reference(e.target.address_of(base, 0), .global_address, name, base.name)
+		} else {
+			e.diagnostics << problem(line, col, 'unsupported: ${name} is read as an array, and no declaration of that name is in scope')
+			return error('unknown name')
+		}
+		if stride == 1 || stride == 2 || stride == 4 || stride == 8 {
+			e.append(e.target.address_of_element(base, register, stride, 0, register)!)
+		} else {
+			// A stride the scaled address cannot write is a multiply and an add:
+			// an object of an aggregate type is rarely a power of two bytes, and
+			// the machine scales an index only by those.
+			e.append(e.target.imul_immediate(register, stride))
+			e.append(e.target.add_reg64(register, base))
+		}
+		if offset != 0 {
+			e.append(e.target.add_immediate(register, offset))
+		}
+		return
+	}
+
 	slot := e.lookup(name) or {
 		// A top-level object: it has no slot in the frame, so the address of the
 		// member is the address of the object in the image plus the byte the
@@ -773,7 +824,7 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr)
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, doubles and pointers only')
 		return error('unsupported member type')
 	}
-	e.address_of_member(member.name, member.offset, member.through_pointer, stmt.line, stmt.col)!
+	e.address_of_member(member.name, member.index, member.offset, member.through_pointer, 1, stmt.line, stmt.col)!
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	e.emit_expr_at(expr, 1)!
@@ -1604,7 +1655,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores ints, chars, doubles and pointers only')
 				return error('unsupported member type')
 			}
-			e.address_of_member(expr.name, expr.offset, expr.through_pointer, expr.line, expr.col)!
+			e.address_of_member(expr.name, expr.index, expr.offset, expr.through_pointer, depth, expr.line, expr.col)!
 			register := e.accumulator(expr.line, expr.col)!
 			if e.writes_a_double(expr.spelling) {
 				double_register := e.float_accumulator(expr.line, expr.col)!
@@ -2498,11 +2549,13 @@ fn (e Emitter) global_shape(name string) ?GlobalSlot {
 			if global.bytes > 0 {
 				// An object of an aggregate type: its storage is as many bytes
 				// as the layout says and it has no element width a load could
-				// use, which is why nothing may read the name as a value.
+				// use, which is why nothing may read the name as a value. An
+				// array of them keeps the count, because that is what says the
+				// name is an array and how far an index reaches.
 				return GlobalSlot{
 					offset: 0
 					width:  global.bytes
-					count:  0
+					count:  global.count
 				}
 			}
 			element := e.type_width(global.typ) or { return none }
@@ -2570,15 +2623,19 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 	// is the byte size the declaration asked the layout for, and it starts as
 	// zeros because there is nothing in the definition to write into it.
 	if object.bytes > 0 {
+		// One object of an aggregate type is the layout's size, and an array of
+		// them is that many per element: `width` is the size of one element,
+		// which is the stride an index scales by, and `count` is how many.
 		for e.program.globals_blob.len % e.target.word_size != 0 {
 			e.program.globals_blob << u8(0)
 		}
 		offset := e.program.globals_blob.len
-		e.program.globals_blob << []u8{len: object.bytes, init: u8(0)}
+		space := if object.count > 0 { object.count * object.bytes } else { object.bytes }
+		e.program.globals_blob << []u8{len: space, init: u8(0)}
 		slot := GlobalSlot{
 			offset: offset
 			width:  object.bytes
-			count:  0
+			count:  object.count
 		}
 		e.program.globals[name] = slot
 		return slot

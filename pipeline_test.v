@@ -533,6 +533,34 @@ fn test_a_top_level_aggregate_is_storage_in_the_image() {
 	os.rm(binary) or {}
 }
 
+// An element of an array of aggregates is a block of the layout's size, and the
+// stride between elements is that size, which the index scales by. A member of an
+// element is read at the element's address plus the member's own offset, so this
+// runs the non-power-of-two stride too: the struct has a char member, which makes
+// it eight bytes, and the machine has to multiply the index rather than scale it.
+fn test_an_element_of_an_array_of_aggregates_is_read_at_the_stride_times_the_index() {
+	source := scratch('arrayofstructs.c')
+	binary := scratch('arrayofstructs')
+	program := 'struct S { int a; int b; char c; };\nint main(void) { struct S s[3]; s[1].a = 9; s[2].b = 4; s[0].c = 2; return s[1].a * 100 + s[2].b * 10 + s[0].c; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 942 % 256
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The same stride applies to an array of aggregates at the top level, whose
+// storage is in the image rather than the frame: an element is addressed from the
+// object's address, and the member is at that element's offset.
+fn test_an_array_of_aggregates_at_the_top_level_is_storage_in_the_image() {
+	source := scratch('globalarrayofstructs.c')
+	binary := scratch('globalarrayofstructs')
+	program := 'struct S { int a; int b; };\nstruct S g[3];\nint main(void) { g[1].a = 5; g[2].b = 7; return g[1].a * 10 + g[2].b; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 57
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // A member of a member is one object read further in, so the offsets add up: the
 // member `x` of the member `a` of `b` is at the byte `a` starts at plus the byte
 // `x` starts at inside it. The answer is 34 = 3 * 10 + 4, and a layout that put
