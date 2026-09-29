@@ -132,11 +132,22 @@ fn (p Parser) starts_assignment() bool {
 	// `x.a = v` starts with a name, a dot and a member. A member is one name, so
 	// three tokens say whether this is an assignment to a member: the operator
 	// after the member is the one that writes.
-	if next.kind == .punct && next.text == '.' {
-		member := p.peek_at(2)
-		after := p.peek_at(3)
-		return member.kind == .identifier && after.kind == .punct
-			&& after.text in assignment_operators
+	if next.kind == .punct && (next.text == '.' || next.text == '->') {
+		// One member is one name, and a path of members is one name per dot, so
+		// the `.<name>` pairs are walked to the token after the last of them:
+		// that token says whether this writes a member.
+		mut at := 2
+		for {
+			if p.peek_at(at).kind != .identifier {
+				return false
+			}
+			after := p.peek_at(at + 1)
+			if after.kind == .punct && after.text == '.' {
+				at += 2
+				continue
+			}
+			return after.kind == .punct && after.text in assignment_operators
+		}
 	}
 	if next.kind == .punct && next.text == '[' {
 		mut depth := 0
@@ -172,6 +183,7 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 	t := p.next() // the name
 	mut index := ?ast.Expr(none)
 	mut field := ?ast.Field(none)
+	mut arrow := false
 	if p.at_punct('[') {
 		p.next()
 		index = p.parse_expression() or { return error('bad subscript') }
@@ -181,7 +193,10 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 		}
 		p.next()
 	} else if p.at_punct('.') {
-		field = p.parse_member(t.text, t)!
+		field = p.parse_member_path(t.text, t, arrow)!
+	} else if p.at_punct('->') {
+		arrow = true
+		field = p.parse_member_path(t.text, t, true)!
 	}
 	op := p.next() // = or a compound spelling
 	if op.text == '=' {

@@ -519,23 +519,31 @@ fn test_a_member_of_a_union_is_at_the_beginning_of_the_object() {
 	os.rm(binary) or {}
 }
 
-// The shapes this slice does not implement are refused where they are written:
-// a member through a pointer, and a member of a member. The refusal goes through
-// the lexer and the parser because that is the stage that refuses them, and it
-// names the construct rather than the punctuation that stopped the reader.
-fn test_a_member_shape_this_slice_does_not_have_is_refused_by_name() {
-	arrow := 'struct S { int a; };\nint main(void) { struct S s; struct S *p = &s; return p->a; }\n'
-	lexed := tokenize.lex(arrow)
-	assert lexed.diagnostics.len == 0
-	parsed := parser.parse(lexed.tokens)
-	assert parsed.diagnostics.len == 1
-	assert parsed.diagnostics[0].msg.contains('-> is not implemented')
-	nested := 'struct I { int a; };\nstruct O { struct I in; };\nint main(void) { struct O o; return o.in.a; }\n'
-	lexed_nested := tokenize.lex(nested)
-	assert lexed_nested.diagnostics.len == 0
-	parsed_nested := parser.parse(lexed_nested.tokens)
-	assert parsed_nested.diagnostics.len == 1
-	assert parsed_nested.diagnostics[0].msg.contains('a member of a member is not implemented')
+// A member of a member is one object read further in, so the offsets add up: the
+// member `x` of the member `a` of `b` is at the byte `a` starts at plus the byte
+// `x` starts at inside it. The answer is 34 = 3 * 10 + 4, and a layout that put
+// either member anywhere else would give a different one.
+fn test_a_member_of_a_member_is_read_and_written_at_the_offsets_added_up() {
+	source := scratch('memberpath.c')
+	binary := scratch('memberpath')
+	program := 'struct A { int x; };\nstruct B { int y; struct A a; };\nint main(void) { struct B b; b.y = 3; b.a.x = 4; return b.y * 10 + b.a.x; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 34
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// An arrow reads the member from the object the pointer names, so the address is
+// the pointer's value and not the frame's: the pointer is set to the address of a
+// local, and the member written through it is read from the local afterwards.
+fn test_a_member_through_a_pointer_is_read_and_written_from_the_object_it_names() {
+	source := scratch('memberpointer.c')
+	binary := scratch('memberpointer')
+	program := 'struct S { int a; int b; };\nint main(void) { struct S s; struct S *p; p = &s; p->a = 5; p->b = 6; return p->a * 10 + p->b; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 56
+	os.rm(source) or {}
+	os.rm(binary) or {}
 }
 
 // A typedef is a name for a type and not a type of its own: the declaration is

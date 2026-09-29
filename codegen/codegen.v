@@ -725,22 +725,40 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 // in a scratch slot while the value is computed, and the value is written through
 // it: the shape an element of an array is written with, because a member is an
 // element of the object at a fixed offset rather than at a computed one.
-fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr) !void {
-	slot := e.lookup(member.name) or {
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${member.name} is written as an object with a member, and no local of that name is in scope')
+// address_of_member leaves the address of a member in the accumulator. An object
+// named by a name is at the frame's address plus the byte the layout gave the
+// member. An object named by a pointer, which is what `->` writes, is at the
+// address the pointer holds plus that byte, so the pointer's value is read and the
+// byte is added to it. The address is left in the accumulator rather than stored,
+// because the reader loads through it and the writer stores it where the value will
+// need it.
+fn (mut e Emitter) address_of_member(name string, offset int, through_pointer bool, line int, col int) !void {
+	slot := e.lookup(name) or {
+		e.diagnostics << problem(line, col, 'unsupported: ${name} is read as an object with a member, and no declaration of that name is in scope')
 		return error('unknown object')
 	}
-	if slot.bytes == 0 {
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${member.name} is not an object whose type has members')
+	if !through_pointer && slot.bytes == 0 {
+		e.diagnostics << problem(line, col, 'unsupported: ${name} is not an object whose type has members')
 		return error('not an aggregate')
 	}
+	register := e.accumulator(line, col)!
+	if through_pointer {
+		e.load_argument(slot, register, e.target.word_size, line, col)!
+		if offset != 0 {
+			e.append(e.target.add_immediate(register, offset))
+		}
+		return
+	}
+	base := e.frame_pointer(line, col)!
+	e.append(e.target.address_of_slot(base, slot.offset + offset, register))
+}
+
+fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr) !void {
 	width := e.type_width(member.spelling) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, doubles and pointers only')
 		return error('unsupported member type')
 	}
-	base := e.frame_pointer(stmt.line, stmt.col)!
-	register := e.accumulator(stmt.line, stmt.col)!
-	e.append(e.target.address_of_slot(base, slot.offset + member.offset, register))
+	e.address_of_member(member.name, member.offset, member.through_pointer, stmt.line, stmt.col)!
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	e.emit_expr_at(expr, 1)!
@@ -1567,21 +1585,12 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			// read at the width of the member's type. A double member is read
 			// with the instruction that moves one rather than with the integer
 			// load of the same width.
-			slot := e.lookup(expr.name) or {
-				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is read as an object with a member, and no local of that name is in scope')
-				return error('unknown object')
-			}
-			if slot.bytes == 0 {
-				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not an object whose type has members')
-				return error('not an aggregate')
-			}
 			width := e.type_width(expr.spelling) or {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores ints, chars, doubles and pointers only')
 				return error('unsupported member type')
 			}
-			base := e.frame_pointer(expr.line, expr.col)!
+			e.address_of_member(expr.name, expr.offset, expr.through_pointer, expr.line, expr.col)!
 			register := e.accumulator(expr.line, expr.col)!
-			e.append(e.target.address_of_slot(base, slot.offset + expr.offset, register))
 			if e.writes_a_double(expr.spelling) {
 				double_register := e.float_accumulator(expr.line, expr.col)!
 				e.append(e.target.load_double_indirect(register, double_register)!)

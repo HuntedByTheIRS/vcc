@@ -425,31 +425,61 @@ fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) 
 	return types.Type{}
 }
 
-// parse_member reads `.name` after the name of an object and answers what the
-// member is: how many bytes into the object it starts, what type the value at
-// that offset has, and what to call both of those in a diagnostic.
+// parse_member_path reads `.name` and the dots that follow it as one object read
+// further in. The object's name is looked up once, and each dot after the first is
+// read from the type the one before it answered, so the offsets add up as the path
+// goes in and `b.a.x` comes back as one Field naming `b` at the byte `x` sits at.
+// It is what both a value read and an assignment to a member go through, because
+// the two ask the same question of the same path.
+fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through_pointer bool) !ast.Field {
+	mut aggregate := p.scopes.lookup(base) or {
+		p.error_at(base_at, 'unsupported: ${base} is read as an object with a member, and no declaration of that name is in scope')
+		return error('unknown object')
+	}.typ
+	if through_pointer {
+		// `p->a` is the member of the object `p` points at, so the type the first
+		// member is looked up in is the one the pointer's base names. A name that
+		// is not a pointer has no object to be read through, and saying so here
+		// keeps the pointer's value from being read as an address that means
+		// something else.
+		pointed_at := aggregate.pointee() or {
+			p.error_at(base_at, 'unsupported: ${base} is read through ->, and it is declared ${aggregate.describe()} rather than a pointer')
+			return error('not a pointer')
+		}
+		aggregate = pointed_at
+	}
+	mut member := p.parse_member(base, aggregate, 0, '', through_pointer)!
+	for p.at_punct('.') {
+		member = p.parse_member(base, member.typ, member.offset, member.member, false)!
+	}
+	return member
+}
+
+// parse_member reads one `.name` of an object and answers what the member is: how
+// many bytes into the object it starts, what type the value at that offset has,
+// and what to call both of those in a diagnostic.
 //
 // None of those is a fact about the source. The offset is where the model's
-// layout of the object's type puts the member, and the type is the one the tag
-// was declared with, so this is one of the places a declaration's type is asked
-// rather than worked out from the words of the declaration. A member of a member,
-// of a call's result, or of a pointer through `->` is a general lvalue the tree
-// does not have, and each of those is refused where it is written rather than
-// read as something else.
-fn (mut p Parser) parse_member(base string, base_at tokenize.Token) !ast.Field {
+// layout of the object's type puts the member, and the type is the one the tag was
+// declared with, so this is one of the places a declaration's type is asked rather
+// than worked out from the words of the declaration.
+//
+// `aggregate` is the type of the object this `.` is read from, which for the `.x`
+// of `b.a.x` is the type of `b.a` and not the type of `b`; `into` and `path` carry
+// what the members before this one already answered, so the offsets add up and the
+// diagnostic names the whole path. A member of a member is one object read further
+// in, because a member of an object is inside the object, and a name written at the
+// end of a path is one Field and not a chain of reads.
+fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path string, through_pointer bool) !ast.Field {
 	dot := p.next() // .
 	if p.peek().kind != .identifier {
 		p.error_at(p.peek(), 'unsupported: expected a member name after ., found ${describe(p.peek())}')
 		return error('member name')
 	}
 	name := p.next()
-	symbol := p.scopes.lookup(base) or {
-		p.error_at(base_at, 'unsupported: ${base} is read as an object with a member, and no declaration of that name is in scope')
-		return error('unknown object')
-	}
-	aggregate := symbol.typ
+	written := if path == '' { name.text } else { '${path}.${name.text}' }
 	if aggregate.kind !in [types.Kind.struct_, .union_] {
-		p.error_at(dot, 'unsupported: ${base} is declared ${aggregate.describe()}, and a member is read from an object whose type has members')
+		p.error_at(dot, 'unsupported: ${base}${if path == '' { '' } else { '.' + path }} is declared ${aggregate.describe()}, and a member is read from an object whose type has members')
 		return error('not an aggregate')
 	}
 	mut index := -1
@@ -469,13 +499,14 @@ fn (mut p Parser) parse_member(base string, base_at tokenize.Token) !ast.Field {
 	}
 	member := aggregate.members[index]
 	return ast.Field{
-		name:     base
-		member:   name.text
-		offset:   layout.offsets[index]
-		spelling: member.typ.describe()
-		typ:      member.typ
-		line:     dot.line
-		col:      dot.col
+		name:            base
+		member:          written
+		offset:          into + layout.offsets[index]
+		spelling:        member.typ.describe()
+		typ:             member.typ
+		through_pointer: through_pointer
+		line:            dot.line
+		col:             dot.col
 	}
 }
 
@@ -662,21 +693,8 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 				col:   t.col
 			})
 		}
-		if p.at_punct('.') {
-			// One member of an object, read where a value is expected. A second
-			// dot is a member of a member, which is a general lvalue the tree
-			// does not have, and it is named here rather than left for the
-			// statement reader to stop at the punctuation.
-			member := p.parse_member(t.text, t)!
-			if p.at_punct('.') {
-				p.error_at(p.peek(), 'unsupported: a member of a member is not implemented; ${t.text}.${member.member} is a value of ${member.spelling}, and a member is read from an object of an aggregate type')
-				return error('member of a member')
-			}
-			return ast.Expr(member)
-		}
-		if p.at_punct('->') {
-			p.error_at(p.peek(), 'unsupported: -> is not implemented; a member through a pointer is read from the object the pointer names')
-			return error('arrow')
+		if p.at_punct('.') || p.at_punct('->') {
+			return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'))!)
 		}
 		typ := p.resolve(t.text)
 		return ast.Expr(ast.Ident{

@@ -496,20 +496,50 @@ fn test_an_aggregate_defined_at_the_top_level_is_refused_where_it_is_written() {
 	assert result.diagnostics[0].line == 2
 }
 
-// A member of a member is a general lvalue the tree does not have, and the
-// refusal names the shape rather than stopping at the punctuation after it.
-fn test_a_member_of_a_member_is_refused_by_name() {
-	result := parsed('struct I { int a; };\nstruct O { struct I in; };\nint main() { struct O o; return o.in.a; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('a member of a member is not implemented')
+// A member of a member is inside the same object: the path is one Field naming the
+// object, with the offsets added up on the way in, because a member of a member is
+// a byte further into the object and not a second object. `o` is four bytes of
+// struct O (`in` starts at zero and holds one int), and `in.a` sits at zero of it.
+fn test_a_member_of_a_member_is_one_field_at_the_sum_of_the_offsets() {
+	decl := first('struct I { int a; char c; };\nstruct O { int n; struct I in; };\nint main() { struct O o; return o.in.c; }')
+	body := decl.body
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.name == 'o'
+	// The path is spelled the way it was written, so a diagnostic about the
+	// member names `in.c` and not just `c`.
+	assert member.member == 'in.c'
+	assert member.offset == 8
+	assert member.spelling == 'char'
+	assert member.typ.same(types.char_type())
 }
 
-// Reading a member through a pointer is the arrow form, which is a different
-// shape and is named as the one it is.
-fn test_a_member_read_through_a_pointer_is_refused_by_name() {
-	result := parsed('struct S { int a; };\nint main() { struct S s; struct S *p = &s; return p->a; }')
+// Reading a member through a pointer is the arrow form: the object is the one the
+// pointer names, so the Field says the address comes from the pointer's value and
+// the offset is the member's place in the pointed-at type.
+fn test_a_member_read_through_a_pointer_is_a_field_that_says_so() {
+	decl := first('struct S { int a; int b; };\nint main() { struct S s; struct S *p = &s; return p->b; }')
+	body := decl.body
+	returned := body[2].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.name == 'p'
+	assert member.member == 'b'
+	assert member.offset == 4
+	assert member.through_pointer
+}
+
+// An arrow on a name that holds no pointer has no object to be read through, and
+// the refusal names the name and the type it does hold.
+fn test_an_arrow_on_a_name_that_is_not_a_pointer_is_refused() {
+	result := parsed('struct S { int a; };\nint main() { struct S s; return s->a; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('-> is not implemented')
+	assert result.diagnostics[0].msg.contains('is read through ->')
 }
 
 // A name whose type has no members has no member, and a member a tag does not
