@@ -87,6 +87,47 @@ mut:
 	// from the list — the file the compiler was handed, or one found beside its
 	// includer — is -1.
 	found_index int
+	// line_delta and report_path are what `#line` changes: the number that is
+	// added to the line of every token that follows it, and the name the text
+	// that follows it is reported under. A program that generates C code uses
+	// them to make a diagnostic point at the file it generated the code from
+	// rather than at the file the compiler is reading.
+	line_delta  int
+	report_path string
+}
+
+// mapped is a token of the file being read as the file says to read it. A
+// `#line` line renumbers what follows, and everything downstream of the reader
+// — a diagnostic, __LINE__, __FILE__ — reads the file through this, so there is
+// one answer to where a token is from and not two.
+fn (p Processor) mapped(tok tokenize.Token) tokenize.Token {
+	if p.frames.len == 0 {
+		return tok
+	}
+	frame := p.frames.last()
+	if frame.line_delta == 0 && frame.report_path == '' {
+		return tok
+	}
+	return tokenize.Token{
+		kind: tok.kind
+		text: tok.text
+		line: tok.line + frame.line_delta
+		col:  tok.col
+		file: if frame.report_path != '' { frame.report_path } else { tok.file }
+	}
+}
+
+// file_name is the file a token is to be reported under: the file it was
+// written in, unless a `#line` renamed it.
+fn (p Processor) file_name(tok tokenize.Token) string {
+	if tok.file != '' {
+		return tok.file
+	}
+	if p.frames.len > 0 {
+		frame := p.frames.last()
+		return if frame.report_path != '' { frame.report_path } else { frame.path }
+	}
+	return ''
 }
 
 // Conditional is one #if being read. A branch that is not taken still has to be
@@ -120,6 +161,9 @@ mut:
 	// main_path is the file the compiler was handed, which is what
 	// __BASE_FILE__ names however deep an include is being read.
 	main_path string
+	// counter is what __COUNTER__ has counted so far, which is nothing until
+	// something asks.
+	counter int
 	// expanding is the stack of macro names being expanded right now. A name
 	// already on it is left alone, which is what keeps `#define A B` beside
 	// `#define B A` from expanding forever.
@@ -166,9 +210,41 @@ fn (mut p Processor) apply_command_line_defines() {
 	}
 }
 
-// include is one #include line. It works out which file the line names, finds
-// it, and opens it — nothing is written for the line itself, because an include
-// is an insertion: the file's tokens take the line's place in the stream.
+// line_directive renumbers what follows it. The number is the number of the line
+// after the directive, and a name, when there is one, is what the text after it
+// is reported as. It is for a program that generates C code: the code it writes
+// can say where it came from, so a diagnostic points at the file it was
+// generated from rather than at the file that happens to be compiled.
+fn (mut p Processor) line_directive(tok tokenize.Token, args string) {
+	tokens := p.expand_all(tokenize.lex_fragment(args))
+	if tokens.len == 0 {
+		p.problem(tok, '${hash}line wants a line number')
+		return
+	}
+	number := integer_literal_value(tokens[0].text) or {
+		p.problem(tok, '${hash}line wants a number, not ${tokens[0].text}')
+		return
+	}
+	if number < 1 {
+		p.problem(tok, '${hash}line numbers start at 1')
+		return
+	}
+	if tokens.len > 1 && tokens[1].kind != .string {
+		p.problem(tok, '${hash}line wants a "file" after the number, not ${tokens[1].text}')
+		return
+	}
+	last := p.frames.len - 1
+	// The directive's own line is the line this file is being read under right
+	// now, which is not necessarily the line it was written on: a file can be
+	// renumbered twice, and the second one counts from where the first left it.
+	physical := tok.line - p.frames[last].line_delta
+	p.frames[last].line_delta = int(number) - (physical + 1)
+	if tokens.len > 1 {
+		p.frames[last].report_path = unquoted_name(tokens[1].text)
+	}
+}
+
+// include reads the file a line names and stacks it. An include is an insertion:
 //
 // `after` is the other spelling, the one that ends in _next: it is for a header
 // installed in more than one place, where one copy wants the one that follows
@@ -361,7 +437,7 @@ fn (mut p Processor) run() {
 			if t.kind == .directive || t.kind == .eof {
 				break
 			}
-			segment << t
+			segment << p.mapped(t)
 			p.frames[i].pos++
 		}
 		if segment.len > 0 && p.reading() {
@@ -370,7 +446,7 @@ fn (mut p Processor) run() {
 			}
 		}
 		if p.frames[i].pos < p.frames[i].tokens.len {
-			tok := p.frames[i].tokens[p.frames[i].pos]
+			tok := p.mapped(p.frames[i].tokens[p.frames[i].pos])
 			p.frames[i].pos++
 			if tok.kind == .eof {
 				p.pop(i)
@@ -598,7 +674,7 @@ fn (mut p Processor) text_directive(tok tokenize.Token, name string, args string
 		'warning' { p.problem(tok, '#warning ${args.trim_space()}') }
 		'include' { p.include(tok, args, false) }
 		'include_next' { p.include(tok, args, true) }
-		'line' { p.problem(tok, 'unsupported: #line is not implemented yet') }
+		'line' { p.line_directive(tok, args) }
 		'pragma' {
 			// `#pragma once` is a file saying it may be read at most once, which
 			// is one of the two ways a header does that; the other is the
@@ -689,8 +765,7 @@ fn (mut p Processor) emit(tok tokenize.Token) {
 }
 
 fn (mut p Processor) problem(tok tokenize.Token, msg string) {
-	where := if p.frames.len > 0 { p.frames.last().path } else { tok.file }
-	p.problem_at(where, tok.line, tok.col, msg)
+	p.problem_at(p.file_name(tok), tok.line, tok.col, msg)
 }
 
 fn (mut p Processor) problem_at(file string, line int, col int, msg string) {

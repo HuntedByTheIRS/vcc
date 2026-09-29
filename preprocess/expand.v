@@ -102,6 +102,17 @@ fn (mut p Processor) expand_all(tokens []tokenize.Token) []tokenize.Token {
 			i++
 			continue
 		}
+		if tok.text == '_Pragma' {
+			// `_Pragma("...")` is how a macro says a pragma, which is why it is
+			// an operator and not a directive: the tokens are already past the
+			// line start by the time they exist. A pragma this compiler has
+			// nothing to say about is nothing, so the shape is read and the
+			// text is left out.
+			if after := pragma_operator(tokens, i) {
+				i = after
+				continue
+			}
+		}
 		if tok.text !in p.macros {
 			// __LINE__ and __FILE__ are the macros whose value is where they
 			// were written, and a program that defined one of them itself has
@@ -396,4 +407,19 @@ fn argument_word(count int) string {
 
 fn were_word(count int) string {
 	return if count == 1 { 'was' } else { 'were' }
+}
+
+// pragma_operator reads `_Pragma ( "text" )` starting at the name and returns
+// where the tokens after it start, or nothing when what follows is not that
+// shape — in which case the name is a name and the caller writes it out. The
+// operand has to be one string literal and nothing else, which is what makes the
+// operator impossible to get wrong in the way a pragma spelled across lines is.
+fn pragma_operator(tokens []tokenize.Token, at int) ?int {
+	if at + 3 >= tokens.len {
+		return none
+	}
+	if tokens[at + 1].text != '(' || tokens[at + 2].kind != .string || tokens[at + 3].text != ')' {
+		return none
+	}
+	return at + 4
 }

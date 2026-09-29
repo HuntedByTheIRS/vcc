@@ -1,6 +1,7 @@
 module preprocess
 
 import os
+import time
 
 // The tests drive the preprocessor the way main.v does and read the stream it
 // produces, because that stream is the product: everything downstream is
@@ -526,4 +527,89 @@ fn test_the_line_and_the_file_are_where_they_were_written() {
 fn test_a_header_can_ask_about_a_construct_and_be_told_no() {
 	assert processed('#if __has_attribute(__nothrow__)\nint x;\n#endif\n') == []
 	assert processed('#ifdef __has_attribute\nint x;\n#endif\n') == ['int', 'x', ';']
+}
+
+fn test_line_renumbers_the_lines_that_follow_it() {
+	// The number is the number of the line after the directive, so __LINE__ on
+	// the next line is that number and a blank line after it is one more.
+	assert processed('${hash}line 100\n__LINE__\n') == ['100']
+	assert processed('${hash}line 100\n\n__LINE__\n') == ['101']
+	// Two of them: the second counts from where the first left the file.
+	assert processed('${hash}line 100\n\n${hash}line 5\n__LINE__\n') == ['5']
+}
+
+fn test_line_renames_the_file_and_the_line_a_diagnostic_points_at() {
+	result := preprocess('${hash}line 42 "generated.c"\n${hash}error here\n', 'test.c', Options{})
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].file == 'generated.c'
+	assert result.diagnostics[0].line == 42
+	assert result.diagnostics[0].msg.contains('here')
+}
+
+fn test_line_reports_the_name_it_was_given() {
+	result := preprocess('${hash}line 7 "generated.c"\n__FILE__\n', 'test.c', Options{})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['"generated.c"']
+}
+
+fn test_line_without_a_number_or_a_name_is_diagnosed() {
+	assert diagnostics_of('${hash}line\n').len == 1
+	assert diagnostics_of('${hash}line 0\n').len == 1
+	assert diagnostics_of('${hash}line 3 nope.c\n').len == 1
+}
+
+fn test_counter_counts_the_uses() {
+	// It is for a name that has to be different each time a header is read, so
+	// the first use is 0 and every use after it is one more.
+	assert processed('__COUNTER__ __COUNTER__ __COUNTER__') == ['0', '1', '2']
+}
+
+fn test_include_level_is_how_deep_the_read_is() {
+	dir := fixture_directory()
+	os.write_file(os.join_path(dir, 'level.h'), '__INCLUDE_LEVEL__\n') or {}
+	source := '__INCLUDE_LEVEL__\n' + include_line('<level.h>')
+	result := preprocess(source, os.join_path(dir, 'main.c'), Options{
+		standard_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['0', '1']
+}
+
+fn test_the_clock_macros_are_written_the_way_c_writes_them() {
+	// The clock cannot be held still in a test, so what is held onto is the
+	// shape: three letters, a two-character day, four digits, and a time.
+	date := processed('__DATE__')[0]
+	stamp := processed('__TIMESTAMP__')[0]
+	clock := processed('__TIME__')[0]
+	assert date.len == 13
+	assert date[1..4] in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct',
+		'Nov', 'Dec']
+	assert clock.len == 10
+	assert clock[3] == `:` && clock[6] == `:`
+	assert stamp.len == 26
+}
+
+fn test_the_day_in_a_date_is_padded_with_a_space_the_way_c_pads_it() {
+	// C writes the day as two characters whether or not it needs both, and pads
+	// with a space rather than a zero. The clock is not held still here, but the
+	// one-digit case is: this timestamp is a single-digit day in every time zone
+	// there is, so what the test is about is the padding and not the date.
+	//
+	// The shape is "Mmm dd yyyy", so the day's two characters are at 5 and 6:
+	// a space and then the digit, where a formatter would have written 0 and 3.
+	midday := date_text(time.unix(1699012800))
+	assert midday.len == 13
+	assert midday[5] == ` `
+	assert midday[6] >= `1` && midday[6] <= `9`
+}
+
+fn test_a_pragma_written_by_a_macro_is_read_and_left_out() {
+	// `_Pragma("...")` is a pragma a macro can write, which is why it has to be
+	// an operator: by the time the tokens exist the line has been left behind.
+	// This compiler has nothing to say about the pragmas it does not know, so
+	// the operator is consumed and nothing is written for it — which is what
+	// keeps a declaration a declaration.
+	assert processed('#define P _Pragma("GCC diagnostic push")\nP\nint x;\n') == ['int', 'x', ';']
+	// Anything else after the name is not the operator, and the name is a name.
+	assert processed('int _Pragma;\n') == ['int', '_Pragma', ';']
 }

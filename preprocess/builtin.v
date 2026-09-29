@@ -1,6 +1,8 @@
 module preprocess
 
 import backend
+import os
+import time
 import tokenize
 
 // A C compiler defines a set of macros before it reads a single line of the
@@ -91,49 +93,100 @@ fn (mut p Processor) define_builtins() {
 	}
 }
 
-// dynamic_builtin answers the macros whose value depends on where they are
-// used rather than on what the compiler knows: __LINE__ is the line it was
-// written on, and __FILE__ is the file it was written in. A name that a
-// program defined itself is not one of these — the macro table is asked first
-// — because a program that defines them is on its own either way.
-fn (p Processor) dynamic_builtin(tok tokenize.Token) ?[]tokenize.Token {
-	where := if p.frames.len > 0 { p.frames.last().path } else { tok.file }
+// dynamic_builtin answers the macros whose value depends on where they are used
+// rather than on what the compiler knows: __LINE__ is the line it was written
+// on, __FILE__ is the file it was written in, and __COUNTER__ is how many times
+// it has been asked. A name that a program defined itself is not one of these —
+// the macro table is asked first — because a program that defines them is on its
+// own either way.
+fn (mut p Processor) dynamic_builtin(tok tokenize.Token) ?[]tokenize.Token {
 	match tok.text {
 		'__LINE__' {
-			return [
-				tokenize.Token{
-					kind: .number
-					text: '${tok.line}'
-					line: tok.line
-					col:  tok.col
-					file: tok.file
-				},
-			]
+			return [number_token('${tok.line}', tok)]
 		}
 		'__FILE__' {
-			return [
-				tokenize.Token{
-					kind: .string
-					text: '"${where}"'
-					line: tok.line
-					col:  tok.col
-					file: tok.file
-				},
-			]
+			return [string_token('"${p.file_name(tok)}"', tok)]
 		}
 		'__BASE_FILE__' {
-			return [
-				tokenize.Token{
-					kind: .string
-					text: '"${p.main_path}"'
-					line: tok.line
-					col:  tok.col
-					file: tok.file
-				},
-			]
+			return [string_token('"${p.main_path}"', tok)]
+		}
+		'__COUNTER__' {
+			// The first use is 0 and every use after it is one more. That is
+			// what makes it a way to build a name that is different each time
+			// the same header is read, which is the whole of what it is for.
+			value := p.counter
+			p.counter++
+			return [number_token('${value}', tok)]
+		}
+		'__INCLUDE_LEVEL__' {
+			// How deep in the includes this use is: 0 in the file the compiler
+			// was handed, 1 in a file it includes, and so on.
+			return [number_token('${p.frames.len - 1}', tok)]
+		}
+		'__DATE__' {
+			return [string_token(date_text(time.now()), tok)]
+		}
+		'__TIME__' {
+			return [string_token(time_text(time.now()), tok)]
+		}
+		'__TIMESTAMP__' {
+			return [string_token(timestamp_text(written_at(p.file_name(tok))), tok)]
 		}
 		else {
 			return none
 		}
 	}
+}
+
+// number_token and string_token are the two shapes a macro like this can have:
+// they are written where the use was written, so a diagnostic about one of them
+// points at the line that asked for it.
+fn number_token(text string, tok tokenize.Token) tokenize.Token {
+	return tokenize.Token{
+		kind: .number
+		text: text
+		line: tok.line
+		col:  tok.col
+		file: tok.file
+	}
+}
+
+fn string_token(text string, tok tokenize.Token) tokenize.Token {
+	return tokenize.Token{
+		kind: .string
+		text: text
+		line: tok.line
+		col:  tok.col
+		file: tok.file
+	}
+}
+
+// The three macros that are about the clock are written the way C writes them,
+// which is the only reason these are functions and not a line each: a program
+// that parses `__DATE__` is parsing the shape, and the shape is fixed.
+//
+// C pads the day to two characters with a space and not with a zero, so the
+// zero a formatter would write has to come back out.
+fn date_text(t time.Time) string {
+	return '"${t.custom_format('MMM DD YYYY').replace(' 0', '  ')}"'
+}
+
+fn time_text(t time.Time) string {
+	return '"${t.custom_format('HH:mm:ss')}"'
+}
+
+fn timestamp_text(t time.Time) string {
+	return '"${t.custom_format('ddd MMM DD HH:mm:ss YYYY').replace(' 0', '  ')}"'
+}
+
+// written_at is when the file being read was last written — which is what
+// __TIMESTAMP__ is for, telling one build's output from another's. A file that
+// cannot be looked up has no time of its own, and the clock is the only other
+// answer there is.
+fn written_at(path string) time.Time {
+	stamp := os.file_last_mod_unix(path)
+	if stamp <= 0 {
+		return time.now()
+	}
+	return time.unix(stamp)
 }
