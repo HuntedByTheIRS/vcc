@@ -157,6 +157,34 @@ pub fn (p Policy) severity(class Class) Severity {
 	return out
 }
 
+// without_promotion is the policy a run that only asks the preprocessor a
+// question is reported under: the same flags, the same order, the same
+// silenced classes, with every promotion to an error taken back down to a
+// warning. Such a run writes what it was asked for — the rule -M asked for, the
+// token stream -E asked for, the macros -dM asked for — and has no compile for
+// an error to stop, so a message a flag asked to be told about is still worth
+// printing and nothing about the read is worth losing over it.
+//
+// It is measured from gcc rather than chosen: gcc's front end reports nothing
+// at all in that run, `gcc -std=c99 -pedantic-errors -M` over a file its own
+// `-fsyntax-only` refuses exits 0 and writes the rule, and `-E` writes the
+// preprocessed text with empty stderr. vcc keeps the message and takes the
+// verdict back, because a diagnostic the command line asked for should not be
+// dropped for a run whose output no verdict could change.
+pub fn (p Policy) without_promotion() Policy {
+	mut mentions := []Mention{cap: p.mentions.len}
+	for mention in p.mentions {
+		mentions << Mention{
+			class:    mention.class
+			severity: if mention.severity == .error { .warning } else { mention.severity }
+		}
+	}
+	return Policy{
+		suppress: p.suppress
+		mentions: mentions
+	}
+}
+
 // render writes one diagnostic the way this compiler writes them:
 //
 //	file.c:12:5: warning: a variable read before it was written

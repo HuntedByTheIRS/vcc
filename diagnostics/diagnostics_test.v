@@ -86,3 +86,35 @@ fn test_a_flag_about_something_else_is_left_to_the_command_line() {
 	assert policy.mentions.len == 0
 	assert !policy.suppress
 }
+
+fn test_a_run_that_only_reads_is_not_stopped_by_a_promotion() {
+	mut promoted := Policy{}
+	assert promoted.accept('-pedantic-errors')
+	assert promoted.severity(.pedantic) == .error
+	reading := promoted.without_promotion()
+	assert reading.severity(.pedantic) == .warning
+	// Everything else is what it was: the class the compiler reports on its own
+	// account is a warning either way, and a class nobody asked about stays
+	// silent.
+	assert reading.severity(.cpp) == .warning
+	mut plain := Policy{}
+	assert plain.without_promotion().severity(.pedantic) == .silent
+	// A diagnostic the command line silenced stays silenced, and -w keeps its
+	// hold whatever the order was.
+	mut silenced := Policy{}
+	assert silenced.accept('-pedantic-errors')
+	assert silenced.accept('-Wno-pedantic')
+	quiet := silenced.without_promotion()
+	assert quiet.severity(.pedantic) == .silent
+	mut suppressed := Policy{}
+	assert suppressed.accept('-w')
+	assert suppressed.accept('-pedantic-errors')
+	held := suppressed.without_promotion()
+	assert held.severity(.pedantic) == .silent
+	assert held.severity(.cpp) == .silent
+	// -Werror=pedantic is the same promotion under its other name.
+	mut named := Policy{}
+	assert named.accept('-Werror=pedantic')
+	assert named.severity(.pedantic) == .error
+	assert named.without_promotion().severity(.pedantic) == .warning
+}
