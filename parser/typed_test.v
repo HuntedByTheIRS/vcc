@@ -244,6 +244,47 @@ fn test_the_arguments_of_a_call_are_read_against_its_declaration() {
 	assert result.diagnostics[0].col == 33
 }
 
+// The constraint on assignment, 6.5.16.1, is asked wherever an assignment is
+// written, which is three places and not one: an argument, which 6.5.2.2 says
+// converts as if by assignment, an assignment statement, and the initializer of a
+// declaration. Measured, gcc 16.2.1 under `-std=c99` refuses both pairs below,
+// where this compiler accepted them: `void f(int *p, char *q) { q = p; }` is
+// `assignment to 'char *' from incompatible pointer type 'int *'`, and
+// `int main(void) { int *p = 7; return 0; }` is `initialization of 'int *' from
+// 'int' makes pointer from integer without a cast`.
+fn test_an_assignment_statement_is_checked_like_an_argument() {
+	result := parsed('void f(int *p, char *q) { q = p; }\nint main(void) { return 0; }')
+	assert result.diagnostics.len == 1
+	message := result.diagnostics[0].msg
+	assert message.contains('int *')
+	assert message.contains('char *')
+	assert message.contains('compatible')
+	// The operator that writes is where the diagnostic points.
+	assert result.diagnostics[0].line == 1
+	assert result.diagnostics[0].col == 29
+	// Writing a value whose type the object has is not a violation, and neither is
+	// the null pointer constant, which converts to any pointer.
+	clean := checked('int main(void) { int *p = 0; int *q = 0; q = p; q = 0; return 0; }')
+	assert clean.unit.decls.len == 1
+}
+
+fn test_a_declaration_initializer_is_checked_like_an_assignment() {
+	refused := parsed('int main(void) { int *p = 7; return 0; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('only an integer constant of value zero')
+	// The initializer is where it points, which is where gcc points at it.
+	assert refused.diagnostics[0].line == 1
+	assert refused.diagnostics[0].col == 27
+	// The other side of the same rule: the same integer written into an int is
+	// accepted, and so is the null pointer constant written into the pointer.
+	accepted := checked('int main(void) { int n = 7; int *p = 0; return n; }')
+	assert accepted.unit.decls.len == 1
+	// An array of characters initialized by a string literal is 6.7.8 and not an
+	// assignment, so this constraint has nothing to say about it.
+	literal := checked('int main(void) { char s[4] = "abc"; return s[0]; }')
+	assert literal.unit.decls.len == 1
+}
+
 fn test_the_null_pointer_constant_is_the_one_integer_a_pointer_takes() {
 	// Zero is a null pointer constant and converts to any pointer; one is not,
 	// and an argument that is a plain integer is a constraint violation.
