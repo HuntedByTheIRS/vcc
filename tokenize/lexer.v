@@ -136,12 +136,55 @@ fn (mut l Lexer) lex_directive() Token {
 	col := l.col
 	mut text := ''
 	for l.pos < l.src.len && l.src[l.pos] != `\n` {
-		if l.src[l.pos] == `\\` && l.peek(1) == `\n` {
+		c := l.src[l.pos]
+		// A backslash at the end of the line joins it to the next one, which
+		// is how a long directive is written across lines. Nothing is inserted
+		// where the two lines join: the splice happens before the text is read
+		// as tokens, so `F\<newline>(x)` is a call and not a name and a list.
+		if c == `\\` && l.peek(1) == `\n` {
 			l.advance()
 			l.advance()
 			continue
 		}
-		text += l.src[l.pos].ascii_str()
+		// A comment is one space as far as a directive is concerned, and a
+		// comment that runs over the end of a line takes the directive with
+		// it: C replaces every comment with a space before it looks for
+		// directives, so the newline inside one does not end the line.
+		if c == `/` && l.peek(1) == `*` {
+			text += ' '
+			if !l.skip_block_comment() {
+				break
+			}
+			continue
+		}
+		// A line comment hides the rest of the line, so the directive ends
+		// where the comment starts.
+		if c == `/` && l.peek(1) == `/` {
+			break
+		}
+		// A string or a character constant is text: nothing inside one of them
+		// is a comment, and a backslash before a newline inside one of them is
+		// not a line join either.
+		if c == `"` || c == `'` {
+			quote := c
+			text += c.ascii_str()
+			l.advance()
+			for l.pos < l.src.len && l.src[l.pos] != `\n` {
+				inner := l.src[l.pos]
+				text += inner.ascii_str()
+				l.advance()
+				if inner == `\\` && l.pos < l.src.len {
+					text += l.src[l.pos].ascii_str()
+					l.advance()
+					continue
+				}
+				if inner == quote {
+					break
+				}
+			}
+			continue
+		}
+		text += c.ascii_str()
 		l.advance()
 	}
 	return Token{

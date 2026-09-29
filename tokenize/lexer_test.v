@@ -61,6 +61,36 @@ fn test_a_directive_continued_with_a_backslash_stays_one_token() {
 	assert tokens[1].line == 3
 }
 
+fn test_a_comment_in_a_directive_line_is_one_space() {
+	tokens := lex('#define N 7 /* seven */\nint x;').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#define N 7'
+}
+
+fn test_a_comment_that_runs_over_the_end_of_a_line_takes_the_directive_with_it() {
+	// C replaces every comment with a space before it looks for directives, so
+	// the newline inside one does not end the line. It is how gcc's stddef.h
+	// ends, and reading it any other way leaks the comment into the program.
+	tokens := lex('#endif /* a\n b */\nint x;').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#endif'
+	assert tokens[1].text == 'int'
+	assert tokens[1].line == 3
+}
+
+fn test_a_line_comment_ends_a_directive() {
+	tokens := lex('#define N 1 // one\nint x;').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#define N 1'
+	assert tokens[1].text == 'int'
+}
+
+fn test_a_comment_inside_a_string_in_a_directive_is_text() {
+	tokens := lex('#include "a/*b.h"\n').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#include "a/*b.h"'
+}
+
 fn test_literals_keep_their_escapes() {
 	assert texts('\'a\' \'\\n\' "hi\\"there" L\'x\'') == ["'a'", "'\\n'", '"hi\\"there"', "L'x'",
 		'']
