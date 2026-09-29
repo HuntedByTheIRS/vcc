@@ -24,8 +24,10 @@ fn compile(args []string, source string) codegen.Result {
 	assert parsed.diagnostics.len == 0
 	optimized := optimizer.optimize(parsed.unit, opts.optimization)
 	return codegen.emit(optimized, codegen.Options{
-		target: opts.target
-		entry:  'main'
+		target:       opts.target
+		entry:        'main'
+		libraries:    opts.libraries
+		library_dirs: opts.library_dirs
 	})
 }
 
@@ -308,4 +310,67 @@ fn test_a_char_array_at_the_top_level_is_a_string() {
 	assert exit_status == 0
 	os.rm(source) or {}
 	os.rm(binary) or {}
+}
+
+// What -l does, end to end: the library is named in the image, and a symbol that
+// lives only in it resolves. `fetestexcept` is in libm and not in the C library
+// (measured: `readelf --dyn-syms /usr/lib/libm.so.6` lists it and
+// `readelf --dyn-syms /usr/lib/libc.so.6` does not), so it is a call the flag
+// and nothing else can make work.
+fn test_a_library_named_with_l_is_the_one_a_symbol_resolves_from() {
+	source := scratch('libm.c')
+	binary := scratch('libm')
+	program := 'int fetestexcept(int);\nint main() { return fetestexcept(0); }\n'
+	exit_status := compile_and_run(['-lm', source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The other half of that: with the library not named, the program compiles and
+// then dies at load, saying which symbol it could not find. That is the shape
+// the flag used to leave behind, and it is worth a test of its own because it is
+// silent at compile time.
+fn test_without_the_library_the_symbol_does_not_resolve() {
+	source := scratch('nolibm.c')
+	binary := scratch('nolibm')
+	program := 'int fetestexcept(int);\nint main() { return fetestexcept(0); }\n'
+	opts := cli.parse([source, '-o', binary])!
+	image := compile([source, '-o', binary], program)
+	assert image.diagnostics.len == 0
+	os.write_file_array(binary, image.bytes) or { panic(err) }
+	os.chmod(binary, 0o755) or { panic(err) }
+	result := os.execute(os.quoted_path(binary))
+	assert opts.libraries.len == 0
+	assert result.exit_code != 0
+	assert result.output.contains('fetestexcept')
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// Naming one library twice names it once, and the image is the one the flag
+// names once: the same input produces the same bytes, which is what makes a
+// duplicate flag cost nothing.
+fn test_the_same_library_twice_is_named_once() {
+	source := scratch('libmonce.c')
+	once := compile([source, '-o', scratch('once'), '-lm'], 'int main() { return 0; }\n')
+	twice := compile([source, '-o', scratch('twice'), '-lm', '-lm'],
+		'int main() { return 0; }\n')
+	assert once.diagnostics.len == 0
+	assert twice.diagnostics.len == 0
+	assert once.bytes == twice.bytes
+	os.rm(source) or {}
+}
+
+// A -l name with no file behind it is reported rather than dropped, and the
+// report says where it looked: a flag that quietly does nothing is the failure
+// this test exists to keep out.
+fn test_a_library_that_is_not_there_is_reported() {
+	source := scratch('missing.c')
+	image := compile([source, '-o', scratch('missing'), '-lnosuchlibrary'],
+		'int main() { return 0; }\n')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('cannot find -lnosuchlibrary')
+	assert image.bytes.len == 0
+	os.rm(source) or {}
 }

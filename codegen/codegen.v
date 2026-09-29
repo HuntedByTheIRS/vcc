@@ -10,6 +10,13 @@ pub struct Options {
 pub:
 	target string
 	entry  string
+	// libraries are the -l names the command line gave, in the order they were
+	// written: a program that calls a function out of a shared library other
+	// than the C library has to name that library for the loader to map it.
+	libraries []string
+	// library_dirs are the -L directories, which are searched for a -l name
+	// before the directories the system keeps its libraries in.
+	library_dirs []string
 }
 
 // Result carries the image to write, or the reasons it could not be produced.
@@ -63,6 +70,12 @@ mut:
 	// imports are the library symbols the image needs, in the order they were
 	// first called, so that the same input produces the same bytes every run.
 	imports []string
+	// libraries are the shared libraries the image names as needed, in the
+	// order the -l flags named them: the loader maps these before the first
+	// instruction runs, and one that is not named is one whose symbols are not
+	// there. The C library is not in this list; the container adds it to every
+	// image it writes.
+	libraries []string
 	// string_blob is the read-only data: every distinct string literal with the
 	// terminator a library function reads to, and strings is where each one
 	// starts in it.
@@ -113,6 +126,11 @@ struct Emitter {
 	target backend.Target
 	entry  string
 	unit   ast.TranslationUnit
+	// libraries are the -l names the command line gave, and library_dirs the
+	// -L directories they are looked for in. Both are resolved into the names
+	// the image carries before anything is emitted.
+	libraries    []string
+	library_dirs []string
 mut:
 	program     Program
 	diagnostics []tokenize.Diagnostic
@@ -177,9 +195,11 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 		}
 	}
 	mut emitter := Emitter{
-		target: target
-		entry:  entry
-		unit:   unit
+		target:       target
+		entry:        entry
+		unit:         unit
+		libraries:    opts.libraries
+		library_dirs: opts.library_dirs
 	}
 	// Nothing is written from a tree the model did not type. The check runs
 	// before the layout, so a tree it refuses produces no image at all.
@@ -242,6 +262,20 @@ fn entry_definition(unit ast.TranslationUnit, entry string) ?ast.FnDecl {
 // build lays the whole program out: the entry point the kernel jumps to, then
 // every function with a body, then the container that holds them.
 fn (mut e Emitter) build() ![]u8 {
+	// The libraries the image will name are settled before a byte is written.
+	// A -l name with no file behind it is an error a link makes, and the
+	// alternative is worse than an error: a program that compiles and then
+	// dies at load with an undefined symbol says nothing about the flag that
+	// asked for the library.
+	for name in e.libraries {
+		soname := resolve_library(name, search_dirs(e.library_dirs, e.target.library_dirs)) or {
+			e.diagnostics << problem(1, 1, err.msg())
+			return error('cannot resolve -l${name}')
+		}
+		if soname !in e.program.libraries {
+			e.program.libraries << soname
+		}
+	}
 	// The names and the parameter widths come first so that a call binds to a
 	// definition wherever in the file it is written. The width is the one the
 	// definition gives the parameter, which is what a call in the same file has

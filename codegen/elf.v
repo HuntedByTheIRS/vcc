@@ -55,7 +55,14 @@ const dt_relasz = u64(8)
 const dt_relaent = u64(9)
 const dt_strsz = u64(10)
 const dt_syment = u64(11)
-const dt_entry_count = 10 // the nine above, and the null that ends the table
+
+// dynamic_entry_count is how many entries the dynamic table holds: the eight
+// that describe the image's own tables, one DT_NEEDED per library it runs
+// against, and the null that ends it. It is a function rather than a constant
+// because the library count is not known until the command line has been read.
+fn dynamic_entry_count(library_count int) int {
+	return 9 + library_count
+}
 
 // A relocation that asks the loader to write a symbol's address into a slot.
 const relocation_glob_dat = u64(6)
@@ -70,10 +77,11 @@ const elf_symbol_size = 24
 const elf_relocation_size = 24
 const elf_dynamic_entry_size = 16
 
-// The library every image here runs against. V passes its own libraries on the
-// command line and this stub does not link them yet, so an image answers its
-// calls out of the one library the system always has.
-const shared_library = 'libc.so.6'
+// The library every image here runs against, whether or not it was asked for:
+// a program written in C has the C library, and a -lc among the -l flags is
+// this same name and adds nothing. Any other library the image runs against was
+// named on the command line and resolved from there.
+const base_library = 'libc.so.6'
 
 // Sections is where each part of the image landed, as a file offset from the
 // start of the file. The image is one segment that starts at file offset zero,
@@ -102,8 +110,19 @@ fn executable(program Program, target backend.Target) ![]u8 {
 	// The loader's path, with the terminator the kernel expects.
 	mut interp := target.interpreter.bytes()
 	interp << u8(0)
+	// The libraries the image runs against: the C library first, wherever it
+	// was asked for or not, then the ones the -l flags named, each once. A
+	// library that is not named here is a library the loader does not map,
+	// which is what an undefined symbol at load comes from.
+	mut libraries := []string{cap: program.libraries.len + 1}
+	libraries << base_library
+	for name in program.libraries {
+		if name !in libraries {
+			libraries << name
+		}
+	}
 	// The string table: the null entry, the name of each imported symbol, and
-	// the library's own name at the offset the dynamic table points at.
+	// the name of each library the image runs against.
 	mut dynstr := []u8{}
 	dynstr << u8(0)
 	mut symbol_names := map[string]int{}
@@ -112,10 +131,15 @@ fn executable(program Program, target backend.Target) ![]u8 {
 		dynstr << name.bytes()
 		dynstr << u8(0)
 	}
-	needed := dynstr.len
-	dynstr << shared_library.bytes()
-	dynstr << u8(0)
-	sections := layout(program, target, interp.len, dynstr.len)
+	// needed is where each library's name starts in the string table, in the
+	// order the DT_NEEDED entries name them.
+	mut needed := []int{}
+	for name in libraries {
+		needed << dynstr.len
+		dynstr << name.bytes()
+		dynstr << u8(0)
+	}
+	sections := layout(program, target, interp.len, dynstr.len, libraries.len)
 	mut image := []u8{len: sections.total, init: u8(0)}
 	put(mut image, sections.interp, interp)
 	put(mut image, sections.text, program.text)
@@ -127,14 +151,14 @@ fn executable(program Program, target backend.Target) ![]u8 {
 	emit_relocations(mut image, program, sections, base)
 	emit_dynamic(mut image, program, sections, dynstr.len, needed, base)
 	emit_header(mut image, target, base + u64(sections.text))
-	emit_program_headers(mut image, target, sections, interp.len)
+	emit_program_headers(mut image, target, sections, interp.len, libraries.len)
 	patch(mut image, program, target, sections)!
 	return image
 }
 
 // layout places every part of the image: one part after another, each at an
 // eight-byte boundary, with the whole image rounded up to a page.
-fn layout(program Program, target backend.Target, interp_len int, dynstr_len int) Sections {
+fn layout(program Program, target backend.Target, interp_len int, dynstr_len int, library_count int) Sections {
 	mut offset := int(elf_header_size) + int(elf_program_header_count) * int(elf_program_header_size)
 	interp := offset
 	offset = align(offset + interp_len, 8)
@@ -155,7 +179,7 @@ fn layout(program Program, target backend.Target, interp_len int, dynstr_len int
 	rela := offset
 	offset = align(offset + program.imports.len * elf_relocation_size, 8)
 	dynamic := offset
-	offset = align(offset + int(dt_entry_count) * elf_dynamic_entry_size, 8)
+	offset = align(offset + dynamic_entry_count(library_count) * elf_dynamic_entry_size, 8)
 	return Sections{
 		interp:  interp
 		text:    text
@@ -210,21 +234,24 @@ fn emit_relocations(mut image []u8, program Program, sections Sections, base u64
 	}
 }
 
-// emit_dynamic writes the table that tells the loader what the image needs: the
-// library, where the tables are, and how big each record in them is.
-fn emit_dynamic(mut image []u8, program Program, sections Sections, dynstr_len int, needed int, base u64) {
-	entries := [
-		[dt_needed, u64(needed)],
-		[dt_hash, base + u64(sections.hash)],
-		[dt_strtab, base + u64(sections.dynstr)],
-		[dt_symtab, base + u64(sections.dynsym)],
-		[dt_rela, base + u64(sections.rela)],
-		[dt_relasz, u64(program.imports.len * elf_relocation_size)],
-		[dt_relaent, u64(elf_relocation_size)],
-		[dt_strsz, u64(dynstr_len)],
-		[dt_syment, u64(elf_symbol_size)],
-		[dt_null, u64(0)],
-	]
+// emit_dynamic writes the table that tells the loader what the image needs: each
+// library it runs against, where the tables are, and how big each record in them
+// is. The DT_NEEDED entries come first and are the only part of the table whose
+// length depends on the command line.
+fn emit_dynamic(mut image []u8, program Program, sections Sections, dynstr_len int, needed []int, base u64) {
+	mut entries := [][]u64{}
+	for offset in needed {
+		entries << [dt_needed, u64(offset)]
+	}
+	entries << [dt_hash, base + u64(sections.hash)]
+	entries << [dt_strtab, base + u64(sections.dynstr)]
+	entries << [dt_symtab, base + u64(sections.dynsym)]
+	entries << [dt_rela, base + u64(sections.rela)]
+	entries << [dt_relasz, u64(program.imports.len * elf_relocation_size)]
+	entries << [dt_relaent, u64(elf_relocation_size)]
+	entries << [dt_strsz, u64(dynstr_len)]
+	entries << [dt_syment, u64(elf_symbol_size)]
+	entries << [dt_null, u64(0)]
 	for i, entry in entries {
 		put_u64(mut image, sections.dynamic + i * elf_dynamic_entry_size, entry[0])
 		put_u64(mut image, sections.dynamic + i * elf_dynamic_entry_size + 8, entry[1])
@@ -257,7 +284,7 @@ fn emit_header(mut image []u8, target backend.Target, entry u64) {
 
 // emit_program_headers writes the four program headers the kernel and the loader
 // read before any of the code runs.
-fn emit_program_headers(mut image []u8, target backend.Target, sections Sections, interp_len int) {
+fn emit_program_headers(mut image []u8, target backend.Target, sections Sections, interp_len int, library_count int) {
 	mut at := int(elf_header_size)
 	// PT_INTERP: the loader the kernel hands the process to.
 	put_u32(mut image, at, elf_ph_type_interp)
@@ -287,8 +314,8 @@ fn emit_program_headers(mut image []u8, target backend.Target, sections Sections
 	put_u64(mut image, at + 8, u64(sections.dynamic))
 	put_u64(mut image, at + 16, target.load_base + u64(sections.dynamic))
 	put_u64(mut image, at + 24, target.load_base + u64(sections.dynamic))
-	put_u64(mut image, at + 32, u64(int(dt_entry_count) * elf_dynamic_entry_size))
-	put_u64(mut image, at + 40, u64(int(dt_entry_count) * elf_dynamic_entry_size))
+	put_u64(mut image, at + 32, u64(dynamic_entry_count(library_count) * elf_dynamic_entry_size))
+	put_u64(mut image, at + 40, u64(dynamic_entry_count(library_count) * elf_dynamic_entry_size))
 	put_u64(mut image, at + 48, 8)
 	at += int(elf_program_header_size)
 	// PT_GNU_STACK: the stack is readable and writable and not executable, which

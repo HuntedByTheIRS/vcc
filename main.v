@@ -181,8 +181,10 @@ fn main() {
 	}
 	started = time.now()
 	image := codegen.emit(optimized, codegen.Options{
-		target: opts.target
-		entry:  'main'
+		target:       opts.target
+		entry:        'main'
+		libraries:    opts.libraries
+		library_dirs: opts.library_dirs
 	})
 	phases << cli.Phase{
 		name:   'emit'
