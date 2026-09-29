@@ -1,6 +1,7 @@
 module printer
 
 import ast
+import types
 
 // The printer turns a translation unit into text. It is what `-print-ast` runs,
 // and it exists as its own module because `ast/` is node types only: the shape
@@ -10,6 +11,13 @@ import ast
 // The output is deterministic — same tree, same text — because it is read by
 // people comparing two runs, and a dump that reorders its own lines is a dump
 // nobody can diff.
+//
+// Every node the parser gave a type to carries it, written after the location it
+// came from: `int 42 at 1:17 : int`. The clause is the model's answer and not the
+// spelling, which is the point of printing it — a reader comparing the two sees
+// where a declaration was read and where it was resolved. A node the model could
+// not answer for says `: unresolved`, so that a missing clause means the printer
+// had none to print and never that the reader has no answer.
 
 // max_indent is where indentation stops growing. A chain of twenty thousand terms
 // is twenty thousand levels deep, and growing the indent all the way down would
@@ -36,13 +44,13 @@ pub fn render(unit ast.TranslationUnit) string {
 		} else {
 			line += ' (zeroed)'
 		}
-		out << '${line} at ${global.line}:${global.col}'
+		out << '${line} at ${global.line}:${global.col}${typed(global.resolved)}'
 	}
 	if unit.decls.len == 0 {
 		out << '(no declarations)'
 	}
 	for decl in unit.decls {
-		out << 'fn ${decl.name}() ${decl.ret} at ${decl.line}:${decl.col}'
+		out << 'fn ${decl.name}() ${decl.ret} at ${decl.line}:${decl.col}${typed(decl.resolved)}'
 		if decl.body.len == 0 {
 			out << '  (declaration without a definition)'
 			continue
@@ -50,6 +58,17 @@ pub fn render(unit ast.TranslationUnit) string {
 		dump_statements(decl.body, 1, mut out)
 	}
 	return out.join('\n')
+}
+
+// typed is the type clause of a node, written after the location it came from. A
+// node with no answer carries the zero type, whose kind is unknown, and says so:
+// the alternative - printing nothing - would read the same as a node this printer
+// has no clause for.
+fn typed(typ types.Type) string {
+	if typ.kind == .unknown {
+		return ' : unresolved'
+	}
+	return ' : ${typ.describe()}'
 }
 
 fn indent_of(depth int) string {
@@ -75,7 +94,7 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			}
 			.var_decl {
 				elements := if stmt.decl_count > 0 { '[${stmt.decl_count}]' } else { '' }
-				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name}${elements} at ${stmt.line}:${stmt.col}'
+				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name}${elements} at ${stmt.line}:${stmt.col}${typed(stmt.resolved)}'
 			}
 			.assign {
 				out << '${indent}assignment to ${stmt.target} at ${stmt.line}:${stmt.col}'
@@ -144,7 +163,7 @@ fn dump_expression(expr ast.Expr, depth int, mut out []string) {
 	}
 	mut current := depth
 	for binary in spine {
-		out << '${indent_of(current)}binary ${binary.op} at ${binary.line}:${binary.col}'
+		out << '${indent_of(current)}binary ${binary.op} at ${binary.line}:${binary.col}${typed(binary.typ)}'
 		current++
 	}
 	dump_leaf(node, current, mut out)
@@ -159,13 +178,13 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 	indent := indent_of(depth)
 	match expr {
 		ast.IntLit {
-			out << '${indent}int ${expr.value} at ${expr.line}:${expr.col}'
+			out << '${indent}int ${expr.value} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
 		ast.Ident {
-			out << '${indent}ident ${expr.name} at ${expr.line}:${expr.col}'
+			out << '${indent}ident ${expr.name} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
 		ast.Unary {
-			out << '${indent}unary ${expr.op} at ${expr.line}:${expr.col}'
+			out << '${indent}unary ${expr.op} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 			dump_expression(expr.expr, depth + 1, mut out)
 		}
 		ast.Binary {
@@ -174,16 +193,16 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			dump_expression(expr, depth, mut out)
 		}
 		ast.Call {
-			out << '${indent}call ${expr.name} with ${expr.args.len} argument(s) at ${expr.line}:${expr.col}'
+			out << '${indent}call ${expr.name} with ${expr.args.len} argument(s) at ${expr.line}:${expr.col}${typed(expr.typ)}'
 			for arg in expr.args {
 				dump_expression(arg, depth + 1, mut out)
 			}
 		}
 		ast.StrLit {
-			out << '${indent}string ${expr.text} at ${expr.line}:${expr.col}'
+			out << '${indent}string ${expr.text} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
 		ast.Index {
-			out << '${indent}element ${expr.name}[] at ${expr.line}:${expr.col}'
+			out << '${indent}element ${expr.name}[] at ${expr.line}:${expr.col}${typed(expr.typ)}'
 			dump_expression(expr.index, depth + 1, mut out)
 		}
 	}

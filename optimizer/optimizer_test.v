@@ -30,18 +30,26 @@ fn optimize_source(text string, opts Options) ast.TranslationUnit {
 // returned_fold is the value of the first statement of the first function, when
 // it is a constant by the time the optimizer has finished.
 fn returned_fold(unit ast.TranslationUnit) ?i64 {
-	if unit.decls.len == 0 || unit.decls[0].body.len == 0 {
+	for decl in unit.decls {
+		if decl.body.len == 0 {
+			continue
+		}
+		expr := decl.body[0].expr or { return none }
+		if expr is ast.IntLit {
+			return (expr as ast.IntLit).value
+		}
 		return none
-	}
-	expr := unit.decls[0].body[0].expr or { return none }
-	if expr is ast.IntLit {
-		return (expr as ast.IntLit).value
 	}
 	return none
 }
 
 fn first_expression(unit ast.TranslationUnit) ast.Expr {
-	return unit.decls[0].body[0].expr or { panic('the statement has no expression') }
+	for decl in unit.decls {
+		if decl.body.len > 0 {
+			return decl.body[0].expr or { panic('the statement has no expression') }
+		}
+	}
+	panic('no declaration in the unit has a body')
 }
 
 fn test_no_pass_runs_at_the_default_level() {
@@ -78,7 +86,7 @@ fn test_a_level_this_stub_does_not_implement_is_recorded_and_ignored() {
 
 fn test_a_builtin_call_folds_to_its_value() {
 	opts := options(['-O2'])
-	folded := optimize_source('int main() { return abs(-7); }', opts)
+	folded := optimize_source('int abs(int n);\nint main() { return abs(-7); }', opts)
 	value := returned_fold(folded) or { -1 }
 	assert value == 7
 }
@@ -86,7 +94,7 @@ fn test_a_builtin_call_folds_to_its_value() {
 fn test_the_three_absolute_value_spellings_agree() {
 	opts := options(['-O2'])
 	for name in ['abs', 'labs', 'llabs'] {
-		folded := optimize_source('int main() { return ${name}(-12); }', opts)
+		folded := optimize_source('int ${name}(int n);\nint main() { return ${name}(-12); }', opts)
 		value := returned_fold(folded) or { -1 }
 		assert value == 12
 	}
@@ -94,26 +102,26 @@ fn test_the_three_absolute_value_spellings_agree() {
 
 fn test_a_call_around_a_non_constant_stays_a_call() {
 	opts := options(['-O2'])
-	expr := first_expression(optimize_source('int main() { return abs(x); }', opts))
+	expr := first_expression(optimize_source('int x;\nint abs(int n);\nint main() { return abs(x); }', opts))
 	assert expr is ast.Call
 }
 
 fn test_a_call_with_the_wrong_number_of_arguments_stays_a_call() {
 	opts := options(['-O2'])
-	expr := first_expression(optimize_source('int main() { return abs(1, 2); }', opts))
+	expr := first_expression(optimize_source('int abs();\nint main() { return abs(1, 2); }', opts))
 	assert expr is ast.Call
 }
 
 fn test_an_unknown_name_stays_a_call() {
 	opts := options(['-O2'])
-	expr := first_expression(optimize_source('int main() { return strlen(1); }', opts))
+	expr := first_expression(optimize_source('int strlen(char *s);\nint main() { return strlen(0); }', opts))
 	assert expr is ast.Call
 }
 
 fn test_fno_builtin_leaves_every_library_name_alone() {
 	opts := options(['-O2', '-fno-builtin'])
 	assert !opts.folds_builtin('abs')
-	expr := first_expression(optimize_source('int main() { return abs(-7); }', opts))
+	expr := first_expression(optimize_source('int abs(int n);\nint main() { return abs(-7); }', opts))
 	assert expr is ast.Call
 }
 
@@ -121,7 +129,7 @@ fn test_fno_builtin_name_turns_off_one_name() {
 	opts := options(['-O2', '-fno-builtin-abs'])
 	assert !opts.folds_builtin('abs')
 	assert opts.folds_builtin('labs')
-	expr := first_expression(optimize_source('int main() { return abs(-7) + labs(-9); }', opts))
+	expr := first_expression(optimize_source('int abs(int n);\nint labs(int n);\nint main() { return abs(-7) + labs(-9); }', opts))
 	assert expr is ast.Binary
 	binary := expr as ast.Binary
 	assert binary.left is ast.Call
@@ -133,7 +141,7 @@ fn test_fno_builtin_name_turns_off_one_name() {
 fn test_the_reserved_spelling_survives_fno_builtin() {
 	opts := options(['-O2', '-fno-builtin'])
 	assert opts.folds_builtin('__builtin_abs')
-	folded := optimize_source('int main() { return __builtin_abs(-7); }', opts)
+	folded := optimize_source('int __builtin_abs(int n);\nint main() { return __builtin_abs(-7); }', opts)
 	value := returned_fold(folded) or { -1 }
 	assert value == 7
 }
@@ -148,14 +156,14 @@ fn test_a_later_flag_turns_a_name_back_on() {
 
 fn test_a_positive_literal_is_left_alone_by_the_absolute_value() {
 	opts := options(['-O2'])
-	folded := optimize_source('int main() { return abs(9); }', opts)
+	folded := optimize_source('int abs(int n);\nint main() { return abs(9); }', opts)
 	value := returned_fold(folded) or { -1 }
 	assert value == 9
 }
 
 fn test_a_call_inside_a_call_is_reached() {
 	opts := options(['-O2'])
-	folded := optimize_source('int main() { return abs(abs(-3)); }', opts)
+	folded := optimize_source('int abs(int n);\nint main() { return abs(abs(-3)); }', opts)
 	value := returned_fold(folded) or { -1 }
 	assert value == 3
 }

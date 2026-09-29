@@ -61,6 +61,7 @@ extern int snprintf (char *restrict __s, size_t __maxlen,
       __attribute__ ((__format__ (__printf__, 3, 4)));
 extern int fscanf (FILE *restrict __stream, const char *restrict __format, ...) __asm__("__isoc99_fscanf")  ;
 extern int __uflow (FILE *);
+extern int puts (const char *__s) ;
 # 2 "hello.c" 2
 int main() {
   puts("Hello, world!");
@@ -89,7 +90,11 @@ fn test_the_stdio_shaped_stream_parses_with_no_diagnostics() {
 	// function whether or not this file defines it.
 	assert 'remove' in names
 	assert 'tmpfile' in names
-	assert 'puts' !in names // the call needs no prototype to parse
+	// The declaration of puts is kept as well, and the call is read against it:
+	// a call to a name nothing in the unit declares is refused once the whole
+	// unit has been read, which is what the stream a preprocessor writes for
+	// `#include <stdio.h>` carries this prototype for.
+	assert 'puts' in names
 	// The types and the object are read and dropped: neither adds code.
 	assert 'stdin' !in names
 	assert 'cookie_read_function_t' !in names
@@ -129,6 +134,21 @@ fn test_an_extern_object_with_a_brace_initializer_is_reported() {
 	result := declarations_of('extern int table[4] = { 1, 2, 3, 4 };')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('not a number')
+	assert result.unit.globals.len == 0
+}
+
+// A file-scope initializer that is a number the literal reader refuses gets the
+// refusal the expression path gives it, at the literal as it was written, rather
+// than the report for an initializer that is not a number at all. Measured,
+// `int x = 0x1p3;` used to exit with `x is initialized with something that is
+// not a number and only a number can be written into the image so far`, which
+// names neither the construct nor where it is.
+fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
+	result := declarations_of('int x = 0x1p3;')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('0x1p3')
+	assert result.diagnostics[0].line == 1
+	assert result.diagnostics[0].col == 9
 	assert result.unit.globals.len == 0
 }
 
@@ -238,4 +258,67 @@ fn test_a_deeply_nested_tag_body_is_reported() {
 		}
 	}
 	assert reported
+}
+
+// A prototype's type is the one its own declaration spelled, not what its parameter
+// list last resolved to. Measured before that was held, `int f(void); int main(void)
+// { return f() + 1; }` was refused - the `(void)` had left the base at void, so the
+// prototype was declared `void (void)` and the call had no value - where gcc
+// compiles it.
+fn test_a_prototype_has_the_type_its_own_specifiers_gave_it() {
+	result := declarations_of('int f(void);\nint main(void) { return f() + 1; }')
+	assert result.diagnostics.len == 0
+	sum := result.unit.decls[1].body[0].expr or {
+		assert false
+		return
+	}
+	assert sum is ast.Binary
+	call := (sum as ast.Binary).left
+	assert call is ast.Call
+	assert (call as ast.Call).typ.kind == .int_
+}
+
+// One name declared twice in one scope is one name (6.2.2), and the two
+// declarations have to describe one type. Measured, `void f1(int *p); void f1(char
+// *p);` was accepted where gcc 16.2.1 refuses `conflicting types for f1`.
+fn test_a_redeclaration_with_a_different_type_is_refused() {
+	result := declarations_of('void f1(int *p);\nvoid f1(char *p);\nint main(void) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('f1 is declared as void (int *)')
+	assert result.diagnostics[0].line == 2
+	assert result.diagnostics[0].col == 6
+	// Repeating a type is one declaration and not a conflict.
+	repeat := declarations_of('int f(int a);\nint f(int a) { return a; }\nint main(void) { return f(1); }')
+	assert repeat.diagnostics.len == 0
+	// 6.2.7p15: an empty parameter list says nothing about the parameters, so two
+	// function types one of which is written that way are compared by what they
+	// return. Measured against gcc 16.2.1 under `-std=c99`: the first two of these
+	// are accepted and the second two are refused as `conflicting types for f`.
+	assert declarations_of('int f(void);\nint f();\nint main(void) { return 0; }').diagnostics.len == 0
+	assert declarations_of('int f(int a);\nint f();\nint main(void) { return 0; }').diagnostics.len == 0
+	assert declarations_of('int f(void);\nchar f();\nint main(void) { return 0; }').diagnostics.len == 1
+	assert declarations_of('int f(int a);\nint f(char b);\nint main(void) { return 0; }').diagnostics.len == 1
+}
+
+// A word the language reserves for itself cannot name a declaration (6.4.1).
+// Measured, `int if = 1;` and `int main(void) { int sizeof = 1; return 0; }`
+// compiled where gcc 16.2.1 refuses both at the name with `expected identifier or
+// '(' before 'if'`. The lexer still does not tell a keyword from an identifier: the
+// general reservation is a table in `tokenize/`, which is another lane's file, and
+// the reader that would make the word a name is where the question is asked.
+fn test_a_keyword_cannot_be_the_name_of_a_declaration() {
+	refused := declarations_of('int if = 1;\nint main(void) { return 0; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('if is a keyword')
+	assert refused.diagnostics[0].line == 1
+	assert refused.diagnostics[0].col == 5
+	// sizeof is the spelling a source is most likely to have written as an object,
+	// because the expression reader reads it as an operator wherever it appears.
+	operator := declarations_of('int main(void) { int sizeof = 1; return 0; }')
+	assert operator.diagnostics.len == 1
+	assert operator.diagnostics[0].msg.contains('sizeof is a keyword')
+	assert operator.diagnostics[0].col == 22
+	// A name that is not reserved is unaffected.
+	ordinary := declarations_of('int size = 1;\nint main(void) { return size; }')
+	assert ordinary.diagnostics.len == 0
 }

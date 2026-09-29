@@ -142,6 +142,87 @@ pub const features = [
 		pedantic:  'the _Static_assert declaration'
 		status:    .unimplemented
 	},
+	// The C99 types the type model resolves and the back end has no form for.
+	// The tree reads each of them, so a prototype naming one is read and kept;
+	// a definition is storage, and a definition of one is refused by location.
+	// The two complex types stay `.unimplemented` because C6's last tier is
+	// where their arithmetic lands, and the floats and `_Bool` say
+	// `.implemented` because the tree does read them and the refusal is the back
+	// end's rather than the reader's.
+	//
+	// Which name that refusal uses depends on the path, and the difference is
+	// recorded rather than smoothed over. A function return type is the one path
+	// that names the type in full, because the answer is about the construct and
+	// not about a word of it: measured, `long double f(void) { return 0; }` and
+	// `double _Complex f(void) { return 0; }` report `unsupported: <type> is a
+	// type this compiler does not emit yet, so a function cannot return it`.
+	// Everywhere else the answer is the first word of the type as written, which
+	// is the word the emitter stopped at: measured, `long long x;` reports
+	// `unsupported type long`, `unsigned long long x;` reports `unsupported type
+	// unsigned`, and `double _Complex z = 0;` in a body reports `unsupported type
+	// double`. A definition's parameter list names what the parameter was
+	// declared with, so `int h(double _Complex z) { return 0; }` reports
+	// `unsupported type double _Complex`; the same list in a prototype is a
+	// promise and is kept.
+	//
+	// `long long` and `long double` have no row, and cannot have one: a row is
+	// found by the text of a single token, and both are written as two tokens
+	// whose first is `long`.
+	Feature{
+		spellings: ['_Bool']
+		since:     .c99
+		gnu:       false
+		extension: ''
+		pedantic:  'the _Bool type'
+		status:    .implemented
+	},
+	Feature{
+		spellings: ['float']
+		since:     .c89
+		gnu:       false
+		extension: ''
+		pedantic:  'the float type'
+		status:    .implemented
+	},
+	Feature{
+		spellings: ['double']
+		since:     .c89
+		gnu:       false
+		extension: ''
+		pedantic:  'the double type'
+		status:    .implemented
+	},
+	Feature{
+		spellings: ['_Complex']
+		since:     .c99
+		gnu:       false
+		extension: ''
+		pedantic:  'the _Complex type'
+		status:    .unimplemented
+	},
+	Feature{
+		spellings: ['_Imaginary']
+		since:     .c99
+		gnu:       false
+		extension: ''
+		pedantic:  'the _Imaginary type'
+		status:    .unimplemented
+	},
+	// sizeof is an operator, and the tree does not read it: the spelling in a
+	// program was read as a call to a function of that name, so
+	// `int main(void) { int a[4]; return sizeof(a); }` compiled into a binary
+	// that died at load with `undefined symbol: sizeof`. The parser refuses the
+	// spelling by name and location now, which is the refusal the unimplemented
+	// rule asks for, and the row records that the operator is C89 and is not
+	// read yet. Implementing it is the milestone that owns the operator.
+	Feature{
+		spellings: ['sizeof']
+		since:     .c89
+		gnu:       false
+		extension: ''
+		pedantic:  'the sizeof operator'
+		status:    .unimplemented
+	},
 ]
 
 // replaces_trigraphs answers phase 1's question for the selected mode: whether a

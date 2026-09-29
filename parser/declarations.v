@@ -2,6 +2,7 @@ module parser
 
 import ast
 import tokenize
+import types
 
 // This file is the declaration grammar of a preprocessed stream. A real header
 // is mostly declarations the back end cannot turn into code: typedefs, tags,
@@ -9,13 +10,14 @@ import tokenize
 // varargs and GNU attributes. They still have to be read, because the only way
 // to find where one declaration ends and the next begins is to parse it.
 //
-// Reading and keeping are different answers here. A declaration of a type or an
-// object adds no code, so it is read and dropped; dropping a typedef costs
-// nothing while this compiler has no type to attach a name to. A function
-// declaration is kept, with an empty body when it is a prototype, because the
-// declaration is what names the function whether or not the file defines it.
-// A function definition the back end cannot emit is reported: a definition is
-// code, and code quietly left out is the failure this compiler is not allowed.
+// Reading and keeping are different answers here. A typedef and a tag add no
+// code, so neither is kept in the tree: what a type name means is a question for
+// the symbol table, which is where the declaration records it, and a later stage
+// asks the table rather than walking the tree for it. A function declaration is
+// kept, with an empty body when it is a prototype, because the declaration is
+// what names the function whether or not the file defines it. A function
+// definition the back end cannot emit is reported: a definition is code, and code
+// quietly left out is the failure this compiler is not allowed.
 
 // storage_classes are the words that say what kind of declaration this is.
 // The double-underscore spellings are the GNU ones: a system header reaches
@@ -39,6 +41,28 @@ const builtin_types = ['void', 'char', 'short', 'int', 'long', 'signed', 'unsign
 // tag_keywords open the specifier that names a struct, a union or an enum.
 const tag_keywords = ['struct', 'union', 'enum']
 
+// keywords are the words the language reserves for itself. A keyword can never
+// name a declarator and can never be a use of a name either, and the lexer does
+// not tell one from an identifier: that table lives in `tokenize/`, which is
+// another lane's file. So a keyword read as an identifier here is a construct
+// this reader has not implemented - a cast is where it happens, `(int)d` reads
+// its `int` as a name - and it is refused by the diagnostic for that construct
+// rather than reported a second time as a missing declaration.
+const keywords = ['_Atomic', '_Bool', '_Complex', '_Imaginary', '_Thread_local', 'auto', 'break',
+	'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float',
+	'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed',
+	'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile',
+	'while', '__asm', '__asm__', '__attribute__', '__const', '__const__', '__extension__', '__inline',
+	'__inline__', '__restrict', '__restrict__', '__signed', '__signed__', '__thread', '__volatile',
+	'__volatile__']
+
+// is_keyword says whether a spelling is one of the reserved words. Nothing in the
+// language may use one as an identifier, so the question is asked by the declarator
+// reader and by the check that refuses a name nothing declares.
+fn is_keyword(text string) bool {
+	return text in keywords
+}
+
 // gnu_postfix are the words that can follow a declarator and have to be read
 // past: an attribute list and an assembler name. Both arrive in system
 // headers, and a parser that stops at one stops in the middle of the
@@ -52,14 +76,39 @@ const gnu_postfix = ['__attribute__', '__asm__', '__asm']
 const max_declaration_depth = 200
 
 // starts_declaration says whether a token can open a declaration: one of the
-// specifier words, or a name this file has already typedef'd.
+// specifier words, or a name this file has already declared as a type.
 fn (p Parser) starts_declaration(t tokenize.Token) bool {
-	return t.kind == .identifier && (is_specifier_word(t.text) || t.text in p.typedefs)
+	return t.kind == .identifier && (is_specifier_word(t.text) || p.is_type_name(t.text))
 }
 
 fn is_specifier_word(text string) bool {
 	return text in storage_classes || text in type_qualifiers || text in builtin_types
 		|| text in tag_keywords
+}
+
+// storage_of is the storage class a word names. `inline` and `__extension__` say
+// something about a function and nothing about a storage class, so they leave the
+// declaration with the one it would have had anyway.
+fn storage_of(word string) types.Storage {
+	return match word {
+		'typedef' { types.Storage.typedef_ }
+		'extern' { types.Storage.extern_ }
+		'static' { types.Storage.static_ }
+		'register' { types.Storage.register_ }
+		'_Thread_local', '__thread' { types.Storage.thread_ }
+		else { types.Storage.automatic }
+	}
+}
+
+// add_qualifier adds the qualifier a word names to the ones already read. The
+// GNU spellings are the same qualifiers under another name: `__const` is `const`,
+// and a declaration that writes either means the same thing.
+fn add_qualifier(quals types.Qualifiers, word string) types.Qualifiers {
+	return types.Qualifiers{
+		const_:    quals.const_ || word in ['const', '__const', '__const__']
+		volatile_: quals.volatile_ || word in ['volatile', '__volatile', '__volatile__']
+		restrict_: quals.restrict_ || word in ['restrict', '__restrict', '__restrict__']
+	}
 }
 
 // DeclSpec is what the specifiers of a declaration add up to: the words in the
@@ -75,6 +124,15 @@ mut:
 	is_extern  bool
 	has_type   bool
 	tag_decl   bool
+	// clause is the type the specifiers name, resolved as they are read: the
+	// builtin words added up, a name followed to what it was declared as, or a
+	// tag. The declarator that follows is built from it, and it is unresolved
+	// when the model has no answer for the words - which is not the same as
+	// saying the declaration has no type, only that this compiler has not
+	// worked out which one it is.
+	clause     types.Type
+	qualifiers types.Qualifiers
+	storage    types.Storage
 }
 
 fn (mut s DeclSpec) note(t tokenize.Token) {
@@ -88,6 +146,41 @@ fn (mut s DeclSpec) note_type(t tokenize.Token) {
 	s.note(t)
 	s.type_words << t.text
 	s.has_type = true
+}
+
+// specifier_clause is the type the specifiers name. The words are the language's
+// type words, a name this file declared as a type, or a compiler's own spelling
+// of one that arrives from a header - `typedef __builtin_va_list va_list;` has
+// no other reading. A tag is resolved where it is read, because only the tag's
+// own namespace knows it, and it is passed in as the answer for that case.
+//
+// A name this compiler has no definition for becomes an opaque type carrying the
+// name: the type exists, nothing may be laid out in it, and a diagnostic can say
+// which name it was.
+fn (p Parser) specifier_clause(spec DeclSpec, tag_clause types.Type) types.Type {
+	mut clause := tag_clause
+	if clause.kind == .unknown {
+		if word_type := types.from_words(spec.type_words) {
+			clause = word_type
+		} else if spec.type_words.len == 1 {
+			clause = p.name_clause(spec.type_words[0])
+		} else {
+			clause = types.opaque_type(spec.type_words.join(' '))
+		}
+	}
+	return types.qualified(clause, spec.qualifiers)
+}
+
+// name_clause is the type a name written among the specifiers stands for: what a
+// typedef declared it as, or an opaque type carrying the name when there is no
+// declaration of it this reader has met.
+fn (p Parser) name_clause(name string) types.Type {
+	if symbol := p.scopes.lookup(name) {
+		if symbol.is_typedef() {
+			return symbol.typ
+		}
+	}
+	return types.opaque_type(name)
 }
 
 // type_spelling is the type as it was written, with the pointer stars the
@@ -107,11 +200,16 @@ fn (s DeclSpec) type_spelling(stars int) string {
 // declarator has no name, which is what a bare type and a parameter may have.
 struct Declarator {
 mut:
-	name     string
-	name_at  tokenize.Token
-	stars    int
-	star_at  tokenize.Token
-	array_at tokenize.Token
+	name    string
+	name_at tokenize.Token
+	stars   int
+	star_at tokenize.Token
+	// star_quals are the qualifiers written after each star, one entry per star.
+	// That is where `char * const p` puts its const: on the pointer and not on
+	// the character it points at, which is the difference between two types an
+	// assignment may not drop either way.
+	star_quals []types.Qualifiers
+	array_at   tokenize.Token
 	// array_count is how many elements the first `[...]` suffix asked for, and
 	// zero when the suffix did not write a size this reader could read — an
 	// empty pair of brackets, or something that was not a number. array_dims
@@ -125,6 +223,17 @@ mut:
 	// declare a function by name keep them: a pointer to a function is not
 	// something a call reaches by name, and this compiler emits no such call.
 	params []ast.Param
+	// variadic says the list ended in an ellipsis and prototyped says it was a
+	// prototype at all: `int f()` names no parameters and says nothing about a
+	// call, while `int f(void)` names the empty list.
+	variadic   bool
+	prototyped bool
+	// inner_function says the suffix named the function a pointer points at.
+	// `int (*f)(int)` declares a pointer, and what it points at is a function
+	// type: a type this model has, even though a call through the pointer is not
+	// a shape this tree carries. The parameters in that case are the ones the
+	// function being pointed at takes, and they are read from the same list.
+	inner_function bool
 	// param_problem says what makes the parameter list one the back end cannot
 	// emit, and stays empty when there is nothing wrong with it. It is recorded
 	// rather than reported because whether it matters is only known when a body
@@ -143,6 +252,12 @@ mut:
 	params  []ast.Param
 	problem string
 	at      tokenize.Token
+	// variadic says the list ended in an ellipsis, so there are arguments it
+	// does not name. prototyped says the list was a prototype at all: `()` names
+	// no parameters and says nothing about a call, which is a different thing
+	// from naming the empty list.
+	variadic   bool
+	prototyped bool
 }
 
 // parse_declaration reads one declaration and returns the functions it
@@ -178,7 +293,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut data_type := ''
 	mut data_stars := 0
 	mut data_count := 0
+	mut data_clause := types.Type{}
 	mut data_init := ?i64(none)
+	// literal_refused says the initializer was a number the literal reader
+	// refused and reported, which is a different answer from an initializer that
+	// is not a number at all: the first has its own diagnostic at its own
+	// location, and the second is what the report below is for.
+	mut literal_refused := false
 	for {
 		d := p.parse_declarator(0) or {
 			p.skip_declaration()
@@ -199,19 +320,30 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					return decls
 				}
 				p.check_definition(spec, d)
-				body := p.parse_block() or { return decls }
+				p.declare_name(d.name, p.declared_type(spec.clause, d), d.name_at, true)
+				// A parameter's scope is the body, so the parameters are
+				// declared in a scope around it: their declarators were read
+				// before the body existed, and a name is typed where it is
+				// read.
+				p.scopes.enter()
+				p.declare_parameters(d.params)
+				body := p.parse_block()
+				p.scopes.leave()
+				statements := body or { return decls }
 				// A definition with no name has been reported and has no
 				// identity to record; one whose signature was reported is kept
 				// anyway, because the tree is what the file said and the
 				// diagnostic is what stops it being compiled.
 				if d.name.len > 0 {
 					decls << ast.FnDecl{
-						name:   d.name
-						ret:    spec.type_spelling(d.stars)
-						params: d.params
-						body:   body
-						line:   d.name_at.line
-						col:    d.name_at.col
+						name:     d.name
+						ret:      spec.type_spelling(d.stars)
+						ret_type: p.pointer_type(spec.clause, d)
+						resolved: p.declared_type(spec.clause, d)
+						params:   d.params
+						body:     statements
+						line:     d.name_at.line
+						col:      d.name_at.col
 					}
 				}
 				return decls
@@ -226,12 +358,14 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// kept as one.
 			if !spec.is_typedef {
 				decls << ast.FnDecl{
-					name:   d.name
-					ret:    spec.type_spelling(d.stars)
-					params: d.params
-					body:   []ast.Stmt{}
-					line:   d.name_at.line
-					col:    d.name_at.col
+					name:     d.name
+					ret:      spec.type_spelling(d.stars)
+					ret_type: p.pointer_type(spec.clause, d)
+					resolved: p.declared_type(spec.clause, d)
+					params:   d.params
+					body:     []ast.Stmt{}
+					line:     d.name_at.line
+					col:      d.name_at.col
 				}
 			}
 		} else {
@@ -242,13 +376,16 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_type = spec.type_spelling(d.stars)
 				data_stars = d.stars
 				data_count = d.array_count
+				data_clause = p.declared_type(spec.clause, d)
 			}
 			if p.at_punct('=') {
 				// An initializer makes it a definition even when the
 				// declaration says extern: the object has to live somewhere.
 				data_defined = true
 				p.next()
+				before := p.diagnostics.len
 				data_init = p.file_scope_constant()
+				literal_refused = p.diagnostics.len > before
 				p.skip_to_separator() or {
 					p.skip_declaration()
 					return decls
@@ -292,7 +429,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if data_defined && data_init == none {
-			p.error_at(data_at, 'unsupported: ${data_name} is initialized with something that is not a number, and only a number can be written into the image so far')
+			// Either way the definition is refused. When the initializer was a
+			// number the literal reader refused, it has already been named at
+			// its own location and this report would be a second message about
+			// the same construct.
+			if !literal_refused {
+				p.error_at(data_at, 'unsupported: ${data_name} is initialized with something that is not a number, and only a number can be written into the image so far')
+			}
 			return decls
 		}
 		if data_name.len == 0 {
@@ -303,13 +446,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		// function reads and writes by name. Everything the back end needs to
 		// lay the bytes out is known here - the type, how many elements, and the
 		// constant the storage starts at - so no later stage has to ask.
+		p.declare_name(data_name, data_clause, data_at, true)
 		p.globals << ast.Global{
-			name:  data_name
-			typ:   data_type
-			count: data_count
-			init:  data_init
-			line:  data_at.line
-			col:   data_at.col
+			name:     data_name
+			typ:      data_type
+			resolved: data_clause
+			count:    data_count
+			init:     data_init
+			line:     data_at.line
+			col:      data_at.col
 		}
 	}
 	return decls
@@ -320,6 +465,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 // Anything else - a string, a brace list, an expression - reads as none, and the
 // caller reports it: what is written into the image is a constant, and a
 // constant is what can be written.
+//
+// A number the literal reader refuses is reported here, at the literal as it was
+// written, which is where the expression path reports the same refusal. The
+// caller is told that it happened so that it does not follow it with the report
+// for an initializer that is not a number at all: measured, `int x = 0x1p3;`
+// used to exit with `x is initialized with something that is not a number`
+// instead of naming the construct.
 fn (mut p Parser) file_scope_constant() ?i64 {
 	sign := if p.at_punct('-') {
 		p.next()
@@ -335,7 +487,10 @@ fn (mut p Parser) file_scope_constant() ?i64 {
 	}
 	t := p.peek()
 	p.next()
-	value := parse_integer_literal(t.text) or { return none }
+	value := parse_integer_literal(t.text) or {
+		p.error_at(t, err.msg())
+		return none
+	}
 	return sign * value
 }
 
@@ -346,6 +501,14 @@ fn (mut p Parser) file_scope_constant() ?i64 {
 fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	if d.name.len == 0 {
 		p.error_at(spec.start, 'unsupported: a function definition needs a name')
+		return
+	}
+	if spec.clause.is_complex() || spec.clause.kind == .long_double {
+		// A type the model knows and the emitter has no form for is a different
+		// answer from a type whose first word is not one the emitter reads:
+		// `long double` and `double _Complex` are each one type, and the refusal
+		// names it rather than naming half of it.
+		p.error_at(spec.start, 'unsupported: ${spec.clause.describe()} is a type this compiler does not emit yet, so a function cannot return it')
 		return
 	}
 	if offender := unsupported_type_word(spec) {
@@ -367,6 +530,14 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 // declaration inside a body are the same question, because both are storage the
 // program has to find room for; a prototype is a promise, and a promise is not
 // asked.
+//
+// It answers with the first word and not with the type as it was written, which
+// is what the emitter stopped at: the diagnostic for `long long x` reads
+// `unsupported type long`, and that wording is the compiler's published
+// behavior, so it is not this lane's to move. A type written as two words is
+// named in full where the answer is about the construct rather than about the
+// word: the parameter list names what a parameter was declared with, and a
+// complex type is refused by name below.
 fn unsupported_type_word(spec DeclSpec) ?string {
 	// The words a type is made of, not the storage class in front of them: an
 	// `extern` or a `static` is not a type, and reporting one as an unsupported
@@ -389,6 +560,7 @@ fn unsupported_type_word(spec DeclSpec) ?string {
 // declaration still has to be measured to its end.
 fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 	mut spec := DeclSpec{}
+	mut tag_clause := types.Type{}
 	for {
 		t := p.peek()
 		if t.kind == .directive {
@@ -407,11 +579,18 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			if t.text == 'extern' {
 				spec.is_extern = true
 			}
+			// The first storage class written is the one the declaration has:
+			// `inline static` is a static function, and a word that says
+			// nothing about storage leaves the answer alone.
+			if spec.storage == .automatic {
+				spec.storage = storage_of(t.text)
+			}
 			continue
 		}
 		if t.text in type_qualifiers {
 			p.next()
 			spec.note(t)
+			spec.qualifiers = add_qualifier(spec.qualifiers, t.text)
 			continue
 		}
 		if t.text in builtin_types {
@@ -423,14 +602,15 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			p.next()
 			spec.note(t)
 			tag := p.parse_tag_specifier(t, depth)!
-			spec.type_words << tag
+			spec.type_words << tag.spelling
 			spec.has_type = true
 			spec.tag_decl = true
+			tag_clause = tag.clause
 			continue
 		}
-		if t.text in p.typedefs && !spec.has_type {
-			// A name this file has typedef'd. Only one can sit among the
-			// specifiers, so once a type has been read the name is the
+		if p.is_type_name(t.text) && !spec.has_type {
+			// A name this file has declared as a type. Only one can sit among
+			// the specifiers, so once a type has been read the name is the
 			// declarator's: `typedef __ssize_t ssize_t;` redeclares ssize_t and
 			// does not name two types.
 			p.next()
@@ -438,7 +618,7 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			continue
 		}
 		// An identifier in specifier position that is not a name this file has
-		// typedef'd is still a type name. A compiler declares spellings of its
+		// declared is still a type name. A compiler declares spellings of its
 		// own, which is how __builtin_va_list arrives here, and there is no
 		// other reading of `typedef __builtin_va_list va_list;`.
 		if !spec.has_type {
@@ -453,41 +633,100 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 		p.error_at(p.peek(), 'unsupported: expected a type, found ${describe(p.peek())}')
 		return error('expected a type')
 	}
+	spec.clause = p.specifier_clause(spec, tag_clause)
+	// What the declarator that follows is built from is held here, because a
+	// declarator is read in three places - a declaration, a parameter and a
+	// member - and this is the one place that resolves the specifiers.
+	p.pending_base = spec.clause
+	p.pending_storage = spec.storage
 	return spec
 }
 
-// parse_tag_specifier reads a struct, union or enum specifier and returns the
-// type as it was written. The tag lives in its own namespace and is not
-// recorded: every later use of it carries its keyword, so `struct _IO_FILE`
-// reads the same wherever it appears.
-fn (mut p Parser) parse_tag_specifier(keyword tokenize.Token, depth int) !string {
+// TagType is a tag specifier: the keyword and the tag as written, which is how a
+// tag is spelled wherever it is used, and the type it named, which is complete
+// when the specifier wrote a body and a tag that is only a name when it did not.
+struct TagType {
+	spelling string
+	clause   types.Type
+}
+
+// parse_tag_specifier reads a struct, union or enum specifier. Its tag lives in
+// its own namespace, where the keyword is part of the name: `struct S` and
+// `union S` are two tags, and neither hides an object called S. A tag with a body
+// defines it and is complete; a tag written without one is declared here if
+// nothing declared it before, so that `struct S *p;` read before
+// `struct S { ... };` is a pointer to the type the later declaration defines.
+fn (mut p Parser) parse_tag_specifier(keyword tokenize.Token, depth int) !TagType {
 	if depth > max_declaration_depth {
 		p.error_at(keyword, 'declaration is nested more than ${max_declaration_depth} levels deep')
 		return error('declaration nested too deeply')
 	}
-	mut text := keyword.text
+	kind := tag_kind(keyword.text)
+	mut spelling := keyword.text
+	mut tag := ''
 	if p.peek().kind == .identifier {
-		text += ' ' + p.next().text
+		tag = p.next().text
+		spelling += ' ' + tag
 	}
 	if !p.at_punct('{') {
-		return text
+		// No body: the type is whatever the tag namespace has for it, or a tag
+		// this reader declares now so that the definition after it completes
+		// the same type.
+		clause := p.scopes.lookup_tag(spelling) or {
+			fresh := types.incomplete_tag(kind, tag)
+			p.scopes.declare_tag(spelling, fresh)
+			fresh
+		}
+		return TagType{
+			spelling: spelling
+			clause:   clause
+		}
 	}
 	open := p.next()
 	if keyword.text == 'enum' {
 		// An enumerator list is names and constant expressions, and nothing in
 		// it is a declaration, so it is scanned as one bracketed region.
 		p.skip_balanced(open)!
-		return text
+		clause := types.enum_type(tag)
+		p.scopes.declare_tag(spelling, clause)
+		return TagType{
+			spelling: spelling
+			clause:   clause
+		}
 	}
-	p.parse_member_list(keyword, open, depth)!
-	return text
+	members := p.parse_member_list(keyword, open, depth)!
+	clause := if keyword.text == 'union' {
+		types.union_type(tag, members)
+	} else {
+		types.struct_type(tag, members)
+	}
+	p.scopes.declare_tag(spelling, clause)
+	return TagType{
+		spelling: spelling
+		clause:   clause
+	}
 }
 
-// parse_member_list reads the body of a struct or a union. Members are not
-// kept: without a type system there is nowhere to put them. The body is read
-// to its closing brace, which is what keeps the declaration after it starting
-// in the right place.
-fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token, depth int) ! {
+// tag_kind is the kind a tag keyword names.
+fn tag_kind(keyword string) types.Kind {
+	return match keyword {
+		'union' { types.Kind.union_ }
+		'enum' { types.Kind.enum_ }
+		else { types.Kind.struct_ }
+	}
+}
+
+// parse_member_list reads the body of a struct or a union and returns its members
+// in the order they were written. A member is a name, the type it resolved to, and
+// the width when it was written as a bitfield; the members are what make the
+// aggregate a complete type, since how much room it takes is the question the
+// object representation answers from them.
+//
+// An unnamed bitfield carries no name and its width, which is what asks the next
+// unit of its type to start where it is: the object representation reads a width
+// of zero that way.
+fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token, depth int) ![]types.Member {
+	mut members := []types.Member{}
 	for {
 		t := p.peek()
 		if t.kind == .eof {
@@ -500,17 +739,23 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 		}
 		if t.kind == .punct && t.text == '}' {
 			p.next()
-			return
+			return members
 		}
 		if t.kind == .punct && t.text == ';' {
 			p.next()
 			continue
 		}
-		_ := p.parse_decl_specifiers(depth + 1)!
+		spec := p.parse_decl_specifiers(depth + 1)!
 		// An unnamed bitfield, `int : 3;`, has a width and no declarator.
 		if p.at_punct(':') {
-			p.next()
-			p.skip_to_separator()!
+			bits := p.parse_bitfield_width()!
+			members << types.Member{
+				typ:      spec.clause
+				bitfield: true
+				bits:     bits
+				line:     spec.start.line
+				col:      spec.start.col
+			}
 			continue
 		}
 		for {
@@ -523,11 +768,16 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 				// ends anyway.
 				break
 			}
-			p.parse_declarator(depth + 1)!
+			d := p.parse_declarator(depth + 1)!
 			p.skip_gnu_postfix()!
-			if p.at_punct(':') {
-				p.next()
-				p.skip_to_separator()!
+			bits := if p.at_punct(':') { p.parse_bitfield_width()! } else { 0 }
+			members << types.Member{
+				name:     d.name
+				typ:      p.declared_type(spec.clause, d)
+				bitfield: bits > 0
+				bits:     bits
+				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
+				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
 			if p.at_punct(',') {
 				p.next()
@@ -544,6 +794,22 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 			return error('member list')
 		}
 	}
+	return members
+}
+
+// parse_bitfield_width reads `: N`, the width of a bitfield. A width this reader
+// can read is a number, which is what a source file writes; anything else - an
+// expression a header computed - is scanned to its separator and the member is
+// recorded without a width, which is what the reader that asked decides about.
+fn (mut p Parser) parse_bitfield_width() !int {
+	p.next() // :
+	if p.peek().kind == .number {
+		t := p.next()
+		value := parse_integer_literal(t.text) or { return 0 }
+		return int(value)
+	}
+	p.skip_to_separator()!
+	return 0
 }
 
 // parse_declarator reads one declarator: pointer stars, a name, and the array
@@ -560,10 +826,13 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 		}
 		p.next()
 		d.stars++
+		mut quals := types.Qualifiers{}
 		// Qualifiers may sit between the star and the name: `char *restrict p`.
 		for p.peek().kind == .identifier && p.peek().text in type_qualifiers {
+			quals = add_qualifier(quals, p.peek().text)
 			p.next()
 		}
+		d.star_quals << quals
 	}
 	mut wrapped := false
 	if p.at_punct('(') {
@@ -581,6 +850,16 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 	} else if p.peek().kind == .identifier {
 		d.name_at = p.peek()
 		d.name = p.next().text
+		// A word the language reserves for itself cannot be the name of a
+		// declaration (6.4.1). The lexer does not tell a keyword from an identifier
+		// - that table is `tokenize/`, another lane's file - so the reader that would
+		// make one a name is where the question is asked. Measured, `int if = 1;` and
+		// `int main(void) { int sizeof = 1; return 0; }` compiled where gcc 16.2.1
+		// refuses both with `expected identifier or '(' before 'if'`.
+		if is_keyword(d.name) {
+			p.error_at(d.name_at, 'unsupported: ${d.name} is a keyword, and a keyword cannot be the name of a declaration')
+			return error('keyword as a name')
+		}
 	}
 	pointer_to_function := wrapped && d.stars > 0
 	for {
@@ -596,11 +875,23 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			continue
 		}
 		if p.at_punct('(') {
+			// The parameters are read with the reader a declaration uses, and each
+			// of them names its own specifiers, so what the list resolved to last is
+			// not this declarator's base: the base is what the declaration's own
+			// specifiers gave. Measured before this was held, `int f(void); int
+			// main(void) { return f() + 1; }` was refused because the `(void)` left
+			// the base at void and the prototype was declared `void (void)`.
+			base := p.pending_base
 			params := p.parse_parameter_list(depth + 1)!
+			p.pending_base = base
 			if !pointer_to_function {
 				d.is_function = true
-				d.params = params.params
+			} else {
+				d.inner_function = true
 			}
+			d.params = params.params
+			d.variadic = params.variadic
+			d.prototyped = params.prototyped
 			if params.problem.len > 0 && d.param_problem.len == 0 {
 				d.param_problem = params.problem
 				d.param_at = params.at
@@ -609,7 +900,159 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 		}
 		break
 	}
+	// The name is recorded where the declarator ends, which is where 6.2.1 says
+	// its scope begins: a declaration is complete when its reader finishes it.
+	p.note_declaration(d, depth)
 	return d
+}
+
+// declared_type is the type a specifier and a declarator together name. The
+// declarator grammar applies its pieces in the order it read them: the stars bind
+// first and each binds to what is left, an array suffix makes an array of that,
+// and a function suffix makes a function returning it.
+//
+// A declarator that wrote more than one array suffix is a shape this tree has no
+// form for, so only the first becomes an array and the reader that asked for it
+// reports the rest; the type is the one array it describes.
+fn (p Parser) declared_type(base types.Type, d Declarator) types.Type {
+	target := if d.inner_function {
+		// The pointer points at the function its suffix named.
+		types.function_type(base, type_params(d.params), d.variadic, d.prototyped)
+	} else {
+		base
+	}
+	mut typ := p.pointer_type(target, d)
+	if d.array_at.line > 0 {
+		typ = types.array_of(typ, if d.array_count > 0 { d.array_count } else { -1 })
+	}
+	if d.is_function {
+		typ = types.function_type(typ, type_params(d.params), d.variadic, d.prototyped)
+	}
+	return typ
+}
+
+// type_params is the parameters of a declarator as the type model wants them. The
+// tree keeps a parameter with the type as it was written, because that is what a
+// definition's frame is laid out from; the type keeps the one the model resolved.
+// parameter_spelling is the type a parameter was declared with, written the way
+// it was written: the type words joined, and the storage class and qualifiers in
+// front of them left out, since those are not the type.
+fn parameter_spelling(spec DeclSpec) string {
+	if spec.type_words.len == 0 {
+		return spec.words.join(' ')
+	}
+	return spec.type_words.join(' ')
+}
+
+fn type_params(params []ast.Param) []types.Param {
+	mut out := []types.Param{cap: params.len}
+	for param in params {
+		out << types.Param{
+			name: param.name
+			typ:  param.resolved
+			line: param.line
+			col:  param.col
+		}
+	}
+	return out
+}
+
+// pointer_type is the base with the pointer stars of a declarator, and nothing
+// else: what a function returns is its specifiers and its stars, without the
+// function suffix and without an array the same declarator might have written for
+// something else.
+fn (p Parser) pointer_type(base types.Type, d Declarator) types.Type {
+	mut typ := base
+	for index in 0 .. d.stars {
+		quals := if index < d.star_quals.len { d.star_quals[index] } else { types.Qualifiers{} }
+		typ = types.qualified(types.pointer_to(typ), quals)
+	}
+	return typ
+}
+
+// note_declaration records the name a declarator gives. It is called for every
+// declarator and answers for the top level only: a member and a parameter are
+// declarators too, and neither declares a name a later use finds by itself - a
+// member is reached through the object, and a parameter is declared in the body's
+// own scope, where the definition puts it.
+fn (mut p Parser) note_declaration(d Declarator, depth int) {
+	if depth != 0 || d.name.len == 0 {
+		return
+	}
+	base := p.pending_base or { return }
+	p.declare_name(d.name, p.declared_type(base, d), d.name_at, false)
+}
+
+// declare_name writes a declaration into the scope being read, with the linkage
+// its storage class and its scope give it. The name is recorded in the unit's
+// own set of declared names as well, which is what the check at the end of the
+// unit asks a name the tree carries against.
+fn (mut p Parser) declare_name(name string, typ types.Type, at tokenize.Token, defined bool) {
+	p.declared[name] = true
+	previous := p.scopes.lookup(name)
+	linkage := types.linkage_for(p.pending_storage, p.scopes.at_file_scope(), previous)
+	// One name declared twice in one scope is one name (6.2.2), and the two
+	// declarations have to describe compatible types (6.2.7): asked here of what
+	// this declaration spells against what the scope already holds. Measured,
+	// `void f1(int *p); void f1(char *p);` was accepted where gcc 16.2.1 refuses
+	// `conflicting types for f1`; a declaration that repeats a type is one name and
+	// not a conflict, `int f(int); int f(int) { return 0; }` included.
+	if earlier := p.scopes.lookup_here(name) {
+		if redeclaration_conflicts(earlier.typ, typ) {
+			p.error_at(at, 'a constraint violation: ${name} is declared as ${earlier.typ.describe()} in this scope and this declaration gives it ${typ.describe()}, and two declarations of one name in one scope have to describe one type')
+		}
+	}
+	p.scopes.declare(types.Symbol{
+		name:    name
+		typ:     typ
+		storage: p.pending_storage
+		linkage: linkage
+		line:    at.line
+		col:     at.col
+		defined: defined
+	})
+}
+
+// redeclaration_conflicts says whether two declarations of one name in one scope
+// describe two different things, which 6.2.7 refuses. Two types that are the same
+// type are one thing and not a conflict, and two declarations of an object are one
+// object. The one case the model's `same` cannot answer is 6.2.7p15: a function
+// type written with an empty parameter list says nothing about its parameters
+// rather than saying that there are none, so two function types one of which is
+// written that way are compared by what they return.
+//
+// Measured, gcc 16.2.1 accepts `int f(void); int f();` and `int f(int a); int f();`
+// under `-std=c99`, and refuses `int f(void); char f();`, which returns something
+// else, and `int f(int a); int f(char b);`, whose parameter lists are both written
+// and disagree.
+fn redeclaration_conflicts(earlier types.Type, later types.Type) bool {
+	if earlier.compatible(later) {
+		return false
+	}
+	if earlier.is_function() && later.is_function() && !(earlier.prototyped && later.prototyped) {
+		earlier_returns := earlier.returns() or { return true }
+		later_returns := later.returns() or { return true }
+		return !earlier_returns.compatible(later_returns)
+	}
+	return true
+}
+
+// declare_parameters declares a definition's parameters in the scope around its
+// body. They are declared from the parameters the head was read with, because a
+// parameter's declarator is read before the body exists: the body is where its
+// scope is, so this opens the scope and the body's own block opens the one inside
+// it.
+fn (mut p Parser) declare_parameters(params []ast.Param) {
+	for param in params {
+		if param.name.len == 0 {
+			continue
+		}
+		at := tokenize.Token{
+			line: param.line
+			col:  param.col
+		}
+		p.declare_name(param.name, param.resolved, at, true)
+	}
 }
 
 // parse_parameter_list reads a parameter list into the parameters it names and
@@ -623,10 +1066,13 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 	open := p.next() // (
 	if p.at_punct(')') {
 		// `()` names no parameters, which is all the tree records: a call is
-		// not checked against an empty list, so there is nothing to keep.
+		// not checked against an empty list, so there is nothing to keep. It is
+		// not a prototype either, so it says nothing about the arguments a call
+		// may pass.
 		p.next()
 		return params
 	}
+	params.prototyped = true
 	for {
 		t := p.peek()
 		if t.kind == .eof {
@@ -639,6 +1085,7 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			// function whose arguments this back end cannot lay out. For a
 			// prototype it is a promise, and promises are not checked here.
 			p.next()
+			params.variadic = true
 			params.note_problem('unsupported: a variadic definition is not implemented', t)
 			if !p.expect_punct(')') {
 				return error('parameter list')
@@ -656,19 +1103,21 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 				}
 			} else {
 				params.params << ast.Param{
-					typ:  spec.type_spelling(0)
-					line: spec.start.line
-					col:  spec.start.col
+					typ:      spec.type_spelling(0)
+					resolved: spec.clause
+					line:     spec.start.line
+					col:      spec.start.col
 				}
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
 			}
 		} else {
 			d := p.parse_declarator(depth + 1)!
 			params.params << ast.Param{
-				name: d.name
-				typ:  spec.type_spelling(d.stars)
-				line: if d.name.len > 0 { d.name_at.line } else { spec.start.line }
-				col:  if d.name.len > 0 { d.name_at.col } else { spec.start.col }
+				name:     d.name
+				typ:      spec.type_spelling(d.stars)
+				resolved: p.declared_type(spec.clause, d)
+				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
+				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
 			// The order of the questions is the order a reader asks them: what
 			// keeps this parameter from being named at all, then the shapes the
@@ -678,7 +1127,9 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			} else if d.array_at.line > 0 {
 				params.note_problem('unsupported: array parameters are not implemented', d.array_at)
 			} else if !(spec.words.len == 1 && spec.words[0] in supported_types) {
-				params.note_problem('unsupported type ${spec.words[0]}', spec.start)
+				// The type as the parameter wrote it, so that `double _Complex`
+				// and `long long` are named rather than a word of them.
+				params.note_problem('unsupported type ${parameter_spelling(spec)}', spec.start)
 			}
 		}
 		if p.at_punct(',') {
@@ -835,8 +1286,28 @@ fn closing_of(open string) string {
 // register_typedef remembers a name as a type for the rest of the file. The
 // declaration grammar needs the list: `size_t n` and `puts(x)` are the same
 // token shape, and only the names seen so far say which one this is.
+//
+// A name already declared as a type is left alone: it is there with the type it
+// names, and replacing that with the name itself would throw away the only answer
+// this file has. A name this reader could only read as a type becomes an opaque
+// type carrying it, recorded at file scope, because a spelling says nothing about
+// which block it was written in.
 fn (mut p Parser) register_typedef(name string) {
-	if name.len > 0 {
-		p.typedefs[name] = true
+	if name.len == 0 {
+		return
 	}
+	p.declared[name] = true
+	if symbol := p.scopes.lookup(name) {
+		if symbol.is_typedef() {
+			return
+		}
+	}
+	at := p.peek()
+	p.scopes.declare_at_file_scope(types.Symbol{
+		name:    name
+		typ:     types.opaque_type(name)
+		storage: types.Storage.typedef_
+		line:    at.line
+		col:     at.col
+	})
 }

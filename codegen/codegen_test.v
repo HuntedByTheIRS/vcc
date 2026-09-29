@@ -220,6 +220,23 @@ fn test_a_status_wider_than_a_byte_keeps_its_low_bits() {
 	assert run_image(emitted.bytes) == 44
 }
 
+// A constant the type model did not resolve is refused before the layout runs.
+// The emitter writes a constant as a four-byte int, so a value that int cannot
+// hold would be written as a different number than the program asked for:
+// measured, `int main(void) { return 4294967295 > 2147483647; }` was emitted as
+// an int comparison and returned 0 where ISO C and gcc return 1.
+fn test_a_constant_the_model_did_not_type_is_refused_before_anything_is_written() {
+	emitted := emit(program([return_expression(int_argument(4294967295))]), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('4294967295')
+	assert emitted.bytes.len == 0
+	// The same node with a value an int holds is written as the int it is, which
+	// is what keeps a tree assembled by hand emittable.
+	small := emit(program([return_expression(int_argument(7))]), Options{})
+	assert small.diagnostics.len == 0
+	assert run_image(small.bytes) == 7
+}
+
 // A body is statements now, not one folded return: the first return is what the
 // function finishes with, and the second is emitted behind it and never reached.
 fn test_a_body_with_more_than_one_return_compiles_and_the_first_wins() {
@@ -420,7 +437,14 @@ fn test_division_by_zero_is_a_diagnostic_and_not_a_crash() {
 }
 
 fn test_a_non_constant_return_is_reported_with_the_name() {
-	emitted := emit(translation_unit('int main() { return x; }'), Options{})
+	// The tree is assembled by hand rather than parsed: a name nothing in the
+	// unit declares is refused by the parser once the whole unit has been read,
+	// and what this checks is the message the emitter gives for a name it cannot
+	// place.
+	emitted := emit(program([ast.Stmt{
+		kind: .return_stmt
+		expr: name_node('x')
+	}]), Options{})
 	assert emitted.diagnostics.len == 1
 	assert emitted.diagnostics[0].msg.contains('x is not a constant')
 }

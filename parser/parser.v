@@ -1,7 +1,9 @@
 module parser
 
 import ast
+import backend
 import tokenize
+import types
 
 // Result is a parse of one file: the declarations that parsed, plus every
 // diagnostic produced on the way. A construct the compiler cannot handle stops
@@ -18,12 +20,26 @@ mut:
 	tokens      []tokenize.Token
 	pos         int
 	diagnostics []tokenize.Diagnostic
-	// typedefs is every name this file has declared as a type. The declaration
-	// grammar needs it: `size_t n` and `puts(x)` are the same token shape, and
-	// only the names seen so far say which one a statement holds. It is a map
-	// because every declaration start asks it a question, and a list would
-	// turn parsing a file with twenty thousand typedefs quadratic.
-	typedefs map[string]bool
+	// scopes is every name this file has declared, in the scope it was declared
+	// in. The declaration grammar needs it: `size_t n` and `puts(x)` are the
+	// same token shape, and only the names seen so far say which one a statement
+	// holds. It is also what gives every node its type clause, because a name is
+	// typed where it is read and a name the reader has not met yet has nothing
+	// to find. It is a table of scopes rather than one map because an inner
+	// declaration hides an outer one and gives it back when its block ends.
+	scopes types.Table
+	// representation is what the target description answered about the object
+	// representation of the C types: the width of a pointer, and the width of
+	// the integer kinds the back end writes a constant at. A question that
+	// needs a width the description does not carry is refused and the node it
+	// belongs to is left unresolved rather than guessed at.
+	representation types.Representation
+	// pending_base is the type the specifiers just read name, for the declarator
+	// that follows them. A declarator is read in three places - a declaration, a
+	// parameter and a member - and it is the same grammar in all three, so what
+	// the specifiers resolved to is held here for the declarator to use.
+	pending_base    ?types.Type
+	pending_storage types.Storage
 	// depth counts open parentheses. The grammar recurses only through them, so
 	// this is the one number that keeps a hostile file from running the stack out.
 	depth int
@@ -32,6 +48,12 @@ mut:
 	// functions are code; the objects are collected here and travel with the
 	// tree, since a body reads them by name.
 	globals []ast.Global
+	// declared is every name this file declares anywhere, wherever it was
+	// declared: an object, a function, a typedef, a parameter. It is what the
+	// check at the end of the unit asks a name the tree carries against, and it
+	// is a set of names rather than the scope table because that check is about
+	// the unit and not about which block a name was visible in.
+	declared map[string]bool
 }
 
 // supported_types are the ones the back end can emit today.
@@ -45,13 +67,47 @@ const max_expression_depth = 200
 // parse reads a token stream into a translation unit.
 pub fn parse(tokens []tokenize.Token) Result {
 	mut p := Parser{
-		tokens: tokens
+		tokens:         tokens
+		scopes:         types.new_table()
+		representation: target_representation()
+		declared:       map[string]bool{}
 	}
 	unit := p.parse_unit()
+	// Every name the tree carries has to be a name this file declares. A name
+	// that is not is refused here, once the whole unit has been read, because
+	// whether a name is declared is a question only the end of the file can
+	// answer: a definition may follow the function that calls it.
+	p.report_undeclared(unit)
 	return Result{
 		unit:        unit
 		diagnostics: p.diagnostics
 	}
+}
+
+// target_representation is what the target description says about the C types.
+// The host is the target this compiler emits for, and the description answers for
+// it what it carries: the width of a pointer, and the width of an int and of an
+// unsigned int, which is the width the back end writes a constant at. A question
+// the description cannot answer is refused by name, which is the difference
+// between a compiler that does not know something and one that guesses.
+fn target_representation() types.Representation {
+	target := backend.host() or { return types.Representation{} }
+	return types.from_target(target).representation
+}
+
+// is_type_name says whether a name is one this file has declared as a type
+// rather than as an object.
+fn (p Parser) is_type_name(name string) bool {
+	symbol := p.scopes.lookup(name) or { return false }
+	return symbol.is_typedef()
+}
+
+// resolve is the one lookup the expression reader does, and it is the reason a
+// name declared later is not a name: this answers with what has been declared so
+// far, and the zero type for a name the reader has not met.
+fn (p Parser) resolve(name string) types.Type {
+	symbol := p.scopes.lookup(name) or { return types.Type{} }
+	return symbol.typ
 }
 
 fn (mut p Parser) parse_unit() ast.TranslationUnit {
@@ -76,8 +132,11 @@ fn (mut p Parser) parse_unit() ast.TranslationUnit {
 		}
 		// Depth is per declaration: an error in one declaration leaves a count
 		// behind, and carrying it into the next one would report nesting that is
-		// not there.
+		// not there. What the specifiers of the last declaration resolved to is
+		// per declaration for the same reason.
 		p.depth = 0
+		p.pending_base = none
+		p.pending_storage = .automatic
 		decls << p.parse_declaration()
 	}
 	return ast.TranslationUnit{
@@ -88,7 +147,19 @@ fn (mut p Parser) parse_unit() ast.TranslationUnit {
 
 // parse_block reads `{ ... }`. Every statement a body is made of is read by the
 // statement reader; what is left here is the block's own business: where it
-// ends, and what happens when the file ends before it does.
+// ends, what a declaration inside it is scoped to, and what happens when the file
+// ends before it does.
+//
+// The block is a scope, which is where 6.2.1 puts the names declared in it: a
+// declaration inside a block hides one outside it and gives it back when the
+// block ends. Names are declared where the statement reader meets them, so this
+// opens the scope before the first statement and closes it when the closing brace
+// is read, errors included.
+//
+// A declaration statement gets its type clause here, from the symbol the
+// declaration recorded. The statement reader builds a declaration out of the
+// spelling it reads - that is its job - and the clause is filled from the one
+// place that answered the type, so the node and the scope cannot disagree.
 fn (mut p Parser) parse_block() ![]ast.Stmt {
 	open := p.peek()
 	if !p.at_punct('{') {
@@ -96,6 +167,10 @@ fn (mut p Parser) parse_block() ![]ast.Stmt {
 		return error('expected a block')
 	}
 	p.next()
+	p.scopes.enter()
+	defer {
+		p.scopes.leave()
+	}
 	mut stmts := []ast.Stmt{}
 	for {
 		t := p.peek()
@@ -122,9 +197,120 @@ fn (mut p Parser) parse_block() ![]ast.Stmt {
 		// been reported where the region opened, and the closing brace this
 		// loop is waiting for is gone with it.
 		fresh := p.parse_statement() or { break }
-		stmts << fresh
+		stmts << p.with_declared_types(fresh)
 	}
 	return stmts
+}
+
+// with_declared_types gives every declaration among the statements of a block the
+// type its declaration resolved to, taken from the symbol table the declaration
+// was recorded in.
+fn (p Parser) with_declared_types(stmts []ast.Stmt) []ast.Stmt {
+	mut out := []ast.Stmt{cap: stmts.len}
+	for stmt in stmts {
+		if stmt.kind == .var_decl {
+			if symbol := p.scopes.lookup(stmt.decl_name) {
+				out << ast.Stmt{
+					...stmt
+					resolved: symbol.typ
+				}
+				continue
+			}
+		}
+		out << stmt
+	}
+	return out
+}
+
+// report_undeclared refuses every name the tree carries that nothing in the unit
+// declares.
+//
+// The emitter resolves a name at layout, and a call to a name no declaration
+// describes is written as a call to a symbol the image does not hold: measured,
+// `int main(void) { return missing(1); }` compiled into a binary that died at
+// load with `undefined symbol: missing`. The question is asked here, over the
+// whole unit, rather than where the name is read, because a definition may
+// follow the function that calls it: `int main(void) { return f(); } int f(void)
+// { return 0; }` is a file this compiler reads, and a use it had not met a
+// declaration for by then is not by itself a name nothing declares. A name no
+// declaration in the unit provides is the class C99 refuses as an implicit
+// declaration, and refusing it is what keeps a name the back end cannot place
+// out of an image.
+//
+// One diagnostic per name, at the first use the walk reaches, because three uses
+// of a name nothing declares are one missing declaration and not three.
+fn (mut p Parser) report_undeclared(unit ast.TranslationUnit) {
+	mut reported := map[string]bool{}
+	for decl in unit.decls {
+		p.check_undeclared_statements(decl.body, mut reported)
+	}
+}
+
+fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map[string]bool) {
+	for stmt in stmts {
+		if stmt.kind == .assign {
+			// The name an assignment writes to is a use of it: `missing = 1;`
+			// names a missing declaration just as reading the name does.
+			p.check_undeclared_name(stmt.target, stmt.line, stmt.col, mut reported)
+		}
+		if expr := stmt.expr {
+			p.check_undeclared_expression(expr, mut reported)
+		}
+		if init := stmt.init {
+			p.check_undeclared_expression(init, mut reported)
+		}
+		if index := stmt.index {
+			p.check_undeclared_expression(index, mut reported)
+		}
+		if cond := stmt.cond {
+			p.check_undeclared_expression(cond, mut reported)
+		}
+		p.check_undeclared_statements(stmt.body, mut reported)
+		p.check_undeclared_statements(stmt.then_body, mut reported)
+		p.check_undeclared_statements(stmt.else_body, mut reported)
+		p.check_undeclared_statements(stmt.step, mut reported)
+	}
+}
+
+// check_undeclared_expression walks one expression for the names it carries: the
+// name of a value, the name a call reaches, and the name of an array being
+// subscripted or assigned element by element.
+fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[string]bool) {
+	match expr {
+		ast.Ident {
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+		}
+		ast.Call {
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			for argument in expr.args {
+				p.check_undeclared_expression(argument, mut reported)
+			}
+		}
+		ast.Index {
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			p.check_undeclared_expression(expr.index, mut reported)
+		}
+		ast.Unary {
+			p.check_undeclared_expression(expr.expr, mut reported)
+		}
+		ast.Binary {
+			p.check_undeclared_expression(expr.left, mut reported)
+			p.check_undeclared_expression(expr.right, mut reported)
+		}
+		ast.IntLit, ast.StrLit {}
+	}
+}
+
+fn (mut p Parser) check_undeclared_name(name string, line int, col int, mut reported map[string]bool) {
+	// A reserved word is not a name, and the constructs that put one in the tree
+	// as if it were - a cast, which this reader does not implement - carry their
+	// own diagnostic. Reporting the word here as well would be a second message
+	// about a construct that was already refused.
+	if name.len == 0 || is_keyword(name) || name in p.declared || name in reported {
+		return
+	}
+	reported[name] = true
+	p.error_span(line, col, 'unsupported: ${name} is used here and nothing in this file declares it')
 }
 
 // skip_statement moves past a statement that failed, so the rest of the block
@@ -179,11 +365,121 @@ fn (mut p Parser) parse_binary(min_precedence int) !ast.Expr {
 			op:    t.text
 			left:  left
 			right: right
+			typ:   p.binary_type(t, left, right)
 			line:  t.line
 			col:   t.col
 		})
 	}
 	return left
+}
+
+// binary_type is the type an expression with two operands has: int for a
+// comparison or a logical operator, and for the arithmetic ones the type the two
+// operands convert to, which is what 6.3.2.1 calls the usual arithmetic
+// conversions. An operand that is an array is read as a pointer to its first
+// element first.
+//
+// Where the model refuses - two arithmetic operands whose conversion needs a
+// width the target description does not carry - the refusal is reported at the
+// operator, where the construct is written, and the clause is left unresolved
+// rather than filled in. The emitter refuses a node whose clause is unresolved,
+// so a construct nothing could type does not reach a binary. A node that already
+// carries the zero type was refused where it was written, and a second message
+// about the operator would only repeat the first.
+//
+// Pointer arithmetic is a case this model has no answer for: the type of `p + 1`
+// this model answers, and the scale factor and the emitted bytes are the back end
+// milestone's, but the type of the difference of two pointers is `ptrdiff_t`,
+// which is a type a header names and not one this compiler has, so it stays
+// unresolved and the back end refuses it.
+fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) types.Type {
+	a := p.value_type(left)
+	b := p.value_type(right)
+	if op.text in ['&&', '||', '==', '!=', '<', '>', '<=', '>='] {
+		// The answer is a truth value whatever the operands were.
+		return types.int_type()
+	}
+	if a.is_arithmetic() && b.is_arithmetic() {
+		return types.usual_arithmetic_conversions(a, b, p.representation) or {
+			p.error_at(op, err.msg())
+			return types.Type{}
+		}
+	}
+	if op.text == '+' || op.text == '-' {
+		if a.is_pointer() && b.is_integer() {
+			return a
+		}
+		if op.text == '+' && b.is_pointer() && a.is_integer() {
+			return b
+		}
+	}
+	if a.kind != .unknown && b.kind != .unknown {
+		// Both operands were resolved and the model still has no answer for the
+		// operator, which is a construct this reader does not type rather than
+		// a construct it refused.
+		p.error_at(op, 'unsupported: the type of ${describe_operand(left)} ${op.text} ${describe_operand(right)} is not one this compiler resolves')
+	}
+	return types.Type{}
+}
+
+// describe_operand names an operand of an operator for a diagnostic, so the
+// refusal says which expression the operator was written between.
+fn describe_operand(expr ast.Expr) string {
+	return match expr {
+		ast.Ident { expr.name }
+		ast.Index { '${expr.name}[...]' }
+		ast.IntLit { expr.text }
+		ast.StrLit { 'a string literal' }
+		ast.Call { 'a call to ${expr.name}' }
+		ast.Unary { 'a value with ${expr.op} applied to it' }
+		ast.Binary { 'a value of ${expr.op}' }
+	}
+}
+
+// value_type is the type an operand contributes where a value is expected: the
+// type it has, with an array decayed to a pointer to its first element and a
+// function to a pointer to itself. 6.3.2.1 lists where that happens, and the
+// places it does not are read from the operand's own clause instead - `&a` is the
+// address of the array, and a string literal that initializes an array of
+// characters stays an array.
+fn (p Parser) value_type(expr ast.Expr) types.Type {
+	return types.decay(expr.typ)
+}
+
+// unary_type is the type a prefix operator gives its expression. `!` answers with
+// an int whatever it was given and `&` with a pointer to the operand's own type,
+// undecayed; the arithmetic operators promote their operand.
+//
+// The promotion is a call the model can refuse, and where it does the refusal is
+// reported at the operator instead of being discarded. An operand that already
+// carries the zero type was refused where it was written, so it is left alone
+// rather than reported twice.
+fn (mut p Parser) unary_type(op tokenize.Token, operand ast.Expr) types.Type {
+	if op.text == '!' {
+		return types.int_type()
+	}
+	if op.text == '&' {
+		if p.is_unresolved(operand) {
+			return types.Type{}
+		}
+		return types.pointer_to(operand.typ)
+	}
+	if p.is_unresolved(operand) {
+		return types.Type{}
+	}
+	return types.integer_promotion(p.value_type(operand), p.representation) or {
+		p.error_at(op, err.msg())
+		return types.Type{}
+	}
+}
+
+// is_unresolved says whether an expression's clause is the one the model could
+// not answer for, which no operator may take an address of or promote.
+fn (p Parser) is_unresolved(expr ast.Expr) bool {
+	if expr.typ.kind == .unknown {
+		return true
+	}
+	return false
 }
 
 fn (mut p Parser) parse_unary() !ast.Expr {
@@ -198,6 +494,7 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 		return ast.Expr(ast.Unary{
 			op:   t.text
 			expr: operand
+			typ:  p.unary_type(t, operand)
 			line: t.line
 			col:  t.col
 		})
@@ -216,6 +513,7 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		return ast.Expr(ast.IntLit{
 			value: value
 			text:  t.text
+			typ:   p.constant_type(t, value)
 			line:  t.line
 			col:   t.col
 		})
@@ -226,20 +524,34 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 			p.error_at(t, err.msg())
 			return error('bad character literal')
 		}
+		// A character constant has the type int, whatever it was written as:
+		// 6.4.4.4 says so, and it is why `'a' + 'b'` is an int in C.
 		return ast.Expr(ast.IntLit{
 			value: value
 			text:  t.text
+			typ:   types.int_type()
 			line:  t.line
 			col:   t.col
 		})
 	}
 	if t.kind == .identifier {
 		p.next()
+		if t.text == 'sizeof' {
+			// `sizeof` is an operator, and the spelling is not a function: read
+			// as a call it produced a reference to a symbol nothing defines,
+			// and the program died at load with `undefined symbol: sizeof`.
+			// Refusing it by name at its own location is what this compiler can
+			// honestly do until the milestone that owns the operator
+			// implements it.
+			p.error_at(t, 'unsupported: sizeof is an operator this compiler does not read yet')
+			return error('sizeof')
+		}
 		if p.at_punct('(') {
 			args := p.parse_arguments()!
 			return ast.Expr(ast.Call{
 				name: t.text
 				args: args
+				typ:  p.call_type(t, args)
 				line: t.line
 				col:  t.col
 			})
@@ -258,12 +570,15 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 			return ast.Expr(ast.Index{
 				name:  t.text
 				index: index
+				typ:   p.index_type(t)
 				line:  t.line
 				col:   t.col
 			})
 		}
+		typ := p.resolve(t.text)
 		return ast.Expr(ast.Ident{
 			name: t.text
+			typ:  typ
 			line: t.line
 			col:  t.col
 		})
@@ -277,6 +592,7 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		return ast.Expr(ast.StrLit{
 			value: value
 			text:  t.text
+			typ:   string_literal_type(t.text, value)
 			line:  t.line
 			col:   t.col
 		})
@@ -323,6 +639,182 @@ fn (mut p Parser) parse_arguments() ![]ast.Expr {
 		p.error_at(p.peek(), 'unsupported: expected , or ) in the argument list, found ${describe(p.peek())}')
 		return error('argument list')
 	}
+}
+
+// constant_type is the type an integer constant has, which 6.4.4.1 decides from
+// the spelling and the value. A constant whose type needs a width the description
+// does not carry is refused here, at the constant as it was written: the model has
+// no answer, and a node left unresolved is a node a later stage would have to
+// guess a width for. Measured, `return 4294967295 > 2147483647;` was compiled
+// with the constant read as an int and returned 0 where ISO C and gcc return 1.
+fn (mut p Parser) constant_type(at tokenize.Token, value i64) types.Type {
+	return types.integer_constant_type(at.text, value, p.representation) or {
+		p.error_at(at, err.msg())
+		return types.Type{}
+	}
+}
+
+// string_literal_type is the type of a string literal: an array of char holding
+// the bytes and the terminator the literal does not write. A prefixed literal
+// names a wide or UTF-8 character type, which is a header's type and not one this
+// compiler has yet, so its clause is left unresolved.
+fn string_literal_type(text string, value string) types.Type {
+	if text.len > 0 && text[0] != `"` {
+		return types.Type{}
+	}
+	return types.array_of(types.char_type(), value.len + 1)
+}
+
+// index_type is the type of one element of an array or of one pointed-to value:
+// `a[i]` has the element type of what a was declared as, and `p[i]` the type p
+// points at. The lookup is the one the name was declared with, which is what
+// makes a subscript of a name the shape this reader can type. A name that is
+// neither an array nor a pointer has no element to be one of, and that is
+// refused here rather than left unresolved.
+fn (mut p Parser) index_type(at tokenize.Token) types.Type {
+	declared := p.resolve(at.text)
+	if declared.is_array() {
+		return declared.element() or { types.Type{} }
+	}
+	if declared.is_pointer() {
+		return declared.pointee() or { types.Type{} }
+	}
+	p.error_at(at, 'unsupported: ${at.text} is neither an array nor a pointer, so it has no element to subscript')
+	return types.Type{}
+}
+
+// signature is the function type a name declares, following a pointer to a
+// function to the function it points at.
+fn (p Parser) signature(name string) ?types.Type {
+	declared := p.resolve(name)
+	if declared.is_function() {
+		return declared
+	}
+	if declared.is_pointer() {
+		inner := declared.pointee() or { return none }
+		if inner.is_function() {
+			return inner
+		}
+	}
+	return none
+}
+
+// is_callable says whether a name the unit declares is what 6.5.2.2 requires what a
+// call calls to be, which is a function or a pointer to a function.
+fn (p Parser) is_callable(name string) bool {
+	signature := p.signature(name) or { return false }
+	return signature.is_function()
+}
+
+// call_type is the type a call has: what the function returns. It also checks the
+// arguments against the parameters as they were read, which is the constraint
+// 6.5.2.2 names: an argument is converted to its parameter's type as if by
+// assignment, so one rule decides both, and the diagnostic names the two types
+// and the argument's own location.
+//
+// A call to a name this file never declared - every call to a library function
+// here - has nothing to check against and answers with the zero type. A call
+// through a parameter list that named no parameters has nothing to check either,
+// because such a declaration says nothing about the call.
+fn (mut p Parser) call_type(name tokenize.Token, args []ast.Expr) types.Type {
+	// 6.5.2.2: what a call calls has to be a function or a pointer to one. A name
+	// the unit declares as something else is refused here rather than written,
+	// because the emitter resolves the call to whatever the name is and the image
+	// then dies at load. Measured, `int x; int main(void) { return x(1); }`
+	// compiled, wrote an image, and the image died at load with `undefined symbol:
+	// x`. A name nothing in the unit declares is left to the check at the end of
+	// the unit, which reports one message for it.
+	if name.text in p.declared && !p.is_callable(name.text) {
+		declared := p.resolve(name.text)
+		p.error_at(name, 'a constraint violation: ${name.text} is declared as ${declared.describe()}, and what a call calls has to be a function or a pointer to a function')
+		return types.Type{}
+	}
+	signature := p.signature(name.text) or { return types.Type{} }
+	if !signature.prototyped {
+		return signature.returns() or { types.Type{} }
+	}
+	parameters := signature.params
+	if !signature.variadic && parameters.len != args.len {
+		p.error_at(name, 'the call to ${name.text} passes ${args.len} argument(s), and the declaration of ${name.text} names ${parameters.len} argument(s)')
+	}
+	for index, argument in args {
+		if index >= parameters.len {
+			break
+		}
+		problem := types.assignment_problem(parameters[index].typ, p.value_type(argument), is_null_constant(argument)) or {
+			continue
+		}
+		p.error_span(argument.line, argument.col, problem)
+	}
+	return signature.returns() or { types.Type{} }
+}
+
+// is_null_constant says whether an expression is the integer constant expression
+// with the value 0 that 6.3.2.3 calls a null pointer constant, which is the one
+// integer a pointer may be initialized with. The clause asks for the value of the
+// expression and not for the way it is spelled, so `0`, `-0`, `2 - 2` and `3 / 4`
+// are the same answer to the question here. Measured, gcc 16.2.1 under `-std=c99`
+// accepts `h(1 - 1)` for a parameter of type `int (*)(void)`, which this compiler
+// refused while the question was asked of the literal alone.
+fn is_null_constant(expr ast.Expr) bool {
+	value := constant_value(expr) or { return false }
+	return value == 0
+}
+
+// constant_value is the value of an integer constant expression this reader
+// evaluates while it reads: a literal, a literal with a sign in front of it, and
+// the arithmetic of two values. The five operators are the ones the tree has a
+// precedence for, which is the arithmetic this compiler reads at all.
+//
+// An expression that is not one of those answers none, which says that this is not
+// a constant expression the compiler can evaluate - not that it has no value. A
+// name, a call and a cast all answer none, so a pointer is still never initialized
+// with something that only has a value at run time.
+fn constant_value(expr ast.Expr) ?i64 {
+	if expr is ast.IntLit {
+		return expr.value
+	}
+	if expr is ast.Unary {
+		operand := constant_value(expr.expr) or { return none }
+		if expr.op == '-' {
+			return -operand
+		}
+		if expr.op == '+' {
+			return operand
+		}
+		return none
+	}
+	if expr is ast.Binary {
+		left := constant_value(expr.left) or { return none }
+		right := constant_value(expr.right) or { return none }
+		match expr.op {
+			'+' {
+				return left + right
+			}
+			'-' {
+				return left - right
+			}
+			'*' {
+				return left * right
+			}
+			'/' {
+				if right == 0 {
+					return none
+				}
+				return left / right
+			}
+			'%' {
+				if right == 0 {
+					return none
+				}
+				return left % right
+			}
+			else {
+				return none
+			}
+		}
+	}
+	return none
 }
 
 // binary_precedence is the binding strength of an operator the tree has a node
@@ -409,9 +901,16 @@ fn (mut p Parser) expect_punct(text string) bool {
 }
 
 fn (mut p Parser) error_at(t tokenize.Token, msg string) {
+	p.error_span(t.line, t.col, msg)
+}
+
+// error_span reports a diagnostic at a position that came from a node rather than
+// from a token: the argument of a call is where its own expression started, which
+// is the line and column a reader of the source will look at.
+fn (mut p Parser) error_span(line int, col int, msg string) {
 	p.diagnostics << tokenize.Diagnostic{
-		line: t.line
-		col:  t.col
+		line: line
+		col:  col
 		msg:  msg
 	}
 }
