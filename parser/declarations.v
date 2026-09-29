@@ -295,6 +295,148 @@ mut:
 	prototyped bool
 }
 
+// skip_uncalled_static skips the definition of a `static` function that nothing
+// else in the file names, and says whether it did.
+//
+// A header carries helpers a program may never call, and what they are written in
+// is not what this reader has: the byte-swap and endianness helpers in
+// <bits/byteswap.h> and <bits/uintn-identity.h> take and return __uint16_t,
+// __uint32_t and __uint64_t, whose specifiers are unsigned types, and their
+// bodies shift and mask. Reading a definition nothing calls refuses the program
+// over a construct it never reaches, so such a definition is stepped over by
+// tokens - braces counted, nothing recorded - before its specifiers are read,
+// which is the only place the refusal can be avoided: `__uint16_t __bsx` is
+// refused at the parameter.
+//
+// What says a definition is one: the first `{` before the declaration's `;` is a
+// body, so a `(` comes before it at the top level, and the identifier in front of
+// that `(` is the name. The name then has to appear nowhere outside the
+// definition, which is the question a call would answer: a function that calls
+// itself is still named by nothing else, and one a later declaration or call names
+// is read as it always was.
+fn (mut p Parser) skip_uncalled_static() bool {
+	if !p.starts_a_static_declaration() {
+		return false
+	}
+	start := p.pos
+	mut open := -1
+	mut brace := -1
+	mut depth := 0
+	mut i := start
+	for i < p.tokens.len {
+		t := p.tokens[i]
+		if t.kind == .eof {
+			return false
+		}
+		if t.kind == .punct {
+			match t.text {
+				'(' {
+					if depth == 0 && open < 0 {
+						open = i
+					}
+					depth++
+				}
+				')' {
+					if depth > 0 {
+						depth--
+					}
+				}
+				'{' {
+					if depth == 0 {
+						brace = i
+						break
+					}
+					depth++
+				}
+				'}' {
+					if depth > 0 {
+						depth--
+					}
+				}
+				';' {
+					// A declaration of an object, or a prototype: nothing to
+					// skip, and the words in front of it are read as they are.
+					if depth == 0 {
+						return false
+					}
+				}
+				else {}
+			}
+		}
+		i++
+	}
+	if brace < 0 || open < 0 || open > brace {
+		return false
+	}
+	if open == 0 || p.tokens[open - 1].kind != .identifier {
+		return false
+	}
+	name := p.tokens[open - 1].text
+	end := p.end_of_block(brace)
+	if end < 0 {
+		return false
+	}
+	for j, t in p.tokens {
+		if j >= start && j <= end {
+			continue
+		}
+		if t.kind == .identifier && t.text == name {
+			return false
+		}
+	}
+	p.pos = end + 1
+	return true
+}
+
+// starts_a_static_declaration says whether the declaration at the reader's
+// position begins with the words in front of the type and one of them is
+// `static`. The helper definitions a header writes put `__extension__` or
+// `__inline` in front of it, and any of them may come first.
+fn (p Parser) starts_a_static_declaration() bool {
+	mut is_static := false
+	mut i := p.pos
+	for i < p.tokens.len {
+		t := p.tokens[i]
+		if t.kind != .identifier {
+			return false
+		}
+		if t.text == 'static' {
+			is_static = true
+			i++
+			continue
+		}
+		if t.text in ['__extension__', 'inline', '__inline', '__inline__'] {
+			i++
+			continue
+		}
+		return is_static
+	}
+	return false
+}
+
+// end_of_block is the index of the `}` that closes the brace at `open`, or -1
+// when the tokens run out first.
+fn (p Parser) end_of_block(open int) int {
+	mut depth := 0
+	mut i := open
+	for i < p.tokens.len {
+		t := p.tokens[i]
+		if t.kind == .punct {
+			if t.text == '{' {
+				depth++
+			}
+			if t.text == '}' {
+				depth--
+				if depth == 0 {
+					return i
+				}
+			}
+		}
+		i++
+	}
+	return -1
+}
+
 // parse_declaration reads one declaration and returns the functions it
 // declares or defines. A typedef, a tag and an object are read and dropped,
 // since none of them adds code. A declaration that cannot be read is skipped
@@ -302,6 +444,9 @@ mut:
 // next one starts in the right place.
 fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut decls := []ast.FnDecl{}
+	if p.skip_uncalled_static() {
+		return decls
+	}
 	spec := p.parse_decl_specifiers(0) or {
 		p.skip_declaration()
 		return decls

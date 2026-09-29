@@ -208,6 +208,27 @@ fn test_sizeof_answers_a_value_and_a_type_where_it_was_refused_by_name() {
 	assert after.unit.decls.len == 1
 }
 
+fn test_a_static_function_nothing_names_is_stepped_over() {
+	// A header carries helpers a program never calls, and what they are written
+	// in is what this reader has no types for: <bits/byteswap.h> and
+	// <bits/uintn-identity.h> take and return __uint16_t, which is an unsigned
+	// type, and their bodies shift and mask. A definition nothing names is
+	// stepped over, so a program that only calls printf and malloc compiles.
+	result := parsed('static unsigned short int unused (unsigned short int x) { return x & 1; }\nint main() { return 0; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls.len == 1
+	assert result.unit.decls[0].name == 'main'
+	// The same definition after the program is stepped over too.
+	late := parsed('int main() { return 0; }\nstatic unsigned short int unused (unsigned short int x) { return x & 1; }')
+	assert late.diagnostics.len == 0
+	assert late.unit.decls.len == 1
+	// A definition a call can reach is read as it always was, and its
+	// unsupported type is refused where it is written.
+	reached := parsed('static unsigned short int id (unsigned short int x) { return x; }\nint main() { return id(1); }')
+	assert reached.diagnostics.len == 1
+	assert reached.diagnostics[0].msg.contains('unsigned')
+}
+
 fn test_a_read_through_an_address_is_typed_as_what_it_points_at() {
 	result := checked('int main() { char *p = (char *)0; return *p; }')
 	returned := result.unit.decls[0].body[1].expr or {

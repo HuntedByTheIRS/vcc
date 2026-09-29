@@ -54,6 +54,28 @@ fn test_a_source_file_becomes_a_runnable_binary() {
 	os.rm(binary) or {}
 }
 
+fn test_a_static_function_nothing_names_is_not_read() {
+	// The shape <bits/byteswap.h> and <bits/uintn-identity.h> have, which main.c
+	// reaches through <stdio.h> and <stdlib.h>: a helper nothing calls, written
+	// in a type this reader has no form for and a body the grammar has no
+	// operators for. The definition is stepped over and the program runs.
+	source := scratch('static_unused.c')
+	binary := scratch('static_unused')
+	exit_status := compile_and_run([source, '-o', binary],
+		'static unsigned short int unused (unsigned short int x) { return x & 1; }\nint main() { return 0; }\n')
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	// A definition a call can reach is still read and emitted.
+	called := scratch('static_called.c')
+	called_binary := scratch('static_called')
+	called_status := compile_and_run([called, '-o', called_binary],
+		'static int twice (int x) { return x * 2; }\nint main() { return twice(3); }\n')
+	assert called_status == 6
+	os.rm(called) or {}
+	os.rm(called_binary) or {}
+}
+
 fn test_the_output_file_is_executable_and_an_elf() {
 	source := scratch('elf.c')
 	binary := scratch('elf')
