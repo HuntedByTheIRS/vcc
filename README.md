@@ -148,15 +148,16 @@ and written at the offsets the layout gives them, for int, char and double membe
 Inside a function that storage is in the frame and at the top level it is in the
 image, and an array of them is a stride of the layout's size times an index. A
 member of a member is the same object read further in, and `->` reads the member
-from the object a pointer names. An object of one eightbyte (eight bytes or fewer)
-is passed to a function and handed back from one as its bytes in the register its
-class names, and assigned to another object of its type by copying the bytes; a
-larger one is two registers or a copy in memory, which is not implemented. The
+from the object a pointer names. An object of one or two eightbytes (sixteen bytes
+or fewer) is passed to a function and handed back from one as its bytes in the
+registers the classes of its eightbytes name, and assigned to another object of its
+type by copying the bytes; a larger one is a copy in memory, which is not
+implemented. The
 arguments a call passes past the machine's registers go on the stack, six ints and
 eight doubles being what the registers carry.
 
 Not implemented, in rough order of how much of the tree depends on it: an object of
-more than one eightbyte passed or returned by value, an element of an array passed
+more than two eightbytes passed or returned by value, an element of an array passed
 by value, and a call's result passed by value; `enum`; casts, so a read of a
 `double` as an int goes through a variable of the type wanted; `switch`; an array
 with an initializer or more than one size; a pointer defined at the top level;
