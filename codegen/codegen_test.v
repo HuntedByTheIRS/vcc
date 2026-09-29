@@ -696,6 +696,33 @@ fn test_continue_goes_round_the_loop_again() {
 	assert run_image(emitted.bytes) == 3
 }
 
+// The shape a for is turned into before the back end sees it: a block that holds
+// the declaration, a while whose condition is the test, and the increment as the
+// last statement of the body. Nothing in the emitter knows about for; this test
+// pins the desugaring both lanes write against, and the parser's own for is what
+// produced the binary this shape came from.
+fn test_the_shape_a_for_is_desugared_into_counts() {
+	counting := ast.Stmt{
+		kind: .block
+		body: [
+			declaration('i', 'int', int_argument(0)),
+			while_statement(binary_node('<', name_node('i'), int_argument(5)), [
+				assignment('total', binary_node('+', name_node('total'), binary_node('*',
+					name_node('i'), int_argument(2)))),
+				assignment('i', binary_node('+', name_node('i'), int_argument(1))),
+			]),
+		]
+	}
+	body := [
+		declaration('total', 'int', int_argument(0)),
+		counting,
+		return_expression(name_node('total')),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 20
+}
+
 // A call whose arguments are computed: two locals are read out of the frame and
 // handed over in the registers the definition reads its parameters from, and the
 // definition reads them in a frame of its own. The library call inside the
