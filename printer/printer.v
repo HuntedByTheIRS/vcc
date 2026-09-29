@@ -26,6 +26,18 @@ const max_indent = 32
 // behavior with no diagnostic at the call site.
 pub fn render(unit ast.TranslationUnit) string {
 	mut out := []string{}
+	for global in unit.globals {
+		mut line := 'global ${global.name} ${global.typ}'
+		if global.count > 0 {
+			line += '[${global.count}]'
+		}
+		if init := global.init {
+			line += ' = ${init}'
+		} else {
+			line += ' (zeroed)'
+		}
+		out << '${line} at ${global.line}:${global.col}'
+	}
 	if unit.decls.len == 0 {
 		out << '(no declarations)'
 	}
@@ -58,11 +70,53 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			.empty {
 				out << '${indent}empty statement at ${stmt.line}:${stmt.col}'
 			}
+			.expr_stmt {
+				out << '${indent}expression statement at ${stmt.line}:${stmt.col}'
+			}
+			.var_decl {
+				elements := if stmt.decl_count > 0 { '[${stmt.decl_count}]' } else { '' }
+				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name}${elements} at ${stmt.line}:${stmt.col}'
+			}
+			.assign {
+				out << '${indent}assignment to ${stmt.target} at ${stmt.line}:${stmt.col}'
+			}
+			.if_stmt {
+				out << '${indent}if at ${stmt.line}:${stmt.col}'
+			}
+			.while_stmt {
+				out << '${indent}while at ${stmt.line}:${stmt.col}'
+			}
+			.break_stmt {
+				out << '${indent}break at ${stmt.line}:${stmt.col}'
+			}
+			.continue_stmt {
+				out << '${indent}continue at ${stmt.line}:${stmt.col}'
+			}
 		}
 		if expr := stmt.expr {
 			dump_expression(expr, depth + 1, mut out)
 		}
+		if index := stmt.index {
+			out << '${indent}subscript'
+			dump_expression(index, depth + 1, mut out)
+		}
+		if init := stmt.init {
+			out << '${indent}initializer'
+			dump_expression(init, depth + 1, mut out)
+		}
+		if cond := stmt.cond {
+			out << '${indent}condition'
+			dump_expression(cond, depth + 1, mut out)
+		}
 		dump_statements(stmt.body, depth + 1, mut out)
+		dump_statements(stmt.then_body, depth + 1, mut out)
+		dump_statements(stmt.else_body, depth + 1, mut out)
+		if stmt.step.len > 0 {
+			// The step of a loop is written under its own heading, because it
+			// is a part of the loop and not a part of the body.
+			out << '${indent}step'
+			dump_statements(stmt.step, depth + 1, mut out)
+		}
 	}
 }
 
@@ -124,6 +178,13 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			for arg in expr.args {
 				dump_expression(arg, depth + 1, mut out)
 			}
+		}
+		ast.StrLit {
+			out << '${indent}string ${expr.text} at ${expr.line}:${expr.col}'
+		}
+		ast.Index {
+			out << '${indent}element ${expr.name}[] at ${expr.line}:${expr.col}'
+			dump_expression(expr.index, depth + 1, mut out)
 		}
 	}
 }

@@ -102,24 +102,54 @@ fn test_a_level_turns_a_builtin_call_into_a_runnable_binary() {
 	os.rm(binary) or {}
 }
 
-fn test_without_a_level_the_same_call_is_a_diagnostic() {
+fn test_without_a_level_the_call_is_made() {
+	// A call whose value is read is emitted: the result arrives in the register
+	// a value is expected to be in, and abs is a library function like any
+	// other. The level decides whether a call the optimizer knows is folded,
+	// not whether it can be made.
 	source := scratch('abs_o0.c')
 	binary := scratch('abs_o0')
-	image := compile([source, '-o', binary], 'int main() { return abs(-7); }\n')
-	assert image.diagnostics.len == 1
-	assert image.diagnostics[0].msg.contains('call')
-	assert image.bytes.len == 0
+	exit_status := compile_and_run([source, '-o', binary], 'int main() { return abs(-7) - 6; }\n')
+	assert exit_status == 1
 	os.rm(source) or {}
+	os.rm(binary) or {}
 }
 
 fn test_fno_builtin_takes_the_fold_back_at_the_same_level() {
 	source := scratch('abs_nb.c')
 	binary := scratch('abs_nb')
-	image := compile(['-O2', '-fno-builtin', source, '-o', binary],
-		'int main() { return abs(-7); }\n')
-	assert image.diagnostics.len == 1
-	assert image.bytes.len == 0
+	exit_status := compile_and_run(['-O2', '-fno-builtin', source, '-o', binary],
+		'int main() { return abs(-7) - 6; }\n')
+	assert exit_status == 1
 	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_call_can_be_the_value_of_an_expression() {
+	// The result of a call arrives where a value is expected, so it can be read
+	// where a name would be; its arguments are parked above the slots the
+	// expression around it is using.
+	source := scratch('callvalue.c')
+	binary := scratch('callvalue')
+	program := 'int add(int a, int b) { return a + b; }\n' +
+		'int main() { int y = 7; int x = add(y, 3) + 2; return x - 12; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_call_can_be_the_argument_of_another_call() {
+	// Two calls in one expression each want slots for their arguments, and the
+	// inner one has to park its arguments above the outer one's.
+	source := scratch('nestedcalls.c')
+	binary := scratch('nestedcalls')
+	program := 'int add(int a, int b) { return a + b; }\n' +
+		'int main() { return add(add(1, 2), add(3, 4)) - 10; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
 }
 
 // A chain of calls is deep in the tree and flat in the grammar, which is the
@@ -169,4 +199,112 @@ fn test_print_ast_writes_nothing() {
 	assert printed.contains('binary *')
 	assert !os.exists(binary)
 	os.rm(source) or {}
+}
+
+fn test_a_continue_runs_the_step_of_a_for() {
+	// A continue jumps to the step, so the counter still advances and the loop
+	// ends. With the step at the end of the body it would jump past it and the
+	// loop would never advance — the guard below is there so that a loop that
+	// went wrong fails this test instead of hanging it.
+	source := scratch('continued.c')
+	binary := scratch('continued')
+	program := 'int main() {\n' +
+		'  int total = 0;\n' +
+		'  int guard = 0;\n' +
+		'  int j = 0;\n' +
+		'  for (j = 1; j <= 3; j = j + 1) {\n' +
+		'    guard = guard + 1;\n' +
+		'    if (guard == 100) {\n' +
+		'      break;\n' +
+		'    }\n' +
+		'    if (j == 2) {\n' +
+		'      continue;\n' +
+		'    }\n' +
+		'    total = total + j;\n' +
+		'  }\n' +
+		'  return total - 4;\n' +
+		'}\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_parameter_survives_the_optimizer() {
+	// The same program with a level on, where every declaration is rebuilt on
+	// the way through: a parameter dropped in that rebuild is a parameter the
+	// emitter cannot find, and this is the level that makes it visible.
+	source := scratch('optparam.c')
+	binary := scratch('optparam')
+	program := 'int twice(int x) { return x + x; }\n' +
+		'int main() { int y = 0; twice(y); return y; }\n'
+	exit_status := compile_and_run([source, '-O2', '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_char_local_and_a_char_parameter_run() {
+	// Both ends of a char are the machine's byte: the value is cut to a byte
+	// when it is stored, and read back as the int the language promotes it to.
+	source := scratch('chars.c')
+	binary := scratch('chars')
+	program := 'int addc(char a, char b) { return a + b; }\n' +
+		'int main() { char c = 65; char d = 300; int sum = c + 1;\n' +
+		' sum = sum + (d - 44);\n' +
+		' return sum + (addc(200, 100) - 44) - 66; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_an_array_holds_elements_that_are_read_back() {
+	source := scratch('array.c')
+	binary := scratch('array')
+	program := 'int main() { int a[4]; int i = 0;\n' +
+		' for (i = 0; i < 4; i = i + 1) { a[i] = i * i; }\n' +
+		' return a[0] + a[1] + a[2] + a[3] - 14; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_char_array_is_a_string_where_a_pointer_is_expected() {
+	source := scratch('chararray.c')
+	binary := scratch('chararray')
+	program := 'int puts(char *s);\n' +
+		'int main() { char buf[8]; buf[0] = 72; buf[1] = 105; buf[2] = 0;\n' +
+		' puts(buf); return buf[1] - 105; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_top_level_object_is_storage_every_function_shares() {
+	source := scratch('globals.c')
+	binary := scratch('globals')
+	program := 'int counter = 3;\n' +
+		'int total;\n' +
+		'int bump(int by) { counter = counter + by; return counter; }\n' +
+		'int main() { total = 10; return bump(4) + total - 17; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_char_array_at_the_top_level_is_a_string() {
+	source := scratch('globalstring.c')
+	binary := scratch('globalstring')
+	program := 'int puts(char *s);\n' +
+		'char message[6];\n' +
+		'int main() { message[0] = 72; message[1] = 105; message[2] = 0;\n' +
+		' puts(message); return message[1] - 105; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
 }

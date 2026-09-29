@@ -11,6 +11,10 @@ module ast
 pub struct TranslationUnit {
 pub:
 	decls []FnDecl
+	// globals are the objects defined at the top level: storage that lives in
+	// the image rather than in any function's frame, and that every function
+	// reads and writes by name.
+	globals []Global
 }
 
 pub struct FnDecl {
@@ -18,8 +22,39 @@ pub:
 	name string
 	// ret is the return type as written, `int` or `void`.
 	ret string
+	// params are the parameters, in the order they were written. They are
+	// storage in the frame of the call, so where they are written is where the
+	// back end has to put them.
+	params []Param
 	// body is empty for a declaration without a definition.
 	body []Stmt
+	line int
+	col  int
+}
+
+// Param is one parameter of a function: its name and its type as written. The
+// Global is one object defined at the top level. The type is written the way a
+// declaration writes it, and a count above zero makes it an array of that many
+// elements. The initializer is a constant, which is what a file-scope definition
+// may have: none means the storage starts zeroed, which is what an object
+// without an initializer is defined to hold.
+pub struct Global {
+pub:
+	name  string
+	typ   string
+	count int
+	init  ?i64
+	line  int
+	col   int
+}
+
+// types this compiler knows are the ones its back end has instructions for, and
+// a type it does not know is diagnosed where it is written rather than guessed
+// at here.
+pub struct Param {
+pub:
+	name string
+	typ  string
 	line int
 	col  int
 }
@@ -28,24 +63,78 @@ pub enum StmtKind {
 	return_stmt
 	block
 	empty
+	// expr_stmt is an expression evaluated for what it does and thrown away,
+	// which is what a call written as a statement is.
+	expr_stmt
+	// var_decl is a declaration inside a function body: storage in the frame,
+	// and a statement that runs where it is written.
+	var_decl
+	// assign is `target = expr;`. C makes an assignment an expression; this
+	// tree makes it a statement of its own, because a statement is where it is
+	// written in almost every line of C there is.
+	assign
+	if_stmt
+	while_stmt
+	break_stmt
+	continue_stmt
 }
 
 pub struct Stmt {
 pub:
 	kind StmtKind
-	// expr is the returned expression of a return statement, and none for a
-	// bare `return;` or for a statement that returns nothing.
+	// expr is the returned expression of a return statement, none for a bare
+	// `return;` or for a statement that returns nothing.
 	expr ?Expr
-	// body is the contents of a block.
+	// init is the initializer of a declaration, and none for `int x;`.
+	init ?Expr
+	// decl_name and decl_type are a declaration's name and type as written, and
+	// decl_count is how many elements an array declaration has: zero for a
+	// declaration of one value.
+	decl_name  string
+	decl_type  string
+	decl_count int
+	// target is the name an assignment writes to, and index is the subscript of
+	// an array element: `a[i] = v` writes to an element, and a plain `x = v`
+	// has none.
+	target string
+	index  ?Expr
+	// cond is the controlling expression of an if or a while: what has to be
+	// true for the branch to be taken, or for the loop to go round again.
+	cond ?Expr
+	// body is the contents of a block, or the body of a loop.
 	body []Stmt
-	line int
-	col  int
+	// step is what a loop runs at the end of every turn before going round
+	// again: the third part of a `for`, and empty for a `while`. It belongs to
+	// the loop and not to the body, because a continue has to reach it — as the
+	// body's last statement it would be jumped over by every continue above it,
+	// and a loop whose counter only advances in its last statement would never
+	// end.
+	step []Stmt
+	// then_body and else_body are the two branches of an if. The else is empty
+	// when it was not written.
+	then_body []Stmt
+	else_body []Stmt
+	line      int
+	col       int
 }
 
 // Expr is one of the expression shapes the stub understands. A call is parsed
 // so that the diagnostic can say calls are not implemented yet, rather than the
 // parser failing on a token it did not expect.
-pub type Expr = Binary | Unary | IntLit | Ident | Call
+pub type Expr = Binary | Unary | IntLit | Ident | Call | StrLit | Index
+
+// Index is one element of an array, written `a[i]`: the name of the array and
+// the expression that says which element. An element of a named array is the one
+// place a subscript is read and written; a general lvalue — a dereference, a
+// subscript of a subscript, or an array that is not a name — is a shape the tree
+// does not have, and the expression reader reports it where it stops.
+pub struct Index {
+pub:
+	name  string
+	index Expr
+	line  int
+	col   int
+}
 
 pub struct IntLit {
 pub:
@@ -54,6 +143,17 @@ pub:
 	text string
 	line int
 	col  int
+}
+
+// StrLit is one string literal. value is the bytes it names with the escapes
+// resolved — what the program will actually read — and text is the literal as
+// written, quotes included, for diagnostics and for printing a tree.
+pub struct StrLit {
+pub:
+	value string
+	text  string
+	line  int
+	col   int
 }
 
 pub struct Ident {

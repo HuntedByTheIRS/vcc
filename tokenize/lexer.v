@@ -1,13 +1,16 @@
 module tokenize
 
 // Longest-match-first tables. C's punctuation is not a prefix code, so `<<=`
-// has to be tried before `<<` before `<`.
+// has to be tried before `<<` before `<`. `#` and `##` are here because a
+// fragment — the text of a directive line — has no line-start rule attached to
+// it: in `#define STR(x) #x` the first hash opens the directive and the second
+// is a punctuator, and both are read by the same table.
 const punct3 = ['<<=', '>>=', '...']
 
 const punct2 = ['->', '++', '--', '<<', '>>', '<=', '>=', '==', '!=', '&&', '||', '+=', '-=', '*=',
 	'/=', '%=', '&=', '|=', '^=', '##']
 
-const punct1 = '+-*/%&|^~!<>=()[]{};,.?:'
+const punct1 = '+-*/%&|^~!<>=()[]{};,.?:#'
 
 // Lexer walks the source once, left to right. It holds the line and column of
 // the byte it is about to read rather than of the byte it just read, so a token
@@ -19,22 +22,46 @@ pub mut:
 	line        int
 	col         int
 	diagnostics []Diagnostic
+	// directives turns on the rule that a `#` which is the first token on a line
+	// opens a directive. It is off for a fragment, where `#` is a punctuator.
+	directives bool
+	// at_line_start is true when the next token would be the first one on its
+	// line, which is the condition C puts on a directive's `#`.
+	at_line_start bool
 }
 
 // lex reads a whole source file into tokens. Directives are recorded as single
-// tokens and nothing else happens to them: macro expansion is a later
-// milestone, so `#define` reaches the parser as one opaque token.
+// tokens and nothing else happens to them: macro expansion is the
+// preprocessor's job, and `#define` reaches it as one token holding the line.
 pub fn lex(src string) Result {
 	mut l := Lexer{
-		src:  src
-		line: 1
-		col:  1
+		src:           src
+		line:          1
+		col:           1
+		directives:    true
+		at_line_start: true
 	}
 	tokens := l.run()
 	return Result{
 		tokens:      tokens
 		diagnostics: l.diagnostics
 	}
+}
+
+// lex_fragment reads the text of one directive line — everything after the `#`
+// — or of a macro body. `#` and `##` are punctuators here, and the result has no
+// end-of-file token: a fragment ends where the caller's text ends.
+pub fn lex_fragment(text string) []Token {
+	mut l := Lexer{
+		src:  text
+		line: 1
+		col:  1
+	}
+	tokens := l.run()
+	if tokens.len > 0 && tokens[tokens.len - 1].kind == .eof {
+		return tokens[..tokens.len - 1]
+	}
+	return tokens
 }
 
 fn (mut l Lexer) run() []Token {
@@ -63,15 +90,17 @@ fn (mut l Lexer) run() []Token {
 			}
 			continue
 		}
-		// `#` outside a literal is a directive in every C program that has one,
-		// so it is read to the end of the line without checking that nothing
-		// preceded it on that line.
-		if c == `#` {
+		// `#` opens a directive when it is the first token on its line and this
+		// text is source rather than a fragment. Anywhere else the same byte is
+		// a punctuator, which is what a macro body uses to paste and stringize.
+		if c == `#` && l.directives && l.at_line_start {
 			tokens << l.lex_directive()
+			l.at_line_start = false
 			continue
 		}
 		tok := l.lex_token() or { break }
 		tokens << tok
+		l.at_line_start = false
 	}
 	tokens << Token{
 		kind: .eof
@@ -107,12 +136,55 @@ fn (mut l Lexer) lex_directive() Token {
 	col := l.col
 	mut text := ''
 	for l.pos < l.src.len && l.src[l.pos] != `\n` {
-		if l.src[l.pos] == `\\` && l.peek(1) == `\n` {
+		c := l.src[l.pos]
+		// A backslash at the end of the line joins it to the next one, which
+		// is how a long directive is written across lines. Nothing is inserted
+		// where the two lines join: the splice happens before the text is read
+		// as tokens, so `F\<newline>(x)` is a call and not a name and a list.
+		if c == `\\` && l.peek(1) == `\n` {
 			l.advance()
 			l.advance()
 			continue
 		}
-		text += l.src[l.pos].ascii_str()
+		// A comment is one space as far as a directive is concerned, and a
+		// comment that runs over the end of a line takes the directive with
+		// it: C replaces every comment with a space before it looks for
+		// directives, so the newline inside one does not end the line.
+		if c == `/` && l.peek(1) == `*` {
+			text += ' '
+			if !l.skip_block_comment() {
+				break
+			}
+			continue
+		}
+		// A line comment hides the rest of the line, so the directive ends
+		// where the comment starts.
+		if c == `/` && l.peek(1) == `/` {
+			break
+		}
+		// A string or a character constant is text: nothing inside one of them
+		// is a comment, and a backslash before a newline inside one of them is
+		// not a line join either.
+		if c == `"` || c == `'` {
+			quote := c
+			text += c.ascii_str()
+			l.advance()
+			for l.pos < l.src.len && l.src[l.pos] != `\n` {
+				inner := l.src[l.pos]
+				text += inner.ascii_str()
+				l.advance()
+				if inner == `\\` && l.pos < l.src.len {
+					text += l.src[l.pos].ascii_str()
+					l.advance()
+					continue
+				}
+				if inner == quote {
+					break
+				}
+			}
+			continue
+		}
+		text += c.ascii_str()
 		l.advance()
 	}
 	return Token{
@@ -263,6 +335,8 @@ fn (mut l Lexer) advance() {
 	if l.src[l.pos] == `\n` {
 		l.line++
 		l.col = 1
+		// The next token starts a line, and a `#` there opens a directive.
+		l.at_line_start = true
 	} else {
 		l.col++
 	}

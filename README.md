@@ -43,57 +43,96 @@ the milestones between here and that.
 
 ## Status
 
-Early, and honest about it. The tree holds a stub that lexes C, parses a very
-small subset, and writes a working Linux x86-64 executable for it.
+Early, and honest about it. The tree holds a compiler that reads real C — the
+preprocessor walks the glibc headers on this machine with no diagnostics — and
+writes a working Linux x86-64 executable that calls into libc.
 
 ```sh
 v -o vcc .
-printf 'int main() { return 7; }\n' > seven.c
-./vcc seven.c -o seven
-./seven; echo $?
+printf '#include <stdio.h>\nint main(void) { puts("Hello, world!"); return 0; }\n' > hello.c
+./vcc hello.c -o hello
+./hello
 ```
 
-That prints `7`. It is close to the full extent of what the compiler does today.
-Anything outside the subset listed below exits non-zero with a diagnostic that
-names the construct and its source location, instead of writing an output file
-that would fail later.
+That prints `Hello, world!`. `./vcc -run hello.c` does the same without leaving
+an image behind, and the compiler leaves with the program's exit status.
+
+Anything outside the subset below exits non-zero with a diagnostic that names the
+construct and its source location, instead of writing an output file that would
+fail later.
 
 It accepts the flags V passes to a C compiler (`-std=`, `-w`, `-fwrapv`, `-g`,
 `-B`, `-I`, `-L`, `-l`, `-Wl,` passthroughs, `-bt25`, `-x`, `@listfile`, `-`),
 plus `--version`, `-v`, `-h`, `-hh`, `-run`, `-E`, `-c`, `-o`, `-bench`,
-`-print-ast`, and the `-O` and `-f(no-)builtin` flags below. See `vcc -hh` for the
-annotated list.
+`-print-ast`, the `-O` and `-f(no-)builtin` flags below, and the preprocessor's
+own: `-D`, `-U`, `-nostdinc`, `-undef`, `-include`, `-imacros`, `-M`, `-MM`,
+`-MD`, `-MMD`, `-MF`, `-MT` and `-dM`. See `vcc -hh` for the annotated list.
 
-The parser currently handles function definitions returning `int`, `return`
-statements, and integer constant expressions with `+ - * / %` and parentheses.
-The back end has no instruction selection yet: it emits an `exit` syscall with
-the folded value of `main`'s return, so `int main() { return 7; }` works and
-`int main() { return x; }` does not.
+`preprocess/` is a C preprocessor and not a macro pass bolted onto the parser:
+`#include` with C's search order and `#include_next`, object-like and
+function-like macros with `#`, `##` and variadic arguments, conditionals with the
+full `#if` expression grammar, `#pragma once`, `#line`, `#error`, `#warning` — a
+warning, so the compile goes on without it — `_Pragma`, the location and clock
+macros, and `__has_include` beside the `__has_attribute`-shaped family, answered
+the way a compiler that honors none of it should answer.
+
+Its fidelity is checked against `tcc -E` on the same file, token by token, and
+the differences that remain are tcc's own: it says it is `__TINYC__`, so glibc
+keeps `__asm__`-shaped redirections for it, while this compiler says it is
+nothing else and gets them erased. `-E` prints the stream as a table of
+`file:line:col`, token kind and text, which is what that comparison reads.
+
+The parser reads what a preprocessed header is made of — typedefs, prototypes,
+structs — and the function definitions after them: parameters, local variables,
+assignments, arithmetic, calls, string literals, `if`/`else`, `while`, and `for`
+with `break` and `continue`. Anything outside the subset is diagnosed rather than
+miscompiled.
+
+The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
+`_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
+loader, which is what makes `puts` work without a linker. A frame holds ints,
+pointers and chars — a char is one byte in its slot and an int when it is read,
+which is where the language's promotion of it happens. An array is a block of
+that frame and its name is the address of its first element, so `puts(buf)`
+passes the bytes themselves. An object defined at the top level is storage the
+image holds instead: one blob laid out beside the code, with the constant it
+starts at written into it, and every function that names it reads and writes the
+same bytes. Taking the address of a local with `&` is an address like any other,
+which is what makes `scanf("%d", &x)` write into the local itself, and a
+definition that returns `void` is a definition with nothing in the return
+register to read.
 
 `optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
 spellings. What a level turns on today is one pass: a call whose value the
 compiler knows (`abs`, `labs`, `llabs`, and the reserved `__builtin_` spellings
-of each) with a literal argument folds to that value. Since the stub cannot emit
-a call at all, `-O0` leaves `abs(-7)` as a diagnostic while `-O2` turns it into
-`7`. `-fno-builtin` and `-fno-builtin-abs` take that back; a call written
+of each) with a literal argument folds to that value. A call whose value is read
+is emitted like any other expression — the result arrives in the register a value
+is expected to be in — so `-O0` makes the call and `-O2` folds it to `7`: the
+level decides whether a call the optimizer knows is folded, not whether it can be
+made. `-fno-builtin` and `-fno-builtin-abs` take the fold back; a call written
 `__builtin_abs` is an explicit request and folds at any level.
 
 `-print-ast` parses, prints the tree the emitter would be given, and stops
 without writing anything. It is how a parse or an optimization is read rather
 than guessed at. `-c` is the other half of that: it is accepted and says it
-cannot write an object file yet, which is M4.
+cannot write an object file yet, which is M4. `-M` writes the make rule that says
+what a file is made of — `-MM` leaves the system headers out of it, `-MD` and
+`-MMD` write it and go on to compile, `-MF` says where the rule goes and `-MT`
+names its target — `-dM` prints what is defined when the read ends, and
+`-include` and `-imacros` read a file before the source does.
 
-Not implemented, in rough order of how much of the tree depends on it: the
-preprocessor, declarations and statements beyond a function returning a constant
-int, any type other than `int`, expressions that are not constant, object files,
-relocatable output, linking against libc, and a real x86-64 back end. `ROADMAP.md`
-maps the order.
+Not implemented, in rough order of how much of the tree depends on it: `double`
+and `struct`, which are not in the tree yet; more than six arguments because the
+machine passes only six in registers; `switch`; an array with an initializer or
+more than one size; a pointer defined at the top level; object files and
+relocatable output; and V's own generated C. `ROADMAP.md` maps the order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a
-constant chain and nothing else), vcc takes about 8x tcc's wall time and 4x its
-peak memory; at 100000 terms it is about 18x. Most of that gap is allocation per
-token and per AST node, which is a design problem rather than a constant factor.
+constant chain and nothing else), vcc takes about 12x tcc's wall time and 10x its
+peak memory; at 100000 terms it is about 28x the time and 35x the memory, so the
+ratio still grows with the input. Most of that gap is allocation per token and per
+AST node, which is a design problem rather than a constant factor.
 
 ## Build
 

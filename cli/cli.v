@@ -2,6 +2,7 @@ module cli
 
 import optimizer
 import os
+import preprocess
 
 // version is the compiler's own version. The output of `--version` is not
 // decoration: V asks a C compiler for its version to decide what it is talking
@@ -25,6 +26,10 @@ pub mut:
 	output       string
 	run_args     []string
 	include_dirs []string
+	// nostdinc is -nostdinc: do not look in the standard directories at all,
+	// which is what a build says when it is compiling against a C library that
+	// is not the one the machine's headers describe.
+	nostdinc     bool
 	library_dirs []string
 	libraries    []string
 	defines      []string
@@ -45,6 +50,27 @@ pub mut:
 	bench            bool
 	debug            bool
 	inhibit_warnings bool
+	// preludes are the -include and -imacros files in the order they were
+	// given: read before the source is, as if their lines were the first lines
+	// of it, with the flag deciding whether their text is kept.
+	preludes []preprocess.Prelude
+	// undef_builtins is -undef: the macros that describe the target are not
+	// defined, which is what a build asks for when it wants to compile for a
+	// target this compiler does not describe.
+	undef_builtins bool
+	// dump_macros is -dM: print what is defined when the read ends.
+	dump_macros bool
+	// deps asks for the make-style rule listing what the file is made of.
+	// deps_system decides whether the headers that came from the standard
+	// directories are in it, deps_file says where it is written, and
+	// deps_compile says the compile goes on afterwards — -M and -MM stop at
+	// the rule, -MD and -MMD write it and keep going. deps_target is the name
+	// the rule is for, when -MT or -MQ gives one.
+	deps         bool
+	deps_system  bool
+	deps_file    string
+	deps_compile bool
+	deps_target  string
 	// optimization is the -O level and the builtin settings, which belong to the
 	// optimizer: it owns the flag list for both, and this file only hands the
 	// arguments over.
@@ -153,6 +179,45 @@ pub fn parse(args []string) !Options {
 			opts.include_dirs << cursor.value_of('')!
 		} else if arg.starts_with('-I') {
 			opts.include_dirs << arg[2..]
+		} else if arg == '-nostdinc' {
+			opts.nostdinc = true
+		} else if arg == '-undef' {
+			opts.undef_builtins = true
+		} else if arg == '-dM' {
+			opts.dump_macros = true
+		} else if arg == '-M' {
+			opts.deps = true
+			opts.deps_system = true
+		} else if arg == '-MM' {
+			opts.deps = true
+		} else if arg == '-MD' {
+			// The spelling a build tool reaches for: the rule is written and
+			// the compile goes on, so one command line does both.
+			opts.deps = true
+			opts.deps_system = true
+			opts.deps_compile = true
+		} else if arg == '-MMD' {
+			opts.deps = true
+			opts.deps_compile = true
+		} else if arg == '-MT' || arg == '-MQ' {
+			// The target the rule is for, when the build knows a better name
+			// than the object file's. -MQ is gcc's spelling for the same
+			// question asked with make's quoting in mind; the quoting happens
+			// where the rule is written, for both of them.
+			opts.deps_target = cursor.value_of('')!
+		} else if arg == '-MF' {
+			opts.deps_file = cursor.value_of('')!
+		} else if arg.starts_with('-MF') {
+			opts.deps_file = arg[3..]
+		} else if arg == '-include' {
+			opts.preludes << preprocess.Prelude{
+				path: cursor.value_of('')!
+			}
+		} else if arg == '-imacros' {
+			opts.preludes << preprocess.Prelude{
+				path:        cursor.value_of('')!
+				macros_only: true
+			}
 		} else if arg == '-D' {
 			opts.defines << cursor.value_of('')!
 		} else if arg.starts_with('-D') {
@@ -182,7 +247,7 @@ pub fn parse(args []string) !Options {
 			opts.standard = arg[5..]
 		} else if arg == '-x' {
 			opts.input_type = cursor.value_of('')!
-		} else if arg == '-MF' || arg == '-B' {
+		} else if arg == '-B' {
 			opts.ignored << '${arg} ${cursor.value_of('')!}'
 		} else if optimization.accept_flag(arg) {
 			// The optimizer recognized it: -O levels and the -f(no-)builtin
@@ -247,17 +312,28 @@ pub fn usage(all bool) string {
 	out << '  -o outfile    set the output filename (default a.out)'
 	out << '  -run          compile to a temporary file and run it'
 	out << '  -c            compile to an object file only (not implemented yet)'
-	out << '  -E            print the token stream and stop'
+	out << '  -E            preprocess and print the token stream, then stop'
 	out << '  -print-ast    print the tree the emitter would be given, then stop'
 	out << '  -bench        print per-phase timings'
 	out << '  -v --version  show the version'
 	out << '  -vv           show the version, the target, the recorded flags and the paths'
 	out << '  -h -hh        show this, show more help'
-	out << '  -w -g         accepted for compatibility; the stub warns about nothing'
+	out << '  -w            do not print warnings'
 	out << '  -O0 -O1 -O2 -O3 -Os   optimization level (default -O0)'
 	out << '  -fno-builtin  do not compute calls to library functions the compiler knows'
 	out << '  -fno-builtin-NAME  the same for one function'
 	out << '  -Idir -Dname -Uname -Ldir -llib -x type -o outfile'
+	out << '  -nostdinc     do not search the standard directories for headers'
+	out << '  -M -MM        print a make rule for what the file needs instead of'
+	out << '                compiling; -MM leaves the system headers out'
+	out << '  -MD -MMD      write that rule and compile as well'
+	out << '  -MF file      write that rule to a file instead of to the output'
+	out << '  -MT -MQ name  the name the rule is for, when it is not the object'
+	out << '  -include file read a file before the source, as if its lines were'
+	out << '                the first lines of it'
+	out << '  -imacros file read a file before the source for its macros only'
+	out << '  -undef        do not define the macros that describe the target'
+	out << '  -dM           print the macros that are defined when the read ends'
 	out << '  -std=version  -std version   recorded; one subset is accepted either way'
 	if all {
 		out << ''
@@ -265,9 +341,10 @@ pub fn usage(all bool) string {
 		out << 'this compiler does with each one today:'
 		out << '  -std=gnu11 -std c99   recorded in both spellings; the language accepted'
 		out << '                        today is one subset, so the flag changes nothing yet'
-		out << '  -fwrapv -fPIC -w -g   accepted and ignored'
+		out << '  -fwrapv -fPIC -g       accepted and ignored'
 		out << '  -Werror=name          accepted and ignored'
-		out << '  -Btcc -Idir -Ldir     accepted; -I and -L paths are recorded, -B is not used yet'
+		out << '  -Btcc -Idir -Ldir     accepted; -I directories are searched for headers,'
+		out << '                        -L paths are recorded, -B is not used yet'
 		out << '  -bt25 -Wl,...         accepted and ignored, as a non-tcc compiler must'
 		out << '  -print-ast            nothing is written and nothing is linked; the dump is'
 		out << '                        the tree after the optimizer, which is what the emitter'
@@ -276,7 +353,8 @@ pub fn usage(all bool) string {
 		out << '                        and -O1 upwards turns on the passes that exist'
 		out << '  -fno-builtin          calls to abs and friends stay calls; the reserved'
 		out << '                        __builtin_ spellings still fold'
-		out << '  -DGC_THREADS=1 ...    recorded; nothing is preprocessed yet'
+		out << '  -Dname=value -Uname  in force before the source is read, as if written'
+		out << '                        above it as #define and #undef'
 		out << '  @listfile             expanded before anything else'
 		out << '  -                     read the source from standard input'
 		out << 'The V toolchain also hands the compiler its own GC library,'

@@ -116,6 +116,95 @@ fn parse_escape(rest string) !i64 {
 	}
 }
 
+// parse_string_literal reads a string literal into the bytes it names, with the
+// escapes resolved. The spelling stays with the caller; what comes back is what
+// the program would read.
+fn parse_string_literal(text string) !string {
+	mut body := text
+	if body.len > 0 && body[0] != `"` {
+		// A prefixed literal: u8"x", L"x", u"x", U"x". The narrow prefix names
+		// the same bytes; the wide ones name an array of something this
+		// compiler does not have, and guessing at it is worse than saying so.
+		mut quote := 0
+		for quote < body.len && body[quote] != `"` {
+			quote++
+		}
+		if body[..quote] != 'u8' {
+			return error('${text}: wide string literals are not implemented')
+		}
+		body = body[quote..]
+	}
+	if body.len < 2 || body[0] != `"` || body[body.len - 1] != `"` {
+		return error('${text}: not a string constant')
+	}
+	inner := body[1..body.len - 1]
+	mut bytes := []u8{}
+	mut i := 0
+	for i < inner.len {
+		c := inner[i]
+		if c != `\\` {
+			bytes << c
+			i++
+			continue
+		}
+		if i + 1 < inner.len && inner[i + 1] == `\n` {
+			// A backslash before the newline joins the two lines, and the pair
+			// produces no byte at all.
+			i += 2
+			continue
+		}
+		value, next := parse_string_escape(inner, i + 1) or {
+			return error('${text}: ${err.msg()}')
+		}
+		if value > 255 {
+			return error('${text}: the escape names ${value}, which is not a byte')
+		}
+		bytes << u8(value)
+		i = next
+	}
+	return bytes.bytestr()
+}
+
+// parse_string_escape reads the escape that starts at `at`, the byte after the
+// backslash, and returns its value and the index after it. The escapes are the
+// ones a character constant takes; a string needs the end of each escape as
+// well, because the byte after a hex escape belongs to the string.
+fn parse_string_escape(inner string, at int) !(i64, int) {
+	if at >= inner.len {
+		return error('the escape is not finished')
+	}
+	c := inner[at]
+	if c == `x` || c == `X` {
+		mut value := i64(0)
+		mut seen := 0
+		mut i := at + 1
+		for i < inner.len {
+			digit := digit_value(inner[i], 16) or { break }
+			value = value * 16 + i64(digit)
+			seen++
+			i++
+		}
+		if seen == 0 {
+			return error('hex escape without digits')
+		}
+		return value, i
+	}
+	if c >= `0` && c <= `7` {
+		mut value := i64(0)
+		mut seen := 0
+		mut i := at
+		for i < inner.len && seen < 3 {
+			digit := digit_value(inner[i], 8) or { break }
+			value = value * 8 + i64(digit)
+			seen++
+			i++
+		}
+		return value, i
+	}
+	value := parse_escape(c.ascii_str()) or { return error(err.msg()) }
+	return value, at + 1
+}
+
 fn digit_value(ch u8, base int) ?int {
 	digit := if ch >= `0` && ch <= `9` {
 		int(ch - `0`)

@@ -262,32 +262,66 @@ pub fn (o Options) summary() string {
 fn fold_builtin_calls(unit ast.TranslationUnit, opts Options) ast.TranslationUnit {
 	mut decls := []ast.FnDecl{}
 	for decl in unit.decls {
+		// Every part of the declaration is carried over, and the parameters are
+		// the ones that are easy to forget: a declaration rebuilt without them
+		// is a function whose parameters the back end cannot find, which is a
+		// diagnostic at -O1 and up and nothing at all at -O0.
 		decls << ast.FnDecl{
-			name: decl.name
-			ret:  decl.ret
-			body: rewrite_body(decl.body, opts)
-			line: decl.line
-			col:  decl.col
+			name:   decl.name
+			ret:    decl.ret
+			params: decl.params
+			body:   rewrite_body(decl.body, opts)
+			line:   decl.line
+			col:    decl.col
 		}
 	}
 	return ast.TranslationUnit{
-		decls: decls
+		decls:   decls
+		globals: unit.globals
 	}
 }
 
 fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 	mut out := []ast.Stmt{}
 	for stmt in body {
+		// Every expression a statement carries is rewritten, and the
+		// statements it carries are rewritten in turn. A statement is passed on
+		// whole: a field that is not written here is a field that would be lost
+		// on the way to the back end.
 		mut expr := ?ast.Expr(none)
 		if value := stmt.expr {
 			expr = rewrite(value, opts, 0)
 		}
+		mut init := ?ast.Expr(none)
+		if value := stmt.init {
+			init = rewrite(value, opts, 0)
+		}
+		mut cond := ?ast.Expr(none)
+		if value := stmt.cond {
+			cond = rewrite(value, opts, 0)
+		}
+		// An element of an array is a place a value is read from as well as
+		// written to, so the subscript is rewritten like every other expression.
+		mut index := ?ast.Expr(none)
+		if value := stmt.index {
+			index = rewrite(value, opts, 0)
+		}
 		out << ast.Stmt{
-			kind: stmt.kind
-			expr: expr
-			body: rewrite_body(stmt.body, opts)
-			line: stmt.line
-			col:  stmt.col
+			kind:       stmt.kind
+			expr:       expr
+			init:       init
+			decl_name:  stmt.decl_name
+			decl_type:  stmt.decl_type
+			decl_count: stmt.decl_count
+			target:     stmt.target
+			index:      index
+			cond:       cond
+			body:       rewrite_body(stmt.body, opts)
+			step:       rewrite_body(stmt.step, opts)
+			then_body:  rewrite_body(stmt.then_body, opts)
+			else_body:  rewrite_body(stmt.else_body, opts)
+			line:       stmt.line
+			col:        stmt.col
 		}
 	}
 	return out
@@ -330,6 +364,19 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 		}
 		ast.Ident {
 			return expr
+		}
+		ast.StrLit {
+			return expr
+		}
+		ast.Index {
+			// An element is a place a value is read from, and the expression
+			// that says which element is rewritten like any other.
+			return ast.Expr(ast.Index{
+				name:  expr.name
+				index: rewrite(expr.index, opts, depth + 1)
+				line:  expr.line
+				col:   expr.col
+			})
 		}
 		ast.Binary {
 			return rewrite(expr, opts, depth + 1)

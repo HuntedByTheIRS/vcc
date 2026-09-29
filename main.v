@@ -6,6 +6,7 @@ import codegen
 import optimizer
 import os
 import parser
+import preprocess
 import printer
 import time
 import tokenize
@@ -42,10 +43,17 @@ fn main() {
 		println('optimize: ${opts.optimization.summary()}')
 		println('standard: ${standard_line(opts.standard)}')
 		if opts.include_dirs.len == 0 {
-			println('include: (the standard directories, which are not used yet)')
+			println('include: (the -I directories, none given)')
 		}
 		for dir in opts.include_dirs {
 			println('include: ${dir}')
+		}
+		if opts.nostdinc {
+			println('include: (the standard directories, which -nostdinc turns off)')
+		} else {
+			for dir in standard_include_dirs() {
+				println('include: ${dir} (standard)')
+			}
 		}
 		return
 	}
@@ -70,27 +78,56 @@ fn main() {
 	}
 	mut phases := []cli.Phase{}
 	mut started := time.now()
-	lexed := tokenize.lex(source)
+	// Lexing happens inside the preprocessor, which is the stage that knows
+	// which file it is reading and what to do with the directives it finds.
+	processed := preprocess.preprocess(source, path, preprocess.Options{
+		include_dirs:   opts.include_dirs
+		defines:        opts.defines
+		undefines:      opts.undefines
+		standard_dirs:  if opts.nostdinc { []string{} } else { standard_include_dirs() }
+		preludes:       opts.preludes
+		undef_builtins: opts.undef_builtins
+	})
 	phases << cli.Phase{
-		name:   'lex'
+		name:   'preprocess'
 		micros: time.since(started).microseconds()
 	}
-	if lexed.diagnostics.len > 0 {
-		report(path, lexed.diagnostics)
+	// A warning is reported and the compile goes on; an error ends it. The
+	// difference is asked of the diagnostics themselves rather than counted, so
+	// that a stage which hands back a warning is not mistaken for a stage that
+	// failed.
+	report(path, processed.diagnostics, opts.inhibit_warnings)
+	if tokenize.errors(processed.diagnostics).len > 0 {
 		exit(1)
 	}
+	// -M and -dM answer a question about the read and stop there: a build tool
+	// asking what a file is made of does not want an object file at the end of
+	// its command line. -MD is the other half of that question — write the rule
+	// and compile as well — and its rule goes beside the object unless -MF
+	// says otherwise.
+	if opts.deps && !opts.deps_compile {
+		write_dependencies(path, processed.files, opts)
+		return
+	}
+	if opts.deps {
+		write_dependencies(path, processed.files, opts)
+	}
+	if opts.dump_macros {
+		print_macros(processed.macros)
+		return
+	}
 	if opts.preprocess {
-		print_tokens(lexed.tokens)
+		print_tokens(processed.tokens)
 		return
 	}
 	started = time.now()
-	parsed := parser.parse(lexed.tokens)
+	parsed := parser.parse(processed.tokens)
 	phases << cli.Phase{
 		name:   'parse'
 		micros: time.since(started).microseconds()
 	}
-	report(path, parsed.diagnostics)
-	if parsed.diagnostics.len > 0 {
+	report(path, parsed.diagnostics, opts.inhibit_warnings)
+	if tokenize.errors(parsed.diagnostics).len > 0 {
 		exit(1)
 	}
 	started = time.now()
@@ -114,8 +151,8 @@ fn main() {
 		name:   'emit'
 		micros: time.since(started).microseconds()
 	}
-	report(path, image.diagnostics)
-	if image.diagnostics.len > 0 {
+	report(path, image.diagnostics, opts.inhibit_warnings)
+	if tokenize.errors(image.diagnostics).len > 0 {
 		exit(1)
 	}
 	out_path := if opts.output != '' {
@@ -165,41 +202,193 @@ fn write_image(path string, bytes []u8) ! {
 
 // run_image runs what was just compiled and leaves with its exit status, which is
 // what `-run` means: the compiler becomes the program it produced.
+//
+// The program is given the terminal rather than a pipe, because its output is
+// the whole reason for running it: a captured stream would arrive after the
+// program had finished, on the wrong one of the two, and in one lump.
 fn run_image(path string, args []string) {
 	mut command := os.quoted_path(path)
 	for arg in args {
 		command += ' ' + os.quoted_path(arg)
 	}
-	result := os.execute(command)
-	if result.exit_code < 0 {
-		abort('cannot run ${path}: ${result.output}')
-	}
-	exit(result.exit_code)
+	exit(os.system(command))
 }
 
 fn temporary_path() string {
 	return os.join_path(os.temp_dir(), 'vcc-run-${os.getpid()}')
 }
 
-// print_tokens is what `-E` does today: the token stream, one token per line.
-// The preprocessor is a later milestone, so nothing is expanded and the text is
-// what was written.
+// print_tokens is what `-E` does: the stream the parser would be handed, one
+// token per line, with the file and the position each token was written at.
 fn print_tokens(tokens []tokenize.Token) {
 	for tok in tokens {
-		if tok.kind == .eof {
-			break
-		}
-		println('${tok.line}:${tok.col}\t${tok.kind}\t${tok.text}')
+		println('${tok.file}:${tok.line}:${tok.col}\t${tok.kind}\t${tok.text}')
 	}
 }
 
-fn report(path string, diagnostics []tokenize.Diagnostic) {
+// write_dependencies is what `-M` does: the make rule that says what the file
+// is made of. It is printed, or written where -MF says, and the compile stops
+// there — make reads the rule to decide whether to run the compile at all, and
+// running it as well would be doing the work twice.
+//
+// -MM leaves the headers that came from the standard directories out of the
+// rule: a build that already knows where the C library is does not need to be
+// told again, and a rule naming /usr/include changes whenever the machine does.
+fn write_dependencies(source string, files []preprocess.SourceFile, opts cli.Options) {
+	mut words := []string{}
+	for file in files {
+		if !opts.deps_system && file.system {
+			continue
+		}
+		words << escape_for_make(file.path)
+	}
+	rule := '${escape_for_make(dependency_target(source, opts))}: ${words.join(' ')}'
+	to := dependency_file(source, opts)
+	if to == '' {
+		// With -M and no -MF the rule goes to the standard output, which is
+		// where a build that asked for it reads it from.
+		println(rule)
+		return
+	}
+	os.write_file(to, '${rule}\n') or {
+		abort('cannot write ${to}: ${err.msg()}')
+		return
+	}
+}
+
+// dependency_file is where the rule is written: the file -MF names, or for
+// -MD and -MMD the object's name with .d in place of its extension, which is
+// where a build looks for it without being told. It is the object's name and not
+// the rule's target: -MT decides what the rule says and not what file it is said
+// in. With -M and no -MF there is no file and the rule is printed.
+fn dependency_file(source string, opts cli.Options) string {
+	if opts.deps_file != '' {
+		return opts.deps_file
+	}
+	if !opts.deps_compile {
+		return ''
+	}
+	base := object_name(source, opts)
+	dot := base.last_index('.') or { return '${base}.d' }
+	return '${base[..dot]}.d'
+}
+
+// dependency_target is what the rule is for: the name -MT or -MQ gives it, or
+// the object the compile writes, which is the file make would look for.
+fn dependency_target(source string, opts cli.Options) string {
+	if opts.deps_target != '' {
+		return opts.deps_target
+	}
+	return object_name(source, opts)
+}
+
+// object_name is the file the compile produces: the one named with -o when
+// there is one, and the source with its last extension changed to .o otherwise.
+fn object_name(source string, opts cli.Options) string {
+	if opts.output != '' {
+		return opts.output
+	}
+	dot := source.last_index('.') or { return '${source}.o' }
+	return '${source[..dot]}.o'
+}
+
+// escape_for_make writes a path so that make reads it as one word with nothing
+// read into it: a space ends a word, a `#` starts a comment and a `$` starts a
+// variable, so a file whose name has one has to say so.
+fn escape_for_make(path string) string {
+	return path.replace(' ', '\\ ').replace('#', '\\#').replace('$', '$$')
+}
+
+// print_macros is what `-dM` does: what is defined when the read ends, one
+// definition per line, in the shape the program itself would have written it.
+// It is how a build checks what a compiler believes about the target before it
+// relies on it, and how a person asks why a branch was not taken.
+fn print_macros(macros []preprocess.Macro) {
+	for macro in macros {
+		mut texts := []string{}
+		for token in macro.body {
+			texts << token.text
+		}
+		mut head := '#define ${macro.name}'
+		if macro.takes_arguments() {
+			mut params := macro.params.clone()
+			if macro.variadic {
+				params << '...'
+			}
+			head += '(${params.join(', ')})'
+		}
+		body := texts.join(' ')
+		if body == '' {
+			println(head)
+			continue
+		}
+		println('${head} ${body}')
+	}
+}
+
+fn report(path string, diagnostics []tokenize.Diagnostic, inhibit_warnings bool) {
 	for diagnostic in diagnostics {
-		eprintln('${path}:${diagnostic.line}:${diagnostic.col}: ${diagnostic.msg}')
+		if diagnostic.warning && inhibit_warnings {
+			// `-w` is the command line asking not to be told. The warning is
+			// still a warning and the compile still succeeds; it is only not
+			// printed.
+			continue
+		}
+		// A diagnostic raised inside an included file names that file; the one
+		// the compiler was handed is the fallback for everything else.
+		where := if diagnostic.file != '' { diagnostic.file } else { path }
+		mut label := ''
+		if diagnostic.warning {
+			label = 'warning: '
+		}
+		eprintln('${where}:${diagnostic.line}:${diagnostic.col}: ${label}${diagnostic.msg}')
 	}
 }
 
 fn abort(message string) {
 	eprintln('vcc: ${message}')
 	exit(1)
+}
+
+// standard_include_dirs are the directories searched for <stdio.h> after the -I
+// ones, unless -nostdinc says not to search any. They are the host's, because
+// this compiler brings no headers of its own: what it compiles against is the C
+// library the machine already has, and the headers that describe it.
+//
+// The compiler's own headers live with the GCC that ships them — stddef.h and
+// stdarg.h, which every standard header expects to find — one directory per
+// version, and the newest one is the one meant to be read. A machine can carry
+// headers for more than one target side by side there (a cross compiler, a
+// mingw toolchain); only the directories whose names describe the target being
+// compiled for are read, so a cross compiler's stddef.h is never picked up
+// because its name happens to sort last.
+fn standard_include_dirs() []string {
+	target := backend.host() or { return []string{} }
+	mut dirs := []string{}
+	dirs << '/usr/local/include'
+	mut gcc_dirs := []string{}
+	for machine in os.ls('/usr/lib/gcc') or { []string{} } {
+		if !machine.contains(target.arch) || !machine.contains(target.os) {
+			continue
+		}
+		for version in os.ls('/usr/lib/gcc/${machine}') or { []string{} } {
+			candidate := '/usr/lib/gcc/${machine}/${version}/include'
+			if os.is_dir(candidate) {
+				gcc_dirs << candidate
+			}
+		}
+	}
+	gcc_dirs.sort()
+	if gcc_dirs.len > 0 {
+		dirs << gcc_dirs.last()
+	}
+	// Debian and its relatives keep the architecture's own headers in a
+	// directory named after the target; on a machine that has no such split
+	// this simply does not exist.
+	arch_dir := '/usr/include/${target.arch}-${target.os}-gnu'
+	if os.is_dir(arch_dir) {
+		dirs << arch_dir
+	}
+	dirs << '/usr/include'
+	return dirs
 }

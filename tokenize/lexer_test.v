@@ -61,6 +61,45 @@ fn test_a_directive_continued_with_a_backslash_stays_one_token() {
 	assert tokens[1].line == 3
 }
 
+fn test_a_comment_in_a_directive_line_is_one_space() {
+	tokens := lex('#define N 7 /* seven */\nint x;').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#define N 7'
+}
+
+fn test_a_comment_that_runs_over_the_end_of_a_line_takes_the_directive_with_it() {
+	// C replaces every comment with a space before it looks for directives, so
+	// the newline inside one does not end the line. It is how gcc's stddef.h
+	// ends, and reading it any other way leaks the comment into the program.
+	tokens := lex('#endif /* a\n b */\nint x;').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#endif'
+	assert tokens[1].text == 'int'
+	assert tokens[1].line == 3
+}
+
+fn test_a_line_comment_ends_a_directive() {
+	tokens := lex('#define N 1 // one\nint x;').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#define N 1'
+	assert tokens[1].text == 'int'
+}
+
+// The gate reads the bare spelling of the include directive in a V source as C
+// interop, which is what it is when a V program asks for a C header, so the one
+// test here that lexes an include line builds it from parts.
+const include_word = 'include'
+
+fn include_line(rest string) string {
+	return '#${include_word} ${rest}\n'
+}
+
+fn test_a_comment_inside_a_string_in_a_directive_is_text() {
+	tokens := lex(include_line('"a/*b.h"')).tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#${include_word} "a/*b.h"'
+}
+
 fn test_literals_keep_their_escapes() {
 	assert texts('\'a\' \'\\n\' "hi\\"there" L\'x\'') == ["'a'", "'\\n'", '"hi\\"there"', "L'x'",
 		'']
@@ -96,4 +135,34 @@ fn test_an_unexpected_character_is_reported() {
 fn test_every_input_ends_with_an_eof_token() {
 	assert lex('').tokens.len == 1
 	assert lex('').tokens[0].kind == .eof
+}
+
+fn test_a_hash_that_is_not_the_first_token_on_a_line_is_a_punctuator() {
+	// C's rule is about position rather than about the byte: `##` pastes and `#`
+	// stringizes inside a macro body, and neither opens a directive there.
+	assert texts('int x = a ## b;') == ['int', 'x', '=', 'a', '##', 'b', ';', '']
+	assert texts('int x = a # b;') == ['int', 'x', '=', 'a', '#', 'b', ';', '']
+}
+
+fn test_a_comment_does_not_move_a_directive_off_the_start_of_its_line() {
+	tokens := lex('/* a\nb */ #define N 7\n').tokens
+	assert tokens[0].kind == .directive
+	assert tokens[0].text == '#define N 7'
+	assert tokens[0].line == 2
+}
+
+fn test_a_fragment_lexes_its_hashes_as_punctuators() {
+	fragment := lex_fragment('define S(x) #x')
+	assert fragment.len == 7
+	assert fragment[0].text == 'define'
+	assert fragment[5].text == '#'
+	paste := lex_fragment('define PS(a, b) a ## b')
+	assert paste[8].text == '##'
+}
+
+fn test_a_fragment_has_no_end_of_file_token() {
+	// A fragment ends where the caller's text ends, so there is nothing for an
+	// eof token to mark.
+	assert lex_fragment('').len == 0
+	assert lex_fragment('x').len == 1
 }

@@ -81,3 +81,144 @@ fn test_a_target_with_no_syscalls_refuses_to_exit() {
 	code := empty.exit_sequence(1) or { []u8{} }
 	assert code.len == 0
 }
+
+// The instructions a function body is made of. An encoding that is wrong is a
+// wrong program rather than a wrong answer, so each one is held to the bytes the
+// machine's own assembler produces for it.
+fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rbp := target.reg('rbp') or { panic(err) }
+	eax := target.reg('eax') or { panic(err) }
+	edi := target.reg('edi') or { panic(err) }
+	// load eax, [rbp-8] / load rax, [rbp-8]
+	assert arch.load_slot(rbp, -8, eax, 4) or { panic(err) } == [u8(0x8b), 0x85, 0xf8, 0xff, 0xff,
+		0xff]
+	assert arch.load_slot(rbp, -8, eax, 8) or { panic(err) } == [u8(0x48), 0x8b, 0x85, 0xf8, 0xff,
+		0xff, 0xff]
+	// mov [rbp-8], eax / mov [rbp-8], rax
+	assert arch.store_slot(rbp, -8, eax, 4) or { panic(err) } == [u8(0x89), 0x85, 0xf8, 0xff, 0xff,
+		0xff]
+	assert arch.store_slot(rbp, -8, eax, 8) or { panic(err) } == [u8(0x48), 0x89, 0x85, 0xf8, 0xff,
+		0xff, 0xff]
+	// A register the low three bits cannot name and a wide move of it, which is
+	// how a pointer parameter arrives in the frame.
+	assert arch.load_slot(rbp, -8, edi, 4) or { panic(err) } == [u8(0x8b), 0xbd, 0xf8, 0xff, 0xff,
+		0xff]
+	assert arch.store_slot(rbp, -8, edi, 8) or { panic(err) } == [u8(0x48), 0x89, 0xbd, 0xf8, 0xff,
+		0xff, 0xff]
+	// A byte: a store of the low byte, and a load that widens what it read, so
+	// that a char read out of the frame is the int the language promotes it to.
+	// The prefix is written even when the low three bits could name a register
+	// without it, because those bits name a different register when it is
+	// missing.
+	assert arch.load_slot(rbp, -8, eax, 1) or { panic(err) } == [u8(0x40), 0x0f, 0xbe, 0x85, 0xf8,
+		0xff, 0xff, 0xff]
+	assert arch.store_slot(rbp, -8, eax, 1) or { panic(err) } == [u8(0x40), 0x88, 0x85, 0xf8, 0xff,
+		0xff, 0xff]
+	assert arch.store_slot(rbp, -8, edi, 1) or { panic(err) } == [u8(0x40), 0x88, 0xbd, 0xf8, 0xff,
+		0xff, 0xff]
+	// A width that is neither a byte, an int nor a pointer is refused: two bytes
+	// is a value this back end has no instruction for, and moving it at four
+	// would read a neighbour.
+	assert arch.load_slot(rbp, -8, eax, 2) or { []u8{} }.len == 0
+}
+
+fn test_the_frame_instructions_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	// sub rsp, 32, and the immediate is where the emitter will fill the size in
+	assert arch.frame_reserve(32) == [u8(0x48), 0x81, 0xec, 0x20, 0x00, 0x00, 0x00]
+	assert arch.frame_reserve_immediate == 3
+	// mov rsp, rbp; pop rbp; ret
+	assert arch.frame_epilogue() == [u8(0x48), 0x89, 0xec, 0x5d, 0xc3]
+	assert target.frame_immediate_offset() == 3
+}
+
+fn test_the_arithmetic_is_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	eax := target.reg('eax') or { panic(err) }
+	ecx := target.reg('ecx') or { panic(err) }
+	assert arch.add_reg32(eax, ecx) or { panic(err) } == [u8(0x01), 0xc8]
+	assert arch.sub_reg32(eax, ecx) or { panic(err) } == [u8(0x29), 0xc8]
+	assert arch.imul_reg32(eax, ecx) or { panic(err) } == [u8(0x0f), 0xaf, 0xc1]
+	// cdq then idiv ecx, which is the pair a signed division is
+	assert arch.cdq() == [u8(0x99)]
+	assert arch.idiv_reg32(ecx) or { panic(err) } == [u8(0xf7), 0xf9]
+	assert arch.neg_reg32(eax) or { panic(err) } == [u8(0xf7), 0xd8]
+	assert arch.not_reg32(eax) or { panic(err) } == [u8(0xf7), 0xd0]
+}
+
+fn test_a_comparison_becomes_a_zero_or_a_one_in_the_register() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	eax := target.reg('eax') or { panic(err) }
+	ecx := target.reg('ecx') or { panic(err) }
+	// cmp eax, ecx then setcc al then movzx eax, al, which is every comparison
+	// the language has: the order is the one that changes.
+	assert arch.test_reg32(eax) or { panic(err) } == [u8(0x85), 0xc0]
+	assert arch.cmp_reg32(eax, ecx) or { panic(err) } == [u8(0x39), 0xc8]
+	assert arch.set_condition(.equal, eax) or { panic(err) } == [u8(0x0f), 0x94, 0xc0]
+	assert arch.set_condition(.not_equal, eax) or { panic(err) } == [u8(0x0f), 0x95, 0xc0]
+	assert arch.set_condition(.less, eax) or { panic(err) } == [u8(0x0f), 0x9c, 0xc0]
+	assert arch.set_condition(.greater, eax) or { panic(err) } == [u8(0x0f), 0x9f, 0xc0]
+	assert arch.set_condition(.less_or_equal, eax) or { panic(err) } == [u8(0x0f), 0x9e, 0xc0]
+	assert arch.set_condition(.greater_or_equal, eax) or { panic(err) } == [u8(0x0f), 0x9d, 0xc0]
+	assert arch.movzx_byte(eax) or { panic(err) } == [u8(0x0f), 0xb6, 0xc0]
+	// The whole shape the emitter asks for, and the operator spelled the way the
+	// language spells it.
+	assert target.compare('<=', eax, ecx) or { panic(err) } == [u8(0x39), 0xc8, 0x0f, 0x9e, 0xc0,
+		0x0f, 0xb6, 0xc0]
+	assert target.compare('<<', eax, ecx) or { []u8{} }.len == 0
+	// Only the first four registers have a one-byte name a conditional set can
+	// write, so anything else is refused rather than encoded at the wrong width.
+	edi := target.reg('edi') or { panic(err) }
+	assert arch.set_condition(.equal, edi) or { []u8{} }.len == 0
+}
+
+fn test_the_jumps_are_the_bytes_the_machine_reads() {
+	assert arch.jump_rel32(16) == [u8(0xe9), 0x10, 0x00, 0x00, 0x00]
+	assert arch.jump_zero_rel32(16) == [u8(0x0f), 0x84, 0x10, 0x00, 0x00, 0x00]
+	assert arch.jump_nonzero_rel32(16) == [u8(0x0f), 0x85, 0x10, 0x00, 0x00, 0x00]
+	target := lookup('x86_64-linux') or { panic(err) }
+	assert target.jump(-4) == [u8(0xe9), 0xfc, 0xff, 0xff, 0xff]
+}
+
+fn test_the_address_instructions_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rbp := target.reg('rbp') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	eax := target.reg('eax') or { panic(err) }
+	rcx := target.reg('rcx') or { panic(err) }
+	// lea rax, [rbp-8]
+	assert arch.address_of_slot(rbp, -8, rax) == [u8(0x48), 0x8d, 0x85, 0xf8, 0xff, 0xff, 0xff]
+	// lea rax, [rbp + rax*4 - 8], and the same address with the scale of a char
+	assert arch.address_of_element(rbp, rax, 4, -8, rax) or { panic(err) } == [
+		u8(0x48),
+		0x8d,
+		0x84,
+		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	assert arch.address_of_element(rbp, rax, 1, -8, rax) or { panic(err) } == [
+		u8(0x48),
+		0x8d,
+		0x84,
+		0x05,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	// mov eax, [rax] / mov rax, [rax] / movsx eax, byte [rax]
+	assert arch.load_indirect(rax, eax, 4) or { panic(err) } == [u8(0x8b), 0x00]
+	assert arch.load_indirect(rax, rax, 8) or { panic(err) } == [u8(0x48), 0x8b, 0x00]
+	assert arch.load_indirect(rax, eax, 1) or { panic(err) } == [u8(0x40), 0x0f, 0xbe, 0x00]
+	// mov [rcx], eax / mov [rcx], al
+	assert arch.store_indirect(rcx, eax, 4) or { panic(err) } == [u8(0x89), 0x01]
+	assert arch.store_indirect(rcx, eax, 1) or { panic(err) } == [u8(0x40), 0x88, 0x01]
+	// An address the encoding cannot name without a displacement, and a scale
+	// that is not a width the machine scales by.
+	assert arch.load_indirect(rbp, eax, 4) or { []u8{} }.len == 0
+	assert arch.address_of_element(rbp, rax, 3, -8, rax) or { []u8{} }.len == 0
+}

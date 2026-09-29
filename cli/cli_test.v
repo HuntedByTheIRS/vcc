@@ -157,3 +157,46 @@ fn test_usage_mentions_the_output_and_the_version_flags() {
 	assert text.contains('libgc.a')
 	assert text.contains('-std version')
 }
+
+fn test_undef_and_dm_are_their_own_modes() {
+	opts := parse(['-undef', '-dM', 'x.c'])!
+	assert opts.undef_builtins
+	assert opts.dump_macros
+}
+
+fn test_the_two_dependency_modes_differ_by_the_system_headers() {
+	full := parse(['-M', 'x.c'])!
+	assert full.deps && full.deps_system
+	user := parse(['-MM', 'x.c'])!
+	assert user.deps && !user.deps_system
+}
+
+fn test_the_dependency_file_can_be_joined_or_separate() {
+	joined := parse(['-MM', '-MFout.d', 'x.c'])!
+	assert joined.deps_file == 'out.d'
+	separate := parse(['-MM', '-MF', 'out.d', 'x.c'])!
+	assert separate.deps_file == 'out.d'
+}
+
+fn test_a_prelude_keeps_the_order_it_was_given_in() {
+	opts := parse(['-imacros', 'macros.h', '-include', 'pre.h', 'x.c'])!
+	assert opts.preludes.len == 2
+	assert opts.preludes[0].path == 'macros.h'
+	assert opts.preludes[0].macros_only
+	assert opts.preludes[1].path == 'pre.h'
+	assert opts.preludes[1].macros_only == false
+}
+
+fn test_the_dependency_modes_that_also_compile() {
+	full := parse(['-MD', 'x.c'])!
+	assert full.deps && full.deps_system && full.deps_compile
+	user := parse(['-MMD', 'x.c'])!
+	assert user.deps && !user.deps_system && user.deps_compile
+	stopping := parse(['-M', 'x.c'])!
+	assert stopping.deps && !stopping.deps_compile
+}
+
+fn test_the_rule_can_be_given_a_target() {
+	assert parse(['-MD', '-MT', 'build/seven.o', 'x.c'])!.deps_target == 'build/seven.o'
+	assert parse(['-MD', '-MQ', 'a b.o', 'x.c'])!.deps_target == 'a b.o'
+}
