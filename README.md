@@ -43,8 +43,8 @@ the milestones between here and that.
 
 ## Status
 
-Early, and honest about it. The tree holds a compiler that reads real C — the
-preprocessor walks the glibc headers on this machine with no diagnostics — and
+Early, and honest about it. The tree holds a compiler that reads real C (the
+preprocessor walks the glibc headers on this machine with no diagnostics) and
 writes a working Linux x86-64 executable that calls into libc.
 
 ```sh
@@ -69,23 +69,23 @@ own: `-D`, `-U`, `-nostdinc`, `-undef`, `-include`, `-imacros`, `-M`, `-MM`,
 `-MD`, `-MMD`, `-MF`, `-MT` and `-dM`. See `vcc -hh` for the annotated list.
 
 `-std=` selects the dialect rather than only being recorded: `-std=c99` and
-`-std=gnu99` are the two modes the compiler has, and every other spelling —
-including the `-std=gnu11` V passes when it writes none — is recorded and never
+`-std=gnu99` are the two modes the compiler has, and every other spelling,
+including the `-std=gnu11` V passes when it writes none, is recorded and never
 refused. The two modes differ in one macro, defined before the first line of the
 program is read: `-std=c99` defines `__STRICT_ANSI__ 1` and `-std=gnu99` does
 not, which is what gcc 16.2.1 defines with the same flags. The standard headers
 read that macro, and it decides which declarations they expose: as c99 the C
 library shows the program the declarations C99 has and hides the POSIX ones
 beside them, and as gnu99 it shows both. `-std=c99` is therefore the strict path,
-and it is the one place where the two modes differ in what they accept — a
+and it is the one place where the two modes differ in what they accept: a
 `<stdlib.h>` program that stops in the header as gnu99 compiles as c99, which is
 what gcc does with the same file under the same flag.
 
 `preprocess/` is a C preprocessor and not a macro pass bolted onto the parser:
 `#include` with C's search order and `#include_next`, object-like and
 function-like macros with `#`, `##` and variadic arguments, conditionals with the
-full `#if` expression grammar, `#pragma once`, `#line`, `#error`, `#warning` — a
-warning, so the compile goes on without it — `_Pragma`, the location and clock
+full `#if` expression grammar, `#pragma once`, `#line`, `#error`, `#warning` (a
+warning, so the compile goes on without it), `_Pragma`, the location and clock
 macros, and `__has_include` beside the `__has_attribute`-shaped family, answered
 the way a compiler that honors none of it should answer.
 
@@ -95,8 +95,8 @@ keeps `__asm__`-shaped redirections for it, while this compiler says it is
 nothing else and gets them erased. `-E` prints the stream as a table of
 `file:line:col`, token kind and text, which is what that comparison reads.
 
-The parser reads what a preprocessed header is made of — typedefs, prototypes,
-structs — and the function definitions after them: parameters, local variables,
+The parser reads what a preprocessed header is made of (typedefs, prototypes,
+structs) and the function definitions after them: parameters, local variables,
 assignments, arithmetic, calls, string literals, `double` values, `if`/`else`,
 `while`, and `for` with `break` and `continue`. A typedef is a name for the type
 it was declared as and is followed wherever a type can be written, so a
@@ -111,7 +111,7 @@ loader, which is what makes `puts` work without a linker. `-l` adds the library
 it names to that list: each `-l<name>` is resolved the way a linker would, through
 the ld script in `/usr/lib` when the file it finds is one, and the SONAME of the
 file at the end of that is what the image asks the loader for, which is how
-`-lm` gets `sqrt` to resolve. A frame holds ints, pointers, chars and doubles — a
+`-lm` gets `sqrt` to resolve. A frame holds ints, pointers, chars and doubles. A
 char is one byte in its slot and an int when it is read, which is where the
 language's promotion of it happens, and a double is eight bytes in its slot and a
 value in the floating-point registers while it is worked on. An array is a block
@@ -128,8 +128,8 @@ of a local with `&` is an address like any other, which is what makes
 spellings. What a level turns on today is one pass: a call whose value the
 compiler knows (`abs`, `labs`, `llabs`, and the reserved `__builtin_` spellings
 of each) with a literal argument folds to that value. A call whose value is read
-is emitted like any other expression — the result arrives in the register a value
-is expected to be in — so `-O0` makes the call and `-O2` folds it to `7`: the
+is emitted like any other expression (the result arrives in the register a value
+is expected to be in), so `-O0` makes the call and `-O2` folds it to `7`: the
 level decides whether a call the optimizer knows is folded, not whether it can be
 made. `-fno-builtin` and `-fno-builtin-abs` take the fold back; a call written
 `__builtin_abs` is an explicit request and folds at any level.
@@ -138,9 +138,9 @@ made. `-fno-builtin` and `-fno-builtin-abs` take the fold back; a call written
 without writing anything. It is how a parse or an optimization is read rather
 than guessed at. `-c` is the other half of that: it is accepted and says it
 cannot write an object file yet, which is M4. `-M` writes the make rule that says
-what a file is made of — `-MM` leaves the system headers out of it, `-MD` and
+what a file is made of: `-MM` leaves the system headers out of it, `-MD` and
 `-MMD` write it and go on to compile, `-MF` says where the rule goes and `-MT`
-names its target — `-dM` prints what is defined when the read ends, and
+names its target; `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
 Not implemented, in rough order of how much of the tree depends on it: `struct`,
