@@ -865,7 +865,15 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			continue
 		}
 		if p.at_punct('(') {
+			// The parameters are read with the reader a declaration uses, and each
+			// of them names its own specifiers, so what the list resolved to last is
+			// not this declarator's base: the base is what the declaration's own
+			// specifiers gave. Measured before this was held, `int f(void); int
+			// main(void) { return f() + 1; }` was refused because the `(void)` left
+			// the base at void and the prototype was declared `void (void)`.
+			base := p.pending_base
 			params := p.parse_parameter_list(depth + 1)!
+			p.pending_base = base
 			if !pointer_to_function {
 				d.is_function = true
 			} else {
@@ -973,6 +981,17 @@ fn (mut p Parser) declare_name(name string, typ types.Type, at tokenize.Token, d
 	p.declared[name] = true
 	previous := p.scopes.lookup(name)
 	linkage := types.linkage_for(p.pending_storage, p.scopes.at_file_scope(), previous)
+	// One name declared twice in one scope is one name (6.2.2), and the two
+	// declarations have to describe compatible types (6.2.7): asked here of what
+	// this declaration spells against what the scope already holds. Measured,
+	// `void f1(int *p); void f1(char *p);` was accepted where gcc 16.2.1 refuses
+	// `conflicting types for f1`; a declaration that repeats a type is one name and
+	// not a conflict, `int f(int); int f(int) { return 0; }` included.
+	if earlier := p.scopes.lookup_here(name) {
+		if redeclaration_conflicts(earlier.typ, typ) {
+			p.error_at(at, 'a constraint violation: ${name} is declared as ${earlier.typ.describe()} in this scope and this declaration gives it ${typ.describe()}, and two declarations of one name in one scope have to describe one type')
+		}
+	}
 	p.scopes.declare(types.Symbol{
 		name:    name
 		typ:     typ
@@ -982,6 +1001,30 @@ fn (mut p Parser) declare_name(name string, typ types.Type, at tokenize.Token, d
 		col:     at.col
 		defined: defined
 	})
+}
+
+// redeclaration_conflicts says whether two declarations of one name in one scope
+// describe two different things, which 6.2.7 refuses. Two types that are the same
+// type are one thing and not a conflict, and two declarations of an object are one
+// object. The one case the model's `same` cannot answer is 6.2.7p15: a function
+// type written with an empty parameter list says nothing about its parameters
+// rather than saying that there are none, so two function types one of which is
+// written that way are compared by what they return.
+//
+// Measured, gcc 16.2.1 accepts `int f(void); int f();` and `int f(int a); int f();`
+// under `-std=c99`, and refuses `int f(void); char f();`, which returns something
+// else, and `int f(int a); int f(char b);`, whose parameter lists are both written
+// and disagree.
+fn redeclaration_conflicts(earlier types.Type, later types.Type) bool {
+	if earlier.compatible(later) {
+		return false
+	}
+	if earlier.is_function() && later.is_function() && !(earlier.prototyped && later.prototyped) {
+		earlier_returns := earlier.returns() or { return true }
+		later_returns := later.returns() or { return true }
+		return !earlier_returns.compatible(later_returns)
+	}
+	return true
 }
 
 // declare_parameters declares a definition's parameters in the scope around its

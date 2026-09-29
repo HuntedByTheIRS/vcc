@@ -259,3 +259,43 @@ fn test_a_deeply_nested_tag_body_is_reported() {
 	}
 	assert reported
 }
+
+// A prototype's type is the one its own declaration spelled, not what its parameter
+// list last resolved to. Measured before that was held, `int f(void); int main(void)
+// { return f() + 1; }` was refused - the `(void)` had left the base at void, so the
+// prototype was declared `void (void)` and the call had no value - where gcc
+// compiles it.
+fn test_a_prototype_has_the_type_its_own_specifiers_gave_it() {
+	result := declarations_of('int f(void);\nint main(void) { return f() + 1; }')
+	assert result.diagnostics.len == 0
+	sum := result.unit.decls[1].body[0].expr or {
+		assert false
+		return
+	}
+	assert sum is ast.Binary
+	call := (sum as ast.Binary).left
+	assert call is ast.Call
+	assert (call as ast.Call).typ.kind == .int_
+}
+
+// One name declared twice in one scope is one name (6.2.2), and the two
+// declarations have to describe one type. Measured, `void f1(int *p); void f1(char
+// *p);` was accepted where gcc 16.2.1 refuses `conflicting types for f1`.
+fn test_a_redeclaration_with_a_different_type_is_refused() {
+	result := declarations_of('void f1(int *p);\nvoid f1(char *p);\nint main(void) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('f1 is declared as void (int *)')
+	assert result.diagnostics[0].line == 2
+	assert result.diagnostics[0].col == 6
+	// Repeating a type is one declaration and not a conflict.
+	repeat := declarations_of('int f(int a);\nint f(int a) { return a; }\nint main(void) { return f(1); }')
+	assert repeat.diagnostics.len == 0
+	// 6.2.7p15: an empty parameter list says nothing about the parameters, so two
+	// function types one of which is written that way are compared by what they
+	// return. Measured against gcc 16.2.1 under `-std=c99`: the first two of these
+	// are accepted and the second two are refused as `conflicting types for f`.
+	assert declarations_of('int f(void);\nint f();\nint main(void) { return 0; }').diagnostics.len == 0
+	assert declarations_of('int f(int a);\nint f();\nint main(void) { return 0; }').diagnostics.len == 0
+	assert declarations_of('int f(void);\nchar f();\nint main(void) { return 0; }').diagnostics.len == 1
+	assert declarations_of('int f(int a);\nint f(char b);\nint main(void) { return 0; }').diagnostics.len == 1
+}
