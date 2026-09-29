@@ -389,6 +389,61 @@ fn test_a_double_argument_reaches_a_library_call() {
 	os.rm(binary) or {}
 }
 
+// A typedef is a name for a type and not a type of its own: the declaration is
+// read, and every use of the name afterwards is a use of the type it stands for,
+// wherever a type can be written. These run the programs, so what is checked is
+// the artifact and not the spelling in the tree.
+fn test_a_typedef_name_is_the_type_it_names() {
+	source := scratch('typedef.c')
+	binary := scratch('typedef')
+	program := 'typedef int T;\nT g = 7;\nT add(T a, T b) { return a + b; }\nint main(void) { T x = 5; return add(x, g); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 12
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A typedef of a double is a double, which is the one type here that travels in
+// the floating-point registers: the alias reaches the emitter as the type it
+// names, so the arithmetic and the argument sequence are the double's.
+fn test_a_typedef_of_a_double_is_a_double() {
+	source := scratch('typedefd.c')
+	binary := scratch('typedefd')
+	program := 'typedef double D;\nD twice(D x) { return x + x; }\nint main(void) { D v = 2.5; int n = twice(v) * 4; return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 20
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A typedef of a pointer is a pointer, and a typedef of a typedef is the type at
+// the end of the chain. The string is read by the library function the pointer is
+// handed to, so what is checked is that the alias reached the call as the `char *`
+// the parameter is: a pointer of the wrong shape would fault here.
+fn test_a_typedef_of_a_pointer_reads_through_it() {
+	source := scratch('typedefp.c')
+	binary := scratch('typedefp')
+	program := 'typedef char *String;\ntypedef String Text;\nint puts(const char *s);\nint main(void) { Text s = "abc"; return puts(s) < 0; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A typedef of a type the back end has no form for is refused by that type and
+// not by the name: the name is a spelling of the type, and the type is what the
+// image has to hold. The refusal is at the declaration, so an object nothing uses
+// is refused too rather than dropped quietly.
+fn test_a_typedef_of_a_type_with_no_form_is_refused_by_that_type() {
+	program := 'typedef long Big;\nBig x;\nint main(void) { return 0; }\n'
+	lexed := tokenize.lex(program)
+	assert lexed.diagnostics.len == 0
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 1
+	assert parsed.diagnostics[0].msg == 'unsupported type long'
+	assert parsed.diagnostics[0].line == 2
+}
+
 // The sign of a double is in the top bit of the value rather than in a bit of a
 // register the arithmetic happens to leave in a convenient place, so a negated
 // double is the case a wrong instruction shows up in first.
