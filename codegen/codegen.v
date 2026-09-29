@@ -165,6 +165,16 @@ mut:
 	// The width cannot answer that on its own: a double is eight bytes and so is
 	// a pointer, and the two travel through different registers.
 	float_params map[string][]bool
+	// aggregate_params says, for the same functions, which parameters are
+	// objects of an aggregate type and how many bytes of one they are. An object
+	// of one eightbyte is handed over as its bytes in one register rather than
+	// as a value, so a call has to know which parameters those are, and zero
+	// bytes means the parameter is a value.
+	aggregate_params map[string][]ast.Eightbyte
+	// return_classes says, for the same functions, which of them hand an object
+	// of an aggregate type back, and how many bytes of one. The value comes back
+	// in the register its class names rather than converted.
+	return_classes map[string]ast.Eightbyte
 	// returning is the return type of the function being emitted, as it was
 	// written, which is what a return statement's value is converted to.
 	returning string
@@ -327,12 +337,27 @@ fn (mut e Emitter) build() ![]u8 {
 	// left out of the table, because its own emission is where that is reported.
 	for decl in e.unit.decls {
 		e.returns[decl.name] = decl.ret
+		if decl.ret_class.bytes > 0 {
+			e.return_classes[decl.name] = decl.ret_class
+		}
 		if decl.body.len > 0 {
 			e.program.defined[decl.name] = true
 			mut widths := []int{}
 			mut classes := []bool{}
+			mut aggregates := []ast.Eightbyte{}
 			mut sized := true
 			for param in decl.params {
+				// A parameter that is an object of an aggregate type is handed
+				// over as its bytes in one register: how many bytes it is and
+				// which file the register belongs to are the two facts the call
+				// needs, and both come from the declaration.
+				if param.class.bytes > 0 {
+					widths << param.class.bytes
+					classes << param.class.floating
+					aggregates << param.class
+					continue
+				}
+				aggregates << ast.Eightbyte{}
 				if width := e.type_width(param.typ) {
 					widths << width
 					classes << e.writes_a_double(param.typ)
@@ -343,6 +368,7 @@ fn (mut e Emitter) build() ![]u8 {
 			if sized {
 				e.signatures[decl.name] = widths
 				e.float_params[decl.name] = classes
+				e.aggregate_params[decl.name] = aggregates
 			}
 		}
 	}
@@ -519,6 +545,46 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	mut doubles := 0
 	mut stacked := 0
 	for _, param in decl.params {
+		// An object of an aggregate type arrives as its bytes in one register of
+		// the class its members make, and the parameter is storage of exactly
+		// that many bytes: the value is copied into the slot rather than
+		// converted into it.
+		if param.class.bytes > 0 {
+			if param.class.bytes > e.target.word_size {
+				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes ${param.typ} by value, which is ${param.class.bytes} bytes, and this compiler hands over an aggregate of one eightbyte')
+				return error('aggregate parameter too large')
+			}
+			if param.class.floating && param.class.bytes != e.target.word_size {
+				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes ${param.typ} by value, which is ${param.class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
+				return error('aggregate floating class width')
+			}
+			object := e.declare(param.name, param.typ, 0, param.class.bytes, param.line, param.col)!
+			stacked_at := 2 * e.target.word_size + stacked * e.target.word_size
+			if param.class.floating {
+				if register := e.target.float_arg_reg(doubles) {
+					e.store_double_register(object, register, param.line, param.col)!
+					doubles++
+					continue
+				}
+				double_register := e.float_accumulator(param.line, param.col)!
+				base := e.frame_pointer(param.line, param.col)!
+				e.append(e.target.load_double_slot(base, stacked_at, double_register)!)
+				e.store_double_register(object, double_register, param.line, param.col)!
+				stacked++
+				continue
+			}
+			if register := e.target.arg_reg(integers) {
+				e.store_register(object, register, param.line, param.col)!
+				integers++
+				continue
+			}
+			register := e.accumulator(param.line, param.col)!
+			base := e.frame_pointer(param.line, param.col)!
+			e.append(e.target.load_slot(base, stacked_at, register, e.target.word_size)!)
+			e.store_register(object, register, param.line, param.col)!
+			stacked++
+			continue
+		}
 		// A parameter is one value in a register or one on the stack, and an
 		// object of an aggregate type passed by value is neither: its spelling
 		// reaches `type_width` and is refused there by name.
@@ -725,6 +791,42 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 // in a scratch slot while the value is computed, and the value is written through
 // it: the shape an element of an array is written with, because a member is an
 // element of the object at a fixed offset rather than at a computed one.
+// aggregate_argument is how argument `position` of a call is handed over when it
+// is an object of an aggregate type, and none when it is a value. It answers from
+// the signature the declaration gave, so a call to a function this file defines
+// knows; a call to a name nothing declares has no signature, and an object is
+// refused there rather than handed to a function whose convention is unknown.
+fn (e Emitter) aggregate_argument(call ast.Call, position int) ?ast.Eightbyte {
+	if classes := e.aggregate_params[call.name] {
+		if position < classes.len && classes[position].bytes > 0 {
+			return classes[position]
+		}
+	}
+	return none
+}
+
+// address_of_object leaves the address of the object an expression names in the
+// accumulator. An object handed over by value is read from its bytes, so what the
+// caller needs is where those bytes are: a local's place in the frame, a top-level
+// object's place in the image, or a member's place inside the object that holds it.
+fn (mut e Emitter) address_of_object(expr ast.Expr, depth int) !void {
+	if expr is ast.Ident {
+		e.address_of_member(expr.name, ?ast.Expr(none), 0, false, depth, expr.line, expr.col)!
+		return
+	}
+	if expr is ast.Field {
+		e.address_of_member(expr.name, expr.index, expr.offset, expr.through_pointer, depth, expr.line,
+			expr.col)!
+		return
+	}
+	if expr is ast.Index {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of an array is not handed over by value in this compiler, so ${expr.name}[...] cannot be an argument')
+		return error('element by value')
+	}
+	e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: an object handed over by value has to be a name, an element or a member, and this expression is not one')
+	return error('not an object')
+}
+
 // address_of_member leaves the address of a member in the accumulator. An object
 // named by a name is at the frame's address plus the byte the layout gave the
 // member. An object named by a pointer, which is what `->` writes, is at the
@@ -2321,7 +2423,23 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		// doubles has three doubles on the stack and every int in a register.
 		// The ones a sequence ran out for go on the stack in the order they
 		// were written, which is the order the callee reads them in.
-		if e.argument_is_double(call, i, arg) {
+		//
+		// An object of an aggregate type takes one register like a value, and
+		// which file that register belongs to is the class its members make and
+		// not a property of the expression: a struct of one double travels where
+		// a double does.
+		class := e.aggregate_argument(call, i)
+		if c := class {
+			if c.bytes > e.target.word_size {
+				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${i + 1} of the call to ${call.name} is an object of ${c.bytes} bytes, and this compiler hands over an aggregate of one eightbyte')
+				return error('aggregate argument too large')
+			}
+		}
+		mut floating := e.argument_is_double(call, i, arg)
+		if c := class {
+			floating = c.floating
+		}
+		if floating {
 			if e.target.float_arg_reg(doubles) != none {
 				places << ArgPlace{
 					floating: true
@@ -2357,6 +2475,23 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
+		if class := e.aggregate_argument(call, i) {
+			// An object is handed over as its bytes: the address of the object
+			// is taken and the one eightbyte the convention puts in a register
+			// is read from it. A struct of one double is bits moved through the
+			// floating file, which is the same eight bytes.
+			e.address_of_object(arg, depth + i + 1)!
+			base := e.accumulator(line, col)!
+			if class.floating {
+				double_register := e.float_accumulator(line, col)!
+				e.append(e.target.load_double_indirect(base, double_register)!)
+				e.store_double_accumulator(e.value_slot(depth + i), line, col)!
+				continue
+			}
+			e.append(e.target.load_indirect(base, base, class.bytes)!)
+			e.store_accumulator(e.value_slot(depth + i), line, col)!
+			continue
+		}
 		if place.floating {
 			e.emit_expr_at(arg, depth + i + 1)!
 			e.convert_to_double(arg, line, col)!
@@ -2496,6 +2631,16 @@ fn (e Emitter) argument_is_double(call ast.Call, position int, arg ast.Expr) boo
 // no conversion between a floating type and a pointer and the bits would arrive
 // as an address the program can no longer follow.
 fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr, floating bool) !int {
+	// An object of an aggregate type is the parameter's own type rather than a
+	// value of some width: the two are the same type or the type checker refused
+	// the call, and what travels is the object's bytes.
+	if class := e.aggregate_argument(call, position) {
+		if class.floating && class.bytes != e.target.word_size {
+			e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is an object of ${class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
+			return error('aggregate floating class width')
+		}
+		return class.bytes
+	}
 	if floating {
 		return e.target.word_size
 	}

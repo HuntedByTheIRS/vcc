@@ -533,6 +533,54 @@ fn test_a_top_level_aggregate_is_storage_in_the_image() {
 	os.rm(binary) or {}
 }
 
+// An object of an aggregate type of one eightbyte is handed over as its bytes in
+// one register: the caller takes the object's address and reads the eightbyte from
+// it, and the callee copies that register into the parameter's storage. The class
+// decides which register file, so a struct of one double travels where a double
+// does.
+fn test_an_object_of_an_aggregate_type_is_handed_over_by_value() {
+	source := scratch('byvalue.c')
+	binary := scratch('byvalue')
+	program := 'struct S { int a; int b; };\nint f(struct S s) { return s.a * 10 + s.b; }\nint main(void) { struct S s; s.a = 3; s.b = 4; return f(s); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 34
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// One byte of object travels the same way as eight, and a member of a member and a
+// top-level object are both read from where they are rather than from a copy.
+fn test_a_small_object_and_a_top_level_object_are_handed_over_by_value() {
+	source := scratch('byvaluesmall.c')
+	binary := scratch('byvaluesmall')
+	program := 'struct C { char c; };\nint f(struct C x) { return x.c; }\nstruct C g;\nint main(void) { struct C x; x.c = 60; g.c = 5; return f(x) + f(g); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 65
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// An object takes one register of its class like a value does, so a call whose
+// argument registers run out hands the object over on the stack: six ints and an
+// object is the object past the last general register, and seven objects are six
+// registers and one pushed word.
+fn test_an_object_past_the_registers_is_handed_over_on_the_stack() {
+	source := scratch('byvaluestack.c')
+	binary := scratch('byvaluestack')
+	program := 'struct S { int a; int b; };\nint f(int p, int q, int r, int s, int t, int u, struct S x) { return p + q + r + s + t + u + x.a * 10 + x.b; }\nint main(void) { struct S x; x.a = 4; x.b = 5; return f(1, 2, 3, 4, 5, 6, x); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 66
+	seven := scratch('byvalueseven.c')
+	seven_binary := scratch('byvalueseven')
+	seven_program := 'struct S { int a; int b; };\nint f(struct S a, struct S b, struct S c, struct S d, struct S e, struct S f, struct S g) { return a.a + b.a + c.a + d.a + e.a + f.a + g.a; }\nint main(void) { struct S v; v.a = 1; v.b = 2; return f(v, v, v, v, v, v, v); }\n'
+	seven_status := compile_and_run([seven, '-o', seven_binary], seven_program)
+	assert seven_status == 7
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	os.rm(seven) or {}
+	os.rm(seven_binary) or {}
+}
+
 // An element of an array of aggregates is a block of the layout's size, and the
 // stride between elements is that size, which the index scales by. A member of an
 // element is read at the element's address plus the member's own offset, so this
