@@ -1,6 +1,7 @@
 module preprocess
 
 import os
+import standard
 import time
 import tokenize
 
@@ -25,6 +26,21 @@ fn diagnostics_of(source string) []string {
 		messages << diagnostic.msg
 	}
 	return messages
+}
+
+// processed_in is `processed` under a named dialect, which is the mode main.v
+// hands the preprocessor. It is what a test about the phases needs, because the
+// mode decides a phase's answer and nothing else about the read.
+fn processed_in(source string, mode standard.Mode) []string {
+	result := preprocess(source, 'test.c', Options{
+		dialect: mode
+	})
+	assert result.diagnostics.len == 0
+	mut texts := []string{}
+	for tok in result.tokens {
+		texts << tok.text
+	}
+	return texts
 }
 
 fn test_text_without_directives_comes_through_unchanged() {
@@ -924,4 +940,26 @@ fn test_a_pair_of_literals_c99_has_no_rule_for_is_named() {
 	// Two of the same kind are one literal, which is what C11 says of them and
 	// harmless here: the literal reader refuses the type itself, by name.
 	assert processed('char s[] = u8"a" u8"b";') == ['char', 's', '[', ']', '=', 'u8"ab"', ';']
+}
+
+fn test_phase_one_is_gated_by_the_dialect_the_command_line_chose() {
+	// The mode reaches the lexer through the preprocessor, which is the wiring
+	// main.v does, and `standard.replaces_trigraphs` is the answer it is asked
+	// for. Finding C1-r1-1, with gcc 16.2.1 as the oracle, measured one mode at
+	// a time over `int main(void) { return 0 ??!??! 0; }`: the strict ISO modes
+	// up to C17 replace (rc 0, and the line is `0 || 0`), while a GNU dialect,
+	// C23 and no `-std` at all leave the bytes alone (rc 1,
+	// `trigraph '??!' ignored, use '-trigraphs' to enable`). `-std=nonsense` is
+	// recorded and refused nothing, so it takes the default dialect's answer,
+	// which is gnu-like.
+	assert processed_in('int x = 0 ??! 1;', .c99) == ['int', 'x', '=', '0', '|', '1', ';']
+	assert processed_in('int x = 0 ??! 1;', .c11) == ['int', 'x', '=', '0', '|', '1', ';']
+	for mode in [standard.Mode.none, .other, .c23, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23] {
+		assert processed_in('int x = 0 ??! 1;', mode) == ['int', 'x', '=', '0', '?', '?', '!',
+			'1', ';']
+	}
+	// A string literal is where a program would feel it: `"??!"` is one byte
+	// under `-std=c99` and the three bytes it wrote everywhere else.
+	assert processed_in('char *s = "??!";', .c99) == ['char', '*', 's', '=', '"|"', ';']
+	assert processed_in('char *s = "??!";', .gnu99) == ['char', '*', 's', '=', '"??!"', ';']
 }

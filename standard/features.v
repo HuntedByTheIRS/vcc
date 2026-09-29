@@ -144,6 +144,49 @@ pub const features = [
 	},
 ]
 
+// replaces_trigraphs answers phase 1's question for the selected mode: whether a
+// `??x` is replaced by the one character it names, on the raw bytes and before
+// anything reads the text.
+//
+// Measured on gcc 16.2.1, one mode at a time over
+// `int main(void) { return 0 ??!??! 0; }`:
+//
+//   -std=c89, -std=c99, -std=c11, -std=c17   rc 0: the line is `0 || 0`
+//   -std=gnu89 … -std=gnu23, -std=c23        rc 1: `trigraph '??!' ignored, use
+//                                            '-trigraphs' to enable`, and the
+//                                            bytes are the program's
+//   no -std at all                           rc 1, the same: gcc's own default
+//                                            is a GNU dialect
+//
+// A `-std=` spelling this compiler does not implement is recorded and refused
+// nothing, and it takes the default dialect's answer, which is gnu-like: a
+// trigraph is not replaced there either. So: replaced in the strict ISO modes up
+// to C17, left alone everywhere else.
+//
+// Trigraphs are the one construct the table above cannot carry, and this
+// function is why. A row is found by the exact text of one token (see `uses`
+// below) and phase 1 runs before a token exists: in a mode that replaces, a
+// `??!` is `|` by the time a token is read, and in a mode that leaves the bytes
+// alone the three characters reach the stream as three punctuators — `?`, `?`,
+// `!` — and no one of them is the construct. So a row for it could never be
+// found, and `standard_test.v` asks of every `implemented` row that it carry a
+// spelling, which leaves a row here either breaking that test or claiming a
+// detection this table does not have. The answer is a function and the record is
+// this comment, the same shape as the `$` row the table is still missing.
+//
+// Two things gcc has are not built here, and are recorded rather than promised:
+// `-trigraphs`, which turns replacement back on in a dialect that leaves it off
+// (measured: `gcc -std=gnu99 -trigraphs` replaces, rc 0), and the
+// `trigraph '??!' ignored, use '-trigraphs' to enable` warning, which is why a
+// GNU-mode program that writes `??!` hears nothing about it here. Both are open
+// items.
+pub fn replaces_trigraphs(mode Mode) bool {
+	return match mode {
+		.c89, .c99, .c11, .c17 { true }
+		.none, .c23, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23, .other { false }
+	}
+}
+
 // Question is what a dialect check is asked under: the mode the command line
 // named, the extensions -fvcc-exts= turned on, and the files the check stays out
 // of.

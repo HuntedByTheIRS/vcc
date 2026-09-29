@@ -40,10 +40,18 @@ const punct1 = '+-*/%&|^~!<>=()[]{};,.?:#'
 //   printf 'int fo\\\nobar;\n' > t3.c; gcc -std=c99 -E t3.c
 //   ... int foobar; <- phase 2 deletes both bytes
 //
-// The trigraph table. Phase 1 is unconditional here and not a branch in the
-// lexer: a mode that leaves `??` alone (gcc's `-std=gnu99` and `-std=c23` do,
-// `-std=c99` does not) is a dialect answer, and the dialect table lives in
-// `standard/`, which this file may read and not write.
+// The trigraph table. Whether phase 1 runs is the selected mode's answer and not
+// a property of this file. gcc 16.2.1, measured one mode at a time over
+// `int main(void) { return 0 ??!??! 0; }`:
+//
+//   -std=c89, -std=c99, -std=c11, -std=c17   rc 0, and the line is `0 || 0`
+//   -std=gnu89 … -std=gnu23, -std=c23, and   rc 1, with `trigraph '??!' ignored,
+//   no -std at all                           use '-trigraphs' to enable`: the
+//                                            bytes are the program's
+//
+// So it is a dialect answer, and it is written down once, in
+// `standard.replaces_trigraphs` — which this module cannot import, because
+// `standard` imports this one — and it arrives here through `Options`.
 const trigraphs = [
 	['??=', '#'],
 	['??/', '\\'],
@@ -58,9 +66,11 @@ const trigraphs = [
 
 // character_at is the byte at the raw position `at` with phase 1 applied, and
 // how many raw bytes it was written with: three for a trigraph, one for
-// anything else.
-fn character_at(src string, at int) (u8, int) {
-	if src[at] == `?` && at + 2 < src.len && src[at + 1] == `?` {
+// anything else. `replace` is the selected mode's answer and the only thing
+// that decides whether `??x` is the character it names: with it false the three
+// bytes are the three bytes.
+fn character_at(src string, at int, replace bool) (u8, int) {
+	if replace && src[at] == `?` && at + 2 < src.len && src[at + 1] == `?` {
 		three := src[at..at + 3]
 		for pair in trigraphs {
 			if three == pair[0] {
@@ -91,10 +101,10 @@ fn line_ending_at(src string, at int) int {
 // two positions, and not one, because a backslash and a line ending deleted by
 // phase 2 belong to no character at all: the character after a splice starts
 // further along, and the line the person wrote after it is where it is reported.
-fn translated(src string, at int) (u8, int, int) {
+fn translated(src string, at int, replace bool) (u8, int, int) {
 	mut i := at
 	for i < src.len {
-		byte, width := character_at(src, i)
+		byte, width := character_at(src, i, replace)
 		if byte == `\\` {
 			after := line_ending_at(src, i + width)
 			if after > 0 {
@@ -126,18 +136,50 @@ pub mut:
 	// at_line_start is true when the next token would be the first one on its
 	// line, which is the condition C puts on a directive's `#`.
 	at_line_start bool
+	// replace_trigraphs is the selected mode's answer to the phase 1 question,
+	// handed in through `Options` rather than decided here: in effect in the
+	// strict ISO modes up to C17, and left alone in a GNU dialect, in C23 and in
+	// a `-std=` spelling this compiler does not implement.
+	// `standard.replaces_trigraphs` is where that answer is written down.
+	replace_trigraphs bool
+}
+
+// Options are the answers the translation phases need from the language the
+// command line chose. Phase 1 runs before a token exists, so its answer is not
+// in the token stream and not in the feature table: it is asked of the mode and
+// handed in here.
+pub struct Options {
+pub:
+	// trigraphs says whether phase 1 replaces a `??x` with the one character it
+	// names. It is the selected mode's answer, and `standard.replaces_trigraphs`
+	// is where that answer is written down: in effect in the strict ISO modes up
+	// to C17, left alone in a GNU dialect, in C23 and in a `-std=` spelling this
+	// compiler does not implement. The field's zero value, false, is the answer
+	// no mode gets: a caller that does not say leaves the bytes alone.
+	trigraphs bool
 }
 
 // lex reads a whole source file into tokens. Directives are recorded as single
 // tokens and nothing else happens to them: macro expansion is the
 // preprocessor's job, and `#define` reaches it as one token holding the line.
+//
+// No dialect is named here, so phase 1 leaves a trigraph alone. That is the
+// answer the compiler's own default mode gets — `.none` is no standard, and gcc
+// with no `-std` leaves the bytes alone too (rc 1, measured) — and a caller that
+// knows the selected mode asks `lex_with`.
 pub fn lex(src string) Result {
+	return lex_with(src, Options{})
+}
+
+// lex_with reads a whole source file with the phases' dialect answers given.
+pub fn lex_with(src string, opts Options) Result {
 	mut l := Lexer{
-		src:           src
-		line:          1
-		col:           1
-		directives:    true
-		at_line_start: true
+		src:               src
+		line:              1
+		col:               1
+		directives:        true
+		at_line_start:     true
+		replace_trigraphs: opts.trigraphs
 	}
 	tokens := l.run()
 	return Result{
@@ -149,6 +191,12 @@ pub fn lex(src string) Result {
 // lex_fragment reads the text of one directive line — everything after the `#`
 // — or of a macro body. `#` and `##` are punctuators here, and the result has no
 // end-of-file token: a fragment ends where the caller's text ends.
+//
+// A fragment is text phase 1 has already had — the directive line a file's lexer
+// copied, a macro body, the name a paste built — so the fragment reader does not
+// replace a trigraph: `??!` is the three punctuators the text is made of. That
+// is gcc's answer for text that never was a file's bytes: measured,
+// `gcc -std=c99 -E -DX='??!'` prints `??!` and not `|`.
 pub fn lex_fragment(text string) []Token {
 	mut l := Lexer{
 		src:  text
@@ -548,7 +596,7 @@ fn hex_value(c u8) ?int {
 
 // at is the byte the lexer is about to read, after the phases have had it.
 fn (l Lexer) at() u8 {
-	byte, _, _ := translated(l.src, l.pos)
+	byte, _, _ := translated(l.src, l.pos, l.replace_trigraphs)
 	return byte
 }
 
@@ -560,7 +608,7 @@ fn (mut l Lexer) advance() {
 	if l.pos >= l.src.len {
 		return
 	}
-	_, _, next := translated(l.src, l.pos)
+	_, _, next := translated(l.src, l.pos, l.replace_trigraphs)
 	l.count(l.pos, next)
 	l.pos = next
 	l.settle()
@@ -572,7 +620,7 @@ fn (mut l Lexer) advance() {
 // it once at the start for a file that opens with a spliced line ending.
 fn (mut l Lexer) settle() {
 	for l.pos < l.src.len {
-		_, start, _ := translated(l.src, l.pos)
+		_, start, _ := translated(l.src, l.pos, l.replace_trigraphs)
 		if start <= l.pos {
 			return
 		}
@@ -607,7 +655,7 @@ fn (l Lexer) peek(n int) u8 {
 		if at >= l.src.len {
 			return 0
 		}
-		got, _, next := translated(l.src, at)
+		got, _, next := translated(l.src, at, l.replace_trigraphs)
 		byte = got
 		if got == 0 && next >= l.src.len {
 			return 0
@@ -626,7 +674,7 @@ fn (l Lexer) ahead(n int) string {
 		if at >= l.src.len {
 			break
 		}
-		byte, _, next := translated(l.src, at)
+		byte, _, next := translated(l.src, at, l.replace_trigraphs)
 		if byte == 0 && next >= l.src.len {
 			break
 		}

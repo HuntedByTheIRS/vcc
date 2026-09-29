@@ -191,6 +191,37 @@ fn tokens_of(source string) []string {
 	return out
 }
 
+// iso is the lexer reading a source under a strict ISO mode, which is the one
+// shape in which phase 1 replaces a trigraph: `standard.replaces_trigraphs` is
+// where that answer is written down, and this module cannot import `standard` —
+// `standard` imports this one — so the tests of phase 1 spell it out and ask
+// through these. `lex` with no dialect named is the other direction, the answer
+// the compiler's own default mode gets.
+fn iso(source string) Result {
+	return lex_with(source, Options{
+		trigraphs: true
+	})
+}
+
+fn iso_texts(source string) []string {
+	mut out := []string{}
+	for tok in iso(source).tokens {
+		out << tok.text
+	}
+	return out
+}
+
+fn iso_tokens_of(source string) []string {
+	mut out := []string{}
+	for tok in iso(source).tokens {
+		if tok.kind == .eof {
+			continue
+		}
+		out << tok.text
+	}
+	return out
+}
+
 // gcc_text is what gcc prints for a file with `-E`, with the line markers it
 // writes left out. Some of what the phases decide is a spelling rather than a
 // token, so the text itself is what has to be compared there: reading gcc's
@@ -227,21 +258,21 @@ fn gcc_preprocessed(source string) ?[]string {
 }
 
 fn test_a_trigraph_is_replaced_before_anything_reads_the_text() {
-	assert texts('a ??! b') == ['a', '|', 'b', '']
-	assert texts('??=??=') == ['##', '']
-	assert texts('??(0??)') == ['[', '0', ']', '']
-	assert texts('a ??- b') == ['a', '~', 'b', '']
+	assert iso_texts('a ??! b') == ['a', '|', 'b', '']
+	assert iso_texts('??=??=') == ['##', '']
+	assert iso_texts('??(0??)') == ['[', '0', ']', '']
+	assert iso_texts('a ??- b') == ['a', '~', 'b', '']
 }
 
 fn test_a_trigraph_inside_a_literal_is_replaced_too() {
 	// Phase 1 runs before the text is read as anything at all, so a string
 	// literal is not a place a trigraph is safe.
-	assert texts('"a??!b"') == ['"a|b"', '']
-	assert texts("'??('") == ["'['", '']
+	assert iso_texts('"a??!b"') == ['"a|b"', '']
+	assert iso_texts("'??('") == ["'['", '']
 }
 
 fn test_a_trigraph_in_a_directive_line_is_replaced() {
-	tokens := lex('#define X ??!\nint x;').tokens
+	tokens := iso('#define X ??!\nint x;').tokens
 	assert tokens[0].kind == .directive
 	assert tokens[0].text == '#define X |'
 }
@@ -269,18 +300,20 @@ fn test_a_trigraph_at_the_end_of_a_line_comment_splices_the_next_line_into_it() 
 	// The other half of the same ordering: `??/` is a backslash by the time
 	// the splice looks at it, so the line ending it stands before is deleted
 	// and the following line is inside the comment.
-	assert tokens_of('int a; // one ??/\nint b;\n') == ['int', 'a', ';']
+	assert iso_tokens_of('int a; // one ??/\nint b;\n') == ['int', 'a', ';']
 }
 
 fn test_a_trigraph_at_the_end_of_a_line_joins_the_two_lines() {
 	assert texts('int fo\\\nobar;') == ['int', 'foobar', ';', '']
-	assert tokens_of('int fo??/\nobar;') == ['int', 'foobar', ';']
+	assert iso_tokens_of('int fo??/\nobar;') == ['int', 'foobar', ';']
 }
 
 fn test_the_phases_produce_what_gcc_produces() {
 	// One fixture per ordering the phases decide between, compared with the
 	// oracle in the same run. The comment cases are the ones that separate the
 	// two orders: reading comments first would leave `int b;` in the stream.
+	// The oracle is `gcc -std=c99`, so the candidate side is the strict ISO
+	// reading and not the mode-less default: a trigraph is replaced there.
 	fixtures := [
 		'int main(void) { return 0 ??!??! 0; }',
 		'char *s = "a??!b";',
@@ -293,7 +326,7 @@ fn test_the_phases_produce_what_gcc_produces() {
 			eprintln('gcc is not on this machine, so the phase comparison is skipped')
 			return
 		}
-		assert expected == tokens_of(source)
+		assert expected == iso_tokens_of(source)
 	}
 }
 
@@ -318,12 +351,37 @@ fn test_a_file_of_many_trigraphs_is_one_pass_over_the_bytes() {
 	// this is a test of the shape a stack overflow would show up in. `??-` is
 	// used because `~` does not combine with itself into a longer punctuator,
 	// so the count of tokens is the count of trigraphs plus the rest.
-	result := lex('int x = ' + '??-'.repeat(20000) + ' 1;')
+	result := iso('int x = ' + '??-'.repeat(20000) + ' 1;')
 	assert result.diagnostics.len == 0
 	assert result.tokens.len == 20000 + 6
 	// And a trigraph is replaced before the punctuation table reads it: `??!`
 	// twice is the `||` operator and not two `|` tokens.
-	assert texts('??!??!') == ['||', '']
+	assert iso_texts('??!??!') == ['||', '']
+}
+
+fn test_phase_one_is_the_selected_mode_s_answer() {
+	// Both directions of the dialect answer, which is the whole of finding
+	// C1-r1-1. gcc 16.2.1, measured one mode at a time over
+	// `int main(void) { return 0 ??!??! 0; }`: the strict ISO modes (`-std=c89`,
+	// `-std=c99`, `-std=c11`, `-std=c17`) replace, and a GNU dialect, `-std=c23`
+	// and no `-std` at all leave the bytes where they are, with
+	// `trigraph '??!' ignored, use '-trigraphs' to enable`. `iso` is the strict
+	// reading; `lex`, which names no dialect, is the default one.
+	assert iso_texts('0 ??! 1') == ['0', '|', '1', '']
+	assert texts('0 ??! 1') == ['0', '?', '?', '!', '1', '']
+	// A string literal is the case a program would notice: `"??!"` is one byte
+	// under `-std=c99` and the three bytes that were written everywhere else.
+	assert iso_texts('"??!"') == ['"|"', '']
+	assert texts('"??!"') == ['"??!"', '']
+	// A directive line is read with the same answer, because phase 1 runs before
+	// anything looks at the line.
+	assert iso('#define X ??!\nint x;').tokens[0].text == '#define X |'
+	assert lex('#define X ??!\nint x;').tokens[0].text == '#define X ??!'
+	// A fragment is text phase 1 has already had — a directive line a file's
+	// lexer copied, a macro body, a name a paste built — so the fragment reader
+	// never replaces. gcc is the same about text that was never a file's bytes:
+	// measured, `gcc -std=c99 -E -DX='??!'` prints `??!`.
+	assert lex_fragment('??!').map(it.text) == ['?', '?', '!']
 }
 
 fn test_a_spliced_continuation_of_a_hundred_thousand_lines_is_one_line() {

@@ -1,6 +1,7 @@
 module preprocess
 
 import os
+import standard
 import tokenize
 
 // The preprocessor reads a file and everything it includes and hands the parser
@@ -36,6 +37,13 @@ pub mut:
 	// defined at all, so a header that asks what machine it is being read on
 	// gets no answer from this compiler.
 	undef_builtins bool
+	// dialect is the mode the command line selected: `-std=c99`, a GNU dialect,
+	// or a spelling this compiler does not implement. It is here because phase 1
+	// asks the language a question before a token exists — whether a `??x` is
+	// replaced — and `standard.replaces_trigraphs` is where the answer is
+	// written down. `.none`, no `-std` at all, is the default dialect, which is
+	// gnu-like, so it leaves the bytes alone too.
+	dialect standard.Mode
 }
 
 // Prelude is one file to read before the source. `macros_only` is what
@@ -529,7 +537,13 @@ fn include_name(name string, angled bool) string {
 }
 
 fn (mut p Processor) push(path string, source string, found_index int, silent bool, system bool) {
-	lexed := tokenize.lex(source)
+	// Phase 1 is the selected mode's answer and not the lexer's, so the mode is
+	// handed to the read rather than assumed by it: the strict ISO modes up to
+	// C17 replace a trigraph, and a GNU dialect, C23 and a spelling this compiler
+	// does not implement leave the bytes alone.
+	lexed := tokenize.lex_with(source, tokenize.Options{
+		trigraphs: standard.replaces_trigraphs(p.opts.dialect)
+	})
 	for diagnostic in lexed.diagnostics {
 		p.diagnostics << tokenize.Diagnostic{
 			line: diagnostic.line

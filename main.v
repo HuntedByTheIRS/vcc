@@ -92,6 +92,10 @@ fn main() {
 		standard_dirs:  if opts.nostdinc { []string{} } else { standard_include_dirs() }
 		preludes:       opts.preludes
 		undef_builtins: opts.undef_builtins
+		// The mode goes to the read as well as to the dialect check below,
+		// because phase 1 asks it a question before a token exists: whether a
+		// trigraph is replaced.
+		dialect:        opts.dialect
 	})
 	phases << cli.Phase{
 		name:   'preprocess'
