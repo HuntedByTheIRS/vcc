@@ -19,6 +19,27 @@ bin/
 # ENV
 .env
 
+# Agent working state: plans, probe scripts, capture generators, scratch notes.
+# None of it belongs in history; see AGENTS.md.
+.omh/
+
+# Agent and AI tool state. One line per tool that drops a directory in the
+# working tree; none of it is project content.
+.aider*
+.claude/
+.codex/
+.continue/
+.crush/
+.cursor/
+.gemini/
+.goose/
+.opencode/
+.omo/
+.openhands/
+.qwen/
+.roo/
+.windsurf/
+
 # Web assets and local databases
 *.db
 *.js
