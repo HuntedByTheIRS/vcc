@@ -146,17 +146,18 @@ names its target; `-dM` prints what is defined when the read ends, and
 An object of a struct or union type is a block of storage whose members are read
 and written at the offsets the layout gives them, for int, char and double members.
 Inside a function that storage is in the frame and at the top level it is in the
-image. A member of a member is the same object read further in, and `->` reads the
-member from the object a pointer names. The arguments a call passes past the
-machine's registers go on the stack, six ints and eight doubles being what the
-registers carry.
+image, and an array of them is a stride of the layout's size times an index. A
+member of a member is the same object read further in, and `->` reads the member
+from the object a pointer names. The arguments a call passes past the machine's
+registers go on the stack, six ints and eight doubles being what the registers
+carry.
 
 Not implemented, in rough order of how much of the tree depends on it: an
-aggregate passed to a function or returned from one, an array of aggregates;
-`enum`; casts, so a read of a `double` as an int goes through a variable of the
-type wanted; `switch`; an array with an initializer or more than one size; a
-pointer defined at the top level; object files and relocatable output; and V's own
-generated C. `ROADMAP.md` maps the order.
+aggregate passed to a function or returned from one; `enum`; casts, so a read of a
+`double` as an int goes through a variable of the type wanted; `switch`; an array
+with an initializer or more than one size; a pointer defined at the top level;
+object files and relocatable output; and V's own generated C. `ROADMAP.md` maps the
+order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a
