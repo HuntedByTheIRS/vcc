@@ -222,7 +222,7 @@ fn soname_in(bytes []u8) string {
 	count := int(read_u16(bytes, elf64_phnum_at))
 	mut dynamic_offset := u64(0)
 	mut found_dynamic := false
-	mut segments := []LibrarySegment{}
+	mut loaded := []LibrarySegment{}
 	for i in 0 .. count {
 		at := phoff + i * entry_size
 		if at + elf64_ph_size > bytes.len {
@@ -234,7 +234,7 @@ fn soname_in(bytes []u8) string {
 			found_dynamic = true
 		}
 		if kind == program_header_load {
-			segments << LibrarySegment{
+			loaded << LibrarySegment{
 				offset: read_u64(bytes, at + elf64_ph_offset_at)
 				vaddr:  read_u64(bytes, at + elf64_ph_vaddr_at)
 				size:   read_u64(bytes, at + elf64_ph_filesz_at)
@@ -269,7 +269,7 @@ fn soname_in(bytes []u8) string {
 	// two, which is the one piece of arithmetic that makes this a reader rather
 	// than a parser.
 	wanted := strtab + soname_at
-	for segment in segments {
+	for segment in loaded {
 		if wanted < segment.vaddr || wanted >= segment.vaddr + segment.size {
 			continue
 		}
