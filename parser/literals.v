@@ -19,6 +19,24 @@ fn parse_integer_literal(text string) !i64 {
 	if body.len > 1 && body[0] == `0` && (body[1] == `x` || body[1] == `X`) {
 		base = 16
 		digits = body[2..]
+		// A hexadecimal floating constant is a construct, and not a digit that
+		// the base does not have. gcc refuses `0x1.8` as `hexadecimal floating
+		// constants require an exponent` and compiles `0x1p3`, so reporting the
+		// `p` as a digit base 16 is missing says the wrong thing about what the
+		// program wrote. Its value needs a float type, which is the C2 lane's
+		// work and the emitter's, so what is owed here is the honest half: the
+		// refusal names the construct, and the caller reports the token this
+		// text was read from, so it is named at its location too.
+		if digits.contains('p') || digits.contains('P') {
+			return error('${text}: hexadecimal floating constants are not implemented')
+		}
+		// `0x1.8` is the same construct short of its exponent, which gcc also
+		// refuses, in these words: `hexadecimal floating constants require an
+		// exponent`. Naming it is the same answer as above, and better than
+		// reporting the point as a digit base 16 is missing.
+		if digits.contains('.') {
+			return error('${text}: hexadecimal floating constants require an exponent')
+		}
 	} else if body.len > 1 && body[0] == `0` && (body[1] == `b` || body[1] == `B`) {
 		base = 2
 		digits = body[2..]
@@ -99,6 +117,14 @@ fn parse_escape(rest string) !i64 {
 			seen++
 		}
 		return value
+	}
+	if c == `u` || c == `U` {
+		// A universal character name in a literal is an escape whose value is
+		// the character it names, written in the execution character set. That
+		// encoding is the literal reader's next piece of work, so the refusal
+		// names the construct rather than calling a name an unknown escape,
+		// which is what the base's message did.
+		return error('universal character names in a literal are not implemented')
 	}
 	return match c {
 		`a` { i64(7) }
