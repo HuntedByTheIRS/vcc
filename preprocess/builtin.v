@@ -2,6 +2,7 @@ module preprocess
 
 import backend
 import os
+import standard
 import time
 import tokenize
 
@@ -76,6 +77,42 @@ fn builtins(target backend.Target) []Definition {
 	definitions << Definition{'__has_builtin', ['x'], '0'}
 	definitions << Definition{'__has_feature', ['x'], '0'}
 	return definitions
+}
+
+// standard_defines are the macros the selected mode adds to the ones this
+// compiler already predefines, in the shape a -D argument has: main() hands them
+// to the preprocessor ahead of the command line's own -D arguments, which is the
+// order C asks for. A mode is a built-in, and a -D on the command line wins over
+// a built-in, as it does in gcc.
+//
+// The table is measured against gcc 16.2.1, with `gcc -std=X -dM -E -x c
+// /dev/null`:
+//
+//	-std=c99    __STDC_VERSION__ 199901L, __STRICT_ANSI__ 1
+//	-std=gnu99  __STDC_VERSION__ 199901L, and no __STRICT_ANSI__
+//	-std=c11, -std=gnu11, no -std at all   no __STRICT_ANSI__
+//
+// __STDC_VERSION__ is not in the table because it is not a mode's business
+// here: the value this compiler predefines is 199901L in every mode, which is
+// what "c11 keeps today's behavior" means. Claiming 201112L for -std=c11 would
+// be a promise about a language this compiler does not have, and the headers
+// would read it.
+//
+// __STRICT_ANSI__ is the one macro a mode adds, and it is the one that makes a
+// C library's headers hide everything that is not the standard's: a program
+// compiled as c99 sees the C99 declarations gcc shows it and not the POSIX ones.
+// No other mode adds anything, so no spelling this compiler does not implement
+// can change a build.
+//
+// -undef takes the macro away with the rest of what describes the target, which
+// is what gcc does with it: `gcc -std=c99 -undef -dM -E -x c /dev/null` prints
+// no __STRICT_ANSI__, and the caller here asks for these defines only when the
+// compiler is meant to predefine things at all.
+pub fn standard_defines(mode standard.Mode) []string {
+	if mode == .c99 {
+		return ['__STRICT_ANSI__=1']
+	}
+	return []
 }
 
 // define_builtins puts them in the macro table, before anything else is read.
