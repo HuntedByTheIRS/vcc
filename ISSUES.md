@@ -32,18 +32,18 @@ as designed, not a bug. The bugs worth filing are the other ones.
 
 Three shapes of report are common enough to describe on their own.
 
-**A miscompile.** The compiler accepted the input and produced an artifact that
+A miscompile is the compiler accepting the input and producing an artifact that
 does the wrong thing. Say what the binary does, what it should do, and how you
 know (the exit status, the printed value, the signal). A reduced input that
 still miscompiles is worth more than a large one that does.
 
-**A bad diagnostic.** The compiler rejected something valid, or rejected
+A bad diagnostic is the compiler rejecting something valid, or rejecting
 something invalid with a message that misdescribes it. Paste the message, the
 file and line it points at, and the language rule you think it gets wrong.
 
-**A crash.** A panic, a hang, or a file that got written and should not have
-been. Paste the panic output and, for a hang, the input that loops. Do not send
-a 200 MB file that hangs the compiler; find the line that does it.
+A crash is a panic, a hang, or a file that got written and should not have been.
+Paste the panic output and, for a hang, the input that loops. Do not send a
+200 MB file that hangs the compiler; find the line that does it.
 
 ## Performance reports
 
