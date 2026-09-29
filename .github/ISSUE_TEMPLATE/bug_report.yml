@@ -1,0 +1,116 @@
+name: Bug report
+description: vcc accepted valid C and did the wrong thing, rejected valid C, or crashed.
+title: "[bug]: "
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports get fixed when they can be reproduced, so the fields below matter more
+        than length. A reduced input is worth more than a large one.
+
+        Unimplemented C is not a bug: the compiler is expected to say so and exit
+        non-zero. ROADMAP.md lists what is coming.
+
+        Security problems go through SECURITY.md and never into this form.
+  - type: input
+    id: tool-version
+    attributes:
+      label: vcc version
+      description: Paste the output of `vcc --version`.
+      placeholder: the output of `vcc --version`
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Which build
+      description: The commit you built from, or the release if there is one.
+      placeholder: main at 1a2b3c4
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, architecture, and the V version that built vcc.
+      placeholder: CachyOS x86_64, V 0.5.2 74e5877
+    validations:
+      required: true
+  - type: dropdown
+    id: invocation
+    attributes:
+      label: How vcc was invoked
+      description: This separates a compiler bug from the wrapper that called it.
+      options:
+        - Directly, by hand or from a script
+        - By V through -cc
+        - By another build system (make, cmake, ...)
+    validations:
+      required: true
+  - type: dropdown
+    id: shape
+    attributes:
+      label: What kind of failure is this
+      options:
+        - It compiled, and the binary does the wrong thing
+        - It refused C that is valid
+        - It crashed, panicked, or hung
+        - It wrote an output file it should not have, or wrote nothing
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command
+      description: The exact command line, flags and all.
+      render: text
+      placeholder: ./vcc -o /tmp/out repro.c
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: The input
+      description: |
+        The smallest input that still shows the problem. Delete lines until removing
+        one more makes it go away, then keep that line.
+      render: c
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: For a miscompile, what the binary should do and how you know.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: The exit status, and the output or the wrong behavior.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: tcc
+    attributes:
+      label: What tcc or gcc does with the same input
+      description: Useful when the input is valid C and you want to say so.
+      placeholder: tcc compiles it and the binary exits 0
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the open and closed issues for this.
+          required: true
+        - label: I reduced the input to the smallest version that still fails.
+          required: true
+        - label: I checked ROADMAP.md, and this is not an unimplemented feature.
+          required: true
+        - label: This is not a security problem.
+          required: true
