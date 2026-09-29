@@ -398,14 +398,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// kept as one.
 			if !spec.is_typedef {
 				decls << ast.FnDecl{
-					name:     d.name
-					ret:      p.spelling_of(spec, d.stars)
-					ret_type: p.pointer_type(spec.clause, d)
-					resolved: p.declared_type(spec.clause, d)
-					params:   d.params
-					body:     []ast.Stmt{}
-					line:     d.name_at.line
-					col:      d.name_at.col
+					name:      d.name
+					ret:       p.spelling_of(spec, d.stars)
+					ret_type:  p.pointer_type(spec.clause, d)
+					resolved:  p.declared_type(spec.clause, d)
+					ret_class: p.eightbyte_of(spec.clause)
+					params:    d.params
+					body:      []ast.Stmt{}
+					line:      d.name_at.line
+					col:       d.name_at.col
 				}
 			}
 		} else {
@@ -1285,10 +1286,12 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			}
 		} else {
 			d := p.parse_declarator(depth + 1)!
+			resolved := p.declared_type(spec.clause, d)
 			params.params << ast.Param{
 				name:     d.name
 				typ:      p.spelling_of(spec, d.stars)
-				resolved: p.declared_type(spec.clause, d)
+				resolved: resolved
+				class:    p.eightbyte_of(resolved)
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
@@ -1322,10 +1325,47 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 // name: a word of the language, or a single name this file declared as a type,
 // which answers as the type it names.
 fn (p Parser) parameter_type_is_known(spec DeclSpec) bool {
+	// An object of an aggregate type is one a definition can be handed by value:
+	// the layout says how many bytes it is and what class its first eightbyte
+	// has, which is what the caller and the callee each have to agree on. A tag
+	// with no body has neither, so it is not one.
+	if spec.clause.kind in [types.Kind.struct_, .union_] {
+		return spec.clause.is_complete() && p.representation.layout(spec.clause) != none
+	}
 	if spec.words.len != 1 {
 		return false
 	}
 	return p.word_problem(spec.words[0]) == none
+}
+
+// eightbyte_of is how an object of an aggregate type is handed over by value on
+// this machine, and zero for anything else.
+//
+// One eightbyte is what this compiler hands over: an object of eight bytes or
+// fewer travels in one register, and the class of that eightbyte is the
+// floating-point one when every member of it is a double and the general one
+// otherwise, which is what the convention says for an eightbyte carrying both.
+// An object larger than that is two eightbytes or a copy in memory, which is the
+// next piece of this and not this one; it answers with its size so that the
+// refusal can name how many bytes it is.
+fn (p Parser) eightbyte_of(declared types.Type) ast.Eightbyte {
+	if declared.kind !in [types.Kind.struct_, .union_] {
+		return ast.Eightbyte{}
+	}
+	bytes := p.aggregate_bytes(declared)
+	if bytes == 0 {
+		return ast.Eightbyte{}
+	}
+	mut floating := declared.members.len > 0
+	for member in declared.members {
+		if member.typ.kind != .double {
+			floating = false
+		}
+	}
+	return ast.Eightbyte{
+		bytes:    bytes
+		floating: floating
+	}
 }
 
 fn (mut params Params) note_problem(problem string, at tokenize.Token) {

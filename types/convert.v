@@ -275,7 +275,14 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 		return 'a constraint violation: a function type is not the type of an object, so nothing is assigned to ${to.describe()}'
 	}
 	if to.is_aggregate() || from.is_aggregate() {
-		return 'the aggregate types are a later milestone: ${from.describe()} is not assigned to ${to.describe()} yet'
+		// 6.5.16.1: an object of a struct or union type is assigned to an object
+		// of the same type and to nothing else. Two declarations of one tag are
+		// one type, so the copy is the bytes of the object and no conversion is
+		// involved.
+		if to.is_aggregate() && from.is_aggregate() && to.same(from) {
+			return none
+		}
+		return 'a constraint violation: ${from.describe()} is not assigned to ${to.describe()}, and an object of an aggregate type is assigned to an object of its own type'
 	}
 	return none
 }

@@ -489,6 +489,34 @@ fn test_an_object_of_an_incomplete_tag_is_refused_by_the_tag() {
 // An object defined at the top level is storage in the image, which is laid out
 // by a path that has no room for an aggregate yet. Refusing it where it is
 // written is what keeps an object nothing uses from being dropped silently.
+// A parameter that is an object of an aggregate type is storage of the layout's
+// size in the frame of the call, and it arrives as its bytes: how many bytes and
+// the class of its one eightbyte are what the declaration carries, so a call and a
+// definition agree without either asking the other.
+fn test_a_parameter_of_an_aggregate_type_carries_how_it_is_handed_over() {
+	decl := first('struct S { int a; int b; };\nint f(struct S s) { return s.a; }')
+	assert decl.params.len == 1
+	assert decl.params[0].class.bytes == 8
+	assert !decl.params[0].class.floating
+	// An object whose members are all doubles is handed over in the floating-point
+	// file, which is the class the convention gives an eightbyte of doubles.
+	doubles := first('struct D { double d; };\nint f(struct D x) { return 0; }')
+	assert doubles.params[0].class.bytes == 8
+	assert doubles.params[0].class.floating
+	// An object larger than one eightbyte is two of them or a copy in memory, and
+	// the size it carries is what says so.
+	wide := first('struct W { int a; int b; int c; };\nint f(struct W w) { return 0; }')
+	assert wide.params[0].class.bytes == 12
+}
+
+// A tag that was declared and never defined has no size and no class, so a
+// parameter of it is refused by the tag as it was written.
+fn test_a_parameter_of_an_incomplete_tag_is_refused_by_name() {
+	result := parsed('struct S;\nint f(struct S s) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'unsupported type struct S'
+}
+
 // An object of an aggregate type at the top level is storage in the image, and how
 // much of it is the model's layout rather than a width a spelling answers. The
 // declaration asks that question once and carries the answer, which is what the
