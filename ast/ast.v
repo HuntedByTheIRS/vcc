@@ -68,11 +68,17 @@ pub:
 	expr ?Expr
 	// init is the initializer of a declaration, and none for `int x;`.
 	init ?Expr
-	// decl_name and decl_type are a declaration's name and type as written.
-	decl_name string
-	decl_type string
-	// target is the name an assignment writes to.
+	// decl_name and decl_type are a declaration's name and type as written, and
+	// decl_count is how many elements an array declaration has: zero for a
+	// declaration of one value.
+	decl_name  string
+	decl_type  string
+	decl_count int
+	// target is the name an assignment writes to, and index is the subscript of
+	// an array element: `a[i] = v` writes to an element, and a plain `x = v`
+	// has none.
 	target string
+	index  ?Expr
 	// cond is the controlling expression of an if or a while: what has to be
 	// true for the branch to be taken, or for the loop to go round again.
 	cond ?Expr
@@ -96,7 +102,20 @@ pub:
 // Expr is one of the expression shapes the stub understands. A call is parsed
 // so that the diagnostic can say calls are not implemented yet, rather than the
 // parser failing on a token it did not expect.
-pub type Expr = Binary | Unary | IntLit | Ident | Call | StrLit
+pub type Expr = Binary | Unary | IntLit | Ident | Call | StrLit | Index
+
+// Index is one element of an array, written `a[i]`: the name of the array and
+// the expression that says which element. An element of a named array is the one
+// place a subscript is read and written; a general lvalue — a dereference, a
+// subscript of a subscript, or an array that is not a name — is a shape the tree
+// does not have, and the expression reader reports it where it stops.
+pub struct Index {
+pub:
+	name  string
+	index Expr
+	line  int
+	col   int
+}
 
 pub struct IntLit {
 pub:

@@ -811,6 +811,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			}
 			e.emit_call(expr, depth + 1)!
 		}
+		ast.Index {
+			// An element of an array is not implemented yet: the address of the
+			// element is a computation the back end has no instruction for so
+			// far, and reading the array's first slot would be a wrong value
+			// rather than a missing one.
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: the element ${expr.name}[...] is not implemented yet')
+			return error('array element')
+		}
 	}
 }
 
@@ -1017,9 +1025,14 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			}
 		}
 		ast.Call {
-			// A call is never a value here (the emitter reports one that is),
-			// but the table has to answer for every expression shape.
+			// A call's value has the width the language returns it with, which
+			// is four bytes: the only return width this back end emits.
 			4
+		}
+		ast.Index {
+			// An element of an array is not a value this back end can size yet;
+			// the emitter reports one where it is written.
+			return none
 		}
 		ast.Unary {
 			if expr.op == '!' {
@@ -1273,6 +1286,7 @@ fn expr_line(expr ast.Expr) int {
 		ast.Unary { expr.line }
 		ast.Binary { expr.line }
 		ast.Call { expr.line }
+		ast.Index { expr.line }
 	}
 }
 
@@ -1284,6 +1298,7 @@ fn expr_col(expr ast.Expr) int {
 		ast.Unary { expr.col }
 		ast.Binary { expr.col }
 		ast.Call { expr.col }
+		ast.Index { expr.col }
 	}
 }
 

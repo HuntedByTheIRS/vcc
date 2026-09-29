@@ -299,20 +299,28 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 		if value := stmt.cond {
 			cond = rewrite(value, opts, 0)
 		}
+		// An element of an array is a place a value is read from as well as
+		// written to, so the subscript is rewritten like every other expression.
+		mut index := ?ast.Expr(none)
+		if value := stmt.index {
+			index = rewrite(value, opts, 0)
+		}
 		out << ast.Stmt{
-			kind:      stmt.kind
-			expr:      expr
-			init:      init
-			decl_name: stmt.decl_name
-			decl_type: stmt.decl_type
-			target:    stmt.target
-			cond:      cond
-			body:      rewrite_body(stmt.body, opts)
-			step:      rewrite_body(stmt.step, opts)
-			then_body: rewrite_body(stmt.then_body, opts)
-			else_body: rewrite_body(stmt.else_body, opts)
-			line:      stmt.line
-			col:       stmt.col
+			kind:       stmt.kind
+			expr:       expr
+			init:       init
+			decl_name:  stmt.decl_name
+			decl_type:  stmt.decl_type
+			decl_count: stmt.decl_count
+			target:     stmt.target
+			index:      index
+			cond:       cond
+			body:       rewrite_body(stmt.body, opts)
+			step:       rewrite_body(stmt.step, opts)
+			then_body:  rewrite_body(stmt.then_body, opts)
+			else_body:  rewrite_body(stmt.else_body, opts)
+			line:       stmt.line
+			col:        stmt.col
 		}
 	}
 	return out
@@ -358,6 +366,16 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 		}
 		ast.StrLit {
 			return expr
+		}
+		ast.Index {
+			// An element is a place a value is read from, and the expression
+			// that says which element is rewritten like any other.
+			return ast.Expr(ast.Index{
+				name:  expr.name
+				index: rewrite(expr.index, opts, depth + 1)
+				line:  expr.line
+				col:   expr.col
+			})
 		}
 		ast.Binary {
 			return rewrite(expr, opts, depth + 1)

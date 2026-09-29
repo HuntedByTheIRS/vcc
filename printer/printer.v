@@ -62,7 +62,8 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 				out << '${indent}expression statement at ${stmt.line}:${stmt.col}'
 			}
 			.var_decl {
-				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name} at ${stmt.line}:${stmt.col}'
+				elements := if stmt.decl_count > 0 { '[${stmt.decl_count}]' } else { '' }
+				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name}${elements} at ${stmt.line}:${stmt.col}'
 			}
 			.assign {
 				out << '${indent}assignment to ${stmt.target} at ${stmt.line}:${stmt.col}'
@@ -82,6 +83,10 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 		}
 		if expr := stmt.expr {
 			dump_expression(expr, depth + 1, mut out)
+		}
+		if index := stmt.index {
+			out << '${indent}subscript'
+			dump_expression(index, depth + 1, mut out)
 		}
 		if init := stmt.init {
 			out << '${indent}initializer'
@@ -164,6 +169,10 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 		}
 		ast.StrLit {
 			out << '${indent}string ${expr.text} at ${expr.line}:${expr.col}'
+		}
+		ast.Index {
+			out << '${indent}element ${expr.name}[] at ${expr.line}:${expr.col}'
+			dump_expression(expr.index, depth + 1, mut out)
 		}
 	}
 }
