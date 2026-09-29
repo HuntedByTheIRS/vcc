@@ -588,6 +588,9 @@ fn (mut p Parser) unary_type(op tokenize.Token, operand ast.Expr) types.Type {
 	if op.text == '!' {
 		return types.int_type()
 	}
+	if op.text == '*' {
+		return p.deref_type(op, operand)
+	}
 	if op.text == '&' {
 		if p.is_unresolved(operand) {
 			return types.Type{}
@@ -601,6 +604,30 @@ fn (mut p Parser) unary_type(op tokenize.Token, operand ast.Expr) types.Type {
 		p.error_at(op, err.msg())
 		return types.Type{}
 	}
+}
+
+// deref_type is the type of the value at an address: 6.5.3.2 makes `*p` a value
+// of the type p points at, and an array's name is the address of its first
+// element, so `*a` for `char a[4]` is a char. A value that is not an address has
+// no value at it, and one that points at void has none either: both are refused
+// here by name rather than read at the width of something else.
+fn (mut p Parser) deref_type(op tokenize.Token, operand ast.Expr) types.Type {
+	if p.is_unresolved(operand) {
+		return types.Type{}
+	}
+	if operand.typ.is_array() {
+		return operand.typ.element() or { types.Type{} }
+	}
+	if !operand.typ.is_pointer() {
+		p.error_at(op, 'unsupported: * reads through an address, and this operand is ${operand.typ.describe()}')
+		return types.Type{}
+	}
+	pointed_at := operand.typ.pointee() or { types.Type{} }
+	if pointed_at.kind == .void_ {
+		p.error_at(op, 'unsupported: * reads through an address of void, which has no value at it')
+		return types.Type{}
+	}
+	return pointed_at
 }
 
 // is_unresolved says whether an expression's clause is the one the model could
@@ -630,11 +657,13 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	if t.kind == .punct && t.text == '(' && p.starts_declaration(p.peek_at(1)) {
 		return p.parse_cast(t)
 	}
-	// `&` is here with the other prefix operators: it is one, and it binds as
-	// tightly as they do - `&x + 1` is the address of x plus one. Whether what
-	// follows is something with an address is the back end's question, since
-	// that is where the storage of a name is known.
-	if t.kind == .punct && t.text in ['-', '+', '!', '~', '&'] {
+	// `&` and `*` are here with the other prefix operators: the address of a
+	// value and the value at an address both bind as tightly as they do -
+	// `&x + 1` is the address of x plus one, and `*p + 1` adds one to the char p
+	// points at. Whether what follows is something with an address, and where the
+	// storage of a name is, are questions for the back end and for this reader's
+	// type lookup.
+	if t.kind == .punct && t.text in ['-', '+', '!', '~', '&', '*'] {
 		p.next()
 		operand := p.parse_unary()!
 		return ast.Expr(ast.Unary{

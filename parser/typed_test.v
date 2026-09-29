@@ -208,6 +208,25 @@ fn test_sizeof_answers_a_value_and_a_type_where_it_was_refused_by_name() {
 	assert after.unit.decls.len == 1
 }
 
+fn test_a_read_through_an_address_is_typed_as_what_it_points_at() {
+	result := checked('int main() { char *p = (char *)0; return *p; }')
+	returned := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	read := returned as ast.Unary
+	assert read.op == '*'
+	assert read.typ.describe() == 'char'
+	// An operand that is not an address has no value at it, and one that points
+	// at void has none either: both are refused by name.
+	refused := parsed('int main() { int x = 3; return *x; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('reads through an address')
+	voided := parsed('int main() { void *p = (void *)0; return *p; }')
+	assert voided.diagnostics.len == 1
+	assert voided.diagnostics[0].msg.contains('void')
+}
+
 fn test_a_cast_is_read_as_a_conversion_to_the_type_it_names() {
 	// `(char *)0` is a conversion and not a parenthesized expression: the clause
 	// on the node is the type that was named and the spelling is what was

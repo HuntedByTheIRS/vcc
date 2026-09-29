@@ -203,6 +203,42 @@ fn test_the_exit_status_is_the_returned_constant() {
 	assert run_image(emitted.bytes) == 7
 }
 
+fn test_a_read_through_an_address_reads_the_value_at_it() {
+	// Measured with gcc 16.2.1 on the same programs: the char 65 behind an
+	// address is 65, an array's name is the address of its first element, the int
+	// 7 is 7, and the double 2.5 read through one and converted is 2.
+	for source in [
+		'int main() { char s[4]; s[0] = 65; char *p = s; return *p; }',
+		'int main() { char s[4]; s[0] = 65; return *s; }',
+		'int main() { int x = 7; int *p = &x; return *p; }',
+	] {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		answer := if source.contains('int x') { 7 } else { 65 }
+		assert run_image(emitted.bytes) == answer
+	}
+	doubled := emit(translation_unit('int main() { double d = 2.5; double *p = &d; return (int)*p; }'),
+		Options{})
+	assert doubled.diagnostics.len == 0
+	assert run_image(doubled.bytes) == 2
+	// A char is loaded with its sign, which is what makes the value the int the
+	// language promotes it to.
+	signed := emit(translation_unit('int main() { char c = (char)200; char *p = &c; return *p; }'),
+		Options{})
+	assert signed.diagnostics.len == 0
+	assert run_image(signed.bytes) == 200
+}
+
+fn test_a_read_through_something_that_is_not_an_address_is_reported() {
+	// The reader refuses it, so there is no tree to emit and no bytes to write:
+	// what the source says is checked without going through the emitter, which is
+	// what the pipeline test that reads a refused source covers as well.
+	lexed := tokenize.lex('int main() { int x = 3; return *x; }')
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 1
+	assert parsed.diagnostics[0].msg.contains('reads through an address')
+}
+
 fn test_a_cast_converts_between_the_classes_the_back_end_carries() {
 	// Measured with gcc 16.2.1 on the same program: `(char)300` is 44 and
 	// `(int)(char *)0` is 0, so the three conversions in one program add up to

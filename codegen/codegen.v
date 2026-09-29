@@ -2199,6 +2199,11 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// read at all, and what is taken is where it lives.
 		return e.emit_address(unary)
 	}
+	if unary.op == '*' {
+		// Reading through an address is not a computation either: the operand is
+		// the address and the value is at it.
+		return e.emit_deref(unary, depth)
+	}
 	floating := e.floating_of(unary.expr)
 	if floating {
 		// Three operators have a meaning for a double: the sign change, the
@@ -2308,6 +2313,40 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		// that byte's sign, which is what this target's char is.
 		e.append(e.target.sign_extend_byte(register)!)
 	}
+}
+
+// storage_width is the width of the value at an address of this type: a char is
+// one byte, an int is four, and a pointer is the machine's word. A double is read
+// by the instruction that moves one rather than at a width here, and a type the
+// back end has no load for answers none.
+fn (e Emitter) storage_width(t types.Type) ?int {
+	return match t.kind {
+		.char_, .signed_char { 1 }
+		.int_ { 4 }
+		.pointer, .array { e.target.word_size }
+		else { none }
+	}
+}
+
+// emit_deref reads through an address: the operand is computed into the register,
+// and the value at that address is loaded at the width of what the address points
+// at. A char is loaded with its sign, which is what makes it the int the language
+// promotes it to, and a double is loaded by the instruction that moves one rather
+// than by an integer load of the same width. A pointed-at type with no load here
+// is refused by name.
+fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
+	e.emit_expr_at(unary.expr, depth + 1)!
+	address := e.accumulator(unary.line, unary.col)!
+	if unary.typ.kind == .double {
+		double_register := e.float_accumulator(unary.line, unary.col)!
+		e.append(e.target.load_double_indirect(address, double_register)!)
+		return
+	}
+	width := e.storage_width(unary.typ) or {
+		e.diagnostics << problem(unary.line, unary.col, 'unsupported: * reads through an address of ${unary.typ.describe()}, and this back end reads ints, chars, doubles and pointers only')
+		return error('unsupported pointed-at type')
+	}
+	e.append(e.target.load_indirect(address, address, width)!)
 }
 
 // emit_binary writes a binary operation. The left spine of an operator chain is
@@ -2697,6 +2736,11 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 				// The address of a value is a pointer, whatever the width of the
 				// value that lives there.
 				e.target.word_size
+			} else if expr.op == '*' {
+				// A read through an address has the width of the class the value
+				// at it belongs to: a char arrives as the int it is promoted to,
+				// an int as itself, and a pointer as the machine's word.
+				e.converted_width(expr.typ)
 			} else {
 				e.width_of(expr.expr) or { return none }
 			}
