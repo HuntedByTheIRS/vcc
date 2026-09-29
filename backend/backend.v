@@ -21,6 +21,11 @@ pub:
 	word_size   int
 	registers   []arch.Register
 	elf_machine u16
+	// float_registers is the machine's second file, the one a double is passed
+	// and computed in. It is listed separately because it carries its own
+	// argument positions: a call numbers its integer arguments and its floating
+	// ones in two sequences, so the same position exists in both.
+	float_registers []arch.Register
 	// return_reg is the register a function leaves its result in, by the name
 	// the machine's table uses.
 	return_reg string
@@ -56,6 +61,7 @@ fn x86_64_linux() Target {
 		os:                 os.name
 		word_size:          arch.word_size
 		registers:          arch.registers()
+		float_registers:    arch.float_registers()
 		elf_machine:        arch.machine
 		return_reg:         arch.return_reg
 		syscalls:           os.syscalls(arch.name)
@@ -111,6 +117,41 @@ pub fn (t Target) arg_reg(position int) ?arch.Register {
 		}
 	}
 	return none
+}
+
+// float_reg finds a register in the machine's floating-point file by name.
+pub fn (t Target) float_reg(name string) ?arch.Register {
+	for r in t.float_registers {
+		if r.name == name || r.wide_name == name {
+			return r
+		}
+	}
+	return none
+}
+
+// float_arg_reg is the register that carries floating-point argument `position`.
+// It is a second sequence on purpose: a call to `printf("%f", 1.5)` numbers the
+// format string in the integer sequence and the double in this one, so both
+// start at zero.
+pub fn (t Target) float_arg_reg(position int) ?arch.Register {
+	for r in t.float_registers {
+		if r.float_call_arg == position {
+			return r
+		}
+	}
+	return none
+}
+
+// float_return is where a function leaves a floating-point result, and
+// float_scratch is where the right-hand value of a floating-point operation
+// waits while the left-hand one sits in the first. They are the same pair of
+// roles the general register file has, one file over.
+pub fn (t Target) float_return() ?arch.Register {
+	return t.float_reg(arch.float_return_reg)
+}
+
+pub fn (t Target) float_scratch() ?arch.Register {
+	return t.float_reg(arch.float_scratch_reg)
 }
 
 // syscall finds a kernel entry point by name.
@@ -336,6 +377,89 @@ pub fn (t Target) compare(op string, left arch.Register, right arch.Register) ![
 	out << arch.set_condition(condition, left)!
 	out << arch.movzx_byte(left)!
 	return out
+}
+
+// The double instructions, named for what the language asks for rather than for
+// the instruction that carries it. A double is not a wide int: the machine moves
+// it, computes it and compares it with a different set of instructions, which is
+// why these are written beside the ones above rather than as a width on them.
+pub fn (t Target) load_double_slot(base arch.Register, disp i32, dst arch.Register) ![]u8 {
+	return arch.load_double_slot(base, disp, dst)
+}
+
+pub fn (t Target) store_double_slot(base arch.Register, disp i32, src arch.Register) ![]u8 {
+	return arch.store_double_slot(base, disp, src)
+}
+
+// load_double_constant reads a double out of the image's read-only data, which
+// is where a floating constant lives: the eight bytes are the value, and the
+// instruction names the place they are at relative to itself.
+pub fn (t Target) load_double_constant(dst arch.Register, disp i32) ![]u8 {
+	return arch.load_double_rip(dst, disp)
+}
+
+pub fn (t Target) load_double_indirect(address arch.Register, dst arch.Register) ![]u8 {
+	return arch.load_double_indirect(address, dst)
+}
+
+pub fn (t Target) store_double_indirect(address arch.Register, src arch.Register) ![]u8 {
+	return arch.store_double_indirect(address, src)
+}
+
+pub fn (t Target) move_double(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.move_double(dst, src)
+}
+
+// double_arithmetic applies an arithmetic operator to two doubles. The operator
+// names are the language's, so the four instructions stay in the machine's file.
+pub fn (t Target) double_arithmetic(op string, dst arch.Register, src arch.Register) ![]u8 {
+	opcode := match op {
+		'+' { arch.double_add }
+		'-' { arch.double_subtract }
+		'*' { arch.double_multiply }
+		'/' { arch.double_divide }
+		else {
+			return error('${t.name}: ${op} is not an operation this machine computes a double with')
+		}
+	}
+	return arch.double_arithmetic(opcode, dst, src)
+}
+
+// double_comparison puts two doubles in the order the operator names and leaves
+// the answer in a register as zero or one. The comparison itself only sets
+// flags, so the answer is read out of them, and for the orders where an
+// unordered pair would otherwise answer wrongly a second flag is read and
+// combined with the first. A NaN is not less than, equal to, or greater than
+// anything, and the pair of flags is what says so.
+pub fn (t Target) double_comparison(op string, left arch.Register, right arch.Register, reg arch.Register, scratch arch.Register) ![]u8 {
+	mut out := arch.compare_double(left, right)!
+	out << arch.set_float_condition(op, reg, scratch)!
+	return out
+}
+
+// zero_double clears a register. It is how the right-hand side of a comparison
+// against zero is made without a constant in memory.
+pub fn (t Target) zero_double(reg arch.Register) ![]u8 {
+	return arch.zero_double(reg)
+}
+
+// negate_double flips the sign of a double through a general register, because
+// the machine has an instruction that negates an integer and none that negates a
+// floating value.
+pub fn (t Target) negate_double(reg arch.Register, gp arch.Register) ![]u8 {
+	return arch.negate_double(reg, gp)
+}
+
+// int_to_double widens a four-byte integer to a double, and double_to_int
+// truncates a double to a four-byte integer. Those are the two conversions the
+// language asks for between the classes, and the machine keeps them in the
+// floating-point file, which is why they are named here.
+pub fn (t Target) int_to_double(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.int_to_double(dst, src)
+}
+
+pub fn (t Target) double_to_int(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.double_to_int(dst, src)
 }
 
 // The jumps. The distance is filled in once the whole function is laid out,

@@ -29,6 +29,397 @@ pub const syscall_number_reg = 'eax'
 // values are 32 bits wide, and a caller that wants the wide name asks for that.
 pub const return_reg = 'eax'
 
+// The floating-point register file, in the second table the emitter asks for
+// argument positions in. It is a separate table because it is a separate file on
+// this machine: a double is not passed in the register an int is, and the
+// sequence an argument of each class takes is its own, so one table with two
+// kinds of register in it would have to be sorted out by whoever read it.
+//
+// Every one of these is sixteen bytes wide, which is the size of the register
+// rather than the size of a value: a double's eight bytes sit in the low half
+// and the rest is not part of any value this compiler emits.
+pub fn float_registers() []Register {
+	return [
+		Register{ name: 'xmm0', wide_name: 'xmm0', code: 0, width: 16, call_arg: -1, float_call_arg: 0 },
+		Register{ name: 'xmm1', wide_name: 'xmm1', code: 1, width: 16, call_arg: -1, float_call_arg: 1 },
+		Register{ name: 'xmm2', wide_name: 'xmm2', code: 2, width: 16, call_arg: -1, float_call_arg: 2 },
+		Register{ name: 'xmm3', wide_name: 'xmm3', code: 3, width: 16, call_arg: -1, float_call_arg: 3 },
+		Register{ name: 'xmm4', wide_name: 'xmm4', code: 4, width: 16, call_arg: -1, float_call_arg: 4 },
+		Register{ name: 'xmm5', wide_name: 'xmm5', code: 5, width: 16, call_arg: -1, float_call_arg: 5 },
+		Register{ name: 'xmm6', wide_name: 'xmm6', code: 6, width: 16, call_arg: -1, float_call_arg: 6 },
+		Register{ name: 'xmm7', wide_name: 'xmm7', code: 7, width: 16, call_arg: -1, float_call_arg: 7 },
+	]
+}
+
+// float_return_reg is where a function leaves a floating-point result, and
+// float_scratch_reg is where the right-hand value of a floating-point operation
+// waits while the left-hand one sits in the first. They are named by their
+// sixteen-byte spelling because that is how the table lists this file; the
+// instruction reads the eight bytes of a double out of one.
+pub const float_return_reg = 'xmm0'
+pub const float_scratch_reg = 'xmm1'
+
+// The SSSE3-era two-byte prefix of every scalar double instruction: F2 says the
+// operand is one double rather than a packed pair, and 0F is the escape.
+const prefix_double = u8(0xf2)
+
+// The opcodes this file emits for scalar double arithmetic, and the one that
+// compares. The comparison is 66 0F 2F because it belongs to the packed
+// instruction family and takes the 66 prefix instead of the F2 one.
+pub const double_add = u8(0x58)
+pub const double_subtract = u8(0x5c)
+pub const double_multiply = u8(0x59)
+pub const double_divide = u8(0x5e)
+const double_int_convert = u8(0x2a)
+const double_int_truncate = u8(0x2c)
+
+// double_modrm is the shared shape of every scalar double instruction whose
+// second operand is a register: the prefix, the escape, the opcode, and a
+// ModRM byte naming the destination in the reg field and the source in the r/m
+// one, with mod 11 saying the source is a register rather than an address.
+fn double_modrm(opcode u8, dst Register, src Register) ![]u8 {
+	if dst.width != 16 || src.width != 16 {
+		return error('${name}: a scalar double operand is a sixteen-byte register, and ${dst.name} or ${src.name} is not one')
+	}
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x40)
+	if dst.code >= 8 {
+		rex |= 0x04
+	}
+	if src.code >= 8 {
+		rex |= 0x01
+	}
+	if rex != 0x40 {
+		out << rex
+	}
+	out << prefix_double
+	out << u8(0x0f)
+	out << opcode
+	out << u8(0xc0 | ((dst.code & 0x07) << 3) | (src.code & 0x07))
+	return out
+}
+
+// move_double copies one double register into another.
+pub fn move_double(dst Register, src Register) ![]u8 {
+	return double_modrm(0x10, dst, src)
+}
+
+// double_arithmetic applies one of the four operations to the destination and
+// the source and leaves the answer in the destination.
+pub fn double_arithmetic(opcode u8, dst Register, src Register) ![]u8 {
+	if opcode !in [double_add, double_subtract, double_multiply, double_divide] {
+		return error('${name}: ${opcode} is not one of the four operations a double is computed with')
+	}
+	return double_modrm(opcode, dst, src)
+}
+
+// compare_double orders two doubles and sets the flags a comparison reads. The
+// instruction is Comisd: the four orders are read off ZF, CF and PF, and the
+// caller writes one of them into a register because there is no instruction that
+// compares a double and leaves a truth value behind.
+pub fn compare_double(left Register, right Register) ![]u8 {
+	mut out := []u8{cap: 4}
+	if left.code >= 8 || right.code >= 8 {
+		// Neither register this compiler compares with is above xmm7, so the
+		// prefix a wider one needs is not written here rather than written
+		// from a value nobody asked for.
+		return error('${name}: a double comparison names ${left.name} against ${right.name}, and neither may be above xmm7')
+	}
+	out << u8(0x66)
+	out << u8(0x0f)
+	out << u8(0x2f)
+	out << u8(0xc0 | ((left.code & 0x07) << 3) | (right.code & 0x07))
+	return out
+}
+
+// int_to_double converts a four-byte integer to a double, and double_to_int
+// truncates a double towards zero. The second is the C conversion from a
+// floating type to an integer one, which is defined to truncate, and the
+// instruction with `tt` in its name is the one that does that rather than the
+// one that rounds.
+//
+// These two are the only instructions here whose operands are one register from
+// each file, so they are not a ModRM pair of doubles: the destination is named in
+// the reg field and the source in the r/m one, and which of the two is the double
+// differs between them. `cvtsi2sd xmm, r/m32` converts an integer into a double
+// and `cvttsd2si r32, xmm` converts the other way.
+fn double_conversion(opcode u8, reg_field Register, rm Register) []u8 {
+	mut out := []u8{cap: 5}
+	mut rex := u8(0x40)
+	if reg_field.code >= 8 {
+		rex |= 0x04 // REX.R: the reg field names a wider register
+	}
+	if rm.code >= 8 {
+		rex |= 0x01 // REX.B: the r/m field names one
+	}
+	if rex != 0x40 {
+		out << rex
+	}
+	out << prefix_double
+	out << u8(0x0f)
+	out << opcode
+	out << u8(0xc0 | ((reg_field.code & 0x07) << 3) | (rm.code & 0x07))
+	return out
+}
+
+pub fn int_to_double(dst Register, src Register) ![]u8 {
+	if dst.width != 16 {
+		return error('${name}: an integer is converted into a double register, and ${dst.name} is not one')
+	}
+	if src.width != 4 {
+		return error('${name}: a double comes from a four-byte integer, and ${src.name} is not one')
+	}
+	return double_conversion(double_int_convert, dst, src)
+}
+
+pub fn double_to_int(dst Register, src Register) ![]u8 {
+	if dst.width != 4 {
+		return error('${name}: a double is truncated into a four-byte integer, and ${dst.name} is not one')
+	}
+	if src.width != 16 {
+		return error('${name}: a double is truncated out of a double register, and ${src.name} is not one')
+	}
+	return double_conversion(double_int_truncate, dst, src)
+}
+
+// Movq, in both directions, between a general register and the low half of a
+// double one. It is how the sign of a double is reached, since there is no
+// instruction that negates one.
+const movq_to_float = u8(0x6e)
+const movq_from_float = u8(0x7e)
+
+fn movq_modrm(opcode u8, first Register, second Register) []u8 {
+	mut out := []u8{cap: 5}
+	out << u8(0x66)
+	out << u8(0x48) // REX.W: the general register is an eight-byte one
+	out << u8(0x0f)
+	out << opcode
+	out << u8(0xc0 | ((first.code & 0x07) << 3) | (second.code & 0x07))
+	return out
+}
+
+// negate_double flips the sign bit of a double. The bit is reached through a
+// general register, because the machine negates an integer and not a floating
+// value: the two moves carry the eight bytes out and back, and the bit test and
+// complement instruction flips bit 63 between them. It is exact for every input
+// including zero and a NaN, where `0 - x` would round a signalling NaN into a
+// quiet one and turn -0.0 into 0.0.
+pub fn negate_double(reg Register, gp Register) ![]u8 {
+	if reg.width != 16 || gp.width != 4 {
+		return error('${name}: negating a double names a sixteen-byte register and a four-byte one, and ${reg.name} or ${gp.name} is neither')
+	}
+	mut out := movq_modrm(movq_from_float, reg, gp)
+	// btc rax, 63: the bit test and complement, with the bit in the immediate.
+	// REX.W is what makes it operate on the eight bytes of the register rather
+	// than on the low four: without it the instruction reads the bit number
+	// modulo 32 and clears the upper half, which flips bit 31 and leaves a value
+	// the program never wrote. Measured, `double a = -3.5; a < 0.0` answered 0
+	// with that bit flipped instead of bit 63.
+	out << u8(0x48)
+	out << u8(0x0f)
+	out << u8(0xba)
+	out << u8(0xf8 | (gp.code & 0x07))
+	out << u8(63)
+	out << movq_modrm(movq_to_float, reg, gp)
+	return out
+}
+
+// zero_double clears a register, which is the one double constant that needs no
+// memory: the exclusive-or of a value with itself is zero, and the instruction
+// leaves the flags alone so a comparison before it still stands.
+//
+// The encoding is the packed-double exclusive or of a register with itself, 66 0F
+// 57 /r. That 66 is not the scalar prefix: the scalar form the rest of this file
+// uses writes F2, and F2 0F 57 is not an instruction at all. Measured, emitting
+// it produced bytes the processor refuses and a program that died on an illegal
+// instruction the first time `!d` was evaluated.
+pub fn zero_double(reg Register) ![]u8 {
+	if reg.width != 16 {
+		return error('${name}: a double register is sixteen bytes, and ${reg.name} is not one')
+	}
+	if reg.code >= 8 {
+		return error('${name}: clearing a double register names ${reg.name}, and only the first eight have the encoding written here')
+	}
+	return [u8(0x66), u8(0x0f), u8(0x57), u8(0xc0 | ((reg.code & 0x07) << 3) | (reg.code & 0x07))]
+}
+
+// load_double_slot, store_double_slot and load_double_rip move one double
+// between the frame and a register, and between the image's read-only data and
+// a register. The displacement is written wide for the reason every other frame
+// access writes it wide: the frame is still growing while the body is emitted,
+// so the length of an access must not depend on how big it ends up.
+pub fn load_double_slot(base Register, disp i32, dst Register) ![]u8 {
+	return double_slot_move(base, disp, dst, false)
+}
+
+pub fn store_double_slot(base Register, disp i32, src Register) ![]u8 {
+	return double_slot_move(base, disp, src, true)
+}
+
+fn double_slot_move(base Register, disp i32, operand Register, store bool) ![]u8 {
+	if operand.width != 16 {
+		return error('${name}: a double is moved through a sixteen-byte register, and ${operand.name} is not one')
+	}
+	mut out := []u8{cap: 9}
+	if operand.code >= 8 || base.code >= 8 {
+		return error('${name}: a frame access names ${operand.name} and ${base.name}, and neither may be above the seventh register')
+	}
+	out << prefix_double
+	out << u8(0x0f)
+	out << u8(if store { 0x11 } else { 0x10 })
+	out << u8(0x80 | ((operand.code & 0x07) << 3) | 0x05) // mod 10, rm 101: [base + disp32]
+	value := u32(disp)
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
+// load_double_rip reads a double out of the image's read-only data, at a
+// displacement from the instruction. It is how a floating constant reaches a
+// register: the eight bytes are in the image and the instruction says where.
+pub fn load_double_rip(dst Register, disp i32) ![]u8 {
+	if dst.width != 16 || dst.code >= 8 {
+		return error('${name}: a floating constant is loaded into one of the first eight double registers, and ${dst.name} is not one')
+	}
+	mut out := []u8{cap: 8}
+	out << prefix_double
+	out << u8(0x0f)
+	out << u8(0x10)
+	out << u8(((dst.code & 0x07) << 3) | 0x05) // mod 00, rm 101: [rip + disp32]
+	value := u32(disp)
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
+// load_double_indirect and store_double_indirect move a double between a
+// register and the address in another register, which is what an object the
+// program addresses itself is read and written through.
+pub fn load_double_indirect(address Register, dst Register) ![]u8 {
+	return double_indirect_move(address, dst, false)
+}
+
+pub fn store_double_indirect(address Register, src Register) ![]u8 {
+	return double_indirect_move(address, src, true)
+}
+
+fn double_indirect_move(address Register, operand Register, store bool) ![]u8 {
+	if operand.width != 16 {
+		return error('${name}: a double is moved through a sixteen-byte register, and ${operand.name} is not one')
+	}
+	low := address.code & 0x07
+	if low == 4 || low == 5 {
+		return error('${name}: an address in ${address.name} cannot be named without a displacement')
+	}
+	mut out := []u8{cap: 4}
+	out << prefix_double
+	out << u8(0x0f)
+	out << u8(if store { 0x11 } else { 0x10 })
+	out << u8(((operand.code & 0x07) << 3) | low) // mod 00: [address]
+	return out
+}
+
+// The setcc codes a double comparison is read with. They are the unsigned ones
+// rather than the signed ones the integer comparison above uses: a double
+// comparison puts `below` in the carry flag and `unordered` in the parity flag,
+// and never touches the sign or overflow flags that setl and setg read.
+pub const float_equal = u8(0x94) // sete, which is set for an unordered pair too
+pub const float_not_equal = u8(0x95) // setne
+pub const float_below = u8(0x92) // setb, the carry flag
+pub const float_above = u8(0x97) // seta
+pub const float_below_or_equal = u8(0x96) // setbe
+pub const float_above_or_equal = u8(0x93) // setae
+pub const float_parity = u8(0x9a) // setp, which is set when the pair was unordered
+pub const float_not_parity = u8(0x9b) // setnp
+
+// float_set writes one flag into the low byte of a register. It is set_condition
+// above with an opcode chosen by the caller, because the two comparisons on this
+// machine do not leave the same flags behind.
+pub fn float_set(opcode u8, reg Register) ![]u8 {
+	byte_operand(reg)!
+	return [u8(0x0f), opcode, u8(0xc0 | (reg.code & 0x07))]
+}
+
+// set_float_condition writes the outcome of a double comparison into a register
+// as zero or one. The four orders are not four flags: less is the carry flag
+// with the unordered case taken back out, equal is the zero flag with it taken
+// out too, and the two `not equal` and `not less` forms are the ones that want
+// it left in. The pair of instructions is why this reads as a sequence rather
+// than as one opcode: the machine compares and leaves flags, and something has
+// to turn those flags into the value the language's operator has.
+pub fn set_float_condition(op string, reg Register, scratch Register) ![]u8 {
+	if reg.code & 0x07 == scratch.code & 0x07 {
+		return error('${name}: writing a comparison into ${reg.name} needs a second byte register for the unordered case, and ${scratch.name} is the same one')
+	}
+	byte_operand(reg)!
+	byte_operand(scratch)!
+	mut out := []u8{cap: 12}
+	match op {
+		'==' {
+			// Ordered and equal: the zero flag without the unordered case.
+			out << float_set(float_equal, reg)!
+			out << float_set(float_not_parity, scratch)!
+			out << and_bytes(reg, scratch)
+		}
+		'!=' {
+			// Not equal, or unordered: an unordered pair is not equal.
+			out << float_set(float_not_equal, reg)!
+			out << float_set(float_parity, scratch)!
+			out << or_bytes(reg, scratch)
+		}
+		'<' {
+			out << float_set(float_below, reg)!
+			out << float_set(float_not_parity, scratch)!
+			out << and_bytes(reg, scratch)
+		}
+		'<=' {
+			out << float_set(float_below_or_equal, reg)!
+			out << float_set(float_not_parity, scratch)!
+			out << and_bytes(reg, scratch)
+		}
+		'>' {
+			// `above` is false for an unordered pair already, since both the
+			// zero flag and the carry flag are set then, so no second
+			// instruction is needed.
+			out << float_set(float_above, reg)!
+		}
+		'>=' {
+			out << float_set(float_above_or_equal, reg)!
+		}
+		else {
+			return error('${name}: ${op} is not an order this machine has a condition for')
+		}
+	}
+	out << movzx_byte(reg)!
+	return out
+}
+
+// and_bytes and or_bytes combine the two one-byte answers the unordered case
+// needs into one. `and al, cl` is 20 /r and `or al, cl` is 08 /r, both with mod
+// 11 and the source in the reg field.
+fn and_bytes(dst Register, src Register) []u8 {
+	return [u8(0x20), u8(0xc0 | ((src.code & 0x07) << 3) | (dst.code & 0x07))]
+}
+
+fn or_bytes(dst Register, src Register) []u8 {
+	return [u8(0x08), u8(0xc0 | ((src.code & 0x07) << 3) | (dst.code & 0x07))]
+}
+
+// xor_byte flips the low bit of a byte, which is how the answer to "is this
+// double zero" becomes the answer to "is this double not zero" without a second
+// comparison.
+pub fn xor_byte(reg Register, value u8) ![]u8 {
+	byte_operand(reg)!
+	if value > 1 {
+		return error('${name}: only the low bit of a byte has a one-byte exclusive-or, and ${value} does not fit in it')
+	}
+	return [u8(0x80), u8(0xf0 | (reg.code & 0x07)), value]
+}
+
 // Register is one machine register as it is written, with the number the
 // instruction encoding wants and the argument position it carries.
 pub struct Register {
@@ -43,6 +434,11 @@ pub:
 	// call_arg is the SysV function argument position, or -1 when the register
 	// does not carry one.
 	call_arg int
+	// float_call_arg is the same position in the separate sequence the
+	// floating-point file takes its arguments from, or -1 in a table that has
+	// no such sequence. An int and a double are numbered in their own
+	// sequence, so both can hold position zero for the same call.
+	float_call_arg int = -1
 }
 
 // registers is the general register file. The stub emits with the 32-bit names,
