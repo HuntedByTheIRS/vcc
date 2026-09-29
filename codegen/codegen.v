@@ -2376,7 +2376,7 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		}
 		e.store_accumulator(slot, step.line, step.col)!
 		e.emit_expr_at(step.right, depth + 1)!
-		e.move_to_scratch(step.line, step.col)!
+		e.move_operand_to_scratch(step)!
 		e.load_accumulator(slot, step.line, step.col)!
 		e.apply_binary(step)!
 	}
@@ -2433,6 +2433,54 @@ fn (mut e Emitter) move_double_to_scratch(line int, col int) !void {
 	e.append(e.target.move_double(other, result)!)
 }
 
+// move_operand_to_scratch puts the value just computed into the scratch register,
+// at the width that value has: a comparison of two addresses moves a whole word,
+// because the four-byte move beside it would keep the low half of the address and
+// zero the rest of the register, and the two addresses would then be compared as
+// halves.
+fn (mut e Emitter) move_operand_to_scratch(step ast.Binary) !void {
+	if e.comparison_of_an_address(step) {
+		result := e.accumulator(step.line, step.col)!
+		other := e.scratch(step.line, step.col)!
+		e.append(e.target.move_register64(other, result)!)
+		return
+	}
+	e.move_to_scratch(step.line, step.col)!
+}
+
+// comparison_of_an_address says whether this step compares an address with
+// something the language lets it be compared with, which is another address or
+// the constant zero: 6.3.2.3 makes the constant zero stand for a null pointer, and
+// 6.5.9 defines the comparison of two pointers. Measured, gcc 16.2.1 and tcc
+// 0.9.28rc both compile `p == 0` in silence and both warn `comparison between
+// pointer and integer` for `p == x` with an int x, which is the line this draws:
+// an int that is not the constant zero is refused rather than compared at the
+// width of its half of the address.
+fn (e Emitter) comparison_of_an_address(binary ast.Binary) bool {
+	if binary.op !in ['==', '!=', '<', '>', '<=', '>='] {
+		return false
+	}
+	if e.floating_of(binary.left) || e.floating_of(binary.right) {
+		return false
+	}
+	left := e.width_of(binary.left) or { return false }
+	right := e.width_of(binary.right) or { return false }
+	if left != e.target.word_size && right != e.target.word_size {
+		return false
+	}
+	// Whichever side is the address, the other one is either an address too or
+	// the constant zero.
+	if left != e.target.word_size {
+		value := e.constant(binary.left) or { return false }
+		return value == 0
+	}
+	if right != e.target.word_size {
+		value := e.constant(binary.right) or { return false }
+		return value == 0
+	}
+	return true
+}
+
 // check_int_operands reports an operand that is not an int. The operators
 // emitted here compute with four-byte values; a pointer on either side is a
 // different operation, an address plus a distance or two addresses compared, and
@@ -2441,6 +2489,13 @@ fn (mut e Emitter) move_double_to_scratch(line int, col int) !void {
 // is not a pointer: it is computed by the other path in emit_binary, so it is
 // passed over here rather than reported.
 fn (mut e Emitter) check_int_operands(binary ast.Binary) !void {
+	if e.comparison_of_an_address(binary) {
+		// Two addresses are compared at the width of a word by the comparison
+		// this back end writes, and an address beside the constant zero stands
+		// for a null pointer, so neither is an int operand that was expected and
+		// did not arrive.
+		return
+	}
 	for operand in [binary.left, binary.right] {
 		if e.floating_of(operand) {
 			continue
@@ -2488,7 +2543,13 @@ fn (mut e Emitter) apply_binary(binary ast.Binary) !void {
 			e.append(e.target.move_register32(result, remainder)!)
 		}
 		'==', '!=', '<', '>', '<=', '>=' {
-			e.append(e.target.compare(binary.op, result, other)!)
+			// Two addresses are compared at the width of a word: their low
+			// halves being equal is not the addresses being equal.
+			if e.comparison_of_an_address(binary) {
+				e.append(e.target.compare_word(binary.op, result, other)!)
+			} else {
+				e.append(e.target.compare(binary.op, result, other)!)
+			}
 		}
 		else {
 			e.diagnostics << problem(binary.line, binary.col, 'unsupported binary operator ${binary.op}')

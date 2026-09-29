@@ -406,19 +406,43 @@ pub fn (t Target) logical_not(reg arch.Register) ![]u8 {
 }
 
 pub fn (t Target) compare(op string, left arch.Register, right arch.Register) ![]u8 {
-	condition := match op {
+	condition := condition_of(t.name, op)!
+	mut out := arch.cmp_reg32(left, right)!
+	out << arch.set_condition(condition, left)!
+	out << arch.movzx_byte(left)!
+	return out
+}
+
+// compare_word is the same comparison at the width of a word, which is what two
+// addresses are compared at: comparing the low halves of two addresses would call
+// two different ones equal.
+pub fn (t Target) compare_word(op string, left arch.Register, right arch.Register) ![]u8 {
+	condition := condition_of(t.name, op)!
+	mut out := arch.cmp_reg64(left, right)!
+	out << arch.set_condition(condition, left)!
+	out << arch.movzx_byte(left)!
+	return out
+}
+
+// move_register64 copies one register into another at the width of a word, which
+// is how an address moves from where it was computed to where it is wanted.
+pub fn (t Target) move_register64(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.mov_reg64(dst, src)
+}
+
+// condition_of is the order an operator names as the machine's condition, and the
+// one place the two translations between an operator and an instruction's test
+// meet: a comparison and a branch both ask it.
+fn condition_of(target string, op string) !arch.Condition {
+	return match op {
 		'==' { arch.Condition.equal }
 		'!=' { arch.Condition.not_equal }
 		'<' { arch.Condition.less }
 		'>' { arch.Condition.greater }
 		'<=' { arch.Condition.less_or_equal }
 		'>=' { arch.Condition.greater_or_equal }
-		else { return error('${t.name}: ${op} is not an order this machine has a condition for') }
+		else { return error('${target}: ${op} is not an order this machine has a condition for') }
 	}
-	mut out := arch.cmp_reg32(left, right)!
-	out << arch.set_condition(condition, left)!
-	out << arch.movzx_byte(left)!
-	return out
 }
 
 // The double instructions, named for what the language asks for rather than for

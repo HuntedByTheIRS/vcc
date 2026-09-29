@@ -871,6 +871,40 @@ pub fn cmp_reg32(left Register, right Register) ![]u8 {
 	return rm_reg(0x39, left, right)
 }
 
+// cmp_reg64 compares two addresses and sets the flags. It is the same shape at
+// the width of a word, because two addresses whose low halves are equal are not
+// equal: the upper halves are the half that tells them apart.
+pub fn cmp_reg64(left Register, right Register) ![]u8 {
+	return rm_reg64(0x39, left, right)
+}
+
+// mov_reg64 copies one register into another at the width of a word, which is what
+// an address needs: the four-byte copy beside this one keeps the low half of the
+// address and zeroes the rest of the register.
+pub fn mov_reg64(dst Register, src Register) ![]u8 {
+	return rm_reg64(0x89, dst, src)
+}
+
+// rm_reg64 is rm_reg with REX.W, which is what makes an operation eight bytes wide
+// on a register whose number is the same either way.
+fn rm_reg64(opcode u8, rm Register, reg Register) ![]u8 {
+	if rm.width != 4 || reg.width != 4 {
+		return error('${name}: opcode ${opcode} takes two registers with a four-byte name, and ${rm.name} and ${reg.name} are not')
+	}
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x48) // REX.W
+	if reg.code >= 8 {
+		rex |= 0x04
+	}
+	if rm.code >= 8 {
+		rex |= 0x01
+	}
+	out << rex
+	out << opcode
+	out << u8(0xc0 | ((reg.code & 0x07) << 3) | (rm.code & 0x07))
+	return out
+}
+
 // test_reg32 compares a value with zero without producing one: it is how a
 // condition becomes a branch.
 pub fn test_reg32(reg Register) ![]u8 {

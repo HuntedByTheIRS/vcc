@@ -185,6 +185,31 @@ fn test_a_comparison_becomes_a_zero_or_a_one_in_the_register() {
 	assert arch.set_condition(.equal, edi) or { []u8{} }.len == 0
 }
 
+fn test_a_comparison_of_two_addresses_is_made_at_the_width_of_a_word() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	rcx := target.reg('rcx') or { panic(err) }
+	// cmp rax, rcx then setcc al then movzx eax, al. The wide compare is the same
+	// comparison with REX.W in front of it, because comparing the low halves of
+	// two addresses would call two different ones equal.
+	assert arch.cmp_reg64(rax, rcx) or { panic(err) } == [u8(0x48), 0x39, 0xc8]
+	assert target.compare_word('==', rax, rcx) or { panic(err) } == [u8(0x48), 0x39, 0xc8, 0x0f,
+		0x94, 0xc0, 0x0f, 0xb6, 0xc0]
+	// The move an address makes into the scratch register is a word too, and the
+	// four-byte move beside it is what would keep the low half of the address.
+	assert arch.mov_reg64(rcx, rax) or { panic(err) } == [u8(0x48), 0x89, 0xc1]
+	assert target.move_register64(rcx, rax) or { panic(err) } == [u8(0x48), 0x89, 0xc1]
+	// A register the encoder cannot name at four bytes is refused rather than
+	// encoded at the wrong width.
+	al := arch.Register{
+		name:  'al'
+		code:  0
+		width: 1
+	}
+	assert arch.cmp_reg64(al, rcx) or { []u8{} }.len == 0
+	assert arch.mov_reg64(rcx, al) or { []u8{} }.len == 0
+}
+
 fn test_the_jumps_are_the_bytes_the_machine_reads() {
 	assert arch.jump_rel32(16) == [u8(0xe9), 0x10, 0x00, 0x00, 0x00]
 	assert arch.jump_zero_rel32(16) == [u8(0x0f), 0x84, 0x10, 0x00, 0x00, 0x00]

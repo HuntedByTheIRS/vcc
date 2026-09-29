@@ -1030,6 +1030,23 @@ fn test_a_tree_with_a_frame_produces_the_same_bytes() {
 // and writes no image at all. These are the three shapes a body can reach: a
 // statement with no loop to leave, a local of a type that has no instruction,
 // and an operation on a pointer that would compute at the wrong width.
+fn test_two_addresses_are_compared_at_the_width_of_a_word() {
+	// The two addresses hold the same low half and different upper halves: q is
+	// p cut down to an int and made back into an address, which sign-extends
+	// what is left. Comparing four bytes would call them equal, and measured,
+	// gcc 16.2.1 answers 0 here while `(int)p == (int)q` answers 1.
+	emitted := emit(translation_unit('int main() { int x = 0; char *p = (char *)&x; char *q = (char *)(int)&x; if (p == q) { return 1; } return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+	// The same comparison with the halves asked about says the halves are equal,
+	// which is what makes the answer above a comparison of the whole word.
+	halves := emit(translation_unit('int main() { int x = 0; char *p = (char *)&x; char *q = (char *)(int)&x; if ((int)p == (int)q) { return 1; } return 0; }'),
+		Options{})
+	assert halves.diagnostics.len == 0
+	assert run_image(halves.bytes) == 1
+}
+
 fn test_break_outside_a_loop_is_one_located_diagnostic_and_no_bytes() {
 	emitted := emit(program([break_statement()]), Options{})
 	assert emitted.diagnostics.len == 1
