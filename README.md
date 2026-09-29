@@ -97,7 +97,10 @@ that frame and its name is the address of its first element, so `puts(buf)`
 passes the bytes themselves. An object defined at the top level is storage the
 image holds instead: one blob laid out beside the code, with the constant it
 starts at written into it, and every function that names it reads and writes the
-same bytes.
+same bytes. Taking the address of a local with `&` is an address like any other,
+which is what makes `scanf("%d", &x)` write into the local itself, and a
+definition that returns `void` is a definition with nothing in the return
+register to read.
 
 `optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
 spellings. What a level turns on today is one pass: a call whose value the
@@ -120,10 +123,9 @@ names its target — `-dM` prints what is defined when the read ends, and
 
 Not implemented, in rough order of how much of the tree depends on it: `double`
 and `struct`, which are not in the tree yet; more than six arguments because the
-machine passes only six in registers; a function definition that returns `void`;
-`switch`; taking the address of a local; an array with an initializer or more
-than one size; a pointer defined at the top level; object files and relocatable
-output; and V's own generated C. `ROADMAP.md` maps the order.
+machine passes only six in registers; `switch`; an array with an initializer or
+more than one size; a pointer defined at the top level; object files and
+relocatable output; and V's own generated C. `ROADMAP.md` maps the order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a

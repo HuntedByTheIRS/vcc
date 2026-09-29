@@ -306,8 +306,11 @@ fn (mut e Emitter) emit_start() !void {
 // function here needs it, because falling through would otherwise hand the
 // caller whatever the last call left in the result register.
 fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
-	if decl.ret != 'int' {
-		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int is implemented')
+	// A definition returns a value the caller reads or nothing at all. There is
+	// no third answer the machine has a place for: the result register holds
+	// what a call leaves there, and a void function leaves nothing to read.
+	if decl.ret != 'int' && decl.ret != 'void' {
+		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int and void are implemented')
 		return error('unsupported return type')
 	}
 	// The prologue is what a call to this function jumps to, so the label goes
@@ -994,7 +997,59 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 // bitwise complement, and the logical not, which is a comparison with zero. The
 // unary plus is the one that computes nothing, since the value is already where
 // it belongs.
+//
+// emit_address takes the address of a name. A local lives in the frame, so its
+// address is its place in the frame; an object defined at the top level lives in
+// the image, so its address is the one the layout fills in. An array's name is
+// already the address of its first element, which is why `&a` and `a` are worth
+// the same address here: the language tells those two types apart, and this back
+// end has no types to tell them apart with.
+fn (mut e Emitter) emit_address(unary ast.Unary) !void {
+	register := e.accumulator(unary.line, unary.col)!
+	if unary.expr is ast.Ident {
+		name := unary.expr.name
+		if slot := e.lookup(name) {
+			base := e.frame_pointer(unary.line, unary.col)!
+			e.append(e.target.address_of_slot(base, slot.offset, register))
+			return
+		}
+		if _ := e.global_of(name) {
+			e.reference(e.target.address_of(register, 0), .global_address, name, register.name)
+			return
+		}
+	}
+	e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of ${describe_target(unary.expr)} is not implemented, and only a local or a top-level object has one this back end can take')
+	return error('no address')
+}
+
+// describe_target names what an address was taken of, so the diagnostic says
+// which expression it was looking at.
+fn describe_target(expr ast.Expr) string {
+	return match expr {
+		ast.Ident {
+			expr.name
+		}
+		ast.Index {
+			'${expr.name}[...]'
+		}
+		ast.StrLit {
+			'a string literal'
+		}
+		ast.Call {
+			'the value of a call'
+		}
+		else {
+			'an expression'
+		}
+	}
+}
+
 fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
+	if unary.op == '&' {
+		// Taking an address is not a computation on a value: the operand is not
+		// read at all, and what is taken is where it lives.
+		return e.emit_address(unary)
+	}
 	if width := e.width_of(unary.expr) {
 		if width != 4 && unary.op != '+' {
 			e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes an int, and this one is a pointer')
@@ -1227,6 +1282,10 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 		ast.Unary {
 			if expr.op == '!' {
 				4
+			} else if expr.op == '&' {
+				// The address of a value is a pointer, whatever the width of the
+				// value that lives there.
+				e.target.word_size
 			} else {
 				e.width_of(expr.expr) or { return none }
 			}

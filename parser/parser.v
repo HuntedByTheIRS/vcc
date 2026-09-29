@@ -188,7 +188,11 @@ fn (mut p Parser) parse_binary(min_precedence int) !ast.Expr {
 
 fn (mut p Parser) parse_unary() !ast.Expr {
 	t := p.peek()
-	if t.kind == .punct && t.text in ['-', '+', '!', '~'] {
+	// `&` is here with the other prefix operators: it is one, and it binds as
+	// tightly as they do - `&x + 1` is the address of x plus one. Whether what
+	// follows is something with an address is the back end's question, since
+	// that is where the storage of a name is known.
+	if t.kind == .punct && t.text in ['-', '+', '!', '~', '&'] {
 		p.next()
 		operand := p.parse_unary()!
 		return ast.Expr(ast.Unary{
