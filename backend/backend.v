@@ -250,6 +250,25 @@ pub fn (t Target) store_slot(base arch.Register, disp i32, src arch.Register, wi
 	return arch.store_slot(base, disp, src, width)
 }
 
+// The address of a value in the frame, the address of one element of it, and the
+// moves through an address: what an array needs to be read and written one
+// element at a time.
+pub fn (t Target) address_of_slot(base arch.Register, disp i32, dst arch.Register) []u8 {
+	return arch.address_of_slot(base, disp, dst)
+}
+
+pub fn (t Target) address_of_element(base arch.Register, index arch.Register, scale int, disp i32, dst arch.Register) ![]u8 {
+	return arch.address_of_element(base, index, scale, disp, dst)
+}
+
+pub fn (t Target) load_indirect(address arch.Register, dst arch.Register, width int) ![]u8 {
+	return arch.load_indirect(address, dst, width)
+}
+
+pub fn (t Target) store_indirect(address arch.Register, src arch.Register, width int) ![]u8 {
+	return arch.store_indirect(address, src, width)
+}
+
 // The arithmetic, named for what the language asks for rather than for the
 // instruction that carries it.
 pub fn (t Target) add(dst arch.Register, src arch.Register) ![]u8 {

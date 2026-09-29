@@ -180,3 +180,45 @@ fn test_the_jumps_are_the_bytes_the_machine_reads() {
 	target := lookup('x86_64-linux') or { panic(err) }
 	assert target.jump(-4) == [u8(0xe9), 0xfc, 0xff, 0xff, 0xff]
 }
+
+fn test_the_address_instructions_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rbp := target.reg('rbp') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	eax := target.reg('eax') or { panic(err) }
+	rcx := target.reg('rcx') or { panic(err) }
+	// lea rax, [rbp-8]
+	assert arch.address_of_slot(rbp, -8, rax) == [u8(0x48), 0x8d, 0x85, 0xf8, 0xff, 0xff, 0xff]
+	// lea rax, [rbp + rax*4 - 8], and the same address with the scale of a char
+	assert arch.address_of_element(rbp, rax, 4, -8, rax) or { panic(err) } == [
+		u8(0x48),
+		0x8d,
+		0x84,
+		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	assert arch.address_of_element(rbp, rax, 1, -8, rax) or { panic(err) } == [
+		u8(0x48),
+		0x8d,
+		0x84,
+		0x05,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	// mov eax, [rax] / mov rax, [rax] / movsx eax, byte [rax]
+	assert arch.load_indirect(rax, eax, 4) or { panic(err) } == [u8(0x8b), 0x00]
+	assert arch.load_indirect(rax, rax, 8) or { panic(err) } == [u8(0x48), 0x8b, 0x00]
+	assert arch.load_indirect(rax, eax, 1) or { panic(err) } == [u8(0x40), 0x0f, 0xbe, 0x00]
+	// mov [rcx], eax / mov [rcx], al
+	assert arch.store_indirect(rcx, eax, 4) or { panic(err) } == [u8(0x89), 0x01]
+	assert arch.store_indirect(rcx, eax, 1) or { panic(err) } == [u8(0x40), 0x88, 0x01]
+	// An address the encoding cannot name without a displacement, and a scale
+	// that is not a width the machine scales by.
+	assert arch.load_indirect(rbp, eax, 4) or { []u8{} }.len == 0
+	assert arch.address_of_element(rbp, rax, 3, -8, rax) or { []u8{} }.len == 0
+}

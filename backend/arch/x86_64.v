@@ -251,6 +251,124 @@ fn slot_move(base Register, disp i32, operand Register, width int, store bool) !
 	return out
 }
 
+// address_of_slot computes the address of a value in the frame, which is what an
+// array's name is worth in an expression: the value of an array is the address
+// of its first element, and that is an instruction of its own. The displacement
+// is written wide for the same reason a slot move writes it wide — the frame is
+// still growing while the body is emitted.
+pub fn address_of_slot(base Register, disp i32, dst Register) []u8 {
+	mut out := []u8{cap: 7}
+	rex := u8(0x48) | (if dst.code >= 8 { u8(0x04) } else { u8(0) }) | (if base.code >= 8 {
+		u8(0x01)
+	} else {
+		u8(0)
+	})
+	out << rex
+	out << u8(0x8d) // lea
+	out << u8(0x80 | ((dst.code & 0x07) << 3) | 0x05) // mod 10, rm 101: [base + disp32]
+	value := u32(disp)
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
+// address_of_element computes the address of one element of an array: the frame,
+// an index scaled by the width of an element, and the array's own displacement,
+// in one instruction. The scale is the width, so a char array scales by one and
+// an int array by four. The index is read as an unsigned value, which is what a
+// subscript outside the array would be anyway: a program that reads one is
+// already wrong, and this is the address it asked for.
+pub fn address_of_element(base Register, index Register, scale int, disp i32, dst Register) ![]u8 {
+	if scale != 1 && scale != 2 && scale != 4 && scale != 8 {
+		return error('${name}: an index cannot be scaled by ${scale}')
+	}
+	if index.code & 0x07 == 4 {
+		// The SIB byte names rsp's slot as "no index at all", so an index in rsp
+		// is not something this encoding can write down.
+		return error('${name}: an index in ${index.name} cannot be named by a scaled address')
+	}
+	mut out := []u8{cap: 8}
+	rex := u8(0x48) | (if dst.code >= 8 { u8(0x04) } else { u8(0) }) | (if index.code >= 8 {
+		u8(0x02)
+	} else {
+		u8(0)
+	}) | (if base.code >= 8 {
+		u8(0x01)
+	} else {
+		u8(0)
+	})
+	out << rex
+	out << u8(0x8d) // lea
+	out << u8(0x80 | ((dst.code & 0x07) << 3) | 0x04) // mod 10, rm 100: a SIB byte follows
+	shift := match scale {
+		1 { u8(0) }
+		2 { u8(1) }
+		4 { u8(2) }
+		else { u8(3) }
+	}
+	out << u8((shift << 6) | ((index.code & 0x07) << 3) | (base.code & 0x07))
+	value := u32(disp)
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
+// load_indirect and store_indirect move a value between a register and the
+// address in another register, which is what an element of an array is once its
+// address has been computed. A byte is loaded with the load that widens it, the
+// same one a frame slot uses, so an element of a char array arrives as the int
+// the language promotes it to.
+pub fn load_indirect(address Register, dst Register, width int) ![]u8 {
+	return indirect_move(address, dst, width, false)
+}
+
+pub fn store_indirect(address Register, src Register, width int) ![]u8 {
+	return indirect_move(address, src, width, true)
+}
+
+fn indirect_move(address Register, operand Register, width int, store bool) ![]u8 {
+	if width != 1 && width != 4 && width != 8 {
+		return error('${name}: a value of ${width} bytes is not one this machine moves through an address')
+	}
+	low := address.code & 0x07
+	if low == 4 || low == 5 {
+		// rsp and rbp are the two the encoding cannot name where a register
+		// goes: those two codes mean something else there, and a displacement of
+		// zero written in would read the wrong memory.
+		return error('${name}: an address in ${address.name} cannot be named without a displacement')
+	}
+	mut out := []u8{cap: 5}
+	mut rex := u8(0x40)
+	if width == 8 {
+		rex |= 0x08
+	}
+	if operand.code >= 8 {
+		rex |= 0x04
+	}
+	if address.code >= 8 {
+		rex |= 0x01
+	}
+	// The prefix rule for a byte operand is the one the frame moves follow: the
+	// low three bits name a different register when it is missing.
+	if width == 1 || rex != 0x40 {
+		out << rex
+	}
+	if store {
+		out << u8(if width == 1 { 0x88 } else { 0x89 })
+	} else if width == 1 {
+		out << u8(0x0f)
+		out << u8(0xbe)
+	} else {
+		out << u8(0x8b)
+	}
+	out << u8(((operand.code & 0x07) << 3) | low) // mod 00: [address]
+	return out
+}
+
 // frame_reserve opens the space a function's locals live in. The size is an
 // immediate because it is not known while the body is written: the emitter
 // reserves the space with a zero and fills the number in once the body has been
