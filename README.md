@@ -9,11 +9,11 @@ Two constraints come before everything else.
 C compiler, no vendored C library. If a piece cannot be written in V yet, it
 stays unimplemented rather than getting a C shortcut.
 
-**Fast.** Near TCC's speed or better, with no compromise. Compiling the C that V
-generates for itself is the benchmark that matters: a few megabytes of C per
-build, and vcc has to get through it in the time the bundled tcc does, at
-comparable peak memory. A compiler that is correct but slower is not a
-replacement, and it will not be merged in that state.
+**Fast.** Near TCC's speed or better, which is not open to compromise.
+Compiling the C that V generates for itself is the benchmark that matters: a
+few megabytes of C per build, and vcc has to get through it in the time the
+bundled tcc does, at comparable peak memory. A compiler that is correct but
+slower is not a replacement, and it will not be merged in that state.
 
 The default pipeline builds an AST, because that is what an optimizer, a type
 checker and a second target are built on. A second path that skips the tree
