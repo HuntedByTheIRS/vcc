@@ -97,11 +97,17 @@ token and per AST node, which is a design problem rather than a constant factor.
 
 ## Build
 
-Needs V 0.5.x on Linux x86-64.
+Needs V built from source on Linux x86-64, at a commit that accepts this tree.
+The 0.5.2 release does not: its checker rejects a `for {}` whose every path
+returns, which `parser/parser.v` uses in `parse_parameters` and
+`parse_arguments`. Everything since accepts it, and CI pins the commit it tests
+with in `.github/workflows/ci.yml`.
 
 ```sh
+git clone https://github.com/vlang/v && cd v && make   # once
+cd /path/to/vcc
 v -o vcc .        # build the compiler
-v test .          # lexer, parser, and codegen tests
+v test .          # lexer, parser, optimizer, printer, pipeline, codegen tests
 v run tools/gate.vsh                          # everything a pull request has to pass
 v run tools/bench.vsh                         # wall time and peak memory, tcc alongside
 v -o vcc . && ./vcc -bench seven.c -o seven   # per-phase timing
@@ -111,6 +117,12 @@ v -o vcc . && ./vcc -bench seven.c -o seven   # per-phase timing
 the speed target is a hard requirement, and a number nobody prints is a number
 nobody watches. `tools/` holds the gate and the benchmark harness; `tools/README.md`
 says what each one checks.
+
+CI runs the same gate against the pinned V commit, runs the build and the tests
+against V master as an informational job, and writes the benchmark numbers into
+the run summary. Tagging `vX.Y.Z` publishes a binary through
+`.github/workflows/release.yml`, which refuses to publish if the version inside
+the compiler disagrees with the tag.
 
 
 ## Layout

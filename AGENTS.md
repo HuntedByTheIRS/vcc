@@ -33,12 +33,15 @@ v fmt -w .                 # format before committing
 /usr/bin/time -v ./vcc -o /tmp/out src.c   # wall time and peak RSS
 ```
 
-`tools/gate.vsh` is the same set of checks a pull request has to pass, so run it
-before claiming a change is done rather than after CI says otherwise. `-nocache`
+`tools/gate.vsh` is the same set of checks a pull request has to pass, and CI
+runs it too (`.github/workflows/ci.yml`), so run it before claiming a change is
+done rather than after CI says otherwise. `-nocache`
 on probe builds, and prefer the gate's build over a binary from an earlier edit.
 
-Building with V 0.5.2 and a source tree you did not just write: cap the compiler
-so a parse loop cannot take the machine down.
+Building with V and a source tree you did not just write: cap the compiler so a
+parse loop cannot take the machine down. Use V from master or from a commit at
+or after the one `ci.yml` pins; the 0.5.2 release cannot compile this tree
+(README, Build).
 
 ```sh
 systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 v test .

@@ -23,8 +23,9 @@ v run tools/gate.vsh  # format, the pure-V rule, the build, the tests, doc links
 ./vcc -hh             # the flag surface, annotated
 ```
 
-The gate is the same set of checks CI runs, so it is worth running before you
-push rather than waiting for a machine to tell you. `tools/README.md` describes
+The gate is the same set of checks CI runs (`.github/workflows/ci.yml`, against
+a pinned V commit, with a second job that only reports on V master), so it is
+worth running before you push rather than waiting for a machine to tell you. `tools/README.md` describes
 it and the benchmark harness next to it.
 
 Nothing in this tree needs a C compiler of its own beyond the one V itself uses
@@ -119,6 +120,19 @@ happens when the output file cannot be written, what a diagnostic carries. Then
 the numbers, if the change is on a hot path. Then the flag contract, if the
 change touches the command line. Say which of those your change affects when you
 open the pull request, so the review goes where the risk is.
+
+## Releasing
+
+A release is a tag. `vX.Y.Z` runs `.github/workflows/release.yml`, which builds V
+at the pinned commit, puts the tree through the same gate a pull request goes
+through, checks that the version inside the compiler matches the tag, compiles a
+program and runs it, and only then attaches `vcc` and its checksum to a GitHub
+release.
+
+So two things before tagging: bump `version` in `cli/cli.v` to match the tag, and
+make sure the gate passes on the commit you are tagging. The workflow stops on
+either one, which is the intent: a compiler that reports a version it is not is
+a compiler V will key its cached build artifacts against incorrectly.
 
 ## Where to ask
 
