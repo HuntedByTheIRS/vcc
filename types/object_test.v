@@ -1,6 +1,7 @@
 module types
 
 import backend
+import measured
 
 // The size and alignment answers, asserted against the measured table.
 //
@@ -15,72 +16,22 @@ import backend
 // machine's registers, and `test_the_description_carries_the_pointer_and_names`
 // checks that the description's pointer entry is what gcc measured.
 
-// measured is the representation backend/ has to be able to answer. Every number
-// in it was printed by the program whose command stands beside the test that
-// asserts it.
-fn measured() Representation {
-	mut sizes := map[Kind]int{}
-	mut aligns := map[Kind]int{}
-	sizes[Kind.bool_] = 1
-	aligns[Kind.bool_] = 1
-	sizes[Kind.char_] = 1
-	aligns[Kind.char_] = 1
-	sizes[Kind.signed_char] = 1
-	aligns[Kind.signed_char] = 1
-	sizes[Kind.unsigned_char] = 1
-	aligns[Kind.unsigned_char] = 1
-	sizes[Kind.short] = 2
-	aligns[Kind.short] = 2
-	sizes[Kind.unsigned_short] = 2
-	aligns[Kind.unsigned_short] = 2
-	sizes[Kind.int_] = 4
-	aligns[Kind.int_] = 4
-	sizes[Kind.unsigned_int] = 4
-	aligns[Kind.unsigned_int] = 4
-	sizes[Kind.long] = 8
-	aligns[Kind.long] = 8
-	sizes[Kind.unsigned_long] = 8
-	aligns[Kind.unsigned_long] = 8
-	sizes[Kind.long_long] = 8
-	aligns[Kind.long_long] = 8
-	sizes[Kind.unsigned_long_long] = 8
-	aligns[Kind.unsigned_long_long] = 8
-	sizes[Kind.float] = 4
-	aligns[Kind.float] = 4
-	sizes[Kind.double] = 8
-	aligns[Kind.double] = 8
-	sizes[Kind.long_double] = 16
-	aligns[Kind.long_double] = 16
-	sizes[Kind.complex_float] = 8
-	aligns[Kind.complex_float] = 4
-	sizes[Kind.complex_double] = 16
-	aligns[Kind.complex_double] = 8
-	sizes[Kind.complex_long_double] = 32
-	aligns[Kind.complex_long_double] = 16
-	sizes[Kind.pointer] = 8
-	aligns[Kind.pointer] = 8
-	return Representation{
-		sizes:  sizes
-		aligns: aligns
-	}
-}
-
 fn size_of(t Type) int {
-	return measured().size_of(t) or {
+	return measured.representation().size_of(t) or {
 		assert false
 		return -1
 	}
 }
 
 fn align_of(t Type) int {
-	return measured().align_of(t) or {
+	return measured.representation().align_of(t) or {
 		assert false
 		return -1
 	}
 }
 
 fn layout_of(t Type) Layout {
-	return measured().layout(t) or {
+	return measured.representation().layout(t) or {
 		assert false
 		return Layout{}
 	}
@@ -102,7 +53,7 @@ fn bitfield(name string, typ Type, bits int) Member {
 	}
 }
 
-// gcc -std=c99 -o measure measure.c && ./measure
+// The command that produced the table is in types/measured/measured.v.
 fn test_the_size_and_alignment_of_every_scalar() {
 	assert size_of(bool_type()) == 1 && align_of(bool_type()) == 1
 	assert size_of(char_type()) == 1 && align_of(char_type()) == 1
@@ -129,7 +80,7 @@ fn test_an_array_is_its_element_size_times_its_count() {
 	assert size_of(array_of(char_type(), 7)) == 7 && align_of(array_of(char_type(), 7)) == 1
 	assert size_of(array_of(int_type(), 3)) == 12 && align_of(array_of(int_type(), 3)) == 4
 	assert size_of(array_of(double_type(), 2)) == 16 && align_of(array_of(double_type(), 2)) == 8
-	assert measured().size_of(array_of(int_type(), -1)) == none
+	assert measured.representation().size_of(array_of(int_type(), -1)) == none
 }
 
 // An enumerated type has the representation of int. Measured on gcc 16.2.1: an
@@ -286,7 +237,7 @@ fn test_a_union_is_its_largest_member_at_the_beginning() {
 }
 
 fn test_a_type_with_no_size_has_no_answer() {
-	representation := measured()
+	representation := measured.representation()
 	// void and a function type describe no object at all.
 	assert representation.size_of(void_type()) == none
 	assert representation.size_of(function_type(int_type(), [], false, true)) == none
@@ -352,5 +303,5 @@ fn test_the_description_carries_the_pointer_and_names_what_it_does_not_carry() {
 	assert !description.missing.contains(Kind.pointer)
 	// The description and the measured table agree about the one entry both of
 	// them carry.
-	assert measured().size_of(pointer) or { -1 } == described_size
+	assert measured.representation().size_of(pointer) or { -1 } == described_size
 }
