@@ -16,9 +16,10 @@ Linux x86-64.
 1. **Pure V.** No C source, no `#include`, no `cc` invocation, no C library
    binding added to make something work. If V cannot express a piece yet, that
    piece stays unimplemented and the failure is reported, not worked around.
-2. **TCC-class speed, no compromise.** The workload that decides this is the V
-   self-build: a few megabytes of generated C. Wall time and peak RSS both
-   matter. Never claim a speed improvement from intuition; measure it.
+2. **TCC-class speed, which is not open to compromise.** The workload that
+   decides this is the V self-build: a few megabytes of generated C. Wall time
+   and peak RSS both matter. Never claim a speed improvement from intuition;
+   measure it.
 
 ## Commands
 
@@ -35,7 +36,7 @@ v fmt -w .                 # format before committing
 
 `tools/gate.vsh` is the same set of checks a pull request has to pass, and CI
 runs it too (`.github/workflows/ci.yml`), so run it before claiming a change is
-done rather than after CI says otherwise. `-nocache`
+done rather than after CI says otherwise. Use `-nocache`
 on probe builds, and prefer the gate's build over a binary from an earlier edit.
 
 Building with V and a source tree you did not just write: cap the compiler so a
