@@ -437,3 +437,63 @@ fn test_the_universal_character_name_spelling_is_gcc_spelling() {
 	expected := gcc_preprocessed(source) or { return }
 	assert expected == tokens_of(source)
 }
+
+// The literal classes C99 adds over C89, one test each, and each of them about
+// the token rather than about a compile: what the parser is handed is what
+// these pin, and a class read as two tokens fails here even when the file it
+// came from would still compile.
+
+fn test_the_float_suffixes_are_part_of_the_number() {
+	// `f`, `F`, `l` and `L` say which type the constant has, and the number
+	// reader keeps them: the token is the whole spelling.
+	assert texts('1.5f 1.5F 1.5l 1.5L 1f 1F 1l 1L') == ['1.5f', '1.5F', '1.5l', '1.5L', '1f', '1F',
+		'1l', '1L', '']
+	assert texts('1.5e3L 1e+3f 1E-3L') == ['1.5e3L', '1e+3f', '1E-3L', '']
+}
+
+fn test_the_long_long_suffixes_are_part_of_the_number() {
+	// `ll`, `LL`, `Ll` and `lL` are the long long suffixes, and the case of
+	// each letter is its own: all four spellings are one token, on a decimal
+	// and on a hexadecimal constant alike.
+	assert texts('1ll 1LL 1Ll 1lL 1ull 1LLU 0x1ll') == ['1ll', '1LL', '1Ll', '1lL', '1ull', '1LLU',
+		'0x1ll', '']
+}
+
+fn test_a_hexadecimal_float_is_one_number() {
+	// 6.4.4.2: a hexadecimal floating constant is `0x`, its digits, a point, an
+	// exponent letter and a binary exponent. The lexer keeps all of it as one
+	// number, which is the whole of what makes the parser's refusal of it a
+	// refusal of one construct rather than of three.
+	assert texts('0x1p3 0x1.8p-4 0x1P+3f 0x.8p3') == ['0x1p3', '0x1.8p-4', '0x1P+3f', '0x.8p3',
+		'']
+	assert kinds('0x1p3') == [.number, .eof]
+}
+
+fn test_a_prefixed_string_is_one_literal() {
+	// `L`, `u`, `U` and `u8` before a string or a character constant are part
+	// of the literal and not an identifier standing beside one.
+	assert texts('L"w" u8"w" u"w" U"w"') == ['L"w"', 'u8"w"', 'u"w"', 'U"w"', '']
+	assert texts("L'x' u8'x' u'x' U'x'") == ["L'x'", "u8'x'", "u'x'", "U'x'", '']
+	assert kinds('u8"w"') == [.string, .eof]
+	assert kinds("U'x'") == [.character, .eof]
+	// It is the position that makes it a prefix: `u8` with a space after it is
+	// the name it looks like.
+	assert texts('u8 "w"') == ['u8', '"w"', '']
+}
+
+fn test_a_multi_character_constant_is_one_literal() {
+	// 6.4.4.4 takes more than one character between the quotes. What the value
+	// is, is the literal reader's question; what the lexer hands over is one
+	// token holding all of it.
+	assert texts("'ab' 'abcd'") == ["'ab'", "'abcd'", '']
+	assert kinds("'ab'") == [.character, .eof]
+}
+
+fn test_a_universal_character_name_escape_stays_in_the_literal() {
+	// The escape is phase 5's business and not the lexer's: the token holds the
+	// spelling with the backslash in it, which is what a reader that knows the
+	// execution character set has to be given.
+	assert texts('"\\u00e9" "\\U0001F600"') == ['"\\u00e9"', '"\\U0001F600"', '']
+	assert texts("'\\u00e9'") == ["'\\u00e9'", '']
+	assert kinds('"\\u00e9"') == [.string, .eof]
+}
