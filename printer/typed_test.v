@@ -133,17 +133,32 @@ fn test_a_parameter_resolves_to_the_type_it_was_declared_with() {
 	}
 }
 
-fn test_a_node_the_model_has_no_answer_for_says_so() {
-	// A name with no declaration in front of it, and a constant whose type needs
-	// a width the target description does not carry. Neither is a diagnostic: the
-	// tree says what it knows, and the printer says that it does not know.
-	printed := printed_lines(parsed('int main(void) { return missing + 0xffffffff; }'))
+fn test_a_node_the_model_has_no_answer_for_is_refused_rather_than_written() {
+	// A constant whose type needs a width the target description does not carry
+	// is refused by the parser where it is written, so a tree that reaches the
+	// emitter carries no clause the model did not answer for. The dump of the
+	// same file says `unresolved` for that node and for the name beside it,
+	// which is the printer naming what the model did not answer rather than
+	// inventing a type for it.
+	lexed := tokenize.lex('int main(void) { return missing + 0xffffffff; }')
+	refused := parser.parse(lexed.tokens)
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('0xffffffff')
+	assert refused.diagnostics[0].line == 1
+	assert refused.diagnostics[0].col == 35
+	printed := printed_lines(refused.unit)
 	assert clause_of_declaration(printed, 'ident missing') == 'unresolved'
 	assert clause_of_declaration(printed, 'int 4294967295') == 'unresolved'
 	assert clause_of_declaration(printed, 'binary +') == 'unresolved'
 	// The return type of the definition was resolved, so the function line keeps
 	// its clause and is not written off with the rest.
 	assert clause_of_declaration(printed, 'fn main() int') == 'int (void)'
+	// A call to a name this file does not declare is the one node that carries
+	// an unresolved clause, and the printer says so: the model had no
+	// declaration to check it against, and the emitter resolves the name at
+	// layout and takes the width from the ABI's return width.
+	library := printed_lines(parsed('int main(void) { return abs(-7) - 6; }'))
+	assert clause_of_declaration(library, 'call abs') == 'unresolved'
 }
 
 fn test_a_clause_is_the_models_answer_and_not_the_spelling() {

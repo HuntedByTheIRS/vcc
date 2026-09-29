@@ -127,23 +127,57 @@ fn test_the_type_of_an_expression_is_the_type_its_operators_give_it() {
 	assert negative.typ.same(types.int_type())
 }
 
-fn test_a_constant_has_the_type_its_value_and_spelling_give_it() {
+fn test_a_constant_whose_type_needs_a_width_the_description_lacks_is_refused() {
 	// 42 fits in the range every int has, so the type is settled without asking
-	// the target description for a width; 0xffffffff is past it and the
-	// description this compiler has carries no width, so it is left unresolved
-	// rather than guessed.
+	// the target description for a width. 0xffffffff is past it and the
+	// description this compiler has carries no width, so the model refuses, and
+	// the refusal is reported where the constant is written rather than
+	// discarded: a node left unresolved is one the emitter would have to guess a
+	// width for, which is how `return 4294967295 > 2147483647;` was emitted as
+	// an int comparison and returned 0 where ISO C and gcc return 1.
 	small := checked('int main() { return 42; }')
 	small_lit := small.unit.decls[0].body[0].expr or {
 		assert false
 		return
 	}
 	assert (small_lit as ast.IntLit).typ.same(types.int_type())
-	wide := checked('int main() { return 0xffffffff; }')
+	wide := parsed('int main() { return 0xffffffff; }')
+	assert wide.diagnostics.len == 1
+	assert wide.diagnostics[0].msg.contains('0xffffffff')
+	assert wide.diagnostics[0].line == 1
+	assert wide.diagnostics[0].col == 21
+	// The clause is the zero type: the constant is still a constant, and the
+	// diagnostic is what keeps it from being compiled at a width nothing
+	// decided.
 	wide_lit := wide.unit.decls[0].body[0].expr or {
 		assert false
 		return
 	}
 	assert (wide_lit as ast.IntLit).typ.kind == .unknown
+}
+
+fn test_sizeof_is_refused_by_name_and_by_location() {
+	// `sizeof` is an operator, and reading the spelling as a call produced a
+	// reference to a symbol nothing defines: `int main(void) { int a[4]; return
+	// sizeof(a); }` compiled into a binary that died at load with `undefined
+	// symbol: sizeof`. It is refused by name at its own token instead, both
+	// spellings, and what it is written with is not read as an argument list.
+	for source in [
+		'int main() { int a[4]; return sizeof(a); }',
+		'int main() { int a[4]; return sizeof a; }',
+	] {
+		result := parsed(source)
+		assert result.diagnostics.len == 1
+		assert result.diagnostics[0].msg.contains('sizeof')
+		assert result.diagnostics[0].line == 1
+		assert result.diagnostics[0].col == 31
+	}
+	// The refusal does not swallow the rest of the file: the next declaration is
+	// read and carries its own clause.
+	after := parsed('int main() { int x = sizeof(int); return x; }')
+	assert after.diagnostics.len == 1
+	assert after.diagnostics[0].col == 22
+	assert after.unit.decls.len == 1
 }
 
 fn test_a_string_literal_is_an_array_of_char_with_room_for_the_terminator() {

@@ -181,6 +181,14 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 		entry:  entry
 		unit:   unit
 	}
+	// Nothing is written from a tree the model did not type. The check runs
+	// before the layout, so a tree it refuses produces no image at all.
+	emitter.refuse_unresolved() or {
+		return Result{
+			target:      target
+			diagnostics: emitter.diagnostics
+		}
+	}
 	image := emitter.build() or {
 		return Result{
 			target:      target
@@ -269,6 +277,90 @@ fn (mut e Emitter) build() ![]u8 {
 		return error('cannot lay out the image')
 	}
 	return image
+}
+
+// refuse_unresolved refuses a tree that carries a value the model did not type.
+//
+// The emitter takes the width of a value and the instruction an operator uses
+// from the shape of the node, not from its clause, so a constant whose clause is
+// unresolved is a value it would write an answer for that nothing decided.
+// Measured, `int main(void) { return 4294967295 > 2147483647; }` was read as an
+// int comparison and returned 0 where ISO C and gcc return 1.
+//
+// The constant is the node this reads. The emitter writes every constant as a
+// four-byte int, so a constant the model left unresolved and whose value that int
+// cannot hold would be written as a different number than the program asked for.
+// It is refused before a byte is written, so no image comes out of it. Every
+// other clause the model did not resolve is refused where it was read, in
+// parser/, which names the construct and its location; a node reached here with
+// the zero type and a value an int holds is one the emitter writes correctly,
+// which is what keeps a tree the tests assemble by hand emittable.
+fn (mut e Emitter) refuse_unresolved() !void {
+	for decl in e.unit.decls {
+		e.check_statements(decl.body, 0)!
+	}
+}
+
+// check_statements walks the statements of a body looking for such a constant.
+fn (mut e Emitter) check_statements(stmts []ast.Stmt, depth int) !void {
+	for stmt in stmts {
+		if expr := stmt.expr {
+			e.check_expression(expr, depth)!
+		}
+		if init := stmt.init {
+			e.check_expression(init, depth)!
+		}
+		if index := stmt.index {
+			e.check_expression(index, depth)!
+		}
+		if cond := stmt.cond {
+			e.check_expression(cond, depth)!
+		}
+		e.check_statements(stmt.body, depth)!
+		e.check_statements(stmt.then_body, depth)!
+		e.check_statements(stmt.else_body, depth)!
+		e.check_statements(stmt.step, depth)!
+	}
+}
+
+// check_expression walks one expression. A tree deeper than the emitter's own
+// walk would go is left to the emitter's depth report, which is the same number.
+fn (mut e Emitter) check_expression(expr ast.Expr, depth int) !void {
+	if depth > max_emit_depth {
+		return
+	}
+	if expr is ast.IntLit {
+		if expr.typ.kind == .unknown && !is_an_int_value(expr.value) {
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: the integer constant ${expr.text} has no type this compiler resolved, and it is not a value the int this back end writes a constant as can hold')
+			return error('unresolved constant')
+		}
+		return
+	}
+	match expr {
+		ast.Binary {
+			e.check_expression(expr.left, depth + 1)!
+			e.check_expression(expr.right, depth + 1)!
+		}
+		ast.Unary {
+			e.check_expression(expr.expr, depth + 1)!
+		}
+		ast.Call {
+			for arg in expr.args {
+				e.check_expression(arg, depth + 1)!
+			}
+		}
+		ast.Index {
+			e.check_expression(expr.index, depth + 1)!
+		}
+		else {}
+	}
+}
+
+// is_an_int_value says whether a value is one the four-byte signed int this back
+// end writes a constant as holds, which is the range a constant written at that
+// width keeps its value in.
+fn is_an_int_value(value i64) bool {
+	return value >= -2147483648 && value <= 2147483647
 }
 
 // emit_start writes the entry point the kernel jumps to. It is not the program's

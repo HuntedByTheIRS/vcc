@@ -208,6 +208,21 @@ pub const features = [
 		pedantic:  'the _Imaginary type'
 		status:    .unimplemented
 	},
+	// sizeof is an operator, and the tree does not read it: the spelling in a
+	// program was read as a call to a function of that name, so
+	// `int main(void) { int a[4]; return sizeof(a); }` compiled into a binary
+	// that died at load with `undefined symbol: sizeof`. The parser refuses the
+	// spelling by name and location now, which is the refusal the unimplemented
+	// rule asks for, and the row records that the operator is C89 and is not
+	// read yet. Implementing it is the milestone that owns the operator.
+	Feature{
+		spellings: ['sizeof']
+		since:     .c89
+		gnu:       false
+		extension: ''
+		pedantic:  'the sizeof operator'
+		status:    .unimplemented
+	},
 ]
 
 // Question is what a dialect check is asked under: the mode the command line

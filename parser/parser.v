@@ -260,7 +260,7 @@ fn (mut p Parser) parse_binary(min_precedence int) !ast.Expr {
 			op:    t.text
 			left:  left
 			right: right
-			typ:   p.binary_type(t.text, left, right)
+			typ:   p.binary_type(t, left, right)
 			line:  t.line
 			col:   t.col
 		})
@@ -274,32 +274,61 @@ fn (mut p Parser) parse_binary(min_precedence int) !ast.Expr {
 // conversions. An operand that is an array is read as a pointer to its first
 // element first.
 //
-// Where the model has no answer the clause is left unresolved rather than filled
-// in. Two arithmetic operands whose conversion needs a width the target
-// description does not carry are one such case. Pointer arithmetic is another:
-// the type of `p + 1` is a question this model answers, and the scale factor and
-// the emitted bytes are the back end milestone's, but the type of the difference
-// of two pointers is `ptrdiff_t`, which is a type a header names and not one this
-// compiler has, so it stays unresolved.
-fn (p Parser) binary_type(op string, left ast.Expr, right ast.Expr) types.Type {
+// Where the model refuses - two arithmetic operands whose conversion needs a
+// width the target description does not carry - the refusal is reported at the
+// operator, where the construct is written, and the clause is left unresolved
+// rather than filled in. The emitter refuses a node whose clause is unresolved,
+// so a construct nothing could type does not reach a binary. A node that already
+// carries the zero type was refused where it was written, and a second message
+// about the operator would only repeat the first.
+//
+// Pointer arithmetic is a case this model has no answer for: the type of `p + 1`
+// this model answers, and the scale factor and the emitted bytes are the back end
+// milestone's, but the type of the difference of two pointers is `ptrdiff_t`,
+// which is a type a header names and not one this compiler has, so it stays
+// unresolved and the back end refuses it.
+fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) types.Type {
 	a := p.value_type(left)
 	b := p.value_type(right)
-	if op in ['&&', '||', '==', '!=', '<', '>', '<=', '>='] {
+	if op.text in ['&&', '||', '==', '!=', '<', '>', '<=', '>='] {
 		// The answer is a truth value whatever the operands were.
 		return types.int_type()
 	}
 	if a.is_arithmetic() && b.is_arithmetic() {
-		return types.usual_arithmetic_conversions(a, b, p.representation) or { types.Type{} }
+		return types.usual_arithmetic_conversions(a, b, p.representation) or {
+			p.error_at(op, err.msg())
+			return types.Type{}
+		}
 	}
-	if op == '+' || op == '-' {
+	if op.text == '+' || op.text == '-' {
 		if a.is_pointer() && b.is_integer() {
 			return a
 		}
-		if op == '+' && b.is_pointer() && a.is_integer() {
+		if op.text == '+' && b.is_pointer() && a.is_integer() {
 			return b
 		}
 	}
+	if a.kind != .unknown && b.kind != .unknown {
+		// Both operands were resolved and the model still has no answer for the
+		// operator, which is a construct this reader does not type rather than
+		// a construct it refused.
+		p.error_at(op, 'unsupported: the type of ${describe_operand(left)} ${op.text} ${describe_operand(right)} is not one this compiler resolves')
+	}
 	return types.Type{}
+}
+
+// describe_operand names an operand of an operator for a diagnostic, so the
+// refusal says which expression the operator was written between.
+fn describe_operand(expr ast.Expr) string {
+	return match expr {
+		ast.Ident { expr.name }
+		ast.Index { '${expr.name}[...]' }
+		ast.IntLit { expr.text }
+		ast.StrLit { 'a string literal' }
+		ast.Call { 'a call to ${expr.name}' }
+		ast.Unary { 'a value with ${expr.op} applied to it' }
+		ast.Binary { 'a value of ${expr.op}' }
+	}
 }
 
 // value_type is the type an operand contributes where a value is expected: the
@@ -315,17 +344,28 @@ fn (p Parser) value_type(expr ast.Expr) types.Type {
 // unary_type is the type a prefix operator gives its expression. `!` answers with
 // an int whatever it was given and `&` with a pointer to the operand's own type,
 // undecayed; the arithmetic operators promote their operand.
-fn (p Parser) unary_type(op string, operand ast.Expr) types.Type {
-	if op == '!' {
+//
+// The promotion is a call the model can refuse, and where it does the refusal is
+// reported at the operator instead of being discarded. An operand that already
+// carries the zero type was refused where it was written, so it is left alone
+// rather than reported twice.
+fn (mut p Parser) unary_type(op tokenize.Token, operand ast.Expr) types.Type {
+	if op.text == '!' {
 		return types.int_type()
 	}
-	if op == '&' {
+	if op.text == '&' {
 		if p.is_unresolved(operand) {
 			return types.Type{}
 		}
 		return types.pointer_to(operand.typ)
 	}
-	return types.integer_promotion(p.value_type(operand), p.representation) or { types.Type{} }
+	if p.is_unresolved(operand) {
+		return types.Type{}
+	}
+	return types.integer_promotion(p.value_type(operand), p.representation) or {
+		p.error_at(op, err.msg())
+		return types.Type{}
+	}
 }
 
 // is_unresolved says whether an expression's clause is the one the model could
@@ -349,7 +389,7 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 		return ast.Expr(ast.Unary{
 			op:   t.text
 			expr: operand
-			typ:  p.unary_type(t.text, operand)
+			typ:  p.unary_type(t, operand)
 			line: t.line
 			col:  t.col
 		})
@@ -368,7 +408,7 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		return ast.Expr(ast.IntLit{
 			value: value
 			text:  t.text
-			typ:   p.constant_type(t.text, value)
+			typ:   p.constant_type(t, value)
 			line:  t.line
 			col:   t.col
 		})
@@ -391,6 +431,16 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
+		if t.text == 'sizeof' {
+			// `sizeof` is an operator, and the spelling is not a function: read
+			// as a call it produced a reference to a symbol nothing defines,
+			// and the program died at load with `undefined symbol: sizeof`.
+			// Refusing it by name at its own location is what this compiler can
+			// honestly do until the milestone that owns the operator
+			// implements it.
+			p.error_at(t, 'unsupported: sizeof is an operator this compiler does not read yet')
+			return error('sizeof')
+		}
 		if p.at_punct('(') {
 			args := p.parse_arguments()!
 			return ast.Expr(ast.Call{
@@ -415,14 +465,15 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 			return ast.Expr(ast.Index{
 				name:  t.text
 				index: index
-				typ:   p.index_type(t.text)
+				typ:   p.index_type(t)
 				line:  t.line
 				col:   t.col
 			})
 		}
+		typ := p.resolve(t.text)
 		return ast.Expr(ast.Ident{
 			name: t.text
-			typ:  p.resolve(t.text)
+			typ:  typ
 			line: t.line
 			col:  t.col
 		})
@@ -487,9 +538,15 @@ fn (mut p Parser) parse_arguments() ![]ast.Expr {
 
 // constant_type is the type an integer constant has, which 6.4.4.1 decides from
 // the spelling and the value. A constant whose type needs a width the description
-// does not carry is left unresolved, and the constant is still a constant.
-fn (p Parser) constant_type(text string, value i64) types.Type {
-	return types.integer_constant_type(text, value, p.representation) or { types.Type{} }
+// does not carry is refused here, at the constant as it was written: the model has
+// no answer, and a node left unresolved is a node a later stage would have to
+// guess a width for. Measured, `return 4294967295 > 2147483647;` was compiled
+// with the constant read as an int and returned 0 where ISO C and gcc return 1.
+fn (mut p Parser) constant_type(at tokenize.Token, value i64) types.Type {
+	return types.integer_constant_type(at.text, value, p.representation) or {
+		p.error_at(at, err.msg())
+		return types.Type{}
+	}
 }
 
 // string_literal_type is the type of a string literal: an array of char holding
@@ -506,15 +563,18 @@ fn string_literal_type(text string, value string) types.Type {
 // index_type is the type of one element of an array or of one pointed-to value:
 // `a[i]` has the element type of what a was declared as, and `p[i]` the type p
 // points at. The lookup is the one the name was declared with, which is what
-// makes a subscript of a name the shape this reader can type.
-fn (p Parser) index_type(name string) types.Type {
-	declared := p.resolve(name)
+// makes a subscript of a name the shape this reader can type. A name that is
+// neither an array nor a pointer has no element to be one of, and that is
+// refused here rather than left unresolved.
+fn (mut p Parser) index_type(at tokenize.Token) types.Type {
+	declared := p.resolve(at.text)
 	if declared.is_array() {
 		return declared.element() or { types.Type{} }
 	}
 	if declared.is_pointer() {
 		return declared.pointee() or { types.Type{} }
 	}
+	p.error_at(at, 'unsupported: ${at.text} is neither an array nor a pointer, so it has no element to subscript')
 	return types.Type{}
 }
 
