@@ -1,0 +1,36 @@
+title: "[show and tell] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Something you built with vcc, or a build you moved onto it. If it is still a
+        work in progress, say what works and what does not: a partial result is
+        useful, and claiming more than the compiler does costs you credibility later.
+  - type: textarea
+    id: what
+    attributes:
+      label: What it is
+    validations:
+      required: true
+  - type: textarea
+    id: vcc
+    attributes:
+      label: How vcc is involved
+      description: Which part of the tree, which flag, and what it compiles or links.
+    validations:
+      required: true
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Numbers, if speed is part of the story
+      description: What it compiles, on which machine, with wall time and peak memory.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: rough
+    attributes:
+      label: What does not work yet
+      description: The parts you worked around, or that fall over.
+    validations:
+      required: false

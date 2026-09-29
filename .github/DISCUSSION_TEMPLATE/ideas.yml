@@ -1,0 +1,33 @@
+title: "[idea] "
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A direction, an ordering argument, or a piece of C support worth doing sooner.
+        ROADMAP.md holds the current order, so say what you would move and why rather
+        than restating the list.
+
+        Two things outrank convenience here: the compiler stays pure V, and it stays
+        at TCC-class speed. An idea that breaks either is worth discussing, but say
+        what it buys in exchange.
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it is worth doing, and by when
+      description: What it unblocks, and which milestone it fits in front of.
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it costs
+      description: Effort, added complexity, or any slowdown you can see coming.
+    validations:
+      required: false

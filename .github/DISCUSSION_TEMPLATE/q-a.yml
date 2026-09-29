@@ -1,0 +1,50 @@
+title: "[Q&A] "
+labels: ['question']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask the question in the title and the detail here. Answers can be marked, so
+        the one that works stays on top.
+
+        Confirmed bugs belong in the issue tracker: an error saying a construct is
+        not implemented yet is the compiler working as designed. Security problems go
+        through SECURITY.md, never a discussion.
+  - type: textarea
+    id: question
+    attributes:
+      label: The question
+      description: What you are trying to do, and where you are stuck.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you have tried
+      description: Include the attempts that did not work; they narrow the answer.
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: The C involved
+      description: The smallest input that shows what you are asking about.
+      render: c
+    validations:
+      required: false
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: The output of `vcc --version`, plus the commit if you built from source.
+      placeholder: the output of `vcc --version`
+    validations:
+      required: false
+  - type: textarea
+    id: output
+    attributes:
+      label: What vcc said
+      description: The command line and the output, when the tool ran at all.
+      render: text
+    validations:
+      required: false
