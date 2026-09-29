@@ -1,0 +1,129 @@
+# Roadmap
+
+The order is deliberate: the front end before the back end, the back end before
+linking, and the V contract before anyone swaps the binary. Each milestone names
+how it is verified, and every one of them ends with the same gate: the V
+self-build does not get slower.
+
+## Where the tree is
+
+A stub. It lexes C, parses function definitions returning `int` with constant
+return expressions, and writes a Linux x86-64 executable that exits with the
+folded value. The command line already accepts the flag surface V uses, because
+getting that wrong later is a rewrite rather than a fix. Everything else exits
+non-zero with a diagnostic naming the construct.
+
+## M0: the stub
+
+Done when `v test .` passes, the lexer covers the C preprocessing-token grammar,
+the parser covers the subset the README lists, the ELF writer produces a binary
+that runs, and every unsupported construct has a diagnostic with a location.
+
+## M1: the preprocessor
+
+A real C preprocessor, not a macro pass bolted onto the parser: `#include` with
+quoted and angle search paths, object-like and function-like macros with `#` and
+`##`, variadic macros, `#if` with the full constant expression grammar,
+`#ifdef`, `#elif`, `#error`, `#line`, `#pragma once`, and `__LINE__`,
+`__FILE__`, `__DATE__`-class predefined macros plus the `__TINYC__`-shaped ones
+V's codegen may test for. `-I`, `-D`, `-U`, `-nostdinc` and `-E` become real.
+
+Verified by preprocessing the same file with `tcc -E` and diffing the token
+streams, macro definitions and include order included.
+
+## M2: the front end
+
+The C11 grammar as GNU C actually uses it: declarations and declarators
+(including the pointer and array spellings that read backwards), structs,
+unions, enums, typedefs, bitfields, `sizeof` and `alignof`, casts, compound
+literals, designated initializers, `switch`, loops, `goto`, labels, variadic
+functions, `_Bool` and the integer and floating types, and constant expression
+folding. Diagnostics with a file, line, column, and a note saying what the
+compiler expected instead.
+
+Verified by parsing and type-checking the corpus of generated C that V emits for
+itself, plus the C in V's `thirdparty/` and a few real-world projects, and
+comparing acceptance against `tcc`.
+
+## M3: the x86-64 back end
+
+Instruction selection, register allocation, stack frames and the SysV calling
+convention, global and thread-local storage, sections, relocations, `.S` input,
+inline assembly, and correct integer and floating point semantics including the
+signed overflow wrapping that V's generated code assumes. Symbols get emitted
+with the right linkage, visibility, and alignment; `-O` levels exist and do
+something.
+
+Verified by running the compiled programs, and by diffing behavior against tcc's
+output for the same input, not by reading the assembly and approving of it.
+
+## M4: objects, linking, and output formats
+
+ELF relocatable objects, an `ar` archive reader, executable linking against
+libc, static and shared output, `-L`/`-l` search order, `-shared`, `-r`,
+`-nostdlib`, `-Wl,` passthroughs, and crt startup objects. This is the milestone
+where the compiler stops producing standalone binaries and starts doing the job
+V actually needs: linking a program against the system libraries.
+
+Verified by linking programs that use libc, libm, pthreads and dl, and running
+them. Then by linking V's own objects and comparing the result with a tcc link.
+
+## M5: the V contract
+
+The interop work, and the milestone that decides whether "drop-in" is true.
+
+- Version output that V classifies correctly, and stays stable enough that
+  cached artifacts keyed on the old answer are not silently wrong.
+- Every flag V passes, accepted and either honored or deliberately ignored with
+  a note: `-std=gnu11`, `-std=c99`, `-fwrapv`, `-fPIC`, `-w`,
+  `-Werror=implicit-function-declaration`, `-g`, `-bt25`, `-B`, `-I`, `-L`,
+  `-Wl,`, `-D`, object files and `.a` archives mixed with sources.
+- `-run`, `-M`/`-MM`/`-MD` dependency output, `-x`, `@listfile`, stdin input,
+  and the `-cc tinyc` semantics V switches codegen on.
+- Self-hosted use: `-cc <vcc>` for V's own build.
+
+Verified by building the V compiler and V's own test suite with vcc, and by
+comparing each build against the same build with the bundled tcc.
+
+## M6: speed
+
+The constraint, not a stretch goal. TCC is fast because it is a single pass
+compiler with no intermediate representation to speak of, and vcc has to be
+within reach of that on the workload that matters: the megabyte-scale generated
+C of a V self-build.
+
+- Phase timings from `-bench` for every stage, tracked per commit rather than
+  discovered later.
+- A wall-time and peak-memory budget for the V self-build, measured against the
+  bundled tcc on the same machine, checked in CI once the tree builds itself.
+- Design choices that follow from the target: single pass over tokens, no
+  building of a full AST where a streaming decision will do, arena allocation
+  rather than per-node heap traffic, and output written with buffered writes.
+- Parallel compilation of translation units, the way tcc and V's `fastc` both
+  do, once the single-threaded path is fast rather than instead of making it
+  fast.
+
+Verified by the numbers, in every pull request that touches a hot path.
+
+## M7: the swap
+
+Point V's `-cc` at vcc for a real build, run V's test suite, and compare against
+the bundled tcc. When a V build with vcc passes the same tests at the same
+speed, the proposal to vendor vcc in place of tcc becomes a question about
+timing rather than about readiness.
+
+## Later, and not yet planned
+
+- **Other targets.** Linux x86-64 first, then arm64, then macOS and Windows.
+  Each is a back end and a linking story, not a flag.
+- **GCC extensions** that real code needs: `__attribute__`, statement
+  expressions, `__builtin_*`, computed gotos. `extensions/` is reserved for
+  this, and it stays empty until something real lands there.
+- **Debug info.** `-g` producing usable DWARF rather than being accepted and
+  ignored.
+
+## Not on the roadmap
+
+- C++ beyond what C already provides.
+- A second command line that differs from tcc's. The point is to be a drop-in.
+- Written in anything but pure V.
