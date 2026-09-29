@@ -285,6 +285,27 @@ fn test_a_declaration_initializer_is_checked_like_an_assignment() {
 	assert literal.unit.decls.len == 1
 }
 
+// 6.5.2.2: what a call calls has to be a function or a pointer to a function. A
+// name the unit declares as something else is refused where the call is written,
+// because the emitter resolves the call to whatever the name is and the image then
+// dies at load: measured, `int x; int main(void) { return x(1); }` compiled, wrote
+// an image, and the image died at load with `undefined symbol: x`.
+fn test_a_call_to_a_name_that_is_not_a_function_is_refused() {
+	refused := parsed('int x;\nint main(void) { return x(1); }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('x is declared as int')
+	assert refused.diagnostics[0].msg.contains('function or a pointer to a function')
+	// A call through a parameter whose type is a pointer to a function is what the
+	// clause allows, and is not this refusal.
+	callable := parsed('int h(int (*fp)(void)) { return fp(); }')
+	assert callable.diagnostics.len == 0
+	// A name nothing declares is left to the check at the end of the unit, so the
+	// two refusals do not both fire on one call.
+	missing := parsed('int main(void) { return missing(1); }')
+	assert missing.diagnostics.len == 1
+	assert missing.diagnostics[0].msg.contains('nothing in this file declares it')
+}
+
 // 6.3.2.3 asks for the value of an integer constant expression and not for the way
 // it is spelled, so the question is asked of the value. Measured, gcc 16.2.1 under
 // `-std=c99` accepts `h(1 - 1)` for a parameter of type `int (*)(void)`, which this

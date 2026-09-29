@@ -699,6 +699,13 @@ fn (p Parser) signature(name string) ?types.Type {
 	return none
 }
 
+// is_callable says whether a name the unit declares is what 6.5.2.2 requires what a
+// call calls to be, which is a function or a pointer to a function.
+fn (p Parser) is_callable(name string) bool {
+	signature := p.signature(name) or { return false }
+	return signature.is_function()
+}
+
 // call_type is the type a call has: what the function returns. It also checks the
 // arguments against the parameters as they were read, which is the constraint
 // 6.5.2.2 names: an argument is converted to its parameter's type as if by
@@ -710,6 +717,18 @@ fn (p Parser) signature(name string) ?types.Type {
 // through a parameter list that named no parameters has nothing to check either,
 // because such a declaration says nothing about the call.
 fn (mut p Parser) call_type(name tokenize.Token, args []ast.Expr) types.Type {
+	// 6.5.2.2: what a call calls has to be a function or a pointer to one. A name
+	// the unit declares as something else is refused here rather than written,
+	// because the emitter resolves the call to whatever the name is and the image
+	// then dies at load. Measured, `int x; int main(void) { return x(1); }`
+	// compiled, wrote an image, and the image died at load with `undefined symbol:
+	// x`. A name nothing in the unit declares is left to the check at the end of
+	// the unit, which reports one message for it.
+	if name.text in p.declared && !p.is_callable(name.text) {
+		declared := p.resolve(name.text)
+		p.error_at(name, 'a constraint violation: ${name.text} is declared as ${declared.describe()}, and what a call calls has to be a function or a pointer to a function')
+		return types.Type{}
+	}
 	signature := p.signature(name.text) or { return types.Type{} }
 	if !signature.prototyped {
 		return signature.returns() or { types.Type{} }
