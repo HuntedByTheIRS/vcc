@@ -23,7 +23,8 @@ and a typedef is followed to the type it names wherever a type can be written.
 function is a block of the frame with its members at the offsets the layout gives
 them, and the arguments past the machine's registers are passed on the stack, so
 both walls that were standing at the end of M1 are down. What is left is `enum`,
-casts, and the rest of the list in the README. An object of sixteen bytes or fewer is
+the shift and bitwise operators, unsigned integer types, and the rest of the list
+in the README. An object of sixteen bytes or fewer is
 handed over in the registers its classes name on both sides, a larger one travels
 through memory, and an assignment between two objects of a type copies the bytes. The command line already
 accepts the flag surface V uses, because getting that wrong later is a rewrite

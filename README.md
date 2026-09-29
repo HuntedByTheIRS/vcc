@@ -98,12 +98,20 @@ nothing else and gets them erased. `-E` prints the stream as a table of
 The parser reads what a preprocessed header is made of (typedefs, prototypes,
 structs) and the function definitions after them: parameters, local variables,
 assignments, arithmetic, calls, string literals, `double` values, `if`/`else`,
-`while`, and `for` with `break` and `continue`. A typedef is a name for the type
+`while`, and `for` with `break` and `continue`. A conversion is a type name in
+parentheses and converts between the four classes the back end carries, `sizeof`
+answers the size of a type name or an expression as a constant, `*` reads the
+value at an address and `&` takes one, and two addresses are compared at the
+width of a word. A typedef is a name for the type
 it was declared as and is followed wherever a type can be written, so a
 declaration written through one is the declaration of the type behind it; a name
 standing for a type the back end has no form for is refused as that type and not
-as the name, so `typedef long Big; Big x;` says `unsupported type long`. Anything
-outside the subset is diagnosed rather than miscompiled.
+as the name, so `typedef long Big; Big x;` says `unsupported type long`. A
+definition of a `static` function that nothing else in the file names is stepped
+over before its specifiers are read, because a header's helpers are often written
+in types this reader has no form for, and a program that never calls one should
+not be refused over it. Anything outside the subset is diagnosed rather than
+miscompiled.
 
 The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
 `_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
@@ -157,8 +165,9 @@ arguments a call passes past the machine's registers go on the stack, six ints a
 eight doubles being what the registers carry.
 
 Not implemented, in rough order of how much of the tree depends on it: an element of
-an array passed by value, and a call's result passed by value; `enum`; casts, so a read of a
-`double` as an int goes through a variable of the type wanted; `switch`; an array
+an array passed by value, and a call's result passed by value; `enum`; the shift
+and bitwise operators (`<<`, `>>`, `&`, `|`, `^`); unsigned integer types;
+`switch`; an array
 with an initializer or more than one size; a pointer defined at the top level;
 object files and relocatable output; and V's own generated C. `ROADMAP.md` maps the
 order.
