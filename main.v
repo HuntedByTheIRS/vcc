@@ -101,31 +101,36 @@ fn main() {
 	// does a warning the command line promoted. Which is which is asked of the
 	// diagnostic and of the policy rather than counted, so that a stage which
 	// hands back a warning is not mistaken for a stage that failed.
-	if report(path, processed.diagnostics, opts.warnings) > 0 {
+	//
+	// A run that only asks what the file is made of — -M without -MD, -E, -dM —
+	// has no compile for that promotion to stop, and its answer is the whole
+	// point of the command: a build that passes a promotion flag to a dependency
+	// step, which is harmless under gcc and was harmless here before these flags
+	// existed, must still get its rule. Measured, gcc reports and writes in that
+	// run: `gcc -M -std=c99 -Werror=cpp` over a file carrying a `#warning` exits
+	// 0 with the rule and empty stderr, `-dM` exits 0 with the macros, and `-E`
+	// writes the stream, where the same command line without a read-only switch
+	// exits 1. So both stages of such a run — the preprocessor's own report here
+	// and the dialect check below — are reported under the policy a read-only
+	// run is reported under, which keeps a message a flag asked for printed and
+	// takes its verdict back. A compile keeps the policy the command line gave,
+	// so there a promotion still ends it.
+	reading_only := (opts.deps && !opts.deps_compile) || opts.preprocess || opts.dump_macros
+	policy := if reading_only { opts.warnings.without_promotion() } else { opts.warnings }
+	if report(path, processed.diagnostics, policy) > 0 {
 		exit(1)
 	}
 	// The dialect check runs over the stream the preprocessor produced, which is
 	// the one place the whole program is in a single list. It reports the
 	// constructs the selected mode does not allow and refuses nothing; a message
-	// the flags promoted is the only way it can stop a compile.
-	//
-	// A run that only asks what the file is made of — -M without -MD, -E, -dM —
-	// has no compile for that promotion to stop, and its answer is the whole
-	// point of the command: a build that passes -pedantic-errors to a dependency
-	// step, which is harmless under gcc and was harmless here before these flags
-	// existed, must still get its rule. Measured, gcc's front end reports
-	// nothing at all in that run: `gcc -std=c99 -pedantic-errors -M` over a file
-	// its own `-fsyntax-only` refuses exits 0 and writes the rule, and `-E`
-	// writes the stream with empty stderr. So the policy is asked for a message
-	// and not for a verdict here, and what -Wpedantic asked for is still
-	// printed.
-	reading_only := (opts.deps && !opts.deps_compile) || opts.preprocess || opts.dump_macros
+	// the flags promoted is the only way it can stop a compile. It is reported
+	// under the same policy as the stage above, so the two stages of a read-only
+	// run agree and neither of them can drop the answer.
 	pedantic := standard.pedantic_messages(processed.tokens, standard.Question{
 		mode:         opts.dialect
 		extensions:   opts.vcc_extensions.enabled_names()
 		system_files: system_files(processed.files)
 	})
-	policy := if reading_only { opts.warnings.without_promotion() } else { opts.warnings }
 	if report(path, pedantic, policy) > 0 {
 		exit(1)
 	}
