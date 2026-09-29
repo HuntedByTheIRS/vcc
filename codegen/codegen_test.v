@@ -128,6 +128,35 @@ fn return_expression(expr ast.Expr) ast.Stmt {
 	}
 }
 
+fn if_statement(cond ast.Expr, then_body []ast.Stmt, else_body []ast.Stmt) ast.Stmt {
+	return ast.Stmt{
+		kind:      .if_stmt
+		cond:      cond
+		then_body: then_body
+		else_body: else_body
+	}
+}
+
+fn while_statement(cond ast.Expr, body []ast.Stmt) ast.Stmt {
+	return ast.Stmt{
+		kind: .while_stmt
+		cond: cond
+		body: body
+	}
+}
+
+fn break_statement() ast.Stmt {
+	return ast.Stmt{
+		kind: .break_stmt
+	}
+}
+
+fn continue_statement() ast.Stmt {
+	return ast.Stmt{
+		kind: .continue_stmt
+	}
+}
+
 fn param(name string, typ string) ast.Param {
 	return ast.Param{
 		name: name
@@ -579,6 +608,94 @@ fn test_division_and_remainder_on_locals() {
 	assert run_image(emitted.bytes) == 29
 }
 
+// Each side of an if returns a value of its own, so the status says which branch
+// ran. The condition is a constant here and a value read from the frame in the
+// test after it, which is the case the branch is for.
+fn test_each_side_of_an_if_returns_its_own_value() {
+	taken := emit(program([
+		if_statement(int_argument(1), [return_statement(3)], [return_statement(4)]),
+	]), Options{})
+	assert taken.diagnostics.len == 0
+	assert run_image(taken.bytes) == 3
+	not_taken := emit(program([
+		if_statement(int_argument(0), [return_statement(3)], [return_statement(4)]),
+	]), Options{})
+	assert not_taken.diagnostics.len == 0
+	assert run_image(not_taken.bytes) == 4
+}
+
+fn test_a_condition_on_a_local_picks_the_branch() {
+	body := [
+		declaration('n', 'int', int_argument(7)),
+		if_statement(binary_node('<', name_node('n'), int_argument(10)), [return_statement(1)],
+			[return_statement(2)]),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+}
+
+// A body whose if can fall through has a way out that returns nothing, so the
+// function still finishes with the zero a caller is owed.
+fn test_a_body_that_falls_off_the_end_after_an_if_returns_zero() {
+	body := [
+		if_statement(int_argument(0), [return_statement(7)], []ast.Stmt{}),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// A loop that counts to five: the variable is what the condition reads and the
+// body writes, and the status is what it holds when the loop stops.
+fn test_a_while_loop_counts_to_five() {
+	body := [
+		declaration('i', 'int', int_argument(0)),
+		while_statement(binary_node('<', name_node('i'), int_argument(5)), [
+			assignment('i', binary_node('+', name_node('i'), int_argument(1))),
+		]),
+		return_expression(name_node('i')),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 5
+}
+
+// break leaves the loop where it stands.
+fn test_break_leaves_a_loop() {
+	body := [
+		declaration('i', 'int', int_argument(0)),
+		while_statement(int_argument(1), [
+			assignment('i', binary_node('+', name_node('i'), int_argument(1))),
+			if_statement(binary_node('==', name_node('i'), int_argument(3)), [break_statement()],
+				[]ast.Stmt{}),
+		]),
+		return_expression(name_node('i')),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 3
+}
+
+// continue goes back to the test, so the statement after it is skipped and the
+// loop still runs to its end: four rounds, one of them cut short.
+fn test_continue_goes_round_the_loop_again() {
+	body := [
+		declaration('i', 'int', int_argument(0)),
+		declaration('counted', 'int', int_argument(0)),
+		while_statement(binary_node('<', name_node('i'), int_argument(4)), [
+			assignment('i', binary_node('+', name_node('i'), int_argument(1))),
+			if_statement(binary_node('==', name_node('i'), int_argument(2)), [continue_statement()],
+				[]ast.Stmt{}),
+			assignment('counted', binary_node('+', name_node('counted'), int_argument(1))),
+		]),
+		return_expression(name_node('counted')),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 3
+}
+
 // A call whose arguments are computed: two locals are read out of the frame and
 // handed over in the registers the definition reads its parameters from, and the
 // definition reads them in a frame of its own. The library call inside the
@@ -721,6 +838,38 @@ fn test_and_and_or_do_not_evaluate_the_side_they_do_not_need() {
 	emitted := emit(program(body), Options{})
 	assert emitted.diagnostics.len == 0
 	assert run_image(emitted.bytes) == 1
+}
+
+// A tree with a frame produces the same bytes every time it is emitted, which is
+// what the layout being a sequence is for.
+fn test_a_tree_with_a_frame_produces_the_same_bytes() {
+	body := [
+		declaration('a', 'int', int_argument(1)),
+		if_statement(name_node('a'), [
+			assignment('a', binary_node('+', name_node('a'), int_argument(1))),
+		], []ast.Stmt{}),
+		while_statement(binary_node('<', name_node('a'), int_argument(4)), [
+			assignment('a', binary_node('+', name_node('a'), int_argument(1))),
+		]),
+		return_expression(name_node('a')),
+	]
+	unit := program(body)
+	first := emit(unit, Options{})
+	second := emit(unit, Options{})
+	assert first.diagnostics.len == 0
+	assert second.diagnostics.len == 0
+	assert first.bytes == second.bytes
+}
+
+// What the back end cannot emit it reports, once, with the place it was written,
+// and writes no image at all. These are the three shapes a body can reach: a
+// statement with no loop to leave, a local of a type that has no instruction,
+// and an operation on a pointer that would compute at the wrong width.
+fn test_break_outside_a_loop_is_one_located_diagnostic_and_no_bytes() {
+	emitted := emit(program([break_statement()]), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('break outside a loop')
+	assert emitted.bytes.len == 0
 }
 
 fn test_a_local_of_a_type_with_no_instruction_is_reported() {

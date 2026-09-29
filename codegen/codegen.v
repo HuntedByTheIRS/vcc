@@ -357,12 +357,19 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 			.assign {
 				e.emit_assign(stmt)!
 			}
-			.if_stmt, .while_stmt, .break_stmt, .continue_stmt {
-				// The tree has branches and loops in it, and the machine has the
-				// jumps to make them; this back end emits the statements that
-				// compute first, and says where one of these was written.
-				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an if, a while, a break or a continue is not emitted yet')
-				return error('a branch or a loop is not emitted yet')
+			.if_stmt {
+				if e.emit_if(stmt)! {
+					returned = true
+				}
+			}
+			.while_stmt {
+				e.emit_while(stmt)!
+			}
+			.break_stmt {
+				e.emit_jump_out(stmt, true)!
+			}
+			.continue_stmt {
+				e.emit_jump_out(stmt, false)!
 			}
 		}
 	}
@@ -419,6 +426,89 @@ fn (mut e Emitter) emit_expression_statement(stmt ast.Stmt) !void {
 	}
 	e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an expression statement is emitted when it is a call, and this one is not a call')
 	return error('not a call')
+}
+
+// emit_if writes a condition and its two branches. The condition is evaluated
+// and tested, the false case jumps past the true body, and when there is an else
+// the true body jumps past it at the end. Each body is a block of its own, so
+// what one of them declares is not visible in the other.
+//
+// The answer is whether every way out of the statement returns, which a function
+// needs to know before it puts a return of zero behind it: an if whose two
+// bodies both return has no way through.
+fn (mut e Emitter) emit_if(stmt ast.Stmt) !bool {
+	cond := stmt.cond or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an if without a condition')
+		return error('if without a condition')
+	}
+	e.emit_expr(cond)!
+	e.emit_test(stmt.line, stmt.col)!
+	else_label := e.label()
+	e.branch(.branch_zero, else_label, stmt.line, stmt.col)!
+	then_returned := e.emit_branch_body(stmt.then_body)!
+	if stmt.else_body.len > 0 {
+		end_label := e.label()
+		e.jump(end_label)!
+		e.place(else_label)
+		else_returned := e.emit_branch_body(stmt.else_body)!
+		e.place(end_label)
+		return then_returned && else_returned
+	}
+	e.place(else_label)
+	return false
+}
+
+// emit_while writes a loop: the condition at the top, the body, and a jump back
+// to the condition. A for loop arrives as this shape, with its step as the last
+// statement of the body, so there is nothing here that knows about one.
+//
+// A continue goes back to the condition, which is where a while goes round; a for
+// loop whose step is at the end of the body is the desugaring's business, and
+// this is the shape it desugared into.
+fn (mut e Emitter) emit_while(stmt ast.Stmt) !void {
+	cond := stmt.cond or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a while without a condition')
+		return error('while without a condition')
+	}
+	top := e.label()
+	end := e.label()
+	e.place(top)
+	e.emit_expr(cond)!
+	e.emit_test(stmt.line, stmt.col)!
+	e.branch(.branch_zero, end, stmt.line, stmt.col)!
+	// The body can leave by jumping to either end of the loop, so both labels
+	// are known while it is emitted.
+	e.loops << LoopLabels{
+		break_to:    end
+		continue_to: top
+	}
+	e.emit_branch_body(stmt.body)!
+	e.loops.pop()
+	e.jump(top)!
+	e.place(end)
+}
+
+// emit_branch_body writes the body of a branch or a loop as a block of its own,
+// which is what its braces were: the names it declares stay inside it.
+fn (mut e Emitter) emit_branch_body(body []ast.Stmt) !bool {
+	e.push_scope()
+	returned := e.emit_statements(body)!
+	e.pop_scope()
+	return returned
+}
+
+// emit_jump_out writes a break or a continue, which are the same jump to two
+// different labels of the innermost loop. A loop is what either is about, so one
+// outside a loop is reported rather than emitted as a jump to nowhere.
+fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
+	if e.loops.len == 0 {
+		word := if is_break { 'break' } else { 'continue' }
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${word} outside a loop')
+		return error('${word} outside a loop')
+	}
+	loop := e.loops[e.loops.len - 1]
+	name := if is_break { loop.break_to } else { loop.continue_to }
+	e.jump(name)!
 }
 
 // declare gives a name a slot and makes it visible in the block being emitted.
