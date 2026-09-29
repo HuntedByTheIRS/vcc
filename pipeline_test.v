@@ -199,3 +199,17 @@ fn test_a_continue_runs_the_step_of_a_for() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+fn test_a_parameter_survives_the_optimizer() {
+	// The same program with a level on, where every declaration is rebuilt on
+	// the way through: a parameter dropped in that rebuild is a parameter the
+	// emitter cannot find, and this is the level that makes it visible.
+	source := scratch('optparam.c')
+	binary := scratch('optparam')
+	program := 'int twice(int x) { return x + x; }\n' +
+		'int main() { int y = 0; twice(y); return y; }\n'
+	exit_status := compile_and_run([source, '-O2', '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

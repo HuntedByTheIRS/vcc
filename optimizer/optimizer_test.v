@@ -172,3 +172,15 @@ fn test_the_summary_names_what_runs() {
 	off := options(['-O2', '-fno-builtin-abs'])
 	assert off.summary() == '-O2: fold-builtins; builtins on; disabled abs'
 }
+
+fn test_a_declaration_keeps_its_parameters_through_the_rewrite() {
+	// The pass rebuilds every declaration it rewrites, and a parameter left out
+	// of the rebuild is one the back end cannot find: at -O1 and up a body that
+	// reads its own parameter was diagnosed as reading something that is not a
+	// local of this function, while the same program compiled at -O0.
+	optimized := optimize(source('int add(int a, int b) { return a + b; }'), options(['-O2']))
+	assert optimized.decls.len == 1
+	assert optimized.decls[0].params.len == 2
+	assert optimized.decls[0].params[0].name == 'a'
+	assert optimized.decls[0].params[1].name == 'b'
+}

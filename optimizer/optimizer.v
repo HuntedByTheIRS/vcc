@@ -262,12 +262,17 @@ pub fn (o Options) summary() string {
 fn fold_builtin_calls(unit ast.TranslationUnit, opts Options) ast.TranslationUnit {
 	mut decls := []ast.FnDecl{}
 	for decl in unit.decls {
+		// Every part of the declaration is carried over, and the parameters are
+		// the ones that are easy to forget: a declaration rebuilt without them
+		// is a function whose parameters the back end cannot find, which is a
+		// diagnostic at -O1 and up and nothing at all at -O0.
 		decls << ast.FnDecl{
-			name: decl.name
-			ret:  decl.ret
-			body: rewrite_body(decl.body, opts)
-			line: decl.line
-			col:  decl.col
+			name:   decl.name
+			ret:    decl.ret
+			params: decl.params
+			body:   rewrite_body(decl.body, opts)
+			line:   decl.line
+			col:    decl.col
 		}
 	}
 	return ast.TranslationUnit{
