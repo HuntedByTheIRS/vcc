@@ -905,10 +905,15 @@ fn test_an_escape_belongs_to_the_literal_it_was_written_in() {
 }
 
 fn test_a_pair_of_literals_c99_has_no_rule_for_is_named() {
-	// `u8`, `u` and `U` are not C99's, and gcc refuses a pair that mixes one of
-	// them with a different prefix in C11 mode as `unsupported non-standard
-	// concatenation of string literals`, so the pair is refused here by name
-	// rather than joined into a type the program did not ask for.
+	// `u8`, `u` and `U` are not C99's — in C99 mode there is no such literal at
+	// all — and under `-std=c11` the message `unsupported non-standard
+	// concatenation of string literals` is what gcc refuses by *name*, and it
+	// refuses only a pair of two different prefixes with it; it accepts the
+	// narrow-and-`u8` pair, and concatenates `"a" u"b"` into the prefixed type.
+	// This compiler has no C11 literal of those types and no place for the
+	// result, so it refuses every pair whose two sides are not two narrow-or-wide
+	// literals by name rather than joining them into a type the program did not
+	// ask for; joining the `u8` pair is C11 work.
 	narrow_and_u8 := diagnostics_of('char s[] = "a" u8"b";')
 	assert narrow_and_u8.len == 1
 	assert narrow_and_u8[0].contains('narrow string literal')

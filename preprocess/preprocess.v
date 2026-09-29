@@ -955,10 +955,24 @@ fn (mut p Processor) append(tok tokenize.Token, where string) {
 //
 // The prefix follows C99 6.4.5p4: a run of adjacent narrow and wide string
 // literals is concatenated, and the result is wide if any of them was wide.
-// Measured: `sizeof(L"a" "b")` is 12, which is three wide characters. A pair
-// with a `u8`, `u` or `U` on one side and something else on the other has no
-// C99 rule at all, and gcc refuses it in C11 mode as `unsupported non-standard
-// concatenation of string literals`, so it is refused here by name.
+// Measured: `sizeof(L"a" "b")` is 12, which is three wide characters.
+//
+// C99 has no `u8`, `u` or `U` literal at all — there is no pair to join, because
+// under `-std=c99` gcc reads `u8"b"` as a name and a stray literal — and what C11
+// says about a pair that mixes them is not one rule. Measured on gcc 16.2.1 under
+// `-std=c11`, one pair at a time: `"a" u8"b"` and `u8"a" "b"` are accepted,
+// because both sides are `char`; `"a" u"b"` and `"a" U"b"` are concatenated and
+// the result carries the prefixed type, so the pair fails on what it initializes
+// and not on the join; and `unsupported non-standard concatenation of string
+// literals` is what the pairs of two *different* prefixes draw — `L`+`u`,
+// `L`+`U`, `L`+`u8`, `u`+`U`, `u`+`u8`, `U`+`u8`, and the same pairs the other
+// way round. So gcc refuses exactly that list by that name, and accepts the
+// narrow-and-`u8` pair from C11 on.
+//
+// This compiler has no C11 literal of those types and no place for the result, so
+// it refuses every pair whose two sides are not both narrow or wide by name
+// rather than joining them into a type the program did not ask for. That is
+// wider than gcc's refusal by the `u8` pair, and joining it is C11 work.
 //
 // One join is not made, and the reason is the order of the phases. Each
 // literal's escapes are its own before the literals are joined, which is what
