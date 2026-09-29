@@ -185,6 +185,90 @@ fn test_character_constants_are_values() {
 	assert (expr as ast.IntLit).value == 65
 }
 
+fn test_a_declaration_inside_a_body_is_storage_in_the_frame() {
+	result := parsed('int main() { int x; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 2
+	assert body[0].kind == .var_decl
+	assert body[0].decl_name == 'x'
+	assert body[0].decl_type == 'int'
+	mut initialized := false
+	if _ := body[0].init {
+		initialized = true
+	}
+	assert !initialized
+	assert body[1].kind == .return_stmt
+}
+
+fn test_a_declaration_keeps_its_initializer() {
+	result := parsed('int main() { int x = 5; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	init := body[0].init or {
+		assert false
+		return
+	}
+	assert init is ast.IntLit
+	assert (init as ast.IntLit).value == 5
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	assert returned is ast.Ident
+	assert (returned as ast.Ident).name == 'x'
+}
+
+fn test_a_pointer_declaration_keeps_the_stars_and_the_literal() {
+	result := parsed('int main() { char *s = "text"; return 0; }')
+	assert result.diagnostics.len == 0
+	decl := result.unit.decls[0].body[0]
+	assert decl.kind == .var_decl
+	assert decl.decl_name == 's'
+	assert decl.decl_type == 'char *'
+	init := decl.init or {
+		assert false
+		return
+	}
+	assert init is ast.StrLit
+	assert (init as ast.StrLit).value == 'text'
+}
+
+// A statement names one object, so a declaration of two is two statements in
+// the tree and still one line of source.
+fn test_a_declaration_may_name_several_objects() {
+	result := parsed('int main() { int a = 1, b = 2; return a + b; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 3
+	assert body[0].kind == .var_decl
+	assert body[0].decl_name == 'a'
+	assert body[1].kind == .var_decl
+	assert body[1].decl_name == 'b'
+	assert body[2].kind == .return_stmt
+}
+
+// The type is the one a definition's return type may be, so a word the emitter
+// has no form for is reported where the declaration is written, and what comes
+// after the declaration still parses.
+fn test_a_local_declaration_with_an_unsupported_type_is_reported() {
+	result := parsed('int main() { unsigned int n = 0; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('unsupported type unsigned')
+	assert result.unit.decls[0].body.len == 1
+	assert result.unit.decls[0].body[0].kind == .return_stmt
+}
+
+// An array is a shape the tree has no node for, and the bound is a constant
+// expression this parser does not read. The declaration is reported and dropped
+// rather than half-kept.
+fn test_a_local_declaration_of_an_array_is_reported() {
+	result := parsed('int main() { char buf[10]; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('array declarations')
+	assert result.unit.decls[0].body.len == 1
+}
+
 fn test_an_unterminated_block_is_reported_once() {
 	result := parsed('int main() { return 1;')
 	assert result.diagnostics.len == 1
