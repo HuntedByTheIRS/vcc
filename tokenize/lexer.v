@@ -289,11 +289,25 @@ fn (mut l Lexer) lex_token() ?Token {
 	start_line := l.line
 	start_col := l.col
 	c := l.at()
-	if is_ident_start(c) {
+	if is_ident_start(c) || (c == `\\` && l.universal_name() != none) {
 		mut text := ''
-		for l.pos < l.src.len && is_ident_char(l.at()) {
-			text += l.at().ascii_str()
-			l.advance()
+		for l.pos < l.src.len {
+			if is_ident_char(l.at()) {
+				text += l.at().ascii_str()
+				l.advance()
+				continue
+			}
+			// A universal character name is a name for one character, and it
+			// is as much a part of an identifier as a letter is: `a\u00e9b` is
+			// one name. The token text is the name in the spelling gcc writes
+			// in a preprocessed stream, `\U` and eight hexadecimal digits, so
+			// the text is itself something C reads back as the same name.
+			name := l.universal_name() or { break }
+			l.check_universal_name(name, start_line, start_col)
+			text += canonical_name(name.value)
+			for _ in 0 .. name.width {
+				l.advance()
+			}
 		}
 		// L"x", u'x' and u8"x" are one literal, not an identifier and a string.
 		if l.pos < l.src.len && (l.at() == `"` || l.at() == `'`)
@@ -422,6 +436,116 @@ fn (mut l Lexer) lex_quoted(prefix string, start_line int, start_col int) ?Token
 	}
 }
 
+// UniversalName is a universal character name as it was written: `\uXXXX` or
+// `\UXXXXXXXX`. `value` is the character it names and `width` is how many
+// characters the spelling takes, which is what the lexer has to step over.
+struct UniversalName {
+	spelling string
+	value    u32
+	width    int
+}
+
+// universal_name reads the universal character name at the current position, or
+// answers none when what is there is not one. gcc reads a short or a
+// non-hexadecimal one as a stray backslash rather than as a name (`int \u00`
+// gives `stray '\' in program`), and so does this lexer: the backslash is then
+// an unexpected character, which is the same refusal in this compiler's words.
+fn (l Lexer) universal_name() ?UniversalName {
+	if l.at() != `\\` {
+		return none
+	}
+	kind := l.peek(1)
+	digits := match kind {
+		`u` { 4 }
+		`U` { 8 }
+		else { return none }
+	}
+	mut spelling := '\\' + kind.ascii_str()
+	mut value := u32(0)
+	for i in 0 .. digits {
+		c := l.peek(2 + i)
+		digit := hex_value(c) or { return none }
+		value = value * 16 + u32(digit)
+		spelling += c.ascii_str()
+	}
+	return UniversalName{
+		spelling: spelling
+		value:    value
+		width:    digits + 2
+	}
+}
+
+// check_universal_name reports a name that does not stand for something an
+// identifier can hold. The two messages are gcc 16.2.1's own, and so is the line
+// between them, measured one input at a time:
+//
+//   int \u0040 = 1;      universal character \u0040 is not valid in an identifier
+//   int \u0020 = 1;      the same
+//   int \U00110000 = 1;  universal character \U00110000 is not valid in an identifier
+//   int \U0010FFFF = 1;  the same
+//   int \U0000D800 = 1;  \U0000D800 is not a valid universal character
+//   int \U0000DFFF = 1;  the same
+//   int \UFFFFFFFE = 1;  \UFFFFFFFE is not a valid universal character
+//   int \UFFFFFFFF = 1;  the same
+//
+// So the first message is for a character an identifier cannot hold: everything
+// under A0 except the dollar, and everything past the last character C99
+// defines. The second is for a name that is not a character at all, which is
+// the surrogate range and the values past what the decimal conversion holds.
+// A name over A0 and inside the range is taken as it stands: gcc also refuses
+// the ones that are not letters (`\u00a1`, `\u00d7`), which would mean the
+// letter ranges of Annex D, and reading a legal name as an illegal one is the
+// worse defect of the two while this compiler has no such table.
+fn (mut l Lexer) check_universal_name(name UniversalName, line int, col int) {
+	if (name.value >= 0xD800 && name.value <= 0xDFFF) || name.value > 0x7FFFFFFF {
+		l.diagnostics << Diagnostic{
+			line: line
+			col:  col
+			msg:  '${name.spelling} is not a valid universal character'
+		}
+		return
+	}
+	if (name.value < 0xA0 && name.value != 0x24) || name.value > 0x10FFFF {
+		l.diagnostics << Diagnostic{
+			line: line
+			col:  col
+			msg:  'universal character ${name.spelling} is not valid in an identifier'
+		}
+	}
+}
+
+// canonical_name is a universal character name in the spelling this compiler
+// writes into a token, which is the one gcc writes into a preprocessed stream:
+// `\U` and eight lowercase hexadecimal digits. Measured: `gcc -std=c99 -E` over
+// `int \u00e9 = 1;` prints `int \U000000e9 = 1;` and over `int \U0001F600 = 1;`
+// prints `int \U0001f600 = 1;`. `-E` here prints the same spelling of the same
+// name, and the text is itself something C reads back as that name.
+fn canonical_name(value u32) string {
+	mut out := '\\U'
+	for shift in [28, 24, 20, 16, 12, 8, 4, 0] {
+		digit := u8((value >> shift) & u32(0xF))
+		out += if digit < 10 {
+			u8(digit + `0`).ascii_str()
+		} else {
+			u8(digit - 10 + `a`).ascii_str()
+		}
+	}
+	return out
+}
+
+fn hex_value(c u8) ?int {
+	if c >= `0` && c <= `9` {
+		return int(c - `0`)
+	}
+	if c >= `a` && c <= `f` {
+		return int(c - `a`) + 10
+	}
+	if c >= `A` && c <= `F` {
+		return int(c - `A`) + 10
+	}
+	return none
+}
+
 // at is the byte the lexer is about to read, after the phases have had it.
 fn (l Lexer) at() u8 {
 	byte, _, _ := translated(l.src, l.pos)
@@ -516,8 +640,26 @@ fn is_digit(c u8) bool {
 	return c >= `0` && c <= `9`
 }
 
+// is_ident_start is what may begin an identifier. `$` is a GNU extension and
+// gcc takes it in every mode (measured: `int $x = 0;` compiles under
+// `-std=c99 -pedantic-errors`), so it is one here. Every byte at or over 0x80 is
+// a name character too, which is what reads an identifier written in UTF-8.
+//
+// 5.2.4.1 asks an implementation to support 63 significant characters in an
+// internal identifier and 31 in an external one. Those are what has to be
+// significant, not what may be written: every character of a name is kept and
+// none of it is refused, so a name of any length is one token with all of it
+// significant, and two names that differ only past the sixty-third character
+// are two names here. That settles the decision the standard leaves open for
+// short external identifiers, which is whether they collapse across translation
+// units: they do not, because nothing in this tree truncates a name. The
+// emitter keys its labels by the name the program wrote (`codegen/codegen.v`
+// writes `e.program.labels[decl.name]`), and gcc is the same way, measured: two
+// functions whose names differ in their thirty-second character are two symbols
+// in its object file. Refusing a name this compiler can keep would be the worse
+// defect of the two.
 fn is_ident_start(c u8) bool {
-	return c == `_` || (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || c >= 0x80
+	return c == `_` || (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || c >= 0x80 || c == `$`
 }
 
 fn is_ident_char(c u8) bool {

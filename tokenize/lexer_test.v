@@ -128,7 +128,10 @@ fn test_an_unterminated_comment_is_reported() {
 }
 
 fn test_an_unexpected_character_is_reported() {
-	result := lex('int x = 1 $ 2;')
+	// `$` is not the example any more: it is an identifier character, since
+	// GNU C takes it and this compiler follows it. The byte that is nobody's is
+	// the one the message is tested with.
+	result := lex('int x = 1 @ 2;')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('unexpected character')
 	assert result.diagnostics[0].col == 11
@@ -188,11 +191,13 @@ fn tokens_of(source string) []string {
 	return out
 }
 
-// gcc_preprocessed is what gcc makes of a file with `-E`, read back as tokens.
-// The line markers gcc writes are not part of the program, so they are left
-// out. A machine without gcc returns none, and the test that called this says
-// so rather than passing quietly: what is being compared is two compilers.
-fn gcc_preprocessed(source string) ?[]string {
+// gcc_text is what gcc prints for a file with `-E`, with the line markers it
+// writes left out. Some of what the phases decide is a spelling rather than a
+// token, so the text itself is what has to be compared there: reading gcc's
+// output back with this lexer would agree with this compiler whatever it wrote.
+// A machine without gcc returns none, and the test that called this says so
+// rather than passing quietly, because what is being compared is two compilers.
+fn gcc_text(source string) ?string {
 	dir := os.join_path(os.temp_dir(), 'vcc-lexer-oracle-${os.getpid()}')
 	os.mkdir_all(dir) or { return none }
 	file := os.join_path(dir, 'phase-fixture.c')
@@ -201,11 +206,21 @@ fn gcc_preprocessed(source string) ?[]string {
 	if result.exit_code != 0 {
 		return none
 	}
-	mut out := []string{}
+	mut out := ''
 	for line in result.output.split_into_lines() {
 		if line.trim_space().starts_with('#') {
 			continue
 		}
+		out += line + '\n'
+	}
+	return out
+}
+
+// gcc_preprocessed is the same text read back as tokens.
+fn gcc_preprocessed(source string) ?[]string {
+	text := gcc_text(source) or { return none }
+	mut out := []string{}
+	for line in text.split_into_lines() {
 		out << tokens_of(line)
 	}
 	return out
@@ -317,4 +332,108 @@ fn test_a_spliced_continuation_of_a_hundred_thousand_lines_is_one_line() {
 	result := lex('int x = 1;\\\n'.repeat(100000) + 'int y;')
 	assert result.diagnostics.len == 0
 	assert result.tokens.len == 100000 * 5 + 3 + 1
+}
+
+fn test_a_dollar_is_an_identifier_character() {
+	// GNU C takes `$` in a name in every mode (measured: `int $x = 0;` compiles
+	// under `-std=c99 -pedantic-errors` with gcc 16.2.1), and this compiler
+	// follows it. That it is a GNU extension is the dialect table's business
+	// and not this file's: there is no mode here to ask.
+	assert texts('$x $ $y') == ['$x', '$', '$y', '']
+	assert texts('int a$b = 1;') == ['int', 'a$b', '=', '1', ';', '']
+}
+
+fn test_a_universal_character_name_is_part_of_an_identifier() {
+	// `\uXXXX` and `\UXXXXXXXX` name one character, and a name is as much a
+	// part of an identifier as a letter is: `a\u00e9b` is one token. The
+	// spelling in the token is `\U` and eight lowercase hexadecimal digits,
+	// which is what gcc writes in a preprocessed stream, so the text is
+	// something C reads back as the same name.
+	assert texts('int \\u00e9 = 1;') == ['int', '\\U000000e9', '=', '1', ';', '']
+	assert texts('int a\\u00e9b = 1;') == ['int', 'a\\U000000e9b', '=', '1', ';', '']
+	assert texts('int \\U0001F600 = 1;') == ['int', '\\U0001f600', '=', '1', ';', '']
+	// The dollar is the one character under A0 the standard lets a name name,
+	// and the one gcc takes.
+	assert texts('int \\u0024 = 1;') == ['int', '\\U00000024', '=', '1', ';', '']
+}
+
+fn test_a_universal_character_name_a_name_cannot_hold_is_reported() {
+	// The two messages are gcc's, measured: `int \u0040 = 1;` gives
+	// `universal character \u0040 is not valid in an identifier`, and
+	// `int \U00110000 = 1;` names the same construct with the same words.
+	small := lex('int \\u0040 = 1;')
+	assert small.diagnostics.len == 1
+	assert small.diagnostics[0].msg == 'universal character \\u0040 is not valid in an identifier'
+	assert small.diagnostics[0].col == 5
+	big := lex('int \\U00110000 = 1;')
+	assert big.diagnostics.len == 1
+	assert big.diagnostics[0].msg == 'universal character \\U00110000 is not valid in an identifier'
+	// A name over A0 is taken as it stands, including the ones gcc refuses
+	// because they are not letters: `\u00a1` and `\u00d7` are "not valid in an
+	// identifier" to gcc, and deciding that would mean the letter ranges of
+	// Annex D. The difference is a decision and not an oversight, so it is
+	// pinned here.
+	not_a_letter := lex('int \\u00a1 = 1;')
+	assert not_a_letter.diagnostics.len == 0
+	assert not_a_letter.tokens[1].text == '\\U000000a1'
+}
+
+fn test_a_universal_character_name_that_names_no_character_is_reported() {
+	// gcc: `\UFFFFFFFF is not a valid universal character`, and the surrogate
+	// range and a value past what the conversion holds are the same kind of
+	// thing: there is no character there to name.
+	assert lex('int \\UFFFFFFFF = 1;').diagnostics[0].msg == '\\UFFFFFFFF is not a valid universal character'
+	assert lex('int \\UFFFFFFFE = 1;').diagnostics[0].msg == '\\UFFFFFFFE is not a valid universal character'
+	assert lex('int \\U0000D800 = 1;').diagnostics[0].msg == '\\U0000D800 is not a valid universal character'
+	assert lex('int \\U0000DFFF = 1;').diagnostics[0].msg == '\\U0000DFFF is not a valid universal character'
+}
+
+fn test_a_backslash_that_is_not_a_universal_character_name_is_not_one() {
+	// Two digits short, and not hexadecimal: gcc reads the backslash as a stray
+	// one (`stray '\' in program`) rather than as a name, and this compiler says
+	// the same thing in its own words instead of inventing a name for it.
+	short := lex('int \\u00 = 1;')
+	assert short.diagnostics.len == 1
+	assert short.diagnostics[0].msg.contains('unexpected character')
+	assert short.diagnostics[0].col == 5
+	not_hex := lex('int \\uZZZZ = 1;')
+	assert not_hex.diagnostics.len == 1
+	assert not_hex.diagnostics[0].msg.contains('unexpected character')
+}
+
+fn test_an_identifier_past_the_significance_floor_is_kept_whole() {
+	// 5.2.4.1 asks for 63 significant characters in an internal identifier and
+	// 31 in an external one. Both are floors and not ceilings: a name over
+	// either is one token with every character of it, and two names that differ
+	// only past the floor stay two names, because nothing here truncates a
+	// name. That is the decision about short external identifiers: they do not
+	// collapse.
+	internal := 'a'.repeat(63)
+	kept := lex('int ${internal}left; int ${internal}right;')
+	assert kept.diagnostics.len == 0
+	assert kept.tokens[1].text == '${internal}left'
+	assert kept.tokens[4].text == '${internal}right'
+	assert kept.tokens[1].text != kept.tokens[4].text
+	external := 'e'.repeat(31)
+	other := lex('int ${external}left; int ${external}right;')
+	assert other.diagnostics.len == 0
+	assert other.tokens[1].text == '${external}left'
+	assert other.tokens[4].text == '${external}right'
+	assert other.tokens[1].text.len == 35
+}
+
+fn test_the_universal_character_name_spelling_is_gcc_spelling() {
+	// The spelling is the whole question here, so the comparison is with the
+	// text gcc printed and not only with tokens of it: reading that text back
+	// with this lexer would agree with this compiler whatever it wrote.
+	source := 'int \\u00e9 = 1;\nint a\\u00e9b = 1;\nint \\U0001F600 = 1;\nint $x = 1;\n'
+	text := gcc_text(source) or {
+		eprintln('gcc is not on this machine, so the universal character name comparison is skipped')
+		return
+	}
+	for token in tokens_of(source) {
+		assert text.contains(token)
+	}
+	expected := gcc_preprocessed(source) or { return }
+	assert expected == tokens_of(source)
 }
