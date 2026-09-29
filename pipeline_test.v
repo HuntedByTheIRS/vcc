@@ -560,6 +560,87 @@ fn test_a_small_object_and_a_top_level_object_are_handed_over_by_value() {
 	os.rm(binary) or {}
 }
 
+// An object of two eightbytes is handed over in two registers, one for each
+// eightbyte's class, and the object goes on the stack whole when either sequence has
+// no register left for it. Which registers they are is the same answer the callee
+// reaches, so a pair whose second eightbyte did not fit arrives in memory rather
+// than half in a register.
+fn test_an_object_of_two_eightbytes_is_handed_over_in_two_registers() {
+	source := scratch('pairregisters.c')
+	binary := scratch('pairregisters')
+	program := 'struct W { int a; int b; int c; };\nint f(struct W w) { return w.a * 100 + w.b * 10 + w.c; }\nint main(void) { struct W w; w.a = 1; w.b = 2; w.c = 3; return f(w); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 123
+	source_four := scratch('pairregistersfour.c')
+	binary_four := scratch('pairregistersfour')
+	program_four := 'struct W { int a; int b; int c; };\nint f(struct W u, struct W v, struct W w, struct W x) { return u.a + v.a * 2 + w.a * 4 + x.a * 8; }\nint main(void) { struct W u; struct W v; struct W w; struct W x; u.a = 1; v.a = 2; w.a = 3; x.a = 4; return f(u, v, w, x); }\n'
+	four_status := compile_and_run([source_four, '-o', binary_four], program_four)
+	assert four_status == 49
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	os.rm(source_four) or {}
+	os.rm(binary_four) or {}
+}
+
+// The class of each eightbyte decides which file carries it, and the two eightbytes
+// of one object may be carried by different files: a struct of two doubles is two
+// floating registers, a struct of a double and an int is one of each.
+fn test_two_eightbytes_are_carried_by_the_file_each_class_names() {
+	source := scratch('pairfloating.c')
+	binary := scratch('pairfloating')
+	program := 'struct T { double x; double y; };\ndouble f(struct T t) { return t.x * 10.0 + t.y; }\nint main(void) { struct T t; t.x = 2.0; t.y = 3.0; return f(t) * 100.0; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 252
+	source_mixed := scratch('pairmixed.c')
+	binary_mixed := scratch('pairmixed')
+	program_mixed := 'struct M { double d; int i; };\nint f(struct M m) { return m.i * 10 + (m.d > 1.0); }\nint main(void) { struct M m; m.d = 2.0; m.i = 3; return f(m); }\n'
+	mixed_status := compile_and_run([source_mixed, '-o', binary_mixed], program_mixed)
+	assert mixed_status == 31
+	source_hole := scratch('pairhole.c')
+	binary_hole := scratch('pairhole')
+	program_hole := 'struct H { char c; double d; };\nint f(struct H h) { return h.c * 10 + (h.d > 1.0); }\nint main(void) { struct H h; h.c = 2; h.d = 3.0; return f(h); }\n'
+	hole_status := compile_and_run([source_hole, '-o', binary_hole], program_hole)
+	assert hole_status == 21
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	os.rm(source_mixed) or {}
+	os.rm(binary_mixed) or {}
+	os.rm(source_hole) or {}
+	os.rm(binary_hole) or {}
+}
+
+// An object of two eightbytes whose registers have run out goes on the stack whole:
+// five ints leave one general register, which is not enough for an object that needs
+// two, and the callee finds it in memory. The second eightbyte is the one at the
+// higher address, which is why the caller pushes it first.
+fn test_an_object_of_two_eightbytes_goes_on_the_stack_when_a_register_ran_out() {
+	source := scratch('pairstack.c')
+	binary := scratch('pairstack')
+	program := 'struct W { int a; int b; int c; };\nint f(int p, int q, int r, int s, int t, struct W w) { return p + q + r + s + t + w.a * 10 + w.b; }\nint main(void) { struct W w; w.a = 4; w.b = 5; w.c = 6; return f(1, 1, 1, 1, 1, w); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 50
+	source_six := scratch('pairstacksix.c')
+	binary_six := scratch('pairstacksix')
+	program_six := 'struct W { int a; int b; int c; };\nint f(int p, int q, int r, int s, int t, int u, struct W w) { return w.a * 100 + w.b * 10 + w.c; }\nint main(void) { struct W w; w.a = 1; w.b = 2; w.c = 3; return f(0, 0, 0, 0, 0, 0, w); }\n'
+	six_status := compile_and_run([source_six, '-o', binary_six], program_six)
+	assert six_status == 123
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	os.rm(source_six) or {}
+	os.rm(binary_six) or {}
+}
+
+// An object of more than two eightbytes is a copy in memory, and it is refused where
+// it is written rather than handed over as two of them.
+fn test_an_object_of_more_than_two_eightbytes_is_refused_by_name() {
+	source := scratch('pairwide.c')
+	binary := scratch('pairwide')
+	program := 'struct B { double a; double b; double c; };\nint f(struct B x) { return x.a > 0.0; }\nint main(void) { struct B b; b.a = 1.0; return f(b); }\n'
+	result := compile([source, '-o', binary], program)
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('at most two')
+}
+
 // A function hands an object back as its bytes in the register the class names, so
 // the caller reads that register: assigning it into another object of the type is
 // the same eight bytes, and a struct of one double comes back where a double comes

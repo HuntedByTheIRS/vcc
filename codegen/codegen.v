@@ -568,16 +568,37 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// that many bytes: the value is copied into the slot rather than
 		// converted into it.
 		if param.class.bytes > 0 {
-			if param.class.bytes > e.target.word_size {
-				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes ${param.typ} by value, which is ${param.class.bytes} bytes, and this compiler hands over an aggregate of one eightbyte')
+			if param.class.count > 2 {
+				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes ${param.typ} by value, which is ${param.class.bytes} bytes or ${param.class.count} eightbytes, and this compiler hands over an aggregate of at most two')
 				return error('aggregate parameter too large')
-			}
-			if param.class.first_floating && param.class.bytes != e.target.word_size {
-				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes ${param.typ} by value, which is ${param.class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
-				return error('aggregate floating class width')
 			}
 			object := e.declare(param.name, param.typ, 0, param.class.bytes, param.line, param.col)!
 			stacked_at := 2 * e.target.word_size + stacked * e.target.word_size
+			if param.class.count == 2 {
+				// Two eightbytes: each arrives in a register of its own class,
+				// or both arrive as two words of the stack when either sequence
+				// had none left for the object, which is the same answer the
+				// caller reached.
+				placed := pair_places(e.target, param.class.first_floating, param.class.second_floating,
+					integers, doubles)
+				if placed.registers {
+					integers = placed.integers
+					doubles = placed.doubles
+					e.store_argument_eightbyte(object, 0, e.target.word_size,
+						param.class.first_floating, placed.first, param.line, param.col)!
+					e.store_argument_eightbyte(object, e.target.word_size,
+						param.class.bytes - e.target.word_size, param.class.second_floating,
+						placed.second, param.line, param.col)!
+					continue
+				}
+				e.load_stacked_eightbyte(object, 0, e.target.word_size, stacked_at, param.line,
+					param.col)!
+				e.load_stacked_eightbyte(object, e.target.word_size,
+					param.class.bytes - e.target.word_size, stacked_at + e.target.word_size,
+					param.line, param.col)!
+				stacked += 2
+				continue
+			}
 			if param.class.first_floating {
 				if register := e.target.float_arg_reg(doubles) {
 					e.store_double_register(object, register, param.line, param.col)!
@@ -2580,9 +2601,35 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		// a double does.
 		class := e.aggregate_argument(call, i)
 		if c := class {
-			if c.bytes > e.target.word_size {
-				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${i + 1} of the call to ${call.name} is an object of ${c.bytes} bytes, and this compiler hands over an aggregate of one eightbyte')
+			if c.count > 2 {
+				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${i + 1} of the call to ${call.name} is an object of ${c.bytes} bytes or ${c.count} eightbytes, and this compiler hands over an aggregate of at most two')
 				return error('aggregate argument too large')
+			}
+			if c.count == 2 {
+				// Two eightbytes: each takes a register of its own class, and
+				// the object goes on the stack whole when either one has none
+				// left, which is the answer pair_places gives both sides.
+				placed := pair_places(e.target, c.first_floating, c.second_floating,
+					integers, doubles)
+				if placed.registers {
+					places << ArgPlace{
+						floating:        c.first_floating
+						position:        placed.first
+						paired:          true
+						second_floating: c.second_floating
+						second_position: placed.second
+					}
+					integers = placed.integers
+					doubles = placed.doubles
+					continue
+				}
+				places << ArgPlace{
+					stack:    true
+					position: stacked
+					paired:   true
+				}
+				stacked += 2
+				continue
 			}
 		}
 		mut floating := e.argument_is_double(call, i, arg)
@@ -2625,6 +2672,13 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
+		if place.paired {
+			// An object of two eightbytes is not read into a slot at all: both
+			// of its eightbytes are read from the object itself, after the stack
+			// this call takes has been made, so that nothing disturbs the
+			// registers they went into.
+			continue
+		}
 		if class := e.aggregate_argument(call, i) {
 			// An object is handed over as its bytes: the address of the object
 			// is taken and the one eightbyte the convention puts in a register
@@ -2674,6 +2728,23 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			arg := call.args[i]
 			line := expr_line(arg)
 			col := expr_col(arg)
+			if place.paired {
+				// An object in memory goes on the stack in one piece: the second
+				// eightbyte is pushed first, because the stack grows down and the
+				// first eightbyte is the one the callee reads at the lower
+				// address.
+				e.address_of_object(arg, depth + i + 1)!
+				base := e.accumulator(line, col)!
+				low := e.remainder(line, col)!
+				e.append(e.target.load_indirect(base, low, e.target.word_size)!)
+				e.append(e.target.add_immediate(base, e.target.word_size))
+				high := e.scratch(line, col)!
+				e.append(e.target.load_indirect(base, high, e.target.word_size)!)
+				e.append(e.target.push_register(high))
+				e.append(e.target.push_register(low))
+				e.stack_pushed += 2 * width
+				continue
+			}
 			slot := e.value_slot(depth + i)
 			// A double in a slot is eight bytes of a value, and handing it over
 			// on the stack is moving those eight bytes: the bits are pushed
@@ -2694,6 +2765,25 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
+		if place.paired && !place.stack {
+			// The object's own bytes, read straight into the two argument
+			// registers: the second eightbyte is eight bytes further in, and the
+			// general file is handed only the bytes the object has left. An
+			// object whose two eightbytes did not both fit is on the stack and
+			// was pushed already, and reading a register for it would hand the
+			// object over twice and clobber the arguments beside it.
+			e.address_of_object(arg, depth + i + 1)!
+			base := e.accumulator(line, col)!
+			class := e.aggregate_argument(call, i) or {
+				e.diagnostics << problem(call.line, call.col, 'internal: an object handed over in two registers has no class in the signature of ${call.name}')
+				return error('no class')
+			}
+			e.load_argument_eightbyte(base, 0, e.target.word_size, place.floating,
+				place.position, line, col)!
+			e.load_argument_eightbyte(base, e.target.word_size, class.bytes - e.target.word_size,
+				place.second_floating, place.second_position, line, col)!
+			continue
+		}
 		slot := e.value_slot(depth + i)
 		if place.stack {
 			continue
@@ -2753,6 +2843,120 @@ struct ArgPlace {
 	// stack says the argument is handed over on the stack rather than in a
 	// register, which is what happens to the ones a sequence ran out for.
 	stack bool
+	// paired says the argument is an object of two eightbytes: the second one of
+	// them travels beside the first, in the register second_floating and
+	// second_position name, or as the stack word after it when stack is set.
+	paired          bool
+	second_floating bool
+	second_position int
+}
+
+// PairPlaces is where the two eightbytes of an object of two of them go, and it is
+// the one answer a caller and a callee both have to reach, because an object the
+// caller puts in a register and the callee expects in memory arrives as whatever
+// happened to be in the register.
+//
+// The convention places an object of two eightbytes in registers when both of them
+// have a register of their own class left, and in memory when either one does not:
+// the object is not split between the two. registers is false in that second case,
+// and then the object is two words on the stack, first eightbyte at the lower
+// address.
+struct PairPlaces {
+	first     int
+	second    int
+	integers  int
+	doubles   int
+	registers bool
+}
+
+fn pair_places(target backend.Target, first_floating bool, second_floating bool, integers int, doubles int) PairPlaces {
+	// How far each sequence moves for the first eightbyte, and for the second one
+	// on top of that: an object of two eightbytes takes a register per eightbyte
+	// from the sequence that eightbyte's class names, so two general eightbytes
+	// take two general registers and a mixed pair takes one of each.
+	first_integer := if first_floating { 0 } else { 1 }
+	first_double := if first_floating { 1 } else { 0 }
+	second_integer := first_integer + (if second_floating { 0 } else { 1 })
+	second_double := first_double + (if second_floating { 1 } else { 0 })
+	mut fits := true
+	if first_floating {
+		if target.float_arg_reg(doubles) == none {
+			fits = false
+		}
+	} else if target.arg_reg(integers) == none {
+		fits = false
+	}
+	if second_floating {
+		if target.float_arg_reg(doubles + first_double) == none {
+			fits = false
+		}
+	} else if target.arg_reg(integers + first_integer) == none {
+		fits = false
+	}
+	return PairPlaces{
+		first:     if first_floating { doubles } else { integers }
+		second:    if second_floating { doubles + first_double } else { integers + first_integer }
+		integers:  integers + second_integer
+		doubles:   doubles + second_double
+		registers: fits
+	}
+}
+
+// load_argument_eightbyte loads one eightbyte of an object into the argument register
+// its class names, reading from the object's address. The general file takes the bytes
+// themselves and only as many of them as the object has, so an object of twelve bytes
+// is not read past its end; the floating-point file takes a double, which is the eight
+// bytes an eightbyte of that class is.
+fn (mut e Emitter) load_argument_eightbyte(base backend.Register, offset int, width int, floating bool, position int, line int, col int) !void {
+	if offset > 0 {
+		e.append(e.target.add_immediate(base, offset))
+	}
+	if floating {
+		register := e.target.float_arg_reg(position) or {
+			e.diagnostics << problem(line, col, 'internal: the floating-point argument register an eightbyte is handed over in is not in the machine table')
+			return error('no floating argument register')
+		}
+		e.append(e.target.load_double_indirect(base, register)!)
+		return
+	}
+	register := e.target.arg_reg(position) or {
+		e.diagnostics << problem(line, col, 'internal: the general argument register an eightbyte is handed over in is not in the machine table')
+		return error('no argument register')
+	}
+	e.append(e.target.load_indirect(base, register, width)!)
+}
+
+// store_argument_eightbyte copies the eightbyte an argument register carries into a
+// parameter's storage at an offset: a register of the floating-point file carries the
+// bits of a double and one of the general file the bytes themselves, and either way
+// the slot holds the object's bytes. The store goes through the parameter's address
+// because the second eightbyte is stored eight bytes into it.
+fn (mut e Emitter) store_argument_eightbyte(object Slot, offset int, width int, floating bool, position int, line int, col int) !void {
+	base := e.frame_pointer(line, col)!
+	if floating {
+		register := e.target.float_arg_reg(position) or {
+			e.diagnostics << problem(line, col, 'internal: the floating-point argument register a parameter arrives in is not in the machine table')
+			return error('no floating argument register')
+		}
+		e.append(e.target.store_double_slot(base, i32(object.offset + offset), register)!)
+		return
+	}
+	register := e.target.arg_reg(position) or {
+		e.diagnostics << problem(line, col, 'internal: the general argument register a parameter arrives in is not in the machine table')
+		return error('no argument register')
+	}
+	e.append(e.target.store_slot(base, i32(object.offset + offset), register, width)!)
+}
+
+// load_stacked_eightbyte copies one eightbyte of an object that is in memory into a
+// parameter's storage. Both classes arrive the same way, because what is in memory is
+// the object's bytes: the bits of a double are those bytes, and the general file
+// carries only as many of them as the object has left.
+fn (mut e Emitter) load_stacked_eightbyte(object Slot, offset int, width int, at int, line int, col int) !void {
+	register := e.accumulator(line, col)!
+	base := e.frame_pointer(line, col)!
+	e.append(e.target.load_slot(base, at, register, e.target.word_size)!)
+	e.append(e.target.store_slot(base, i32(object.offset + offset), register, width)!)
 }
 
 // argument_is_double says whether an argument is handed over as a double. A
