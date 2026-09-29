@@ -76,6 +76,10 @@ mut:
 struct Slot {
 	offset int
 	width  int
+	// count is how many elements an array slot holds, and zero for a slot that
+	// holds one value. An array's slot is the address of its first element, and
+	// width is the width of one element of it.
+	count int
 }
 
 // LoopLabels are the two places a loop's body can leave by: where the loop ends,
@@ -305,7 +309,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// into the frame on the way in, so a parameter is read exactly the way a
 	// local is, and the register is free for the expression that follows.
 	for i, param in decl.params {
-		slot := e.declare(param.name, param.typ, param.line, param.col)!
+		slot := e.declare(param.name, param.typ, 0, param.line, param.col)!
 		register := e.target.arg_reg(i) or {
 			e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes more than ${i} parameters, and the machine passes only ${i} of them in registers')
 			return error('too many parameters')
@@ -399,15 +403,15 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 // storage and nothing else, which is what C says it is: the slot is there for
 // whatever the function writes into it next.
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
-	if stmt.decl_count > 0 {
-		// An array is storage with a size, and a frame slot is one value wide:
-		// reserving one for an array of sixteen would be a wrong program built
-		// out of a construct nobody agreed to hold.
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is an array of ${stmt.decl_count}, and an array is not a shape this back end reserves yet')
-		return error('array declaration')
-	}
-	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.line, stmt.col)!
+	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.line, stmt.col)!
 	init := stmt.init or { return }
+	if stmt.decl_count > 0 {
+		// An array is storage, and the elements of it are whatever the frame
+		// held: an initializer for one is a shape this back end does not copy
+		// yet, and writing one element of it would be a wrong program.
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is an array declared with an initializer, and an array of elements is not initialized here')
+		return error('array initializer')
+	}
 	e.emit_expr(init)!
 	e.store_value(slot, init, stmt.line, stmt.col)!
 }
@@ -416,23 +420,55 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 // The name has to be in scope: an assignment to a name that was never declared
 // has nowhere to go, and a guessed slot would be someone else's variable.
 fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
-	if stmt.index != none {
-		// A subscript writes through an address, which is a computation this
-		// back end does not do yet: writing to the array instead would be a
-		// wrong program rather than a missing one.
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an element of ${stmt.target} is written, and an element is not a place this back end writes to yet')
-		return error('array element')
+	expr := stmt.expr or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned without a value')
+		return error('assignment without a value')
+	}
+	if subscript := stmt.index {
+		return e.assign_element(stmt, subscript, expr)
 	}
 	target := e.lookup(stmt.target) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
 	}
-	expr := stmt.expr or {
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned without a value')
-		return error('assignment without a value')
-	}
 	e.emit_expr(expr)!
 	e.store_value(target, expr, stmt.line, stmt.col)!
+}
+
+// assign_element writes a value into one element of an array. The address of the
+// element is computed from the index and the array's place in the frame, parked
+// in a scratch slot while the value is computed, and the value is written
+// through it. The parking is what makes `a[i] = a[i] + 1` work: the value reads
+// the array again, and computing it would otherwise write over the register the
+// address was in.
+fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Expr) !void {
+	slot := e.lookup(stmt.target) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
+		return error('unknown assignment target')
+	}
+	if slot.count == 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an element of ${stmt.target} is written, and ${stmt.target} is not an array')
+		return error('not an array')
+	}
+	e.emit_expr_at(subscript, 0)!
+	base := e.frame_pointer(stmt.line, stmt.col)!
+	register := e.accumulator(stmt.line, stmt.col)!
+	e.append(e.target.address_of_element(base, register, slot.width, slot.offset, register)!)
+	address := e.value_slot(0)
+	e.store_accumulator(address, stmt.line, stmt.col)!
+	e.emit_expr_at(expr, 1)!
+	width := e.width_of(expr) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
+		return error('unknown width')
+	}
+	if width != slot.width && !(slot.width == 1 && width == 4) {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${slot.width}')
+		return error('width mismatch')
+	}
+	value := e.accumulator(stmt.line, stmt.col)!
+	address_register := e.scratch(stmt.line, stmt.col)!
+	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.store_indirect(address_register, value, slot.width)!)
 }
 
 fn (mut e Emitter) emit_expression_statement(stmt ast.Stmt) !void {
@@ -549,7 +585,12 @@ fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
 // a pointer is the machine's word. A type that is neither is reported where it
 // was written, because storing it at a width that happens to fit would make
 // every value it touches silently wrong.
-fn (mut e Emitter) declare(name string, written string, line int, col int) !Slot {
+//
+// A declaration with a count is an array: it takes a block of storage, one
+// element after another, and what the name is worth in an expression is the
+// address of the first of them. The block is rounded up to the machine's word
+// like every other slot, so no element straddles the end of it.
+fn (mut e Emitter) declare(name string, written string, count int, line int, col int) !Slot {
 	if e.scopes.len > 0 {
 		if name in e.scopes[e.scopes.len - 1] {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared twice in the same block')
@@ -557,12 +598,17 @@ fn (mut e Emitter) declare(name string, written string, line int, col int) !Slot
 		}
 	}
 	width := e.type_width(written) or {
-		e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints and pointers only')
+		e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints, chars and pointers only')
 		return error('unsupported type')
 	}
-	slot := e.reserve(width)
-	e.scopes[e.scopes.len - 1][name] = slot
-	return slot
+	slot := if count > 0 { e.reserve(count * width) } else { e.reserve(width) }
+	block := Slot{
+		offset: slot.offset
+		width:  width
+		count:  count
+	}
+	e.scopes[e.scopes.len - 1][name] = block
+	return block
 }
 
 // type_width is the width of a value of a type as the source wrote it. An int is
@@ -793,6 +839,15 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a constant and is not a local of this function')
 				return error('unknown name')
 			}
+			if slot.count > 0 {
+				// An array's name is worth the address of its first element: in
+				// an expression it is what a pointer is, which is what makes
+				// `puts(buf)` and `strlen(buf)` work with an array.
+				register := e.accumulator(expr.line, expr.col)!
+				base := e.frame_pointer(expr.line, expr.col)!
+				e.append(e.target.address_of_slot(base, slot.offset, register))
+				return
+			}
 			e.load_accumulator(slot, expr.line, expr.col)!
 		}
 		ast.StrLit {
@@ -826,12 +881,24 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.emit_call(expr, depth + 1)!
 		}
 		ast.Index {
-			// An element of an array is not implemented yet: the address of the
-			// element is a computation the back end has no instruction for so
-			// far, and reading the array's first slot would be a wrong value
-			// rather than a missing one.
-			e.diagnostics << problem(expr.line, expr.col, 'unsupported: the element ${expr.name}[...] is not implemented yet')
-			return error('array element')
+			// One element of an array: the address of the element, computed from
+			// the index scaled by the width of an element, and then the value
+			// read through it. The load is the same one a frame slot uses, so an
+			// element of a char array arrives as the int the language promotes
+			// it to.
+			slot := e.lookup(expr.name) or {
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a local of this function')
+				return error('unknown name')
+			}
+			if slot.count == 0 {
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${expr.name} is read, and ${expr.name} is not an array')
+				return error('not an array')
+			}
+			e.emit_expr_at(expr.index, depth + 1)!
+			base := e.frame_pointer(expr.line, expr.col)!
+			register := e.accumulator(expr.line, expr.col)!
+			e.append(e.target.address_of_element(base, register, slot.width, slot.offset, register)!)
+			e.append(e.target.load_indirect(register, register, slot.width)!)
 		}
 	}
 }
@@ -1029,10 +1096,13 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 		}
 		ast.Ident {
 			slot := e.lookup(expr.name) or { return none }
-			// A char in an expression is an int: the language promotes it, and
-			// the load that reads it is where that happens, so the width of the
-			// value is the width of the read rather than the width of the slot.
-			if slot.width == 1 {
+			// An array's name is the address of its first element, which is a
+			// pointer. A char in an expression is an int: the language promotes
+			// it, and the load that reads it is where that happens, so the width
+			// of the value is the width of the read rather than of the slot.
+			if slot.count > 0 {
+				e.target.word_size
+			} else if slot.width == 1 {
 				4
 			} else {
 				slot.width
@@ -1044,9 +1114,17 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			4
 		}
 		ast.Index {
-			// An element of an array is not a value this back end can size yet;
-			// the emitter reports one where it is written.
-			return none
+			// An element is the width of an element of the array it belongs to,
+			// with a char promoted to the int the load widens it to.
+			slot := e.lookup(expr.name) or { return none }
+			if slot.count == 0 {
+				return none
+			}
+			if slot.width == 1 {
+				4
+			} else {
+				slot.width
+			}
 		}
 		ast.Unary {
 			if expr.op == '!' {

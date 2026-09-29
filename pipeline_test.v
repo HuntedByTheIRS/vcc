@@ -258,3 +258,27 @@ fn test_a_char_local_and_a_char_parameter_run() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+fn test_an_array_holds_elements_that_are_read_back() {
+	source := scratch('array.c')
+	binary := scratch('array')
+	program := 'int main() { int a[4]; int i = 0;\n' +
+		' for (i = 0; i < 4; i = i + 1) { a[i] = i * i; }\n' +
+		' return a[0] + a[1] + a[2] + a[3] - 14; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_char_array_is_a_string_where_a_pointer_is_expected() {
+	source := scratch('chararray.c')
+	binary := scratch('chararray')
+	program := 'int puts(char *s);\n' +
+		'int main() { char buf[8]; buf[0] = 72; buf[1] = 105; buf[2] = 0;\n' +
+		' puts(buf); return buf[1] - 105; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

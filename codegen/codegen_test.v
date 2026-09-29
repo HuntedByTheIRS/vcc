@@ -1141,3 +1141,74 @@ fn test_a_char_parameter_keeps_its_value_and_its_sign() {
 	result := run_capturing(emitted.bytes)
 	assert result.exit_code == 0
 }
+
+// An array is a block of storage and its name is the address of the first
+// element, which is what a library function that takes a pointer reads: the bytes
+// written one at a time are the string that comes out of it.
+fn test_a_char_array_written_one_byte_at_a_time_is_a_string() {
+	body := [
+		ast.Stmt{
+			kind:       .var_decl
+			decl_name:  'buf'
+			decl_type:  'char'
+			decl_count: 8
+		},
+		ast.Stmt{
+			kind:   .assign
+			target: 'buf'
+			index:  int_argument(0)
+			expr:   int_argument(72)
+		},
+		ast.Stmt{
+			kind:   .assign
+			target: 'buf'
+			index:  int_argument(1)
+			expr:   int_argument(105)
+		},
+		ast.Stmt{
+			kind:   .assign
+			target: 'buf'
+			index:  int_argument(2)
+			expr:   int_argument(0)
+		},
+		call_statement('puts', [name_node('buf')]),
+		return_statement(0),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+	assert result.output.contains('Hi')
+}
+
+// An element is addressed as the frame plus the index scaled by the width of an
+// element, so an index that is not a constant is the same instruction: what one
+// element was written through, the other is read through.
+fn test_an_element_with_a_variable_index_is_the_element_it_reads() {
+	body := [
+		ast.Stmt{
+			kind:       .var_decl
+			decl_name:  'a'
+			decl_type:  'int'
+			decl_count: 4
+		},
+		declaration('i', 'int', int_argument(2)),
+		ast.Stmt{
+			kind:   .assign
+			target: 'a'
+			index:  name_node('i')
+			expr:   int_argument(30)
+		},
+		ast.Stmt{
+			kind: .return_stmt
+			expr: binary_node('-', ast.Expr(ast.Index{
+				name:  'a'
+				index: int_argument(2)
+			}), int_argument(30))
+		},
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+}

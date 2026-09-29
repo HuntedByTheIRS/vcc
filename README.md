@@ -92,7 +92,9 @@ The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
 `_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
 loader, which is what makes `puts` work without a linker. A frame holds ints,
 pointers and chars — a char is one byte in its slot and an int when it is read,
-which is where the language's promotion of it happens.
+which is where the language's promotion of it happens. An array is a block of
+that frame and its name is the address of its first element, so `puts(buf)`
+passes the bytes themselves.
 
 `optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
 spellings. What a level turns on today is one pass: a call whose value the
@@ -113,12 +115,12 @@ what a file is made of — `-MM` leaves the system headers out of it, `-MD` and
 names its target — `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
-Not implemented, in rough order of how much of the tree depends on it: storage
-beyond a byte and the machine's int and word (`double`, `struct`, arrays, and
-globals, which are not in the tree yet), more than six arguments because the
-machine passes only six in registers, a function definition that returns `void`,
-`switch`, taking the address of a local, object files and relocatable output, and
-V's own generated C. `ROADMAP.md` maps the order.
+Not implemented, in rough order of how much of the tree depends on it: `double`,
+`struct` and globals, which are not in the tree yet; more than six arguments
+because the machine passes only six in registers; a function definition that
+returns `void`; `switch`; taking the address of a local; an array with an
+initializer or more than one size; object files and relocatable output; and V's
+own generated C. `ROADMAP.md` maps the order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a
