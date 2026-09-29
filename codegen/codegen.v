@@ -193,6 +193,11 @@ fn fold_leaf(expr ast.Expr, depth int, mut diagnostics []tokenize.Diagnostic) !i
 				'unsupported: ${expr.name} is not a constant, and the stub folds constant expressions only')
 			return error('not a constant')
 		}
+		ast.StrLit {
+			diagnostics << problem(expr.line, expr.col,
+				'unsupported: a string literal is not a constant, and the stub folds constant expressions only')
+			return error('not a constant')
+		}
 		ast.Call {
 			diagnostics << problem(expr.line, expr.col,
 				'unsupported: the call to ${expr.name} cannot be folded; calls are not implemented')

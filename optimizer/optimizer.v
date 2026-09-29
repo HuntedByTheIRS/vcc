@@ -331,6 +331,9 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 		ast.Ident {
 			return expr
 		}
+		ast.StrLit {
+			return expr
+		}
 		ast.Binary {
 			return rewrite(expr, opts, depth + 1)
 		}

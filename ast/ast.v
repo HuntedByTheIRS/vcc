@@ -28,6 +28,9 @@ pub enum StmtKind {
 	return_stmt
 	block
 	empty
+	// expr_stmt is an expression evaluated for what it does and thrown away,
+	// which is what a call written as a statement is.
+	expr_stmt
 }
 
 pub struct Stmt {
@@ -45,7 +48,7 @@ pub:
 // Expr is one of the expression shapes the stub understands. A call is parsed
 // so that the diagnostic can say calls are not implemented yet, rather than the
 // parser failing on a token it did not expect.
-pub type Expr = Binary | Unary | IntLit | Ident | Call
+pub type Expr = Binary | Unary | IntLit | Ident | Call | StrLit
 
 pub struct IntLit {
 pub:
@@ -54,6 +57,17 @@ pub:
 	text string
 	line int
 	col  int
+}
+
+// StrLit is one string literal. value is the bytes it names with the escapes
+// resolved — what the program will actually read — and text is the literal as
+// written, quotes included, for diagnostics and for printing a tree.
+pub struct StrLit {
+pub:
+	value string
+	text  string
+	line  int
+	col   int
 }
 
 pub struct Ident {

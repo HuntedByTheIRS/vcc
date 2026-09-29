@@ -58,6 +58,9 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			.empty {
 				out << '${indent}empty statement at ${stmt.line}:${stmt.col}'
 			}
+			.expr_stmt {
+				out << '${indent}expression statement at ${stmt.line}:${stmt.col}'
+			}
 		}
 		if expr := stmt.expr {
 			dump_expression(expr, depth + 1, mut out)
@@ -124,6 +127,9 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			for arg in expr.args {
 				dump_expression(arg, depth + 1, mut out)
 			}
+		}
+		ast.StrLit {
+			out << '${indent}string ${expr.text} at ${expr.line}:${expr.col}'
 		}
 	}
 }
