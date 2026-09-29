@@ -71,12 +71,23 @@ fn test_a_width_the_description_does_not_carry_is_refused_rather_than_guessed() 
 	// A value every int holds still answers, because the standard settles it and
 	// no width is needed.
 	assert integer_constant_type('42', 42, measured.partial()) or { Type{} }.same(int_type())
-	// 2147483647 is past the range every int is required to have, so the widths
-	// decide it and the description has no answer: the refusal names the fact
-	// that is missing instead of guessing a type.
+	// 2147483647 and 0xffffffff are past the range every int is required to
+	// have, and the description carries the width of the four-byte integer the
+	// back end writes a constant at, so those answers come from it.
+	assert integer_constant_type('2147483647', 2147483647, measured.partial()) or {
+		Type{}
+	}.same(int_type())
+	assert integer_constant_type('0xffffffff', 4294967295, measured.partial()) or {
+		Type{}
+	}.same(unsigned_int_type())
+	assert integer_constant_type('4294967295u', 4294967295, measured.partial()) or {
+		Type{}
+	}.same(unsigned_int_type())
+	// 4294967296 needs a long, and the description carries no width for one, so
+	// the refusal names the fact that is missing instead of guessing a type.
 	mut named := false
-	refused := integer_constant_type('2147483647', 2147483647, measured.partial()) or {
-		named = err.msg().contains('widths') && err.msg().contains('int')
+	refused := integer_constant_type('4294967296', 4294967296, measured.partial()) or {
+		named = err.msg().contains('widths') && err.msg().contains('long')
 		Type{}
 	}
 	assert named

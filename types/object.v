@@ -244,21 +244,38 @@ pub:
 
 // from_target asks a target description for the object representation.
 //
-// One entry is a fact the description carries today: the width of the machine's
-// general registers, which is what `codegen` already reads out of `word_size` for
-// the width of a pointer and is the width of an address. Everything else the C
-// types need, the width and the alignment of each integer and floating kind, is
-// not in the description yet, so those kinds are named in `missing` and no number
-// stands in for them.
+// Two entries are facts about the machine, and both of them are measured rather
+// than read off the standard. The width and the alignment of a pointer are the
+// width of the machine's general registers, which is what `codegen` already
+// reads out of `word_size`. The width of an int and of an unsigned int is four
+// bytes, which is what the back end writes a constant at: measured on this
+// target with gcc 16.2.1, `sizeof(int)` and `sizeof(unsigned int)` are 4 with an
+// alignment of 4, and `codegen`'s own `type_width` answers the same four bytes
+// for `int`.
 //
-// A pointer's alignment is taken to be its width because the machine's registers
-// are the unit an address is held in, which is the reading measured on this
-// target: gcc 16.2.1 reports `void *` as 8 bytes and alignment 8.
+// Every other integer kind is left out, and the reason is the back end rather
+// than the machine: it has an instruction for a four-byte integer and no other,
+// so a constant whose value needs a wider type would be written as a different
+// number than the program asked for. Measured before this was true of the
+// description: `int main(void) { return 4294967295 > 2147483647; }` was read as
+// an int comparison and returned 0 where ISO C and gcc return 1. A question that
+// needs one of those widths is refused by name instead, which is the difference
+// between a compiler that does not know something and one that guesses. A
+// character constant is an int (6.4.4.4), so no rule here asks for a char's
+// width; the character types are added to the description with the kinds that
+// need them.
 pub fn from_target(target backend.Target) Description {
 	mut sizes := map[Kind]int{}
 	mut aligns := map[Kind]int{}
 	sizes[Kind.pointer] = target.word_size
 	aligns[Kind.pointer] = target.word_size
+	// The width every integer constant is written at, and the unsigned reading
+	// of the same four bytes: `4294967295U` is an unsigned int whose value the
+	// back end holds at that width.
+	sizes[Kind.int_] = 4
+	aligns[Kind.int_] = 4
+	sizes[Kind.unsigned_int] = 4
+	aligns[Kind.unsigned_int] = 4
 	mut missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in sizes {

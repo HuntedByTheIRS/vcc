@@ -12,9 +12,10 @@ import measured
 // description that did not carry them answers nothing rather than answering
 // something invented.
 //
-// The one number a target description does carry today is the width of the
-// machine's registers, and `test_the_description_carries_the_pointer_and_names`
-// checks that the description's pointer entry is what gcc measured.
+// The entries a target description does carry are the width of the machine's
+// registers and the width of the integer the back end writes a constant at, and
+// `test_the_description_carries_the_pointer_and_the_written_int` checks that both
+// of those are what gcc measured.
 
 fn size_of(t Type) int {
 	return measured.representation().size_of(t) or {
@@ -279,10 +280,13 @@ fn test_a_description_that_does_not_carry_a_kind_refuses_the_question() {
 	assert partial.layout(holder) == none
 }
 
-// backend answers one entry today and names the rest. This test is the interface
-// the plan assigns between types/ and backend/: the pointer width comes out of
-// the description, everything else has to be added to it.
-fn test_the_description_carries_the_pointer_and_names_what_it_does_not_carry() {
+// backend answers the width of a pointer and the width of the integer the back
+// end writes a constant at, and names the rest. This test is the interface the
+// plan assigns between types/ and backend/: the pointer width comes out of the
+// machine's own table, the integer width is the one the back end writes at, and
+// everything else has to be added to the description before a question that needs
+// it can be answered.
+fn test_the_description_carries_the_pointer_and_the_written_int() {
 	target := backend.host() or {
 		assert false
 		return
@@ -295,13 +299,35 @@ fn test_the_description_carries_the_pointer_and_names_what_it_does_not_carry() {
 	described_align := description.representation.align_of(pointer) or { -1 }
 	assert described_size == 8
 	assert described_align == 8
-	// Every scalar kind is named as missing, and an int has no size until the
-	// description carries one.
-	assert description.missing == basic_kinds()
-	assert description.representation.size_of(int_type()) == none
-	assert description.representation.size_of(long_double_type()) == none
+	// Measured the same way: int and unsigned int are 4 bytes with an alignment
+	// of 4, which is the width the back end writes every integer constant at.
+	described_int := description.representation.size_of(int_type()) or { -1 }
+	described_int_align := description.representation.align_of(int_type()) or { -1 }
+	assert described_int == 4
+	assert described_int_align == 4
+	assert description.representation.size_of(unsigned_int_type()) or { -1 } == 4
+	// Every other scalar kind is named as missing: the description carries no
+	// width for a long, a float or an aggregate, and a question that needs one
+	// is refused rather than answered with a number that would be a machine
+	// fact in the wrong module.
+	mut expected_missing := []Kind{}
+	for kind in basic_kinds() {
+		if kind != .int_ && kind != .unsigned_int {
+			expected_missing << kind
+		}
+	}
+	assert description.missing == expected_missing
+	assert !description.missing.contains(Kind.int_)
+	assert !description.missing.contains(Kind.unsigned_int)
 	assert !description.missing.contains(Kind.pointer)
-	// The description and the measured table agree about the one entry both of
-	// them carry.
+	assert description.representation.size_of(long_double_type()) == none
+	assert description.representation.size_of(long_type()) == none
+	// The description and the measured table agree about every entry both of
+	// them carry, which is what keeps the two numbers in the description from
+	// drifting away from what gcc says the target is.
 	assert measured.representation().size_of(pointer) or { -1 } == described_size
+	assert measured.representation().size_of(int_type()) or { -1 } == described_int
+	assert measured.representation().align_of(int_type()) or { -1 } == described_int_align
+	assert measured.representation().size_of(unsigned_int_type()) or { -1 } ==
+		description.representation.size_of(unsigned_int_type()) or { -1 }
 }

@@ -71,12 +71,15 @@ fn test_the_integer_promotions_of_6_3_1_1() {
 
 // Whether an int can hold every unsigned short value is the one promotion that is
 // a width question, so a description that does not carry the widths gets a
-// refusal that names what it would have to carry.
+// refusal that names what it would have to carry. The description carries the
+// width of an int, so what is missing here is the width of a short, and the
+// refusal names that one.
 fn test_the_unsigned_short_promotion_is_decided_by_the_widths() {
 	assert promote(unsigned_short_type()) == 'int'
 	refused := integer_promotion(unsigned_short_type(), measured.partial()) or {
 		assert err.msg().contains('unsigned short')
-		assert err.msg().contains('width of int')
+		assert err.msg().contains('width of short')
+		assert err.msg().contains('carries no short')
 		return
 	}
 	assert refused.kind == .unknown

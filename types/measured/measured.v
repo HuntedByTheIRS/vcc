@@ -70,7 +70,8 @@ pub fn representation() types.Representation {
 }
 
 // partial is the representation the compiler actually has while it reads: the
-// target description answers the width of a pointer and nothing else, so every
+// target description answers the width of a pointer and the width of the
+// four-byte integer the back end writes a constant at, and nothing else, so every
 // other kind is missing and the model refuses a question that needs a width
 // rather than guessing one. The tests use it to check that a refusal names the
 // fact it is missing.
