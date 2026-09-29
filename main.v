@@ -108,12 +108,25 @@ fn main() {
 	// the one place the whole program is in a single list. It reports the
 	// constructs the selected mode does not allow and refuses nothing; a message
 	// the flags promoted is the only way it can stop a compile.
+	//
+	// A run that only asks what the file is made of — -M without -MD, -E, -dM —
+	// has no compile for that promotion to stop, and its answer is the whole
+	// point of the command: a build that passes -pedantic-errors to a dependency
+	// step, which is harmless under gcc and was harmless here before these flags
+	// existed, must still get its rule. Measured, gcc's front end reports
+	// nothing at all in that run: `gcc -std=c99 -pedantic-errors -M` over a file
+	// its own `-fsyntax-only` refuses exits 0 and writes the rule, and `-E`
+	// writes the stream with empty stderr. So the policy is asked for a message
+	// and not for a verdict here, and what -Wpedantic asked for is still
+	// printed.
+	reading_only := (opts.deps && !opts.deps_compile) || opts.preprocess || opts.dump_macros
 	pedantic := standard.pedantic_messages(processed.tokens, standard.Question{
 		mode:         opts.dialect
 		extensions:   opts.vcc_extensions.enabled_names()
 		system_files: system_files(processed.files)
 	})
-	if report(path, pedantic, opts.warnings) > 0 {
+	policy := if reading_only { opts.warnings.without_promotion() } else { opts.warnings }
+	if report(path, pedantic, policy) > 0 {
 		exit(1)
 	}
 	// -M and -dM answer a question about the read and stop there: a build tool
