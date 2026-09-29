@@ -310,6 +310,13 @@ pub fn (t Target) store_slot(base arch.Register, disp i32, src arch.Register, wi
 // The address of a value in the frame, the address of one element of it, and the
 // moves through an address: what an array needs to be read and written one
 // element at a time.
+// add_immediate folds a constant into a register. A member of an object named by a
+// pointer is read at the pointer's value plus the member's offset, and this is the
+// addition that makes the two one address.
+pub fn (t Target) add_immediate(dst arch.Register, value i32) []u8 {
+	return arch.add_immediate(dst, value)
+}
+
 pub fn (t Target) address_of_slot(base arch.Register, disp i32, dst arch.Register) []u8 {
 	return arch.address_of_slot(base, disp, dst)
 }

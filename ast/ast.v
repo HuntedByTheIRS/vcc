@@ -183,14 +183,17 @@ pub:
 }
 
 // Field is one member of an aggregate object, written `x.a`. The object is named
-// rather than held as a nested expression, because a member of a named object is
-// the one place this tree reads and writes a field: a member of a member, of a
-// call's result, or of a pointer needs a general lvalue the tree does not have.
+// rather than held as a nested expression: a member is read from an object with a
+// place in the frame, and the name is that place.
 //
 // offset is where the member sits in the object, which is a fact about the
 // target's layout that the model answered when the member was read. spelling is
 // the member's type as this compiler writes a type, because what is read at that
 // offset is a value of the member's type and the back end sizes a load from that.
+//
+// A path of members is one Field and not a chain of them, because a member of a
+// member is inside the same object: `b.a.x` names `b` at the byte `x` sits at, with
+// the offsets added up on the way in.
 pub struct Field {
 pub:
 	name     string
@@ -198,8 +201,13 @@ pub:
 	offset   int
 	spelling string
 	typ      types.Type
-	line     int
-	col      int
+	// through_pointer says the name holds a pointer and not the object itself,
+	// which is what `->` writes: `p->a` reads the member from the object `p`
+	// points at, so the address comes from the pointer's value rather than from
+	// the frame.
+	through_pointer bool
+	line            int
+	col             int
 }
 
 pub struct IntLit {

@@ -811,6 +811,21 @@ pub fn align_stack() []u8 {
 // names: the values are four bytes wide, and an operation at eight bytes would
 // be an answer about a different value.
 
+// add_immediate folds a constant into a register, which is how a member's offset
+// joins the address the object was found at. The constant is written in four bytes
+// and the machine extends it, so every offset a layout produces is reachable.
+pub fn add_immediate(dst Register, value i32) []u8 {
+	mut out := []u8{cap: 7}
+	out << if dst.code >= 8 { u8(0x49) } else { u8(0x48) } // REX.W, with B when the code needs it
+	out << u8(0x81) // the group opcode, with /0 for add
+	out << u8(0xc0 | (dst.code & 0x07))
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
 pub fn add_reg32(dst Register, src Register) ![]u8 {
 	return rm_reg(0x01, dst, src)
 }
