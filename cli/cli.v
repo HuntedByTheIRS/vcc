@@ -62,10 +62,15 @@ pub mut:
 	dump_macros bool
 	// deps asks for the make-style rule listing what the file is made of.
 	// deps_system decides whether the headers that came from the standard
-	// directories are in it, and deps_file says where it is written.
-	deps        bool
-	deps_system bool
-	deps_file   string
+	// directories are in it, deps_file says where it is written, and
+	// deps_compile says the compile goes on afterwards — -M and -MM stop at
+	// the rule, -MD and -MMD write it and keep going. deps_target is the name
+	// the rule is for, when -MT or -MQ gives one.
+	deps         bool
+	deps_system  bool
+	deps_file    string
+	deps_compile bool
+	deps_target  string
 	// optimization is the -O level and the builtin settings, which belong to the
 	// optimizer: it owns the flag list for both, and this file only hands the
 	// arguments over.
@@ -185,6 +190,21 @@ pub fn parse(args []string) !Options {
 			opts.deps_system = true
 		} else if arg == '-MM' {
 			opts.deps = true
+		} else if arg == '-MD' {
+			// The spelling a build tool reaches for: the rule is written and
+			// the compile goes on, so one command line does both.
+			opts.deps = true
+			opts.deps_system = true
+			opts.deps_compile = true
+		} else if arg == '-MMD' {
+			opts.deps = true
+			opts.deps_compile = true
+		} else if arg == '-MT' || arg == '-MQ' {
+			// The target the rule is for, when the build knows a better name
+			// than the object file's. -MQ is gcc's spelling for the same
+			// question asked with make's quoting in mind; the quoting happens
+			// where the rule is written, for both of them.
+			opts.deps_target = cursor.value_of('')!
 		} else if arg == '-MF' {
 			opts.deps_file = cursor.value_of('')!
 		} else if arg.starts_with('-MF') {
@@ -227,7 +247,7 @@ pub fn parse(args []string) !Options {
 			opts.standard = arg[5..]
 		} else if arg == '-x' {
 			opts.input_type = cursor.value_of('')!
-		} else if arg == '-MF' || arg == '-B' {
+		} else if arg == '-B' {
 			opts.ignored << '${arg} ${cursor.value_of('')!}'
 		} else if optimization.accept_flag(arg) {
 			// The optimizer recognized it: -O levels and the -f(no-)builtin
@@ -306,7 +326,9 @@ pub fn usage(all bool) string {
 	out << '  -nostdinc     do not search the standard directories for headers'
 	out << '  -M -MM        print a make rule for what the file needs instead of'
 	out << '                compiling; -MM leaves the system headers out'
+	out << '  -MD -MMD      write that rule and compile as well'
 	out << '  -MF file      write that rule to a file instead of to the output'
+	out << '  -MT -MQ name  the name the rule is for, when it is not the object'
 	out << '  -include file read a file before the source, as if its lines were'
 	out << '                the first lines of it'
 	out << '  -imacros file read a file before the source for its macros only'

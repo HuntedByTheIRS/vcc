@@ -186,3 +186,17 @@ fn test_a_prelude_keeps_the_order_it_was_given_in() {
 	assert opts.preludes[1].path == 'pre.h'
 	assert opts.preludes[1].macros_only == false
 }
+
+fn test_the_dependency_modes_that_also_compile() {
+	full := parse(['-MD', 'x.c'])!
+	assert full.deps && full.deps_system && full.deps_compile
+	user := parse(['-MMD', 'x.c'])!
+	assert user.deps && !user.deps_system && user.deps_compile
+	stopping := parse(['-M', 'x.c'])!
+	assert stopping.deps && !stopping.deps_compile
+}
+
+fn test_the_rule_can_be_given_a_target() {
+	assert parse(['-MD', '-MT', 'build/seven.o', 'x.c'])!.deps_target == 'build/seven.o'
+	assert parse(['-MD', '-MQ', 'a b.o', 'x.c'])!.deps_target == 'a b.o'
+}

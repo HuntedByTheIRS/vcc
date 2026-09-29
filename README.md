@@ -66,7 +66,7 @@ It accepts the flags V passes to a C compiler (`-std=`, `-w`, `-fwrapv`, `-g`,
 plus `--version`, `-v`, `-h`, `-hh`, `-run`, `-E`, `-c`, `-o`, `-bench`,
 `-print-ast`, the `-O` and `-f(no-)builtin` flags below, and the preprocessor's
 own: `-D`, `-U`, `-nostdinc`, `-undef`, `-include`, `-imacros`, `-M`, `-MM`,
-`-MF` and `-dM`. See `vcc -hh` for the annotated list.
+`-MD`, `-MMD`, `-MF`, `-MT` and `-dM`. See `vcc -hh` for the annotated list.
 
 `preprocess/` is a C preprocessor and not a macro pass bolted onto the parser:
 `#include` with C's search order and `#include_next`, object-like and
@@ -104,8 +104,9 @@ a call at all, `-O0` leaves `abs(-7)` as a diagnostic while `-O2` turns it into
 without writing anything. It is how a parse or an optimization is read rather
 than guessed at. `-c` is the other half of that: it is accepted and says it
 cannot write an object file yet, which is M4. `-M` writes the make rule that says
-what a file is made of — `-MM` leaves the system headers out of it and `-MF` says
-where the rule goes — `-dM` prints what is defined when the read ends, and
+what a file is made of — `-MM` leaves the system headers out of it, `-MD` and
+`-MMD` write it and go on to compile, `-MF` says where the rule goes and `-MT`
+names its target — `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
 Not implemented, in rough order of how much of the tree depends on it: local

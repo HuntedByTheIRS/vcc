@@ -102,10 +102,15 @@ fn main() {
 	}
 	// -M and -dM answer a question about the read and stop there: a build tool
 	// asking what a file is made of does not want an object file at the end of
-	// its command line.
-	if opts.deps {
+	// its command line. -MD is the other half of that question — write the rule
+	// and compile as well — and its rule goes beside the object unless -MF
+	// says otherwise.
+	if opts.deps && !opts.deps_compile {
 		write_dependencies(path, processed.files, opts)
 		return
+	}
+	if opts.deps {
+		write_dependencies(path, processed.files, opts)
 	}
 	if opts.dump_macros {
 		print_macros(processed.macros)
@@ -237,35 +242,61 @@ fn write_dependencies(source string, files []preprocess.SourceFile, opts cli.Opt
 		}
 		words << escape_for_make(file.path)
 	}
-	rule := '${escape_for_make(dependency_target(source, opts.output))}: ${words.join(' ')}'
-	if opts.deps_file != '' {
-		os.write_file(opts.deps_file, '${rule}\n') or {
-			abort('cannot write ${opts.deps_file}: ${err.msg()}')
-			return
-		}
+	rule := '${escape_for_make(dependency_target(source, opts))}: ${words.join(' ')}'
+	to := dependency_file(source, opts)
+	if to == '' {
+		// With -M and no -MF the rule goes to the standard output, which is
+		// where a build that asked for it reads it from.
+		println(rule)
 		return
 	}
-	// The rule names what a build would have asked for, so the output path is
-	// the object file's; with -M and -MF there is none and the rule goes to the
-	// standard output, which is where a build reads it from.
-	println(rule)
+	os.write_file(to, '${rule}\n') or {
+		abort('cannot write ${to}: ${err.msg()}')
+		return
+	}
 }
 
-// dependency_target is what the rule is for: the file named with -o when there
-// is one, and the source with its last extension changed to .o otherwise, which
-// is the file make would look for.
-fn dependency_target(source string, output string) string {
-	if output != '' {
-		return output
+// dependency_file is where the rule is written: the file -MF names, or for
+// -MD and -MMD the object's name with .d in place of its extension, which is
+// where a build looks for it without being told. It is the object's name and not
+// the rule's target: -MT decides what the rule says and not what file it is said
+// in. With -M and no -MF there is no file and the rule is printed.
+fn dependency_file(source string, opts cli.Options) string {
+	if opts.deps_file != '' {
+		return opts.deps_file
+	}
+	if !opts.deps_compile {
+		return ''
+	}
+	base := object_name(source, opts)
+	dot := base.last_index('.') or { return '${base}.d' }
+	return '${base[..dot]}.d'
+}
+
+// dependency_target is what the rule is for: the name -MT or -MQ gives it, or
+// the object the compile writes, which is the file make would look for.
+fn dependency_target(source string, opts cli.Options) string {
+	if opts.deps_target != '' {
+		return opts.deps_target
+	}
+	return object_name(source, opts)
+}
+
+// object_name is the file the compile produces: the one named with -o when
+// there is one, and the source with its last extension changed to .o otherwise.
+fn object_name(source string, opts cli.Options) string {
+	if opts.output != '' {
+		return opts.output
 	}
 	dot := source.last_index('.') or { return '${source}.o' }
 	return '${source[..dot]}.o'
 }
 
-// escape_for_make writes a path so that make reads it as one word: a space ends
-// a word in a rule, so a file whose name has one has to say so.
+// escape_for_make writes a path so that make reads it as one word with nothing
+// read into it: a space ends a word, a `#` starts a comment and a `$` starts a
+// variable, so a file whose name has one has to say so.
 fn escape_for_make(path string) string {
-	return path.replace(' ', '\\ ')
+	return path.replace(' ', '\\ ').replace('#', '\\#').replace('$', '$$')
 }
 
 // print_macros is what `-dM` does: what is defined when the read ends, one
