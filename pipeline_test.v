@@ -663,6 +663,38 @@ fn test_an_object_is_handed_back_from_a_function() {
 	os.rm(binary_double) or {}
 }
 
+// An object of two eightbytes comes back in two registers too, and the caller writes
+// both of them into the object it is assigned to: the second register is the one
+// beside the first in its own file, so the two files are numbered apart.
+fn test_an_object_of_two_eightbytes_is_handed_back_in_two_registers() {
+	source := scratch('pairreturn.c')
+	binary := scratch('pairreturn')
+	program := 'struct W { int a; int b; int c; };\nstruct W f(void) { struct W w; w.a = 1; w.b = 2; w.c = 3; return w; }\nint main(void) { struct W w; w = f(); struct W v = f(); return w.a * 100 + w.b * 10 + w.c; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 123
+	source_global := scratch('pairreturnglobal.c')
+	binary_global := scratch('pairreturnglobal')
+	program_global := 'struct W { int a; int b; int c; };\nstruct W g;\nstruct W f(void) { struct W w; w.a = 4; w.b = 5; w.c = 6; return w; }\nint main(void) { g = f(); return g.a; }\n'
+	global_status := compile_and_run([source_global, '-o', binary_global], program_global)
+	assert global_status == 4
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	os.rm(source_global) or {}
+	os.rm(binary_global) or {}
+}
+
+// A pair of floating eightbytes comes back in the machine's two floating registers,
+// which is where a double and the double beside it come back.
+fn test_two_floating_eightbytes_are_handed_back_in_two_registers() {
+	source := scratch('pairreturnfloating.c')
+	binary := scratch('pairreturnfloating')
+	program := 'struct T { double x; double y; };\nstruct T f(void) { struct T t; t.x = 2.0; t.y = 0.5; return t; }\nint main(void) { struct T t = f(); return t.x * 100.0 + t.y * 10.0; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 205
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // One object is written into another by copying its bytes, which is what 6.5.16.1
 // gives an assignment between two objects of the same type: no conversion is
 // involved and neither object is read as a value.
@@ -676,16 +708,16 @@ fn test_one_object_is_copied_into_another() {
 	os.rm(binary) or {}
 }
 
-// The shapes past one eightbyte are named where they are reached rather than
-// compiled into something else: an object of twelve bytes is two registers or a
-// copy in memory, and this compiler hands back one eightbyte.
-fn test_an_object_of_more_than_one_eightbyte_is_refused_by_name() {
+// The shapes past two eightbytes are named where they are reached rather than
+// compiled into something else: an object of three eightbytes is a copy in memory
+// with a hidden pointer for a return, and this compiler hands back at most two.
+fn test_a_return_of_more_than_two_eightbytes_is_refused_by_name() {
 	source := scratch('byvaluewide.c')
 	binary := scratch('byvaluewide')
-	program := 'struct S { int a; int b; int c; };\nstruct S f(void) { struct S s; s.a = 1; return s; }\nint main(void) { struct S s = f(); return s.a; }\n'
+	program := 'struct S { double a; double b; double c; };\nstruct S f(void) { struct S s; s.a = 1.0; return s; }\nint main(void) { struct S s = f(); return s.a > 0.0; }\n'
 	result := compile([source, '-o', binary], program)
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('one eightbyte')
+	assert result.diagnostics[0].msg.contains('at most two')
 }
 
 // An object takes one register of its class like a value does, so a call whose

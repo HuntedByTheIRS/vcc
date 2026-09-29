@@ -528,10 +528,13 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// comes back in the register the class names rather than converted. An
 		// object larger than one eightbyte is two registers or a copy in memory,
 		// which is the half of this that this compiler does not hand over.
-		if decl.ret_class.bytes > e.target.word_size
-			|| (decl.ret_class.first_floating && decl.ret_class.bytes != e.target.word_size) {
-			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes, and this compiler hands back an aggregate of one eightbyte')
+		if decl.ret_class.count > 2 {
+			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes or ${decl.ret_class.count} eightbytes, and this compiler hands back an aggregate of at most two')
 			return error('aggregate return too large')
+		}
+		if decl.ret_class.first_floating && decl.ret_class.bytes < e.target.word_size {
+			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
+			return error('aggregate floating class width')
 		}
 	} else if decl.ret != 'int' && decl.ret != 'void' && decl.ret != 'double' {
 		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, double and void are implemented')
@@ -754,17 +757,25 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 	}
 	if e.return_class.bytes > 0 {
 		// The value is an object, and the machine hands it back as its bytes in
-		// the register the class names: the address of the object is taken and
-		// the eightbyte is read from it, which is the same eight bytes a caller
-		// reads out of that register.
+		// the registers the classes name: the address of the object is taken and
+		// each eightbyte is read from it, which is the same bytes a caller reads
+		// out of those registers. The first eightbyte of a pair goes into the
+		// register a value of its class comes back in and the second into the one
+		// after it, so the two files are numbered apart and both are read here.
+		if e.return_class.count == 2 {
+			// The second eightbyte is read first and eight bytes further in, and the
+			// object's address is taken again for the first one, because the address
+			// travels in the register the first general eightbyte goes back in.
+			e.address_of_object(expr, 0)!
+			base := e.accumulator(stmt.line, stmt.col)!
+			e.append(e.target.add_immediate(base, e.target.word_size))
+			e.load_return_eightbyte(base, 1, e.return_class.bytes - e.target.word_size,
+				e.return_class.second_floating, stmt.line, stmt.col)!
+		}
 		e.address_of_object(expr, 0)!
 		base := e.accumulator(stmt.line, stmt.col)!
-		if e.return_class.first_floating {
-			double_register := e.float_accumulator(stmt.line, stmt.col)!
-			e.append(e.target.load_double_indirect(base, double_register)!)
-		} else {
-			e.append(e.target.load_indirect(base, base, e.return_class.bytes)!)
-		}
+		e.load_return_eightbyte(base, 0, e.target.word_size, e.return_class.first_floating,
+			stmt.line, stmt.col)!
 		e.append(e.target.frame_epilogue())
 		return
 	}
@@ -890,22 +901,23 @@ fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object GlobalSlot) !void 
 fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line int, col int) !void {
 	if expr is ast.Call {
 		if class := e.return_classes[expr.name] {
-			// The value arrives in the register the class names, which is one
-			// eightbyte: an object larger than that is not handed back at all.
-			if width > e.target.word_size {
-				e.diagnostics << problem(line, col, 'unsupported: a call hands back an object of ${class.bytes} bytes and ${width} bytes are written into this object, and this compiler hands back an aggregate of one eightbyte')
-				return error('aggregate too large')
+			// The value arrives in the registers the classes name: one eightbyte,
+			// or two when the object is two of them, each in the register a value
+			// of its class comes back in.
+			if class.bytes != width {
+				e.diagnostics << problem(line, col, 'unsupported: the call to ${expr.name} hands back an object of ${class.bytes} bytes and ${width} bytes are written into this object')
+				return error('aggregate too small')
 			}
 			e.emit_expr_at(expr, 1)!
 			base := e.scratch(line, col)!
 			e.load_argument(address, base, e.target.word_size, line, col)!
-			if class.first_floating {
-				value := e.float_accumulator(line, col)!
-				e.append(e.target.store_double_indirect(base, value)!)
-				return
+			e.store_return_eightbyte(base, 0, e.target.word_size, class.first_floating, expr.line,
+				expr.col)!
+			if class.count == 2 {
+				e.append(e.target.add_immediate(base, e.target.word_size))
+				e.store_return_eightbyte(base, 1, class.bytes - e.target.word_size,
+					class.second_floating, expr.line, expr.col)!
 			}
-			value := e.accumulator(line, col)!
-			e.append(e.target.store_indirect(base, value, width)!)
 			return
 		}
 	}
@@ -2900,6 +2912,61 @@ fn pair_places(target backend.Target, first_floating bool, second_floating bool,
 		doubles:   doubles + second_double
 		registers: fits
 	}
+}
+
+// store_return_eightbyte writes one of the registers a call handed its object back
+// in into storage the caller has the address of: the same two files the return read
+// from, in the same order.
+fn (mut e Emitter) store_return_eightbyte(base backend.Register, offset int, width int, floating bool, line int, col int) !void {
+	// base is the address the eightbyte is stored at, which the caller has already
+	// advanced for the second one of a pair; offset only says which of the two it
+	// is, because that is the register the value came back in.
+	if floating {
+		value := if offset == 0 {
+			e.float_accumulator(line, col)!
+		} else {
+			e.target.float_scratch() or {
+				e.diagnostics << problem(line, col, 'internal: ${e.target.name} has no second floating register a second eightbyte comes back in')
+				return error('no second floating register')
+			}
+		}
+		e.append(e.target.store_double_indirect(base, value)!)
+		return
+	}
+	value := if offset == 0 { e.accumulator(line, col)! } else { e.remainder(line, col)! }
+	e.append(e.target.store_indirect(base, value, width)!)
+}
+
+// load_return_eightbyte loads one eightbyte of an object into the register a value
+// of its class is handed back in: a general one, the first of which is the result
+// register the machine's calls answer in, and a floating one, which is the machine's
+// first floating register or the one beside it. The number of the register is the
+// number of eightbytes of that class before this one, which is why the first read
+// here is always register zero and the second is register zero or one of the file its
+// class names.
+fn (mut e Emitter) load_return_eightbyte(base backend.Register, offset int, width int, floating bool, line int, col int) !void {
+	// base is the address the eightbyte is read from, which the caller has already
+	// advanced for the second one of a pair; offset only says which of the two it is,
+	// because that is the register the value goes back in. The general file's result
+	// registers are the accumulator and the one beside it, and the floating file's are
+	// its first register and the one beside it.
+	if floating {
+		register := if offset == 0 {
+			e.float_accumulator(line, col)!
+		} else {
+			e.target.float_scratch() or {
+				e.diagnostics << problem(line, col, 'internal: ${e.target.name} has no second floating register to hand a second eightbyte back in')
+				return error('no second floating register')
+			}
+		}
+		e.append(e.target.load_double_indirect(base, register)!)
+		return
+	}
+	// The first general eightbyte goes into the accumulator last, because the address
+	// it is read through is in the accumulator too and reading into the register one
+	// has just advanced would read from the value rather than from the object.
+	register := if offset == 0 { e.accumulator(line, col)! } else { e.remainder(line, col)! }
+	e.append(e.target.load_indirect(base, register, width)!)
 }
 
 // load_argument_eightbyte loads one eightbyte of an object into the argument register
