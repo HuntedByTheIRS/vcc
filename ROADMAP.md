@@ -19,10 +19,14 @@ read, as in `int x = add(y, 3) + 2;`. A `double` is a value the compiler has, in
 the floating-point registers and in the SysV sequence for arguments and returns,
 and a typedef is followed to the type it names wherever a type can be written.
 `-l` links the library it names, so `-lm` puts `libm.so.6` in the image's
-`DT_NEEDED` and `sqrt` resolves. What is left is `struct`, unions and enums, casts,
-the arguments past the sixth, and the rest of the list in the README. The command
-line already accepts the flag surface V uses, because getting that wrong later is
-a rewrite rather than a fix.
+`DT_NEEDED` and `sqrt` resolves. An object of a struct or union type inside a
+function is a block of the frame with its members at the offsets the layout gives
+them, and the arguments past the machine's registers are passed on the stack, so
+both walls that were standing at the end of M1 are down. What is left is `enum`,
+an aggregate at the top level or passed by value, a member through a pointer or of
+a member, casts, and the rest of the list in the README. The command line already
+accepts the flag surface V uses, because getting that wrong later is a rewrite
+rather than a fix.
 Everything else exits non-zero with a diagnostic naming the construct.
 
 The numbers, from `tools/bench.vsh` against the tcc V vendors: on a 20000-term
