@@ -96,7 +96,7 @@ fn test_a_level_turns_a_builtin_call_into_a_runnable_binary() {
 	source := scratch('abs.c')
 	binary := scratch('abs')
 	exit_status := compile_and_run(['-O2', source, '-o', binary],
-		'int main() { return abs(-7) - 6; }\n')
+		'int abs(int n);\nint main() { return abs(-7) - 6; }\n')
 	assert exit_status == 1
 	os.rm(source) or {}
 	os.rm(binary) or {}
@@ -109,7 +109,8 @@ fn test_without_a_level_the_call_is_made() {
 	// not whether it can be made.
 	source := scratch('abs_o0.c')
 	binary := scratch('abs_o0')
-	exit_status := compile_and_run([source, '-o', binary], 'int main() { return abs(-7) - 6; }\n')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int abs(int n);\nint main() { return abs(-7) - 6; }\n')
 	assert exit_status == 1
 	os.rm(source) or {}
 	os.rm(binary) or {}
@@ -119,7 +120,7 @@ fn test_fno_builtin_takes_the_fold_back_at_the_same_level() {
 	source := scratch('abs_nb.c')
 	binary := scratch('abs_nb')
 	exit_status := compile_and_run(['-O2', '-fno-builtin', source, '-o', binary],
-		'int main() { return abs(-7) - 6; }\n')
+		'int abs(int n);\nint main() { return abs(-7) - 6; }\n')
 	assert exit_status == 1
 	os.rm(source) or {}
 	os.rm(binary) or {}
@@ -164,7 +165,7 @@ fn test_a_long_chain_of_calls_is_rewritten() {
 	source := scratch('chain.c')
 	binary := scratch('chain')
 	exit_status := compile_and_run(['-O2', source, '-o', binary],
-		'int main() { return ${terms.join(' + ')}; }\n')
+		'int abs(int n);\nint main() { return ${terms.join(' + ')}; }\n')
 	assert exit_status == expected
 	os.rm(source) or {}
 	os.rm(binary) or {}

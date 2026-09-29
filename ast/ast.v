@@ -1,10 +1,26 @@
 module ast
 
+import types
+
 // The tree the parser produces and the back end consumes. It covers what the
 // stub compiles and nothing else: function definitions returning one of the
 // supported types, statements that are a return, a block or an empty statement,
 // and integer constant expressions. Every node carries the location it came
 // from, because a diagnostic without one is a diagnostic nobody can act on.
+//
+// Every node also carries the type clause 6 resolves it to, in the field named
+// `typ` on an expression and `resolved` on a declaration. It is filled while the
+// parser reads, by the type model in `types/`, and a node the model could not
+// answer for carries the zero value of `types.Type`, whose kind is `.unknown`:
+// the type of a name this compiler never resolved, or of a construct whose
+// milestone has not landed. An unresolved clause is not a claim that the type is
+// void.
+//
+// The spelling a declaration was written with is kept beside the clause it
+// resolved to, in `ret`, `typ`, `decl_type` and the type a global was declared
+// with. The emitter reads the spelling today, since moving it to the clause is
+// the back end milestone's work for the C99 types, and a reader comparing the two
+// can see where a declaration was read and where it was resolved.
 
 // TranslationUnit is one source file: its declarations, in the order they were
 // written.
@@ -20,8 +36,14 @@ pub:
 pub struct FnDecl {
 pub:
 	name string
-	// ret is the return type as written, `int` or `void`.
-	ret string
+	// ret is the return type as written, `int` or `void`, and ret_type is what
+	// the type model resolved that spelling to. resolved is the type the name
+	// denotes, which is the function type: the return type and the parameters
+	// together, since that is what a call is checked against and what a
+	// declaration of the same function has to agree with.
+	ret      string
+	ret_type types.Type
+	resolved types.Type
 	// params are the parameters, in the order they were written. They are
 	// storage in the frame of the call, so where they are written is where the
 	// back end has to put them.
@@ -32,31 +54,32 @@ pub:
 	col  int
 }
 
-// Param is one parameter of a function: its name and its type as written. The
-// Global is one object defined at the top level. The type is written the way a
-// declaration writes it, and a count above zero makes it an array of that many
-// elements. The initializer is a constant, which is what a file-scope definition
-// may have: none means the storage starts zeroed, which is what an object
-// without an initializer is defined to hold.
-pub struct Global {
-pub:
-	name  string
-	typ   string
-	count int
-	init  ?i64
-	line  int
-	col   int
-}
-
-// types this compiler knows are the ones its back end has instructions for, and
-// a type it does not know is diagnosed where it is written rather than guessed
-// at here.
+// Param is one parameter of a function: its name, the type as written, and what
+// the type model resolved that spelling to. A parameter is stored with the
+// adjustment 6.7.5.3 asks for, so one written as an array is a pointer here.
 pub struct Param {
 pub:
-	name string
-	typ  string
-	line int
-	col  int
+	name     string
+	typ      string
+	resolved types.Type
+	line     int
+	col      int
+}
+
+// Global is one object defined at the top level. The type is written the way a
+// declaration writes it and `resolved` is what it names, which a count above zero
+// makes an array of that many elements. The initializer is a constant, which is
+// what a file-scope definition may have: none means the storage starts zeroed,
+// which is what an object without an initializer is defined to hold.
+pub struct Global {
+pub:
+	name     string
+	typ      string
+	resolved types.Type
+	count    int
+	init     ?i64
+	line     int
+	col      int
 }
 
 pub enum StmtKind {
@@ -89,10 +112,12 @@ pub:
 	init ?Expr
 	// decl_name and decl_type are a declaration's name and type as written, and
 	// decl_count is how many elements an array declaration has: zero for a
-	// declaration of one value.
+	// declaration of one value. resolved is the type the declaration resolved
+	// to, and it is the zero value for a statement that declares nothing.
 	decl_name  string
 	decl_type  string
 	decl_count int
+	resolved   types.Type
 	// target is the name an assignment writes to, and index is the subscript of
 	// an array element: `a[i] = v` writes to an element, and a plain `x = v`
 	// has none.
@@ -121,6 +146,11 @@ pub:
 // Expr is one of the expression shapes the stub understands. A call is parsed
 // so that the diagnostic can say calls are not implemented yet, rather than the
 // parser failing on a token it did not expect.
+//
+// Every one of them carries `typ`, the type the expression has: a literal the
+// type of the constant, a name the type it was declared with, an operator the
+// type its operands convert to. Where the model has no answer the clause is
+// unresolved, and the printer says nothing about it.
 pub type Expr = Binary | Unary | IntLit | Ident | Call | StrLit | Index
 
 // Index is one element of an array, written `a[i]`: the name of the array and
@@ -132,6 +162,7 @@ pub struct Index {
 pub:
 	name  string
 	index Expr
+	typ   types.Type
 	line  int
 	col   int
 }
@@ -139,19 +170,24 @@ pub:
 pub struct IntLit {
 pub:
 	value i64
-	// text is the literal as written, kept for diagnostics.
+	// text is the literal as written, kept for diagnostics and for the type the
+	// constant has, which 6.4.4.1 decides from the spelling as much as from the
+	// value.
 	text string
+	typ  types.Type
 	line int
 	col  int
 }
 
 // StrLit is one string literal. value is the bytes it names with the escapes
 // resolved — what the program will actually read — and text is the literal as
-// written, quotes included, for diagnostics and for printing a tree.
+// written, quotes included, for diagnostics and for printing a tree. Its type is
+// an array of char, with room for the terminator the literal does not write.
 pub struct StrLit {
 pub:
 	value string
 	text  string
+	typ   types.Type
 	line  int
 	col   int
 }
@@ -159,6 +195,7 @@ pub:
 pub struct Ident {
 pub:
 	name string
+	typ  types.Type
 	line int
 	col  int
 }
@@ -167,6 +204,7 @@ pub struct Unary {
 pub:
 	op   string
 	expr Expr
+	typ  types.Type
 	line int
 	col  int
 }
@@ -176,6 +214,7 @@ pub:
 	op    string
 	left  Expr
 	right Expr
+	typ   types.Type
 	line  int
 	col   int
 }
@@ -184,6 +223,7 @@ pub struct Call {
 pub:
 	name string
 	args []Expr
+	typ  types.Type
 	line int
 	col  int
 }

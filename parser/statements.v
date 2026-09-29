@@ -2,6 +2,7 @@ module parser
 
 import ast
 import tokenize
+import types
 
 // This file reads the statements a function body is made of. A statement is
 // where the tree keeps code: a return leaves the function, an expression is
@@ -173,6 +174,7 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 	op := p.next() // = or a compound spelling
 	if op.text == '=' {
 		expr := p.parse_expression()!
+		p.check_assignment(p.assignment_target_type(t.text, index), expr, op)
 		return ast.Stmt{
 			kind:   .assign
 			target: t.text
@@ -183,6 +185,56 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 		}
 	}
 	return p.parse_compound_assignment(t, op, index)
+}
+
+// assignment_target_type is the type an assignment writes through: the type the
+// name was declared with, or the type of one element of it where the target is
+// written with a subscript. A name no declaration describes answers with the zero
+// type, and the constraint below takes no position on that: the name is what the
+// check at the end of the unit is for.
+fn (p Parser) assignment_target_type(name string, index ?ast.Expr) types.Type {
+	declared := p.resolve(name)
+	if index == none {
+		return declared
+	}
+	if declared.is_array() {
+		return declared.element() or { types.Type{} }
+	}
+	if declared.is_pointer() {
+		return declared.pointee() or { types.Type{} }
+	}
+	return types.Type{}
+}
+
+// check_assignment asks the constraint 6.5.16.1 for a value written into an
+// object, which is what an assignment is and what an initialization is: an
+// argument is checked the same way because 6.5.2.2 says it converts as if by
+// assignment, and `types.assignment_problem` is the one place those rules live.
+// The refusal is reported at the operator that writes, which is where a reader of
+// the source looks for it.
+//
+// The compound spellings are not asked here. `x += e` is read as `x = x + e` in
+// this tree, and the sum is a node built while the compound spelling is read,
+// which carries no clause at all: the question would have no operand to ask about.
+// A source whose target and value disagree that way is refused at the operators
+// it is written with, which is the next milestone's arithmetic.
+fn (mut p Parser) check_assignment(to types.Type, value ast.Expr, at tokenize.Token) {
+	problem := types.assignment_problem(to, p.value_type(value), is_null_constant(value)) or {
+		return
+	}
+	p.error_at(at, problem)
+}
+
+// check_initializer is the same question for the initializer of a declaration,
+// reported at the initializer as it was written, which is where gcc points at it:
+// measured, `int main(void) { int *p = 7; return 0; }` is `initialization of 'int
+// *' from 'int' makes pointer from integer without a cast` under `gcc -std=c99
+// -pedantic-errors`, where this compiler used to accept it.
+fn (mut p Parser) check_initializer(to types.Type, init ast.Expr) {
+	problem := types.assignment_problem(to, p.value_type(init), is_null_constant(init)) or {
+		return
+	}
+	p.error_span(init.line, init.col, problem)
 }
 
 // parse_compound_assignment reads `name += expr`, and `name -= expr` because it
@@ -437,6 +489,15 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 	}
 	if offender := unsupported_type_word(spec) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
+		// The declaration is refused for its type, and the name it declares is
+		// still a name this file declares: recording it here is what keeps a later
+		// use of it from being reported a second time as a name nothing declares,
+		// which would say something untrue about the source. A statement that
+		// reads it is still refused where it is written, by the type this
+		// declaration never gave it.
+		if p.peek().kind == .identifier {
+			p.declared[p.peek().text] = true
+		}
 		p.skip_declaration()
 		return stmts
 	}
@@ -476,6 +537,16 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			init = p.parse_expression() or {
 				p.skip_declaration()
 				return stmts
+			}
+			if initializer := init {
+				declared := p.declared_type(spec.clause, d)
+				// 6.7.8 lets an array of characters be initialized by a string
+				// literal, which is not an assignment and not this constraint's
+				// business: it is the one initializer that is not a value written
+				// into an object.
+				if !(declared.is_array() && initializer is ast.StrLit) {
+					p.check_initializer(declared, initializer)
+				}
 			}
 		}
 		stmts << ast.Stmt{

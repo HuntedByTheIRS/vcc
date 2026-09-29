@@ -1,8 +1,11 @@
 module cli
 
+import diagnostics
+import extensions
 import optimizer
 import os
 import preprocess
+import standard
 
 // version is the compiler's own version. The output of `--version` is not
 // decoration: V asks a C compiler for its version to decide what it is talking
@@ -35,21 +38,39 @@ pub mut:
 	defines      []string
 	undefines    []string
 	target       string
+	// standard is the -std= spelling as it was written, and dialect is the mode
+	// that spelling names. Both are kept because both are asked for: the
+	// spelling is what the command line, a verbose mode and a build compare
+	// against, and the mode is what the rest of the compiler asks its questions
+	// of. Every spelling has a mode, including the ones this compiler does not
+	// implement, because a spelling that stops a build is worse than a flag
+	// that does nothing.
 	standard     string
+	dialect      standard.Mode
 	input_type   string
 	compile_only bool
 	preprocess   bool
 	// print_ast stops after the tree is built: nothing is emitted and nothing is
 	// written, which is what `-print-ast` is for.
-	print_ast        bool
-	run              bool
-	show_help        bool
-	show_help_all    bool
-	show_version     bool
-	show_paths       bool
-	bench            bool
-	debug            bool
+	print_ast     bool
+	run           bool
+	show_help     bool
+	show_help_all bool
+	show_version  bool
+	show_paths    bool
+	bench         bool
+	debug         bool
+	// inhibit_warnings is -w: the one boolean a caller that only wants "was -w
+	// given" reads. What the warning flags actually decide is per class, which
+	// is what the policy below is for, and this is that policy's suppress.
 	inhibit_warnings bool
+	// warnings is the policy the diagnostic flags built, in the order they were
+	// written: which class is reported, which is promoted to an error, and which
+	// -w silenced. The classes are diagnostics.Class.
+	warnings diagnostics.Policy
+	// vcc_extensions is the extension state the -fvcc-exts= flags built. Every
+	// extension is off unless it was named, and none is honored yet.
+	vcc_extensions extensions.Options
 	// preludes are the -include and -imacros files in the order they were
 	// given: read before the source is, as if their lines were the first lines
 	// of it, with the flag deciding whether their text is kept.
@@ -167,8 +188,21 @@ pub fn parse(args []string) !Options {
 			opts.run = true
 		} else if arg == '-bench' {
 			opts.bench = true
-		} else if arg == '-w' {
-			opts.inhibit_warnings = true
+		} else if opts.warnings.accept(arg) {
+			// The diagnostic policy took the flag: -w, -W<class>, -Wno-<class>,
+			// -Werror=<class>, -pedantic or -pedantic-errors. A -W spelling about
+			// something this compiler does not classify is not taken here and
+			// falls through to the recorded list, which is what keeps -Wl,... and
+			// -Werror=implicit-function-declaration accepted by a compiler that
+			// acts on neither.
+			opts.inhibit_warnings = opts.warnings.suppress
+		} else if arg.starts_with('-fvcc-exts=') || arg.starts_with('-fno-vcc-exts=') {
+			// The family is read here and the registry is consulted in
+			// `extensions/`, because the spellings are a command-line fact and
+			// what a name means is not. A name this compiler does not have is an
+			// error, since naming an extension is a request; a name it has is
+			// recorded and changes nothing, because none is honored yet.
+			opts.vcc_extensions.accept(arg)!
 		} else if arg == '-g' {
 			opts.debug = true
 		} else if arg == '-o' {
@@ -241,10 +275,14 @@ pub fn parse(args []string) !Options {
 		} else if arg == '-std' {
 			// Both spellings, because V writes -std=gnu11 and a person writes
 			// -std gnu11, and a compiler that takes one of them turns the other
-			// into an input file named gnu11.
+			// into an input file named gnu11. The spelling is recorded as written
+			// and the mode is what it names; a spelling this compiler does not
+			// implement is a mode like any other and not a failure.
 			opts.standard = cursor.value_of('')!
+			opts.dialect = standard.from_spelling(opts.standard)
 		} else if arg.starts_with('-std=') {
 			opts.standard = arg[5..]
+			opts.dialect = standard.from_spelling(opts.standard)
 		} else if arg == '-x' {
 			opts.input_type = cursor.value_of('')!
 		} else if arg == '-B' {
@@ -316,9 +354,10 @@ pub fn usage(all bool) string {
 	out << '  -print-ast    print the tree the emitter would be given, then stop'
 	out << '  -bench        print per-phase timings'
 	out << '  -v --version  show the version'
-	out << '  -vv           show the version, the target, the recorded flags and the paths'
+	out << '  -vv           show the version, the target, the mode, the extensions, the'
+	out << '                recorded flags and the paths'
 	out << '  -h -hh        show this, show more help'
-	out << '  -w            do not print warnings'
+	out << '  -w            do not print warnings, whatever asked for them'
 	out << '  -O0 -O1 -O2 -O3 -Os   optimization level (default -O0)'
 	out << '  -fno-builtin  do not compute calls to library functions the compiler knows'
 	out << '  -fno-builtin-NAME  the same for one function'
@@ -334,15 +373,34 @@ pub fn usage(all bool) string {
 	out << '  -imacros file read a file before the source for its macros only'
 	out << '  -undef        do not define the macros that describe the target'
 	out << '  -dM           print the macros that are defined when the read ends'
-	out << '  -std=version  -std version   recorded; one subset is accepted either way'
+	out << '  -std=version  -std version   the dialect: c99 and gnu99 are the ones'
+	out << '                this compiler honors, and every other spelling is'
+	out << '                recorded and never refused'
+	out << '  -Wpedantic -pedantic      report what the selected dialect forbids'
+	out << '  -pedantic-errors          the same as an error (-Werror=pedantic too)'
+	out << '  -Wclass -Wno-class        one class of diagnostic, on or off: the last'
+	out << '                            mention of a class on the line is the one that'
+	out << '                            counts'
+	out << '  -fvcc-exts=NAME[,NAME]    turn vendor extensions on: a list of names,'
+	out << '  -fvcc-exts=all            or every name the compiler has'
+	out << '  -fno-vcc-exts=NAME        turn one off again'
+	out << '  -fno-vcc-exts=all         or all of them'
 	if all {
 		out << ''
 		out << 'What a replacement for the bundled tcc is asked to accept, and what'
 		out << 'this compiler does with each one today:'
-		out << '  -std=gnu11 -std c99   recorded in both spellings; the language accepted'
-		out << '                        today is one subset, so the flag changes nothing yet'
+		out << '  -std=gnu11 -std c99   both spellings; c99 and gnu99 select the dialect,'
+		out << '                        and every other spelling is recorded, never refused'
+		out << '  -Wpedantic -pedantic   the constructs the selected dialect does not allow,'
+		out << '                        in vcc words; -pedantic-errors and -Werror=pedantic'
+		out << '                        make them errors and -w or -Wno-pedantic silence them'
+		out << '  -fvcc-exts=NAME[,NAME]  turn the vendor extensions on, per name'
+		out << '  -fvcc-exts=all          or every name the compiler has'
+		out << '  -fno-vcc-exts=NAME      turn one off again'
+		out << '  -fno-vcc-exts=all       or all of them; nothing is honored yet, so a'
+		out << '                        name is recorded and changes no compile'
 		out << '  -fwrapv -fPIC -g       accepted and ignored'
-		out << '  -Werror=name          accepted and ignored'
+		out << '  -Werror=name          accepted and ignored, except the classes above'
 		out << '  -Btcc -Idir -Ldir     accepted; -I directories are searched for headers,'
 		out << '                        -L paths are recorded, -B is not used yet'
 		out << '  -bt25 -Wl,...         accepted and ignored, as a non-tcc compiler must'

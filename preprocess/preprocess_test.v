@@ -1,7 +1,9 @@
 module preprocess
 
 import os
+import standard
 import time
+import tokenize
 
 // The tests drive the preprocessor the way main.v does and read the stream it
 // produces, because that stream is the product: everything downstream is
@@ -24,6 +26,21 @@ fn diagnostics_of(source string) []string {
 		messages << diagnostic.msg
 	}
 	return messages
+}
+
+// processed_in is `processed` under a named dialect, which is the mode main.v
+// hands the preprocessor. It is what a test about the phases needs, because the
+// mode decides a phase's answer and nothing else about the read.
+fn processed_in(source string, mode standard.Mode) []string {
+	result := preprocess(source, 'test.c', Options{
+		dialect: mode
+	})
+	assert result.diagnostics.len == 0
+	mut texts := []string{}
+	for tok in result.tokens {
+		texts << tok.text
+	}
+	return texts
 }
 
 fn test_text_without_directives_comes_through_unchanged() {
@@ -374,27 +391,29 @@ fn test_an_unknown_directive_is_diagnosed_with_its_name() {
 }
 
 fn test_an_argument_is_expanded_even_when_it_names_the_macro_being_expanded() {
-	// tcc -E prints 1 for this file: the inner F is a use of F that is not
-	// inside F's own replacement, so it is replaced.
-	assert processed('#define F(x) x\nF(F(1))\n') == ['1']
+	// The inner F is a use of F that is not inside F's own replacement, so it is
+	// replaced, and what tcc makes of this file is what this makes of it. That
+	// comparison is made when the test runs: the answer that used to be written
+	// here was tcc's answer, read once and recorded.
+	source := '#define F(x) x\nF(F(1))\n'
+	expected := tcc_tokens(source) or {
+		eprintln('tcc is not on this machine, so the macro comparison is skipped')
+		return
+	}
+	assert processed(source) == expected
 }
 
 fn test_macros_that_call_each_other_in_turns_stop() {
-	// The same file through tcc -E prints A(A(A(1))): a name is left as it
-	// stands while that name is the one being expanded, and by the time the
-	// outer call comes back around the inner ones are that name.
-	assert processed('#define A(x) B(x)\n#define B(x) A(x)\nA(A(A(1)))\n') == [
-		'A',
-		'(',
-		'A',
-		'(',
-		'A',
-		'(',
-		'1',
-		')',
-		')',
-		')',
-	]
+	// A name is left as it stands while that name is the one being expanded, and
+	// by the time the outer call comes back around the inner ones are that name.
+	// The comparison with tcc is made when the test runs, not recorded from a
+	// reading of it.
+	source := '#define A(x) B(x)\n#define B(x) A(x)\nA(A(A(1)))\n'
+	expected := tcc_tokens(source) or {
+		eprintln('tcc is not on this machine, so the mutual recursion comparison is skipped')
+		return
+	}
+	assert processed(source) == expected
 }
 
 fn test_a_define_from_the_command_line_is_in_force_before_the_file_is_read() {
@@ -799,4 +818,148 @@ fn test_a_define_on_the_command_line_can_take_arguments() {
 	})
 	assert alone.diagnostics.len == 0
 	assert alone.tokens.map(it.text) == ['F']
+}
+
+// tcc_tokens is what tcc prints for a file with `-E`, read back as the text of
+// each token. The line markers tcc writes are not part of the program, and the
+// tokens are read with this compiler's lexer, so what is compared is two
+// preprocessors and not this one with a note about itself. A machine without
+// tcc returns none, and the test that called this says so rather than passing
+// quietly.
+fn tcc_tokens(source string) ?[]string {
+	dir := fixture_directory()
+	file := os.join_path(dir, 'oracle-fixture.c')
+	os.write_file(file, source) or { return none }
+	result := os.execute('tcc -E ${os.quoted_path(file)} 2>/dev/null')
+	if result.exit_code != 0 {
+		return none
+	}
+	mut out := []string{}
+	for line in result.output.split_into_lines() {
+		if line.trim_space().starts_with('#') {
+			continue
+		}
+		for tok in tokenize.lex(line).tokens {
+			if tok.kind != .eof {
+				out << tok.text
+			}
+		}
+	}
+	return out
+}
+
+// Phase 6 is over the token stream, and these are its tests: what the parser is
+// handed is one literal where the program wrote two, and never a value the
+// program did not write.
+
+fn test_two_adjacent_string_literals_are_one_literal() {
+	assert processed('char s[] = "a" "b";') == ['char', 's', '[', ']', '=', '"ab"', ';']
+	// Three in a row, and an empty one in the middle: the join is over the text
+	// between the quotes, whatever it is.
+	assert processed('char s[] = "a" "b" "c";') == ['char', 's', '[', ']', '=', '"abc"', ';']
+	assert processed('char s[] = "" "ab";') == ['char', 's', '[', ']', '=', '"ab"', ';']
+	// A literal a macro produced is adjacent to the one written beside it: the
+	// join is over the stream phase 4 left behind.
+	assert processed('#define S "a"\nchar s[] = S "b";') == ['char', 's', '[', ']', '=', '"ab"',
+		';']
+	// A token between two literals is a token between two literals.
+	assert processed('char s[] = "a" + "b";') == ['char', 's', '[', ']', '=', '"a"', '+', '"b"',
+		';']
+}
+
+fn test_the_joined_literal_is_the_literal_the_same_text_alone_would_be() {
+	// The invariant the join has to have, and one a test can fail on: the quotes
+	// are dropped once, no character of either half is lost, and the two halves
+	// are in the order they were written.
+	assert processed('char s[] = "a" "b";') == processed('char s[] = "ab";')
+	assert processed('char s[] = "x" "" "y";') == processed('char s[] = "xy";')
+	assert processed('char s[] = L"a" L"b";') == processed('char s[] = L"ab";')
+}
+
+fn test_a_wide_and_a_narrow_literal_join_into_a_wide_one() {
+	// C99 6.4.5p4: a run of adjacent narrow and wide string literals is
+	// concatenated, and the result is wide if any of them was wide. gcc agrees,
+	// and the measurement is the one that says what "wide" is here:
+	// `sizeof(L"a" "b")` is 12, which is three wide characters.
+	assert processed('char s[] = L"a" "b";') == ['char', 's', '[', ']', '=', 'L"ab"', ';']
+	assert processed('char s[] = "a" L"b";') == ['char', 's', '[', ']', '=', 'L"ab"', ';']
+}
+
+fn test_adjacency_is_the_token_stream_and_not_a_line() {
+	// A header read between two literals is not between them either, because
+	// what phase 6 sees is the tokens phase 4 left. gcc is the same: `char a[] =
+	// "a"` with a header holding `"b"` and a `;` after it is three bytes
+	// (measured).
+	dir := fixture_directory()
+	os.write_file(os.join_path(dir, 'adjacent.h'), '"b"\n') or { return }
+	source := 'char s[] = "a"\n${include_line('"adjacent.h"')};\n'
+	result := preprocess(source, os.join_path(dir, 'main.c'), Options{
+		include_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['char', 's', '[', ']', '=', '"ab"', ';']
+}
+
+fn test_an_escape_belongs_to_the_literal_it_was_written_in() {
+	// Each literal's escapes are interpreted before the literals are joined,
+	// which is what gcc does: `sizeof("\1" "2")` is three bytes and the first of
+	// them is 1, and `sizeof("\x41" "b")` is three whose first byte is 65 and
+	// second is 98. Joined as spellings they would be `"\12"` and `"\x41b"`,
+	// and `"\x41b"` is one byte of value 27 with a warning from gcc about a hex
+	// escape out of range, which is a value the program did not write. So that
+	// join is not made and the diagnostic names both literals.
+	assert processed('char s[] = "\\101" "b";') == ['char', 's', '[', ']', '=', '"\\101b"', ';']
+	assert processed('char s[] = "a" "\\nb";') == ['char', 's', '[', ']', '=', '"a\\nb"', ';']
+	by_hex := diagnostics_of('char s[] = "\\x41" "b";')
+	assert by_hex.len == 1
+	assert by_hex[0].contains('"\\x41"')
+	assert by_hex[0].contains('"b"')
+	by_octal := diagnostics_of('char s[] = "\\1" "2";')
+	assert by_octal.len == 1
+	assert by_octal[0].contains('"\\1"')
+	assert by_octal[0].contains('"2"')
+}
+
+fn test_a_pair_of_literals_c99_has_no_rule_for_is_named() {
+	// `u8`, `u` and `U` are not C99's — in C99 mode there is no such literal at
+	// all — and under `-std=c11` the message `unsupported non-standard
+	// concatenation of string literals` is what gcc refuses by *name*, and it
+	// refuses only a pair of two different prefixes with it; it accepts the
+	// narrow-and-`u8` pair, and concatenates `"a" u"b"` into the prefixed type.
+	// This compiler has no C11 literal of those types and no place for the
+	// result, so it refuses every pair whose two sides are not two narrow-or-wide
+	// literals by name rather than joining them into a type the program did not
+	// ask for; joining the `u8` pair is C11 work.
+	narrow_and_u8 := diagnostics_of('char s[] = "a" u8"b";')
+	assert narrow_and_u8.len == 1
+	assert narrow_and_u8[0].contains('narrow string literal')
+	assert narrow_and_u8[0].contains('u8 string literal')
+	wide_and_u := diagnostics_of('char s[] = L"a" u"b";')
+	assert wide_and_u.len == 1
+	assert wide_and_u[0].contains('wide string literal')
+	// Two of the same kind are one literal, which is what C11 says of them and
+	// harmless here: the literal reader refuses the type itself, by name.
+	assert processed('char s[] = u8"a" u8"b";') == ['char', 's', '[', ']', '=', 'u8"ab"', ';']
+}
+
+fn test_phase_one_is_gated_by_the_dialect_the_command_line_chose() {
+	// The mode reaches the lexer through the preprocessor, which is the wiring
+	// main.v does, and `standard.replaces_trigraphs` is the answer it is asked
+	// for. Finding C1-r1-1, with gcc 16.2.1 as the oracle, measured one mode at
+	// a time over `int main(void) { return 0 ??!??! 0; }`: the strict ISO modes
+	// up to C17 replace (rc 0, and the line is `0 || 0`), while a GNU dialect,
+	// C23 and no `-std` at all leave the bytes alone (rc 1,
+	// `trigraph '??!' ignored, use '-trigraphs' to enable`). `-std=nonsense` is
+	// recorded and refused nothing, so it takes the default dialect's answer,
+	// which is gnu-like.
+	assert processed_in('int x = 0 ??! 1;', .c99) == ['int', 'x', '=', '0', '|', '1', ';']
+	assert processed_in('int x = 0 ??! 1;', .c11) == ['int', 'x', '=', '0', '|', '1', ';']
+	for mode in [standard.Mode.none, .other, .c23, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23] {
+		assert processed_in('int x = 0 ??! 1;', mode) == ['int', 'x', '=', '0', '?', '?', '!',
+			'1', ';']
+	}
+	// A string literal is where a program would feel it: `"??!"` is one byte
+	// under `-std=c99` and the three bytes it wrote everywhere else.
+	assert processed_in('char *s = "??!";', .c99) == ['char', '*', 's', '=', '"|"', ';']
+	assert processed_in('char *s = "??!";', .gnu99) == ['char', '*', 's', '=', '"??!"', ';']
 }
