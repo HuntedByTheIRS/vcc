@@ -18,6 +18,9 @@ mut:
 	tokens      []tokenize.Token
 	pos         int
 	diagnostics []tokenize.Diagnostic
+	// depth counts open parentheses. The grammar recurses only through them, so
+	// this is the one number that keeps a hostile file from running the stack out.
+	depth int
 }
 
 // type_keywords is every word that can start a type in C, so the parser can say
@@ -28,6 +31,11 @@ const type_keywords = ['int', 'char', 'void', 'short', 'long', 'signed', 'unsign
 
 // supported_types are the ones the back end can emit today.
 const supported_types = ['int', 'char', 'void']
+
+// max_expression_depth bounds parenthesised nesting. The C standard asks a
+// compiler for 63 levels; past this the parser reports instead of following the
+// recursion until the stack runs out.
+const max_expression_depth = 200
 
 // parse reads a token stream into a translation unit.
 pub fn parse(tokens []tokenize.Token) Result {
@@ -55,6 +63,10 @@ fn (mut p Parser) parse_unit() ast.TranslationUnit {
 			p.skip_declaration()
 			continue
 		}
+		// Depth is per declaration: an error in one declaration leaves a count
+		// behind, and carrying it into the next one would report nesting that is
+		// not there.
+		p.depth = 0
 		decl := p.parse_declaration() or {
 			p.skip_declaration()
 			continue
@@ -366,7 +378,17 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .punct && t.text == '(' {
 		p.next()
-		inner := p.parse_expression()!
+		p.depth++
+		if p.depth > max_expression_depth {
+			p.error_at(t, 'expression is nested more than ${max_expression_depth} levels deep')
+			p.depth--
+			return error('expression nested too deeply')
+		}
+		inner := p.parse_expression() or {
+			p.depth--
+			return error('expression')
+		}
+		p.depth--
 		if !p.expect_punct(')') {
 			return error('unclosed parenthesis')
 		}

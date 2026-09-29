@@ -24,6 +24,21 @@ fn test_a_function_that_returns_a_constant() {
 	assert (expr as ast.IntLit).value == 42
 }
 
+// The parser recurses through parentheses, so a file with thousands of them used
+// to run the stack out. It is reported now, which is what a compiler owes a file
+// it cannot compile.
+fn test_deeply_nested_parentheses_are_reported() {
+	depth := max_expression_depth + 100
+	result := parsed('int main() { return ${'('.repeat(depth)}1${')'.repeat(depth)}; }')
+	mut reported := false
+	for diagnostic in result.diagnostics {
+		if diagnostic.msg.contains('nested more than') {
+			reported = true
+		}
+	}
+	assert reported
+}
+
 fn test_operators_bind_by_precedence() {
 	result := parsed('int main() { return 2 + 3 * 4; }')
 	assert result.diagnostics.len == 0
