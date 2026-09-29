@@ -196,3 +196,117 @@ pub fn (t Target) frame_epilogue() []u8 {
 pub fn (t Target) halt() []u8 {
 	return arch.halt()
 }
+
+// Register is the machine's register, named again here because it is what the
+// functions below hand back: a caller asks this module for a machine fact and
+// should not have to reach into the machine's own file to say what it received.
+pub type Register = arch.Register
+
+// The instructions a body with locals, branches and arithmetic needs, in the
+// same spirit as the ones above: each asks the machine's file for the encoding
+// rather than spelling one here.
+
+// frame_pointer is the register a local is found at, scratch is where the
+// right-hand value of an operation waits while the left-hand one sits in the
+// result register, and remainder is where a division leaves what did not divide
+// evenly.
+pub fn (t Target) frame_pointer() ?arch.Register {
+	return t.reg(arch.frame_pointer)
+}
+
+pub fn (t Target) scratch() ?arch.Register {
+	return t.reg(arch.scratch_reg)
+}
+
+pub fn (t Target) remainder() ?arch.Register {
+	return t.reg(arch.remainder_reg)
+}
+
+// frame_reserve opens the space a function's locals live in. The size is not
+// known while the body is written, so frame_immediate_offset is where it sits in
+// those bytes and the emitter fills it in once the body has been walked.
+pub fn (t Target) frame_reserve(size u32) []u8 {
+	return arch.frame_reserve(size)
+}
+
+pub fn (t Target) frame_immediate_offset() int {
+	return arch.frame_reserve_immediate
+}
+
+// load_slot and store_slot move a value between the frame and a register at the
+// width the value has: four bytes for an int, eight for a pointer.
+pub fn (t Target) load_slot(base arch.Register, disp i32, dst arch.Register, width int) ![]u8 {
+	return arch.load_slot(base, disp, dst, width)
+}
+
+pub fn (t Target) store_slot(base arch.Register, disp i32, src arch.Register, width int) ![]u8 {
+	return arch.store_slot(base, disp, src, width)
+}
+
+// The arithmetic, named for what the language asks for rather than for the
+// instruction that carries it.
+pub fn (t Target) add(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.add_reg32(dst, src)
+}
+
+pub fn (t Target) subtract(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.sub_reg32(dst, src)
+}
+
+pub fn (t Target) multiply(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.imul_reg32(dst, src)
+}
+
+// divide divides the result register by another one, signed. The sign goes over
+// the register above first, because that pair is what the machine divides: the
+// quotient is left in the result register and the remainder above it.
+pub fn (t Target) divide(src arch.Register) ![]u8 {
+	mut out := arch.cdq()
+	out << arch.idiv_reg32(src)!
+	return out
+}
+
+pub fn (t Target) negate(reg arch.Register) ![]u8 {
+	return arch.neg_reg32(reg)
+}
+
+pub fn (t Target) complement(reg arch.Register) ![]u8 {
+	return arch.not_reg32(reg)
+}
+
+// test and compare set the flags a branch reads. test compares a value with zero;
+// compare puts two values in the order the operator names and turns the flags
+// into a value of the language's int width, zero or one.
+pub fn (t Target) test(reg arch.Register) ![]u8 {
+	return arch.test_reg32(reg)
+}
+
+pub fn (t Target) compare(op string, left arch.Register, right arch.Register) ![]u8 {
+	condition := match op {
+		'==' { arch.Condition.equal }
+		'!=' { arch.Condition.not_equal }
+		'<' { arch.Condition.less }
+		'>' { arch.Condition.greater }
+		'<=' { arch.Condition.less_or_equal }
+		'>=' { arch.Condition.greater_or_equal }
+		else { return error('${t.name}: ${op} is not an order this machine has a condition for') }
+	}
+	mut out := arch.cmp_reg32(left, right)!
+	out << arch.set_condition(condition, left)!
+	out << arch.movzx_byte(left)!
+	return out
+}
+
+// The jumps. The distance is filled in once the whole function is laid out,
+// which is why a jump is written here with a displacement the emitter will patch.
+pub fn (t Target) jump(disp i32) []u8 {
+	return arch.jump_rel32(disp)
+}
+
+pub fn (t Target) jump_if_zero(disp i32) []u8 {
+	return arch.jump_zero_rel32(disp)
+}
+
+pub fn (t Target) jump_if_not_zero(disp i32) []u8 {
+	return arch.jump_nonzero_rel32(disp)
+}
