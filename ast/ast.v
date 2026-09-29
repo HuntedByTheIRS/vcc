@@ -18,8 +18,24 @@ pub:
 	name string
 	// ret is the return type as written, `int` or `void`.
 	ret string
+	// params are the parameters, in the order they were written. They are
+	// storage in the frame of the call, so where they are written is where the
+	// back end has to put them.
+	params []Param
 	// body is empty for a declaration without a definition.
 	body []Stmt
+	line int
+	col  int
+}
+
+// Param is one parameter of a function: its name and its type as written. The
+// types this compiler knows are the ones its back end has instructions for, and
+// a type it does not know is diagnosed where it is written rather than guessed
+// at here.
+pub struct Param {
+pub:
+	name string
+	typ  string
 	line int
 	col  int
 }
@@ -31,18 +47,43 @@ pub enum StmtKind {
 	// expr_stmt is an expression evaluated for what it does and thrown away,
 	// which is what a call written as a statement is.
 	expr_stmt
+	// var_decl is a declaration inside a function body: storage in the frame,
+	// and a statement that runs where it is written.
+	var_decl
+	// assign is `target = expr;`. C makes an assignment an expression; this
+	// tree makes it a statement of its own, because a statement is where it is
+	// written in almost every line of C there is.
+	assign
+	if_stmt
+	while_stmt
+	break_stmt
+	continue_stmt
 }
 
 pub struct Stmt {
 pub:
 	kind StmtKind
-	// expr is the returned expression of a return statement, and none for a
-	// bare `return;` or for a statement that returns nothing.
+	// expr is the returned expression of a return statement, none for a bare
+	// `return;` or for a statement that returns nothing.
 	expr ?Expr
-	// body is the contents of a block.
+	// init is the initializer of a declaration, and none for `int x;`.
+	init ?Expr
+	// decl_name and decl_type are a declaration's name and type as written.
+	decl_name string
+	decl_type string
+	// target is the name an assignment writes to.
+	target string
+	// cond is the controlling expression of an if or a while: what has to be
+	// true for the branch to be taken, or for the loop to go round again.
+	cond ?Expr
+	// body is the contents of a block, or the body of a loop.
 	body []Stmt
-	line int
-	col  int
+	// then_body and else_body are the two branches of an if. The else is empty
+	// when it was not written.
+	then_body []Stmt
+	else_body []Stmt
+	line      int
+	col       int
 }
 
 // Expr is one of the expression shapes the stub understands. A call is parsed

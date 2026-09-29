@@ -61,11 +61,39 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			.expr_stmt {
 				out << '${indent}expression statement at ${stmt.line}:${stmt.col}'
 			}
+			.var_decl {
+				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name} at ${stmt.line}:${stmt.col}'
+			}
+			.assign {
+				out << '${indent}assignment to ${stmt.target} at ${stmt.line}:${stmt.col}'
+			}
+			.if_stmt {
+				out << '${indent}if at ${stmt.line}:${stmt.col}'
+			}
+			.while_stmt {
+				out << '${indent}while at ${stmt.line}:${stmt.col}'
+			}
+			.break_stmt {
+				out << '${indent}break at ${stmt.line}:${stmt.col}'
+			}
+			.continue_stmt {
+				out << '${indent}continue at ${stmt.line}:${stmt.col}'
+			}
 		}
 		if expr := stmt.expr {
 			dump_expression(expr, depth + 1, mut out)
 		}
+		if init := stmt.init {
+			out << '${indent}initializer'
+			dump_expression(init, depth + 1, mut out)
+		}
+		if cond := stmt.cond {
+			out << '${indent}condition'
+			dump_expression(cond, depth + 1, mut out)
+		}
 		dump_statements(stmt.body, depth + 1, mut out)
+		dump_statements(stmt.then_body, depth + 1, mut out)
+		dump_statements(stmt.else_body, depth + 1, mut out)
 	}
 }
 

@@ -236,6 +236,12 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 			.expr_stmt {
 				e.emit_expression_statement(stmt)!
 			}
+			.var_decl, .assign, .if_stmt, .while_stmt, .break_stmt, .continue_stmt {
+				// The tree has the shape of a function body that keeps its
+				// values in variables; this back end is still folding constants
+				// only, and saying so where it was written is the honest answer.
+				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a function body with variables, branches or loops is not emitted yet')
+			}
 		}
 	}
 	return returned

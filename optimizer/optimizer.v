@@ -278,16 +278,35 @@ fn fold_builtin_calls(unit ast.TranslationUnit, opts Options) ast.TranslationUni
 fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 	mut out := []ast.Stmt{}
 	for stmt in body {
+		// Every expression a statement carries is rewritten, and the
+		// statements it carries are rewritten in turn. A statement is passed on
+		// whole: a field that is not written here is a field that would be lost
+		// on the way to the back end.
 		mut expr := ?ast.Expr(none)
 		if value := stmt.expr {
 			expr = rewrite(value, opts, 0)
 		}
+		mut init := ?ast.Expr(none)
+		if value := stmt.init {
+			init = rewrite(value, opts, 0)
+		}
+		mut cond := ?ast.Expr(none)
+		if value := stmt.cond {
+			cond = rewrite(value, opts, 0)
+		}
 		out << ast.Stmt{
-			kind: stmt.kind
-			expr: expr
-			body: rewrite_body(stmt.body, opts)
-			line: stmt.line
-			col:  stmt.col
+			kind:      stmt.kind
+			expr:      expr
+			init:      init
+			decl_name: stmt.decl_name
+			decl_type: stmt.decl_type
+			target:    stmt.target
+			cond:      cond
+			body:      rewrite_body(stmt.body, opts)
+			then_body: rewrite_body(stmt.then_body, opts)
+			else_body: rewrite_body(stmt.else_body, opts)
+			line:      stmt.line
+			col:       stmt.col
 		}
 	}
 	return out
