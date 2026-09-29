@@ -13,7 +13,7 @@ opinion the author did not already have a chance to see.
 v run tools/gate.vsh
 ```
 
-Five steps, each reporting on its own line, exit status zero only when all pass:
+Six steps, each reporting on its own line, exit status zero only when all pass:
 
 - **formatting** — `v fmt -verify .`
 - **pure V** — no C sources in the tree, and no `#include`, `#flag`, or `C.`
@@ -21,6 +21,8 @@ Five steps, each reporting on its own line, exit status zero only when all pass:
 - **build** — `v -o <temp> .`
 - **tests** — `v test .`
 - **documents** — every relative link between the markdown files resolves
+- **workflows** — the files under `.github/workflows` pin the same V commit,
+  and every action is pinned to a version rather than a branch that moves
 
 The pure-V step is the machine-checked half of the first constraint. It cannot
 prove the compiler is written in V, only that it has not started importing C.
@@ -57,5 +59,21 @@ workload that matters.
   compile V's output, which is M3's problem and not a tooling problem.
 - A phase-by-phase profile. `./vcc -bench` reports microseconds per phase and the
   harness prints them, but there is no history of those numbers across commits.
-- CI wiring. The gate is written to be CI-ready and runs locally today; the
-  workflows under `.github/` do not call it yet.
+- A speed gate. `.github/workflows/ci.yml` runs the harness and writes the
+  numbers into the run summary,
+  but nothing fails on them yet: a shared runner's wall time is not a budget to
+  hold a pull request to, and the workload that decides this project is the V
+  self-build, which no milestone can run yet. The gate appears when that number
+  exists (ROADMAP M6).
+
+## What CI does with them
+
+`.github/workflows/ci.yml` builds V from source at a pinned commit, runs
+`gate.vsh`, then runs the benchmark and writes the numbers into the run summary.
+A second job builds V master and runs the build and the tests without calling it
+a failure: master is not the version this tree promises to build with, and
+finding out early is cheaper than finding out from a bump.
+
+`.github/workflows/release.yml` runs on a `v*` tag: the gate, a check that the
+version inside the compiler matches the tag, a compiled program that is run, and
+only then the release with the binary and its checksum attached.

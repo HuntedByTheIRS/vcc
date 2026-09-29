@@ -22,6 +22,7 @@ fn main() {
 	report('build', check_build(root), mut failures)
 	report('tests', check_tests(root), mut failures)
 	report('documents', check_documents(root), mut failures)
+	report('workflows', check_workflows(root), mut failures)
 	if failures.len > 0 {
 		eprintln('')
 		eprintln('gate: ${failures.len} step(s) failed: ${failures.join(', ')}')
@@ -125,6 +126,78 @@ fn check_tests(root string) []string {
 		problems << 'v test failed: ${result.output.trim_space()}'
 	}
 	return problems
+}
+
+// check_workflows reads the CI configuration for the two things the files cannot
+// check about themselves: every workflow pins the same V commit, and every action
+// is pinned to a version rather than to a branch that moves under it.
+//
+// Two workflows that pin different V commits would be testing two compilers and
+// calling it one CI, and the failure would look like flakiness rather than like
+// the disagreement it is.
+fn check_workflows(root string) []string {
+	mut problems := []string{}
+	mut pinned := map[string]string{}
+	workflows := os.walk_ext(os.join_path(root, '.github', 'workflows'), '.yml')
+	if workflows.len == 0 {
+		problems << 'no workflows under .github/workflows'
+		return problems
+	}
+	for file in workflows {
+		name := os.file_name(file)
+		mut commit := ''
+		for line in os.read_lines(file) or { continue } {
+			trimmed := line.trim_space()
+			if trimmed.starts_with('V_COMMIT:') {
+				commit = value_after(trimmed, ':')
+				if commit.len != 40 || !is_hex(commit) {
+					problems << '${name}: V_COMMIT is not a 40-character commit hash'
+				}
+			}
+			if trimmed.starts_with('- uses:') || trimmed.starts_with('uses:') {
+				target := value_after(trimmed, 'uses:')
+				at := target.last_index('@') or { -1 }
+				if at >= 0 && !target[at + 1..].starts_with('v') {
+					problems << '${name}: ${target} is not pinned to a version'
+				}
+			}
+		}
+		if commit == '' {
+			problems << '${name}: no V_COMMIT, so nothing says which V it runs against'
+			continue
+		}
+		pinned[name] = commit
+	}
+	mut by_commit := map[string][]string{}
+	for name, commit in pinned {
+		// The append has to go back into the map: appending to a missing map
+		// value lands in a temporary and is dropped.
+		mut names := by_commit[commit] or { []string{} }
+		names << name
+		by_commit[commit] = names
+	}
+	if by_commit.len > 1 {
+		mut described := []string{}
+		for commit, names in by_commit {
+			described << '${commit[..8]} (${names.join(', ')})'
+		}
+		problems << 'the workflows pin different V commits: ${described.join('; ')}'
+	}
+	return problems
+}
+
+fn value_after(line string, separator string) string {
+	at := line.index(separator) or { return '' }
+	return line[at + separator.len..].trim_space()
+}
+
+fn is_hex(text string) bool {
+	for character in text {
+		if !(character >= `0` && character <= `9`) && !(character >= `a` && character <= `f`) {
+			return false
+		}
+	}
+	return true
 }
 
 // check_documents follows the relative links between the documents. One pointing
