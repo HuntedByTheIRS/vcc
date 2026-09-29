@@ -26,6 +26,39 @@ fn test_joined_and_separate_paths_are_the_same_flag() {
 	assert joined.defines == ['N=7']
 }
 
+fn test_the_optimizer_owns_its_flags() {
+	opts := parse(['-O2', '-fno-builtin', '-fno-builtin-abs', 'src.c', '-o', 'out'])!
+	// Recognized by the optimizer, so not in the ignored list, and not refused.
+	assert !opts.ignored.contains('-O2')
+	assert !opts.ignored.contains('-fno-builtin')
+	assert opts.optimization.level == .o2
+	assert !opts.optimization.builtins
+	assert opts.optimization.recorded == ['-O2', '-fno-builtin', '-fno-builtin-abs']
+	assert opts.optimization.disabled == ['abs']
+}
+
+fn test_a_level_this_stub_does_not_implement_is_still_not_refused() {
+	opts := parse(['-O9', 'src.c', '-o', 'out'])!
+	assert opts.optimization.level == .o0
+	assert opts.optimization.recorded == ['-O9']
+	assert opts.inputs == ['src.c']
+}
+
+fn test_compile_only_and_print_ast_are_their_own_modes() {
+	only := parse(['-c', 'src.c', '-o', 'src.o'])!
+	assert only.compile_only
+	assert only.output == 'src.o'
+	assert !only.print_ast
+	printed := parse(['-print-ast', 'src.c'])!
+	assert printed.print_ast
+	assert !printed.compile_only
+	assert !printed.ignored.contains('-print-ast')
+	// Reading the tree is not a reason to stop reading the command line.
+	both := parse(['-O2', '-print-ast', 'src.c'])!
+	assert both.print_ast
+	assert both.optimization.level == .o2
+}
+
 fn test_what_v_passes_is_accepted_rather_than_refused() {
 	// The flag set read off the V tree: a compiler that errors on one of these
 	// fails a build it was supposed to serve.

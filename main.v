@@ -3,8 +3,10 @@ module main
 import backend
 import cli
 import codegen
+import optimizer
 import os
 import parser
+import printer
 import time
 import tokenize
 
@@ -37,6 +39,7 @@ fn main() {
 			return
 		}
 		println('target: ${target.name}')
+		println('optimize: ${opts.optimization.summary()}')
 		if opts.include_dirs.len == 0 {
 			println('include: (the standard directories, which are not used yet)')
 		}
@@ -90,7 +93,19 @@ fn main() {
 		exit(1)
 	}
 	started = time.now()
-	image := codegen.emit(parsed.unit, codegen.Options{
+	optimized := optimizer.optimize(parsed.unit, opts.optimization)
+	phases << cli.Phase{
+		name:   'opt'
+		micros: time.since(started).microseconds()
+	}
+	if opts.print_ast {
+		// The tree the emitter would be handed, which is the useful one to read
+		// when a level is suspected of doing the wrong thing.
+		println(printer.render(optimized))
+		return
+	}
+	started = time.now()
+	image := codegen.emit(optimized, codegen.Options{
 		target: opts.target
 		entry:  'main'
 	})

@@ -1,5 +1,6 @@
 module cli
 
+import optimizer
 import os
 
 // version is the compiler's own version. The output of `--version` is not
@@ -20,19 +21,22 @@ pub fn version_line() string {
 // build it was supposed to serve.
 pub struct Options {
 pub mut:
-	inputs           []string
-	output           string
-	run_args         []string
-	include_dirs     []string
-	library_dirs     []string
-	libraries        []string
-	defines          []string
-	undefines        []string
-	target           string
-	standard         string
-	input_type       string
-	compile_only     bool
-	preprocess       bool
+	inputs       []string
+	output       string
+	run_args     []string
+	include_dirs []string
+	library_dirs []string
+	libraries    []string
+	defines      []string
+	undefines    []string
+	target       string
+	standard     string
+	input_type   string
+	compile_only bool
+	preprocess   bool
+	// print_ast stops after the tree is built: nothing is emitted and nothing is
+	// written, which is what `-print-ast` is for.
+	print_ast        bool
 	run              bool
 	show_help        bool
 	show_help_all    bool
@@ -41,6 +45,10 @@ pub mut:
 	bench            bool
 	debug            bool
 	inhibit_warnings bool
+	// optimization is the -O level and the builtin settings, which belong to the
+	// optimizer: it owns the flag list for both, and this file only hands the
+	// arguments over.
+	optimization optimizer.Options
 	// ignored holds every flag that was accepted and not acted on, so a verbose
 	// mode can say what was passed over instead of implying it worked.
 	ignored []string
@@ -92,7 +100,10 @@ fn (mut c Cursor) value_of(joined string) !string {
 // parse reads a command line in the shape tcc uses.
 pub fn parse(args []string) !Options {
 	expanded := expand_list_files(args)!
-	mut opts := Options{}
+	mut opts := Options{
+		optimization: optimizer.default_options()
+	}
+	mut optimization := opts.optimization
 	mut positional := []string{}
 	mut end_of_flags := false
 	mut cursor := Cursor{
@@ -124,6 +135,8 @@ pub fn parse(args []string) !Options {
 			opts.compile_only = true
 		} else if arg == '-E' {
 			opts.preprocess = true
+		} else if arg == '-print-ast' {
+			opts.print_ast = true
 		} else if arg == '-run' {
 			opts.run = true
 		} else if arg == '-bench' {
@@ -166,6 +179,9 @@ pub fn parse(args []string) !Options {
 			opts.input_type = cursor.value_of('')!
 		} else if arg == '-MF' || arg == '-B' {
 			opts.ignored << '${arg} ${cursor.value_of('')!}'
+		} else if optimization.accept_flag(arg) {
+			// The optimizer recognized it: -O levels and the -f(no-)builtin
+			// spellings. Nothing to do here beyond not recording it as ignored.
 		} else {
 			// Everything else is accepted and recorded. The list of what V
 			// actually passes is in README.md under "What a drop-in has to
@@ -174,6 +190,7 @@ pub fn parse(args []string) !Options {
 			opts.ignored << arg
 		}
 	}
+	opts.optimization = optimization
 	if opts.run && positional.len > 0 {
 		opts.inputs = [positional[0]]
 		opts.run_args = positional[1..]
@@ -224,13 +241,17 @@ pub fn usage(all bool) string {
 	out << 'General options:'
 	out << '  -o outfile    set the output filename (default a.out)'
 	out << '  -run          compile to a temporary file and run it'
-	out << '  -c            compile only (not implemented yet)'
+	out << '  -c            compile to an object file only (not implemented yet)'
 	out << '  -E            print the token stream and stop'
+	out << '  -print-ast    print the tree the emitter would be given, then stop'
 	out << '  -bench        print per-phase timings'
 	out << '  -v --version  show the version'
 	out << '  -vv           show the version, the target and the include paths'
 	out << '  -h -hh        show this, show more help'
 	out << '  -w -g         accepted for compatibility; the stub warns about nothing'
+	out << '  -O0 -O1 -O2 -O3 -Os   optimization level (default -O0)'
+	out << '  -fno-builtin  do not compute calls to library functions the compiler knows'
+	out << '  -fno-builtin-NAME  the same for one function'
 	out << '  -Idir -Dname -Uname -Ldir -llib -std=version -x type -o outfile'
 	if all {
 		out << ''
@@ -241,6 +262,13 @@ pub fn usage(all bool) string {
 		out << '  -Werror=name          accepted and ignored'
 		out << '  -Btcc -Idir -Ldir     accepted; -I and -L paths are recorded, -B is not used yet'
 		out << '  -bt25 -Wl,...         accepted and ignored, as a non-tcc compiler must'
+		out << '  -print-ast            nothing is written and nothing is linked; the dump is'
+		out << '                        the tree after the optimizer, which is what the emitter'
+		out << '                        would see'
+		out << '  -O<level>             -O0 through -O3, and -Os; every level is recorded,'
+		out << '                        and -O1 upwards turns on the passes that exist'
+		out << '  -fno-builtin          calls to abs and friends stay calls; the reserved'
+		out << '                        __builtin_ spellings still fold'
 		out << '  -DGC_THREADS=1 ...    recorded; nothing is preprocessed yet'
 		out << '  @listfile             expanded before anything else'
 		out << '  -                     read the source from standard input'
