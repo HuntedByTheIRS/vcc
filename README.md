@@ -143,13 +143,19 @@ what a file is made of: `-MM` leaves the system headers out of it, `-MD` and
 names its target; `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
-Not implemented, in rough order of how much of the tree depends on it: `struct`,
-unions and enums, which are read as declarations and refused where one is used;
-more than six arguments because the machine passes only six in registers; casts,
-so a read of a `double` as an int goes through a variable of the type wanted;
-`switch`; an array with an initializer or more than one size; a pointer defined
-at the top level; object files and relocatable output; and V's own generated C.
-`ROADMAP.md` maps the order.
+An object of a struct or union type declared inside a function is a block of the
+frame, and its members are read and written at the offsets the layout gives them,
+for int, char and double members. The arguments a call passes past the machine's
+registers go on the stack, six ints and eight doubles being what the registers
+carry.
+
+Not implemented, in rough order of how much of the tree depends on it: an object
+of an aggregate type at the top level or passed to a function, a member through a
+pointer, and a member of a member; `enum`; casts, so a read of a `double` as an
+int goes through a variable of the type wanted; `switch`; an array with an
+initializer or more than one size; a pointer defined at the top level; object
+files and relocatable output; and V's own generated C. `ROADMAP.md` maps the
+order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a
