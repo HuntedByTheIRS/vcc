@@ -7,6 +7,11 @@ import tokenize
 pub struct Macro {
 pub:
 	name string
+	// function_like says the definition had a parameter list. It is not the
+	// same question as `params.len > 0`: `#define C() ...` takes no parameters
+	// and is still a macro that has to be called, and `C(1)` is a mistake to
+	// report rather than a name to expand with a bracket left standing after it.
+	function_like bool
 	// params is empty for an object-like macro. For a function-like one it is
 	// the parameter names in order, and variadic is set when the list ended
 	// with `...`.
@@ -24,5 +29,5 @@ pub:
 // followed by a parenthesised argument list, and a name that expands on its
 // own.
 pub fn (m Macro) takes_arguments() bool {
-	return m.params.len > 0 || m.variadic
+	return m.function_like
 }

@@ -83,12 +83,13 @@ fn (mut p Processor) define_builtins() {
 	target := backend.host() or { return }
 	for definition in builtins(target) {
 		p.macros[definition.name] = Macro{
-			name:   definition.name
-			params: definition.params
-			body:   tokenize.lex_fragment(definition.body)
-			file:   '<built-in>'
-			line:   1
-			col:    1
+			name:          definition.name
+			function_like: definition.params.len > 0
+			params:        definition.params
+			body:          tokenize.lex_fragment(definition.body)
+			file:          '<built-in>'
+			line:          1
+			col:           1
 		}
 	}
 }

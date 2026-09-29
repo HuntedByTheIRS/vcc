@@ -768,3 +768,35 @@ fn test_a_has_include_with_nothing_in_it_is_diagnosed() {
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg == '__has_include( wants a "file" or a <file>'
 }
+
+fn test_a_macro_that_takes_no_arguments_still_takes_arguments() {
+	// `#define C() nothing` is a macro that has to be called: `C(1)` is a
+	// mistake to report, and not a name to expand with a bracket left standing
+	// after it — which is what an object-like reading of it would do.
+	assert processed('#define C() nothing\nC()\n') == ['nothing']
+	result := preprocess('#define C() nothing\nC(1)\n', 'test.c', Options{})
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'C takes 0 arguments and 1 was given'
+}
+
+fn test_a_bracket_on_the_next_line_is_not_a_parameter_list() {
+	// What tells the two shapes apart is the bracket being against the name:
+	// `#define F (x) x` is an object-like macro whose body is `(x) x`.
+	assert processed('#define F (x) x\nF\n') == ['(', 'x', ')', 'x']
+	assert processed('#define F (x) x\nF(3)\n') == ['(', 'x', ')', 'x', '(', '3', ')']
+}
+
+fn test_a_define_on_the_command_line_can_take_arguments() {
+	result := preprocess('F(3)', 'test.c', Options{
+		defines: ['F(x)=((x)+1)']
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['(', '(', '3', ')', '+', '1', ')']
+	// And the name on its own is still not a use of it: a macro that takes
+	// arguments is only one where it is called.
+	alone := preprocess('F', 'test.c', Options{
+		defines: ['F(x)=((x)+1)']
+	})
+	assert alone.diagnostics.len == 0
+	assert alone.tokens.map(it.text) == ['F']
+}

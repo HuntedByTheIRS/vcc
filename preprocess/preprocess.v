@@ -260,16 +260,45 @@ fn (mut p Processor) apply_command_line_defines() {
 	for define in p.opts.defines {
 		mut name := define
 		mut body := ''
+		mut params := []string{}
+		mut variadic := false
+		mut function_like := false
 		if at := define.index('=') {
 			name = define[..at]
 			body = define[at + 1..]
 		}
+		// `-DF(x)=...` defines a macro that takes arguments, the same way a
+		// #define does: the shape of the name decides and not the flag. A
+		// command line that writes the parameters without closing the list is
+		// left alone rather than guessed at.
+		if open := name.index('(') {
+			if close := name.index(')') {
+				if close > open {
+					function_like = true
+					for part in name[open + 1..close].split(',') {
+						param := part.trim_space()
+						if param == '' {
+							continue
+						}
+						if param == '...' {
+							variadic = true
+							continue
+						}
+						params << param
+					}
+					name = name[..open]
+				}
+			}
+		}
 		p.macros[name] = Macro{
-			name: name
-			body: tokenize.lex_fragment(body)
-			file: '<command line>'
-			line: 1
-			col:  1
+			name:          name
+			function_like: function_like
+			params:        params
+			variadic:      variadic
+			body:          tokenize.lex_fragment(body)
+			file:          '<command line>'
+			line:          1
+			col:           1
 		}
 	}
 	for name in p.opts.undefines {
@@ -840,8 +869,14 @@ fn (mut p Processor) define(tok tokenize.Token, args string) {
 	name := tokens[0].text
 	mut params := []string{}
 	mut variadic := false
+	// A macro takes arguments when the parameter list is against the name and
+	// not merely somewhere on the line: `#define F (x) x` defines an
+	// object-like macro F whose body is `(x) x`, which is C's rule and not an
+	// accident of spelling.
+	mut function_like := false
 	mut body_text := text[name.len..]
 	if text.len > name.len && text[name.len] == `(` {
+		function_like = true
 		close := text.index(')') or {
 			p.problem(tok, '#define ${name}: the parameter list has no closing )')
 			return
@@ -860,13 +895,14 @@ fn (mut p Processor) define(tok tokenize.Token, args string) {
 		body_text = text[close + 1..]
 	}
 	p.macros[name] = Macro{
-		name:     name
-		params:   params
-		variadic: variadic
-		body:     tokenize.lex_fragment(body_text)
-		file:     p.frames.last().path
-		line:     tok.line
-		col:      tok.col
+		name:          name
+		function_like: function_like
+		params:        params
+		variadic:      variadic
+		body:          tokenize.lex_fragment(body_text)
+		file:          p.frames.last().path
+		line:          tok.line
+		col:           tok.col
 	}
 }
 
