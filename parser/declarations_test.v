@@ -132,6 +132,21 @@ fn test_an_extern_object_with_a_brace_initializer_is_reported() {
 	assert result.unit.globals.len == 0
 }
 
+// A file-scope initializer that is a number the literal reader refuses gets the
+// refusal the expression path gives it, at the literal as it was written, rather
+// than the report for an initializer that is not a number at all. Measured,
+// `int x = 0x1p3;` used to exit with `x is initialized with something that is
+// not a number and only a number can be written into the image so far`, which
+// names neither the construct nor where it is.
+fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
+	result := declarations_of('int x = 0x1p3;')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('0x1p3')
+	assert result.diagnostics[0].line == 1
+	assert result.diagnostics[0].col == 9
+	assert result.unit.globals.len == 0
+}
+
 // A pointer at the top level is a relocation this compiler does not write yet,
 // so the definition is reported instead of laid out as a wrong number.
 fn test_a_pointer_defined_at_the_top_level_is_reported() {

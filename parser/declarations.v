@@ -273,6 +273,11 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut data_count := 0
 	mut data_clause := types.Type{}
 	mut data_init := ?i64(none)
+	// literal_refused says the initializer was a number the literal reader
+	// refused and reported, which is a different answer from an initializer that
+	// is not a number at all: the first has its own diagnostic at its own
+	// location, and the second is what the report below is for.
+	mut literal_refused := false
 	for {
 		d := p.parse_declarator(0) or {
 			p.skip_declaration()
@@ -356,7 +361,9 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				// declaration says extern: the object has to live somewhere.
 				data_defined = true
 				p.next()
+				before := p.diagnostics.len
 				data_init = p.file_scope_constant()
+				literal_refused = p.diagnostics.len > before
 				p.skip_to_separator() or {
 					p.skip_declaration()
 					return decls
@@ -400,7 +407,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if data_defined && data_init == none {
-			p.error_at(data_at, 'unsupported: ${data_name} is initialized with something that is not a number, and only a number can be written into the image so far')
+			// Either way the definition is refused. When the initializer was a
+			// number the literal reader refused, it has already been named at
+			// its own location and this report would be a second message about
+			// the same construct.
+			if !literal_refused {
+				p.error_at(data_at, 'unsupported: ${data_name} is initialized with something that is not a number, and only a number can be written into the image so far')
+			}
 			return decls
 		}
 		if data_name.len == 0 {
@@ -430,6 +443,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 // Anything else - a string, a brace list, an expression - reads as none, and the
 // caller reports it: what is written into the image is a constant, and a
 // constant is what can be written.
+//
+// A number the literal reader refuses is reported here, at the literal as it was
+// written, which is where the expression path reports the same refusal. The
+// caller is told that it happened so that it does not follow it with the report
+// for an initializer that is not a number at all: measured, `int x = 0x1p3;`
+// used to exit with `x is initialized with something that is not a number`
+// instead of naming the construct.
 fn (mut p Parser) file_scope_constant() ?i64 {
 	sign := if p.at_punct('-') {
 		p.next()
@@ -445,7 +465,10 @@ fn (mut p Parser) file_scope_constant() ?i64 {
 	}
 	t := p.peek()
 	p.next()
-	value := parse_integer_literal(t.text) or { return none }
+	value := parse_integer_literal(t.text) or {
+		p.error_at(t, err.msg())
+		return none
+	}
 	return sign * value
 }
 
