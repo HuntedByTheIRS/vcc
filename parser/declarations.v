@@ -850,6 +850,16 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 	} else if p.peek().kind == .identifier {
 		d.name_at = p.peek()
 		d.name = p.next().text
+		// A word the language reserves for itself cannot be the name of a
+		// declaration (6.4.1). The lexer does not tell a keyword from an identifier
+		// - that table is `tokenize/`, another lane's file - so the reader that would
+		// make one a name is where the question is asked. Measured, `int if = 1;` and
+		// `int main(void) { int sizeof = 1; return 0; }` compiled where gcc 16.2.1
+		// refuses both with `expected identifier or '(' before 'if'`.
+		if is_keyword(d.name) {
+			p.error_at(d.name_at, 'unsupported: ${d.name} is a keyword, and a keyword cannot be the name of a declaration')
+			return error('keyword as a name')
+		}
 	}
 	pointer_to_function := wrapped && d.stars > 0
 	for {

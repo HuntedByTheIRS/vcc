@@ -299,3 +299,26 @@ fn test_a_redeclaration_with_a_different_type_is_refused() {
 	assert declarations_of('int f(void);\nchar f();\nint main(void) { return 0; }').diagnostics.len == 1
 	assert declarations_of('int f(int a);\nint f(char b);\nint main(void) { return 0; }').diagnostics.len == 1
 }
+
+// A word the language reserves for itself cannot name a declaration (6.4.1).
+// Measured, `int if = 1;` and `int main(void) { int sizeof = 1; return 0; }`
+// compiled where gcc 16.2.1 refuses both at the name with `expected identifier or
+// '(' before 'if'`. The lexer still does not tell a keyword from an identifier: the
+// general reservation is a table in `tokenize/`, which is another lane's file, and
+// the reader that would make the word a name is where the question is asked.
+fn test_a_keyword_cannot_be_the_name_of_a_declaration() {
+	refused := declarations_of('int if = 1;\nint main(void) { return 0; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('if is a keyword')
+	assert refused.diagnostics[0].line == 1
+	assert refused.diagnostics[0].col == 5
+	// sizeof is the spelling a source is most likely to have written as an object,
+	// because the expression reader reads it as an operator wherever it appears.
+	operator := declarations_of('int main(void) { int sizeof = 1; return 0; }')
+	assert operator.diagnostics.len == 1
+	assert operator.diagnostics[0].msg.contains('sizeof is a keyword')
+	assert operator.diagnostics[0].col == 22
+	// A name that is not reserved is unaffected.
+	ordinary := declarations_of('int size = 1;\nint main(void) { return size; }')
+	assert ordinary.diagnostics.len == 0
+}
