@@ -190,3 +190,89 @@ fn written_at(path string) time.Time {
 	}
 	return time.unix(stamp)
 }
+
+// has_names are the macros that ask a compiler about itself. __has_include asks
+// about the machine — whether a header is there to be read — and the rest ask
+// what this compiler can be told: it honors no attributes, offers no builtins of
+// its own and has no extensions, and 0 is the answer that sends a header down
+// the fallback path it wrote for compilers like this one. A 1 would promise a
+// block that this compiler cannot compile.
+const has_names = ['__has_include', '__has_attribute', '__has_builtin', '__has_feature',
+	'__has_extension', '__has_c_attribute', '__has_declspec_attribute']
+
+// parenthesised reads the tokens of a parenthesised argument, starting at the
+// opening bracket, and says where the tokens after the closing one begin. A
+// bracket that is never closed is -1, which is the caller's to report.
+fn parenthesised(tokens []tokenize.Token, start int) ([]tokenize.Token, int) {
+	mut depth := 0
+	mut inside := []tokenize.Token{}
+	mut i := start
+	for i < tokens.len {
+		t := tokens[i]
+		if t.kind == .punct && (t.text == '(' || t.text == ')') {
+			if t.text == '(' {
+				depth++
+				// The bracket the argument opens with is not part of the
+				// argument: what the caller wants is what is between them.
+				if depth > 1 {
+					inside << t
+				}
+			} else {
+				depth--
+				if depth == 0 {
+					return inside, i + 1
+				}
+				inside << t
+			}
+			i++
+			continue
+		}
+		inside << t
+		i++
+	}
+	return []tokenize.Token{}, -1
+}
+
+// asks_about_itself answers one of the has_names macros, in the shape the caller
+// writes into the stream: '1' or '0'.
+fn (mut p Processor) asks_about_itself(tok tokenize.Token, argument []tokenize.Token) string {
+	if tok.text != '__has_include' {
+		// Nothing here is honored, and the argument is not looked at: asking
+		// what a compiler supports is how a header protects itself, and the
+		// question has an answer whether or not the name is spelled right.
+		return '0'
+	}
+	if argument.len == 0 {
+		p.problem(tok, '__has_include( wants a "file" or a <file>')
+		return '0'
+	}
+	mut name := ''
+	mut angled := false
+	if argument[0].kind == .string {
+		name = unquoted_name(argument[0].text)
+	} else if argument[0].kind == .punct && argument[0].text == '<' {
+		angled = true
+		// The characters between the brackets are the name of the file, and the
+		// lexer read them as several tokens: `bits/types.h` is a name, a slash,
+		// a name and a dot.
+		mut i := 1
+		for i < argument.len && !(argument[i].kind == .punct && argument[i].text == '>') {
+			name += argument[i].text
+			i++
+		}
+		if i >= argument.len {
+			p.problem(tok, '__has_include has a < with no >')
+			return '0'
+		}
+	} else {
+		p.problem(tok, '__has_include wants a "file" or a <file>, not ${argument[0].text}')
+		return '0'
+	}
+	if name == '' {
+		return '0'
+	}
+	// The search is the one #include would do, from the file that asked, and the
+	// file is not read: the question is whether it is there.
+	_ := p.find_include(name, angled, p.frames.last().path, false) or { return '0' }
+	return '1'
+}

@@ -758,6 +758,22 @@ fn (mut p Processor) if_value(tok tokenize.Token, args string) ?i64 {
 			}
 			continue
 		}
+		// The macros that ask a compiler about itself are answered here too,
+		// and for the same reason `defined` is: what they take is looked at
+		// rather than expanded, and `<stdio.h>` is not an expression. A program
+		// that defined one of the names for itself is asked first, because
+		// then the macro is the program's and not the compiler's.
+		if t.kind == .identifier && t.text in has_names && t.text !in p.macros && i + 1 < raw.len
+			&& raw[i + 1].kind == .punct && raw[i + 1].text == '(' {
+			argument, end := parenthesised(raw, i + 1)
+			if end < 0 {
+				p.problem(t, '${t.text}( has no closing )')
+				return none
+			}
+			answered << number_token(p.asks_about_itself(t, argument), t)
+			i = end
+			continue
+		}
 		answered << t
 		i++
 	}

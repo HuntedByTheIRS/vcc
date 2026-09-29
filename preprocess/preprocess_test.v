@@ -703,3 +703,68 @@ fn test_the_files_the_read_opened_are_reported_in_order() {
 		os.join_path(dir, 'inner.h')]
 	assert result.files.map(it.system) == [false, false, false]
 }
+
+fn test_has_include_asks_whether_a_header_is_there() {
+	// The question is answered with the search the include does, from the file
+	// that asks, and the file the name points at is not read.
+	dir := fixture_directory()
+	os.write_file(os.join_path(dir, 'there.h'), 'int there;\n') or { panic(err) }
+	result := preprocess('#if __has_include("there.h")\nint found;\n#else\nint missing;\n#endif\n',
+		os.join_path(dir, 'main.c'), Options{})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int', 'found', ';']
+	assert processed('#if __has_include("nowhere.h")\nint found;\n#else\nint missing;\n#endif\n') == [
+		'int',
+		'missing',
+		';',
+	]
+}
+
+fn test_has_include_reads_the_name_between_the_brackets() {
+	// The contents of <...> are the name of the file and not an expression:
+	// `nested/angled.h` arrives from the lexer as five tokens.
+	dir := fixture_directory()
+	os.mkdir_all(os.join_path(dir, 'nested')) or { panic(err) }
+	os.write_file(os.join_path(dir, 'nested', 'angled.h'), 'int there;\n') or { panic(err) }
+	result := preprocess('#if __has_include(<nested/angled.h>)\nint found;\n#endif\n', 'test.c', Options{
+		standard_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int', 'found', ';']
+}
+
+fn test_what_this_compiler_can_be_told_is_answered_with_no() {
+	// No attributes are honored and no extensions are offered, so the honest
+	// answer is the one that sends a header down the path it wrote for a
+	// compiler like this one.
+	assert processed('#if __has_attribute(packed)\nint yes;\n#else\nint no;\n#endif\n') == [
+		'int',
+		'no',
+		';',
+	]
+	assert processed('#if __has_builtin(__builtin_trap)\nint yes;\n#else\nint no;\n#endif\n') == [
+		'int',
+		'no',
+		';',
+	]
+}
+
+fn test_a_program_that_defines_one_of_the_names_for_itself_is_asked_first() {
+	assert processed('#define __has_attribute(x) 1\n#if __has_attribute(packed)\nint yes;\n#endif\n') == [
+		'int',
+		'yes',
+		';',
+	]
+}
+
+fn test_a_has_include_with_no_closing_bracket_is_diagnosed() {
+	result := preprocess('#if __has_include(<stdio.h>\nint x;\n#endif\n', 'test.c', Options{})
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == '__has_include( has no closing )'
+}
+
+fn test_a_has_include_with_nothing_in_it_is_diagnosed() {
+	result := preprocess('#if __has_include()\nint x;\n#endif\n', 'test.c', Options{})
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == '__has_include( wants a "file" or a <file>'
+}
