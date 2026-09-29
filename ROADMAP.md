@@ -23,8 +23,10 @@ and a typedef is followed to the type it names wherever a type can be written.
 function is a block of the frame with its members at the offsets the layout gives
 them, and the arguments past the machine's registers are passed on the stack, so
 both walls that were standing at the end of M1 are down. What is left is `enum`,
-an aggregate passed by value or returned, casts, and the rest of the list in the
-README. The command line already
+an object of more than one eightbyte passed or returned by value, casts, and the
+rest of the list in the README. An object of one eightbyte is handed over in a
+register on both sides, and an assignment between two objects of a type copies the
+bytes. The command line already
 accepts the flag surface V uses, because getting that wrong later is a rewrite
 rather than a fix.
 Everything else exits non-zero with a diagnostic naming the construct.
