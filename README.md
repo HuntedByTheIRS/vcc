@@ -83,10 +83,10 @@ nothing else and gets them erased. `-E` prints the stream as a table of
 `file:line:col`, token kind and text, which is what that comparison reads.
 
 The parser reads what a preprocessed header is made of — typedefs, prototypes,
-structs — and the function definitions after them, with string literals, calls,
-and `return` expressions. Function bodies with local variables and control flow
-are the next milestone; until they land, a program with an `if` in it is
-diagnosed rather than miscompiled.
+structs — and the function definitions after them: parameters, local variables,
+assignments, arithmetic, calls, string literals, `if`/`else`, `while`, and `for`
+with `break` and `continue`. Anything outside the subset is diagnosed rather than
+miscompiled.
 
 The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
 `_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
@@ -109,10 +109,11 @@ what a file is made of — `-MM` leaves the system headers out of it, `-MD` and
 names its target — `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
-Not implemented, in rough order of how much of the tree depends on it: local
-variables and control flow, expressions that are not constants or calls, types
-beyond the integer family the headers use, object files and relocatable output,
-and V's own generated C. `ROADMAP.md` maps the order.
+Not implemented, in rough order of how much of the tree depends on it: a call
+whose value is used inside an expression (a call is emitted where its result is
+discarded), types and operators beyond the integer family the headers use, object
+files and relocatable output, and V's own generated C. `ROADMAP.md` maps the
+order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a

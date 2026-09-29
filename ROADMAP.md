@@ -8,14 +8,15 @@ self-build does not get slower.
 ## Where the tree is
 
 Past the stub, at the end of M1. The preprocessor is real — it reads the glibc
-headers this machine has — and the front end reads the declarations such a header
-is made of and the function definitions after them, and the back end writes a
+headers this machine has — the front end reads the declarations such a header is
+made of and the function definitions after them, and the back end writes a
 dynamically linked Linux x86-64 executable that calls into libc, so `#include
-<stdio.h>` and `puts` work end to end. Function bodies with local variables and
-control flow are the open edge and the next thing to land. The command line
-already accepts the flag surface V uses, because getting that wrong later is a
-rewrite rather than a fix. Everything else exits non-zero with a diagnostic
-naming the construct.
+<stdio.h>` and `puts` work end to end. Function bodies with parameters, local
+variables and control flow — `if`/`else`, `while`, `for` with `break` and
+`continue` — run as well; a call whose value is used inside an expression is the
+open edge and the next thing to land. The command line already accepts the flag
+surface V uses, because getting that wrong later is a rewrite rather than a fix.
+Everything else exits non-zero with a diagnostic naming the construct.
 
 The numbers, from `tools/bench.vsh` against the tcc V vendors: on a 20000-term
 constant chain vcc is about 12x its wall time and 10x its peak memory, and at
