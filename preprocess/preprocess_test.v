@@ -218,19 +218,123 @@ fn test_an_include_is_not_read_from_the_conditional_it_skips() {
 	assert messages.len == 1
 }
 
-fn test_a_function_like_macro_is_diagnosed_where_it_is_used() {
-	// The definition parses and is remembered; expanding it is what the
-	// compiler cannot do yet, and that is what it has to say.
+fn test_a_function_like_macro_parses_and_remembers_its_parameters() {
 	assert processed('#define F(x) x\n') == []
-	messages := diagnostics_of('#define F(x) x\nF(1)\n')
+	assert processed('#define F(x) x\nF(1)\n') == ['1']
+	assert processed('#define ADD(a, b) a + b\nADD(1, 2)\n') == ['1', '+', '2']
+}
+
+fn test_arguments_are_expanded_before_they_are_put_in_place() {
+	assert processed('#define N 7\n#define F(x) x + x\nF(N)\n') == ['7', '+', '7']
+}
+
+fn test_a_macro_can_be_called_inside_the_argument_of_another() {
+	assert processed('#define twice(x) x + x\n#define N 2\ntwice(twice(N))\n') == ['2', '+', '2',
+		'+', '2', '+', '2']
+}
+
+fn test_a_comma_inside_parentheses_is_part_of_the_argument() {
+	assert processed('#define F(a, b) a b\nF((1, 2), 3)\n') == ['(', '1', ',', '2', ')', '3']
+}
+
+fn test_a_macro_name_with_no_parenthesis_is_not_a_call() {
+	assert processed('#define F(x) x\nF\n') == ['F']
+}
+
+fn test_a_macro_that_calls_itself_stops() {
+	assert processed('#define F(x) F(x)\nF(1)\n') == ['F', '(', '1', ')']
+	assert processed('#define F(x) G(x)\n#define G(x) F(x)\nF(1)\n') == ['F', '(', '1', ')']
+}
+
+fn test_the_wrong_number_of_arguments_is_diagnosed() {
+	messages := diagnostics_of('#define F(a, b) a b\nF(1)\n')
 	assert messages.len == 1
-	assert messages[0].contains('function-like macro')
+	assert messages[0].contains('takes 2')
+}
+
+fn test_a_string_is_made_out_of_the_argument_as_it_was_written() {
+	assert processed('#define S(x) #x\nS(hello world)\n') == ['"hello world"']
+	assert processed('#define S(x) #x\nS(N)\n#define N 1\n') == ['"N"']
+}
+
+fn test_two_tokens_are_joined_into_one_by_a_double_hash() {
+	assert processed('#define J(a, b) a ## b\nJ(x, y)\n') == ['xy']
+	assert processed('#define J(a, b) a ## b\nJ(, y)\n') == ['y']
+}
+
+fn test_the_join_is_how_a_name_is_built_out_of_two_pieces() {
+	assert processed('#define NAMED_gcc 1\n#define USE(f) NAMED_ ## f\nUSE(gcc)\n') == ['1']
+}
+
+fn test_the_arguments_after_the_named_ones_are_the_variadic_ones() {
+	assert processed('#define V(fmt, ...) send(fmt, __VA_ARGS__)\nV("a", 1, 2)\n') == [
+		'send',
+		'(',
+		'"a"',
+		',',
+		'1',
+		',',
+		'2',
+		')',
+	]
+}
+
+fn test_a_comma_that_is_only_there_when_there_are_arguments() {
+	// gcc's `, ## __VA_ARGS__`: the comma goes when nothing follows it, and is
+	// written out as it is when something does.
+	assert processed('#define V(fmt, ...) send(fmt, ## __VA_ARGS__)\nV("a")\n') == [
+		'send',
+		'(',
+		'"a"',
+		')',
+	]
+	assert processed('#define V(fmt, ...) send(fmt, ## __VA_ARGS__)\nV("a", 1)\n') == [
+		'send',
+		'(',
+		'"a"',
+		',',
+		'1',
+		')',
+	]
+}
+
+fn test_an_if_can_call_a_macro_that_takes_arguments() {
+	assert processed('#define USE(x) x\n#if USE(1)\nint x;\n#endif\n') == ['int', 'x', ';']
+	assert processed('#define LESS(a, b) a < b\n#if LESS(1, 2)\nint x;\n#endif\n') == [
+		'int',
+		'x',
+		';',
+	]
 }
 
 fn test_an_unknown_directive_is_diagnosed_with_its_name() {
 	messages := diagnostics_of('#frobnicate\n')
 	assert messages.len == 1
 	assert messages[0].contains('frobnicate')
+}
+
+fn test_an_argument_is_expanded_even_when_it_names_the_macro_being_expanded() {
+	// tcc -E prints 1 for this file: the inner F is a use of F that is not
+	// inside F's own replacement, so it is replaced.
+	assert processed('#define F(x) x\nF(F(1))\n') == ['1']
+}
+
+fn test_macros_that_call_each_other_in_turns_stop() {
+	// The same file through tcc -E prints A(A(A(1))): a name is left as it
+	// stands while that name is the one being expanded, and by the time the
+	// outer call comes back around the inner ones are that name.
+	assert processed('#define A(x) B(x)\n#define B(x) A(x)\nA(A(A(1)))\n') == [
+		'A',
+		'(',
+		'A',
+		'(',
+		'A',
+		'(',
+		'1',
+		')',
+		')',
+		')',
+	]
 }
 
 fn test_a_define_from_the_command_line_is_in_force_before_the_file_is_read() {

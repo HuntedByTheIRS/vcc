@@ -36,6 +36,11 @@ pub mut:
 // of memory instead of saying so.
 const max_include_depth = 200
 
+// max_expansion_depth is the same kind of limit for macro expansion, which is
+// recursive: a replacement that keeps producing text to expand would be a
+// stack overflow without it.
+const max_expansion_depth = 200
+
 // Result is a preprocess of one translation unit: the stream the parser
 // consumes, plus everything that went wrong on the way.
 pub struct Result {
@@ -102,10 +107,15 @@ mut:
 	// expanding is the stack of macro names being expanded right now. A name
 	// already on it is left alone, which is what keeps `#define A B` beside
 	// `#define B A` from expanding forever.
-	expanding   []string
-	out         []tokenize.Token
-	diagnostics []tokenize.Diagnostic
-	opts        Options
+	expanding []string
+	// expansion_depth is how deep in the expansion recursion the reader is, and
+	// expansion_reported says whether the depth limit has been reported once
+	// already, so the report does not repeat for every token after it.
+	expansion_depth    int
+	expansion_reported bool
+	out                []tokenize.Token
+	diagnostics        []tokenize.Diagnostic
+	opts               Options
 }
 
 // apply_command_line_defines puts the -D and -U arguments into the macro table
@@ -282,6 +292,22 @@ fn (mut p Processor) run() {
 		if !p.reading() {
 			continue
 		}
+		// A function-like macro takes the tokens after its name as arguments,
+		// and those tokens are in the file being read: this is the one place
+		// where a macro use reaches past itself.
+		if tok.kind == .identifier && tok.text in p.macros {
+			macro := p.macros[tok.text]
+			if macro.takes_arguments() {
+				use_args := p.collect_arguments(p.frames[i].tokens, p.frames[i].pos, tok)
+				if use_args.called {
+					for expanded in p.expand_call(tok, macro, use_args) {
+						p.emit(expanded)
+					}
+					p.frames[i].pos = use_args.next
+					continue
+				}
+			}
+		}
 		p.text(tok)
 	}
 }
@@ -440,7 +466,11 @@ fn (mut p Processor) endif_directive(tok tokenize.Token) {
 // expansion is a name that is not defined, which C says is zero.
 fn (mut p Processor) if_value(tok tokenize.Token, args string) ?i64 {
 	raw := tokenize.lex_fragment(args)
-	mut expanded := []tokenize.Token{}
+	// `defined` is answered before anything is expanded, because what it takes
+	// is the name of a macro and not a use of one: it is rewritten to 1 or 0
+	// here, and the expansion that follows is the ordinary one — which is what
+	// lets an #if call a macro that takes arguments.
+	mut answered := []tokenize.Token{}
 	mut i := 0
 	for i < raw.len {
 		t := raw[i]
@@ -466,7 +496,7 @@ fn (mut p Processor) if_value(tok tokenize.Token, args string) ?i64 {
 				p.problem(t, 'defined wants the name of a macro')
 				return none
 			}
-			expanded << tokenize.Token{
+			answered << tokenize.Token{
 				kind: .number
 				text: if name in p.macros { '1' } else { '0' }
 				line: t.line
@@ -475,11 +505,11 @@ fn (mut p Processor) if_value(tok tokenize.Token, args string) ?i64 {
 			}
 			continue
 		}
-		expanded << p.expand(t)
+		answered << t
 		i++
 	}
 	mut condition := Condition{
-		tokens: expanded
+		tokens: p.expand_all(answered)
 		file:   p.frames.last().path
 		line:   tok.line
 		col:    tok.col
@@ -597,8 +627,11 @@ fn (mut p Processor) expand(tok tokenize.Token) []tokenize.Token {
 	}
 	macro := p.macros[tok.text]
 	if macro.takes_arguments() {
-		p.problem(tok, 'unsupported: ${tok.text} is a function-like macro, and arguments are not implemented yet')
-		return []
+		// A function-like macro's name is a use of it only when a ( follows,
+		// and the reader that sees the ( is the one holding the rest of the
+		// text. A token that got this far is a name in the middle of the text,
+		// and a name is what it stays.
+		return [tok]
 	}
 	if tok.text in p.expanding {
 		// The name is being expanded right now, so this occurrence is the text
