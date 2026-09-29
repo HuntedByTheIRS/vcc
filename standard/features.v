@@ -143,20 +143,31 @@ pub const features = [
 		status:    .unimplemented
 	},
 	// The C99 types the type model resolves and the back end has no form for.
-	// The tree reads each of them, so a prototype naming one is read and kept; a
-	// definition is storage, and a definition of one is refused by name and
-	// location, which is what the unimplemented rule asks of a construct that is
-	// not emitted. The two complex types stay `.unimplemented` because C6's last
-	// tier is where their arithmetic lands, and the floats and `_Bool` say
+	// The tree reads each of them, so a prototype naming one is read and kept;
+	// a definition is storage, and a definition of one is refused by location.
+	// The two complex types stay `.unimplemented` because C6's last tier is
+	// where their arithmetic lands, and the floats and `_Bool` say
 	// `.implemented` because the tree does read them and the refusal is the back
 	// end's rather than the reader's.
 	//
+	// Which name that refusal uses depends on the path, and the difference is
+	// recorded rather than smoothed over. A function return type is the one path
+	// that names the type in full, because the answer is about the construct and
+	// not about a word of it: measured, `long double f(void) { return 0; }` and
+	// `double _Complex f(void) { return 0; }` report `unsupported: <type> is a
+	// type this compiler does not emit yet, so a function cannot return it`.
+	// Everywhere else the answer is the first word of the type as written, which
+	// is the word the emitter stopped at: measured, `long long x;` reports
+	// `unsupported type long`, `unsigned long long x;` reports `unsupported type
+	// unsigned`, and `double _Complex z = 0;` in a body reports `unsupported type
+	// double`. A definition's parameter list names what the parameter was
+	// declared with, so `int h(double _Complex z) { return 0; }` reports
+	// `unsupported type double _Complex`; the same list in a prototype is a
+	// promise and is kept.
+	//
 	// `long long` and `long double` have no row, and cannot have one: a row is
 	// found by the text of a single token, and both are written as two tokens
-	// whose first is `long`. The refusal names them in full all the same -
-	// `unsupported type long long`, `unsupported type unsigned long long`,
-	// `unsupported type long double` - because the diagnostic is built from the
-	// type as the declaration wrote it rather than from one word of it.
+	// whose first is `long`.
 	Feature{
 		spellings: ['_Bool']
 		since:     .c99
