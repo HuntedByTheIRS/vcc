@@ -1,0 +1,71 @@
+name: Feature request
+description: C that vcc does not handle yet, or a direction for the project.
+title: "[feature]: "
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most of C is unimplemented on purpose, in an order. ROADMAP.md has the
+        order, so check it first: if the milestone is already listed, say which part
+        of it you need earliest rather than restating the milestone.
+
+        Anything that needs a C dependency, or that trades away the speed target, is
+        arguing against the two constraints this project exists to satisfy. Make the
+        argument if you have one.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the compiler
+      options:
+        - Preprocessor (includes, macros, conditionals)
+        - Front end (parsing, types, statements)
+        - Back end (x86-64 codegen, calling convention)
+        - Objects and linking
+        - Command line, flags, or the V interop contract
+        - Speed
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: The C that should work
+      description: The smallest input vcc should accept today but does not.
+      render: c
+    validations:
+      required: true
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: What vcc does with it now
+      description: The error, or the wrong answer, or nothing at all.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this matters
+      description: What it blocks, and what depends on it.
+    validations:
+      required: true
+  - type: input
+    id: reference
+    attributes:
+      label: Where the behavior is defined
+      description: A clause of the C standard, a GCC or tcc behavior worth matching, or a link.
+      placeholder: C11 6.5.2.5, or tcc accepts this
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked ROADMAP.md, and this is either not on it or is the part of it I need first.
+          required: true
+        - label: I searched the open and closed issues and discussions for this.
+          required: true
+        - label: This keeps the compiler in pure V and does not move the speed target.
+          required: true
