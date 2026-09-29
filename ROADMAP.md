@@ -7,13 +7,13 @@ self-build does not get slower.
 
 ## Where the tree is
 
-Past the stub, at the end of M1. The preprocessor is real — it reads the glibc
-headers this machine has — the front end reads the declarations such a header is
+Past the stub, at the end of M1. The preprocessor is real (it reads the glibc
+headers this machine has), the front end reads the declarations such a header is
 made of and the function definitions after them, and the back end writes a
 dynamically linked Linux x86-64 executable that calls into libc, so `#include
 <stdio.h>` and `puts` work end to end. Function bodies with parameters, local
-variables and control flow — `if`/`else`, `while`, `for` with `break` and
-`continue` — run as well, arrays and objects defined at the top level run with
+variables and control flow (`if`/`else`, `while`, `for` with `break` and
+`continue`) run as well, arrays and objects defined at the top level run with
 them, the address of a local is one thing more, and so does a call whose value is
 read, as in `int x = add(y, 3) + 2;`. A `double` is a value the compiler has, in
 the floating-point registers and in the SysV sequence for arguments and returns,
@@ -27,7 +27,7 @@ Everything else exits non-zero with a diagnostic naming the construct.
 
 The numbers, from `tools/bench.vsh` against the tcc V vendors: on a 20000-term
 constant chain vcc is about 12x its wall time and 10x its peak memory, and at
-100000 terms about 28x and 35x — the ratio grows with the input because the
+100000 terms about 28x and 35x. The ratio grows with the input because the
 pipeline allocates per token and per AST node. That gap is the M6 problem, and it
 is measured rather than felt.
 
