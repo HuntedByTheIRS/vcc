@@ -269,6 +269,65 @@ fn test_a_local_declaration_of_an_array_is_reported() {
 	assert result.unit.decls[0].body.len == 1
 }
 
+fn test_an_assignment_writes_to_a_name() {
+	result := parsed('int main() { int x; x = 5; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .assign
+	assert body[1].target == 'x'
+	value := body[1].expr or {
+		assert false
+		return
+	}
+	assert value is ast.IntLit
+	assert (value as ast.IntLit).value == 5
+}
+
+fn test_an_assignment_takes_a_variable_on_each_side() {
+	result := parsed('int main() { int x = 1; int y = 2; x = y + 1; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	value := body[2].expr or {
+		assert false
+		return
+	}
+	assert value is ast.Binary
+	binary := value as ast.Binary
+	assert binary.op == '+'
+	assert binary.left is ast.Ident
+	assert (binary.left as ast.Ident).name == 'y'
+}
+
+// `x += 1` reads and writes the same name, so it is the assignment it means,
+// written the way the tree writes an assignment of a sum.
+fn test_a_compound_assignment_is_the_assignment_it_means() {
+	result := parsed('int main() { int x = 1; x += 2; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .assign
+	assert body[1].target == 'x'
+	value := body[1].expr or {
+		assert false
+		return
+	}
+	assert value is ast.Binary
+	binary := value as ast.Binary
+	assert binary.op == '+'
+	assert binary.left is ast.Ident
+	assert (binary.left as ast.Ident).name == 'x'
+	assert binary.right is ast.IntLit
+}
+
+// A compound operator the expression grammar has no binary spelling for is
+// reported rather than expanded into something the file did not say.
+fn test_a_compound_assignment_with_no_form_is_reported() {
+	result := parsed('int main() { int x = 1; x *= 2; return x; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('compound assignment')
+	assert result.unit.decls[0].body.len == 2
+	assert result.unit.decls[0].body[1].kind == .return_stmt
+}
+
 fn test_an_unterminated_block_is_reported_once() {
 	result := parsed('int main() { return 1;')
 	assert result.diagnostics.len == 1

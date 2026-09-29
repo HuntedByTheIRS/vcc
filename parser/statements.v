@@ -1,6 +1,7 @@
 module parser
 
 import ast
+import tokenize
 
 // This file reads the statements a function body is made of. A statement is
 // where the tree keeps code: a return leaves the function, an expression is
@@ -44,11 +45,23 @@ fn (mut p Parser) parse_statement() ![]ast.Stmt {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
-	// Anything else is an expression evaluated for what it does, which is what
-	// a call written as a statement is. An expression that does not parse is
-	// reported by the expression reader and the statement is skipped, so one
-	// unsupported construct produces one diagnostic.
-	expr := p.parse_expression() or {
+	// Anything else is an assignment or an expression evaluated for what it
+	// does, which is what a call written as a statement is. An expression that
+	// does not parse is reported by the expression reader and the statement is
+	// skipped, so one unsupported construct produces one diagnostic.
+	return p.parse_simple_statement()
+}
+
+// assignment_operators are the tokens that write to a name. The compound
+// spellings are here so that `x *= 2` is read as the compound assignment it is
+// rather than as an expression that stopped at `*`.
+const assignment_operators = ['=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=']
+
+// parse_simple_statement reads the statements that are one expression: an
+// assignment, which writes to a name, or an expression evaluated for what it
+// does.
+fn (mut p Parser) parse_simple_statement() []ast.Stmt {
+	stmt := p.parse_expression_statement() or {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
@@ -56,12 +69,93 @@ fn (mut p Parser) parse_statement() ![]ast.Stmt {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
-	return [ast.Stmt{
+	return [stmt]
+}
+
+// parse_expression_statement reads an assignment or an expression and stops
+// before the punctuation that ends it: a statement ends with `;`, and the step
+// of a for ends with the `)` of its header. A failure reports itself and comes
+// back as an error, so the reader that knows what ending it was waiting for is
+// the one that resynchronises.
+fn (mut p Parser) parse_expression_statement() !ast.Stmt {
+	if p.starts_assignment() {
+		return p.parse_assignment()!
+	}
+	t := p.peek()
+	expr := p.parse_expression()!
+	return ast.Stmt{
 		kind: .expr_stmt
 		expr: expr
 		line: t.line
 		col:  t.col
-	}]
+	}
+}
+
+// starts_assignment says whether the tokens at the cursor are `name = ...`. It
+// is a lookahead and not a reading, because `x = 1;` and `x(1);` start the same
+// way and only the second token tells them apart. `==` is a token of its own,
+// so an expression like `x == 1;` is not an assignment.
+fn (p Parser) starts_assignment() bool {
+	if p.peek().kind != .identifier {
+		return false
+	}
+	next := p.peek_at(1)
+	return next.kind == .punct && next.text in assignment_operators
+}
+
+// parse_assignment reads `name = expr`. C makes an assignment an expression;
+// this tree makes it a statement, because a statement is where it is written in
+// almost every line of C there is. The target is the name alone: an lvalue with
+// a subscript or a dereference is not a name the tree can hold, and the
+// expression reader reports it where it stopped.
+fn (mut p Parser) parse_assignment() !ast.Stmt {
+	t := p.next() // the name
+	op := p.next() // = or a compound spelling
+	if op.text == '=' {
+		expr := p.parse_expression()!
+		return ast.Stmt{
+			kind:   .assign
+			target: t.text
+			expr:   expr
+			line:   t.line
+			col:    t.col
+		}
+	}
+	return p.parse_compound_assignment(t, op)
+}
+
+// parse_compound_assignment reads `name += expr`, and `name -= expr` because it
+// is the same thing with the other operator. `x += 1` reads and writes the same
+// name, so with a name for its target it means exactly `x = x + 1`, and that is
+// the shape the tree is written in. The other compound spellings are reported
+// instead: a compound operator stands for one the expression grammar does not
+// read as a binary operator either, so expanding it would be inventing a form
+// nobody has agreed on.
+fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.Token) !ast.Stmt {
+	arithmetic := op.text[..op.text.len - 1]
+	if arithmetic !in ['+', '-'] {
+		p.error_at(op, 'unsupported: the compound assignment ${op.text} is not implemented')
+		return error('compound assignment')
+	}
+	right := p.parse_expression()!
+	value := ast.Expr(ast.Binary{
+		op:    arithmetic
+		left:  ast.Expr(ast.Ident{
+			name: target.text
+			line: target.line
+			col:  target.col
+		})
+		right: right
+		line:  op.line
+		col:   op.col
+	})
+	return ast.Stmt{
+		kind:   .assign
+		target: target.text
+		expr:   value
+		line:   target.line
+		col:    target.col
+	}
 }
 
 // parse_local_declaration reads a declaration inside a body: storage in the
