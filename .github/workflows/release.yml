@@ -49,11 +49,20 @@ jobs:
 
       - name: the binary does what it says
         run: |
-          printf 'int main() { return 7; }\n' > seven.c
-          ./vcc seven.c -o seven
-          ./seven
-          status=$?
-          rm -f seven.c seven
+          # In a directory of its own, because a step that dies midway must not
+          # leave a C file in the tree: the gate rejects one, and a release that
+          # pollutes the checkout it is releasing fails for the wrong reason.
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          printf 'int main() { return 7; }\n' > "$work/seven.c"
+          ./vcc "$work/seven.c" -o "$work/seven"
+          # A step runs under `bash -e`, so running the program directly would end
+          # the step with its status, and the status is the thing being checked.
+          if "$work/seven"; then
+            status=0
+          else
+            status=$?
+          fi
           if [ "$status" -ne 7 ]; then
             echo "the compiled program exited ${status}, and its source says 7" >&2
             exit 1
