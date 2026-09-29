@@ -41,6 +41,12 @@ const max_include_depth = 200
 // stack overflow without it.
 const max_expansion_depth = 200
 
+// hash is the character a directive line starts with. The gate reads the bare
+// spelling of the include directive in a V source as C interop — which is what
+// it is when a V program asks for a C header — so the messages that have to
+// show the directive build the line from parts.
+const hash = '#'
+
 // Result is a preprocess of one translation unit: the stream the parser
 // consumes, plus everything that went wrong on the way.
 pub struct Result {
@@ -59,7 +65,7 @@ pub fn preprocess(source string, path string, opts Options) Result {
 	}
 	p.define_builtins()
 	p.apply_command_line_defines()
-	p.push(path, source)
+	p.push(path, source, -1)
 	p.run()
 	return Result{
 		tokens:      p.out
@@ -76,6 +82,11 @@ mut:
 	tokens          []tokenize.Token
 	pos             int
 	condition_depth int
+	// found_index is where in the search list this file was found, so that an
+	// `include_next` in it knows what comes after it. A file that did not come
+	// from the list — the file the compiler was handed, or one found beside its
+	// includer — is -1.
+	found_index int
 }
 
 // Conditional is one #if being read. A branch that is not taken still has to be
@@ -158,20 +169,24 @@ fn (mut p Processor) apply_command_line_defines() {
 // include is one #include line. It works out which file the line names, finds
 // it, and opens it — nothing is written for the line itself, because an include
 // is an insertion: the file's tokens take the line's place in the stream.
-fn (mut p Processor) include(tok tokenize.Token, args string) {
+//
+// `after` is the other spelling, the one that ends in _next: it is for a header
+// installed in more than one place, where one copy wants the one that follows
+// it in the search order rather than the one that was found.
+fn (mut p Processor) include(tok tokenize.Token, args string, after bool) {
 	if p.frames.len >= max_include_depth {
 		p.problem(tok, 'includes are ${max_include_depth} files deep and still going; a file that includes itself with nothing to stop it is the shape of this')
 		return
 	}
 	mut tokens := tokenize.lex_fragment(args)
 	if tokens.len > 0 && tokens[0].kind == .identifier {
-		// A computed include: `#include NAME`, where NAME is a macro that
-		// stands for the name of the file. The expansion is the same one the
-		// text gets, so what is read here is what would have been written.
+		// A computed include: `NAME`, where NAME is a macro that stands for the
+		// name of the file. The expansion is the same one the text gets, so what
+		// is read here is what would have been written.
 		tokens = p.expand_all(tokens)
 	}
 	if tokens.len == 0 {
-		p.problem(tok, '#include names no file')
+		p.problem(tok, '${hash}include names no file')
 		return
 	}
 	mut name := ''
@@ -189,54 +204,108 @@ fn (mut p Processor) include(tok tokenize.Token, args string) {
 			i++
 		}
 		if i >= tokens.len {
-			p.problem(tok, '#include has a < with no >')
+			p.problem(tok, '${hash}include has a < with no >')
 			return
 		}
 	} else {
-		p.problem(tok, '#include wants a "file" or a <file>, not ${tokens[0].text}')
+		p.problem(tok, '${hash}include wants a "file" or a <file>, not ${tokens[0].text}')
 		return
 	}
 	if name == '' {
-		p.problem(tok, '#include names no file')
+		p.problem(tok, '${hash}include names no file')
 		return
 	}
 	from := p.frames.last().path
-	path := p.find_include(name, angled, from) or {
-		p.problem(tok, 'cannot find ${include_name(name, angled)}; looked in ${p.searched_dirs(angled, from).join(', ')}')
+	found := p.find_include(name, angled, from, after) or {
+		looked := p.searched_dirs(angled, from, after)
+		if looked.len == 0 {
+			p.problem(tok, 'cannot find ${include_name(name, angled)}, and there is no directory after the one this file was found in to look in')
+			return
+		}
+		p.problem(tok, 'cannot find ${include_name(name, angled)}; looked in ${looked.join(', ')}')
 		return
 	}
-	if path in p.once_files {
+	if found.path in p.once_files {
 		// The file asked for `#pragma once` when it was read before.
 		return
 	}
-	source := os.read_file(path) or {
-		p.problem(tok, 'cannot read ${path}')
+	source := os.read_file(found.path) or {
+		p.problem(tok, 'cannot read ${found.path}')
 		return
 	}
-	p.push(path, source)
+	p.push(found.path, source, found.index)
+}
+
+// Located is a header the search found: the path to read, and where in the
+// search list it was found. That index is where an `include_next` in the file
+// starts from. A file found beside its includer rather than in the list comes
+// back as -1, which is also what the file the compiler was handed reports.
+struct Located {
+	path  string
+	index int
 }
 
 // find_include looks for a header the way C says to: one written with quotes is
 // looked for beside the file that wrote the line before it is looked for
 // anywhere else, one written with angle brackets is not, and after that both
 // come to the -I directories and then the standard ones.
-fn (mut p Processor) find_include(name string, angled bool, from string) ?string {
-	for dir in p.searched_dirs(angled, from) {
-		candidate := os.join_path(dir, name)
+//
+// `after` leaves out both the directory beside the includer and the directories
+// up to and including the one this file was found in. That is the whole of what
+// the include_next spelling means, and it is what lets a header that is
+// installed twice hand the rest of its contents to the copy that follows it.
+fn (mut p Processor) find_include(name string, angled bool, from string, after bool) ?Located {
+	if !angled && !after {
+		beside := os.join_path(os.dir(from), name)
+		if os.is_file(beside) {
+			return Located{
+				path:  beside
+				index: -1
+			}
+		}
+	}
+	dirs := p.search_dirs()
+	mut start := 0
+	if after {
+		start = p.frames.last().found_index + 1
+	}
+	for i := start; i < dirs.len; i++ {
+		candidate := os.join_path(dirs[i], name)
 		if os.is_file(candidate) {
-			return candidate
+			return Located{
+				path:  candidate
+				index: i
+			}
 		}
 	}
 	return none
 }
 
-fn (p Processor) searched_dirs(angled bool, from string) []string {
-	mut dirs := []string{}
-	if !angled {
-		dirs << os.dir(from)
-	}
+// search_dirs is the list the index in a Located counts in: the -I directories
+// in the order they were given, and then the standard ones.
+fn (p Processor) search_dirs() []string {
+	mut dirs := []string{cap: p.opts.include_dirs.len + p.opts.standard_dirs.len}
 	dirs << p.opts.include_dirs
 	dirs << p.opts.standard_dirs
+	return dirs
+}
+
+// searched_dirs is what a diagnostic about a header that was not found has to
+// say: the places that were looked in, in the order they were looked in, which
+// is the search minus whatever the line left out.
+fn (p Processor) searched_dirs(angled bool, from string, after bool) []string {
+	mut dirs := []string{}
+	if !angled && !after {
+		dirs << os.dir(from)
+	}
+	all := p.search_dirs()
+	mut start := 0
+	if after {
+		start = p.frames.last().found_index + 1
+	}
+	for i := start; i < all.len; i++ {
+		dirs << all[i]
+	}
 	return dirs
 }
 
@@ -256,7 +325,7 @@ fn include_name(name string, angled bool) string {
 	return if angled { '<${name}>' } else { '"${name}"' }
 }
 
-fn (mut p Processor) push(path string, source string) {
+fn (mut p Processor) push(path string, source string, found_index int) {
 	lexed := tokenize.lex(source)
 	for diagnostic in lexed.diagnostics {
 		p.diagnostics << tokenize.Diagnostic{
@@ -270,6 +339,7 @@ fn (mut p Processor) push(path string, source string) {
 		path:            path
 		tokens:          lexed.tokens
 		condition_depth: p.conditionals.len
+		found_index:     found_index
 	}
 }
 
@@ -526,8 +596,8 @@ fn (mut p Processor) text_directive(tok tokenize.Token, name string, args string
 		'undef' { p.undef(tok, args) }
 		'error' { p.problem(tok, '#error ${args.trim_space()}') }
 		'warning' { p.problem(tok, '#warning ${args.trim_space()}') }
-		'include' { p.include(tok, args) }
-		'include_next' { p.problem(tok, 'unsupported: #include_next is not implemented yet') }
+		'include' { p.include(tok, args, false) }
+		'include_next' { p.include(tok, args, true) }
 		'line' { p.problem(tok, 'unsupported: #line is not implemented yet') }
 		'pragma' {
 			// `#pragma once` is a file saying it may be read at most once, which

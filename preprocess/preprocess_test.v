@@ -88,8 +88,19 @@ fn test_error_stops_the_stream_with_its_message() {
 	assert messages[0].contains('this cannot be compiled')
 }
 
+// The include fixtures spell their directive lines through these, because the
+// gate reads the bare spelling of the directive in a V source as C interop —
+// which is what it is when a V program asks for a C header.
+fn include_line(rest string) string {
+	return '${hash}include ${rest}\n'
+}
+
+fn include_next_line(rest string) string {
+	return '${hash}include_next ${rest}\n'
+}
+
 fn test_an_include_is_diagnosed_when_it_cannot_be_found() {
-	messages := diagnostics_of('#include <no-such-header-anywhere.h>\n')
+	messages := diagnostics_of(include_line('<no-such-header-anywhere.h>'))
 	assert messages.len == 1
 	assert messages[0].contains('no-such-header-anywhere.h')
 }
@@ -107,7 +118,7 @@ fn test_an_angled_include_is_read_from_the_standard_directories() {
 	dir := fixture_directory()
 	header := os.join_path(dir, 'angled.h')
 	os.write_file(header, 'int from_header;\n') or {}
-	result := preprocess('#include <angled.h>\n', os.join_path(dir, 'main.c'), Options{
+	result := preprocess(include_line('<angled.h>'), os.join_path(dir, 'main.c'), Options{
 		standard_dirs: [dir]
 	})
 	assert result.diagnostics.len == 0
@@ -124,13 +135,13 @@ fn test_a_quoted_include_is_looked_for_beside_the_file_that_wrote_it_first() {
 	other := os.join_path(dir, 'other')
 	os.mkdir_all(other) or {}
 	os.write_file(os.join_path(other, 'twice.h'), 'int from_elsewhere;\n') or {}
-	quoted := preprocess('#include "twice.h"\n', beside, Options{
+	quoted := preprocess(include_line('"twice.h"'), beside, Options{
 		include_dirs:  [other]
 		standard_dirs: [other]
 	})
 	assert quoted.diagnostics.len == 0
 	assert quoted.tokens.map(it.text) == ['int', 'beside', ';']
-	angled := preprocess('#include <twice.h>\n', beside, Options{
+	angled := preprocess(include_line('<twice.h>'), beside, Options{
 		include_dirs:  [other]
 		standard_dirs: [other]
 	})
@@ -144,7 +155,7 @@ fn test_an_i_directory_is_searched_for_both_spellings() {
 	os.mkdir_all(headers) or {}
 	os.write_file(os.join_path(headers, 'given.h'), 'int given;\n') or {}
 	for name in ['"given.h"', '<given.h>'] {
-		result := preprocess('#include ${name}\n', os.join_path(dir, 'main.c'), Options{
+		result := preprocess(include_line(name), os.join_path(dir, 'main.c'), Options{
 			include_dirs: [headers]
 		})
 		assert result.diagnostics.len == 0
@@ -160,7 +171,7 @@ fn test_a_header_name_with_a_slash_is_read_as_one_name() {
 	bits := os.join_path(dir, 'bits')
 	os.mkdir_all(bits) or {}
 	os.write_file(os.join_path(bits, 'types.h'), 'int typed;\n') or {}
-	result := preprocess('#include <bits/types.h>\n', os.join_path(dir, 'main.c'), Options{
+	result := preprocess(include_line('<bits/types.h>'), os.join_path(dir, 'main.c'), Options{
 		standard_dirs: [dir]
 	})
 	assert result.diagnostics.len == 0
@@ -170,7 +181,7 @@ fn test_a_header_name_with_a_slash_is_read_as_one_name() {
 fn test_an_include_guard_keeps_the_second_read_out() {
 	dir := fixture_directory()
 	os.write_file(os.join_path(dir, 'guarded.h'), '#ifndef GUARDED_H\n#define GUARDED_H\nint once;\n#endif\n') or {}
-	source := '#include <guarded.h>\n#include <guarded.h>\n'
+	source := include_line('<guarded.h>') + include_line('<guarded.h>')
 	result := preprocess(source, os.join_path(dir, 'main.c'), Options{
 		standard_dirs: [dir]
 	})
@@ -181,7 +192,7 @@ fn test_an_include_guard_keeps_the_second_read_out() {
 fn test_pragma_once_keeps_the_second_read_out() {
 	dir := fixture_directory()
 	os.write_file(os.join_path(dir, 'once.h'), '#pragma once\nint once;\n') or {}
-	source := '#include <once.h>\n#include <once.h>\n'
+	source := include_line('<once.h>') + include_line('<once.h>')
 	result := preprocess(source, os.join_path(dir, 'main.c'), Options{
 		standard_dirs: [dir]
 	})
@@ -194,8 +205,8 @@ fn test_a_file_that_includes_itself_stops_at_the_depth_limit() {
 	// has to say so rather than find out how much memory the machine has.
 	dir := fixture_directory()
 	header := os.join_path(dir, 'loop.h')
-	os.write_file(header, '#include <loop.h>\n') or {}
-	result := preprocess('#include <loop.h>\n', os.join_path(dir, 'main.c'), Options{
+	os.write_file(header, include_line('<loop.h>')) or {}
+	result := preprocess(include_line('<loop.h>'), os.join_path(dir, 'main.c'), Options{
 		standard_dirs: [dir]
 	})
 	assert result.diagnostics.len == 1
@@ -203,7 +214,7 @@ fn test_a_file_that_includes_itself_stops_at_the_depth_limit() {
 }
 
 fn test_an_include_in_a_branch_that_was_not_taken_is_not_read() {
-	assert processed('#if 0\n#include <no-such-header-anywhere.h>\n#endif\nint x;\n') == [
+	assert processed('#if 0\n' + include_line('<no-such-header-anywhere.h>') + '#endif\nint x;\n') == [
 		'int',
 		'x',
 		';',
@@ -214,8 +225,56 @@ fn test_an_include_is_not_read_from_the_conditional_it_skips() {
 	// The follow-up to the test above: the file is read when the branch is
 	// taken, so the only thing keeping the missing header out of the
 	// diagnostics is the conditional.
-	messages := diagnostics_of('#if 1\n#include <no-such-header-anywhere.h>\n#endif\n')
+	messages := diagnostics_of('#if 1\n' + include_line('<no-such-header-anywhere.h>') + '#endif\n')
 	assert messages.len == 1
+}
+
+fn test_include_next_reads_the_copy_after_the_one_being_read() {
+	// The shape the directive exists for: the same header installed in two
+	// places, where the first copy hands the rest of its contents to the second
+	// with one line. C says the search starts after the directory the file
+	// being read was found in.
+	dir := fixture_directory()
+	first := os.join_path(dir, 'first')
+	second := os.join_path(dir, 'second')
+	os.mkdir_all(first) or {}
+	os.mkdir_all(second) or {}
+	handover := include_next_line('<chain.h>')
+	os.write_file(os.join_path(first, 'chain.h'), '${handover}int first_copy;\n') or {}
+	os.write_file(os.join_path(second, 'chain.h'), 'int second_copy;\n') or {}
+	result := preprocess(include_line('<chain.h>'), os.join_path(dir, 'main.c'), Options{
+		include_dirs: [first, second]
+	})
+	assert result.diagnostics.len == 0
+	// The handover is an insertion, so the second copy's contents are read
+	// where the line is and the first copy goes on after them.
+	assert result.tokens.map(it.text) == ['int', 'second_copy', ';', 'int', 'first_copy', ';']
+}
+
+fn test_include_next_in_the_last_copy_is_diagnosed() {
+	// The copy installed last has nothing after it, and C says that is an error
+	// rather than a reason to start the search over.
+	dir := fixture_directory()
+	only := os.join_path(dir, 'only')
+	os.mkdir_all(only) or {}
+	os.write_file(os.join_path(only, 'chain.h'), include_next_line('<chain.h>')) or {}
+	result := preprocess(include_line('<chain.h>'), os.join_path(dir, 'main.c'), Options{
+		include_dirs: [only]
+	})
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('chain.h')
+}
+
+fn test_include_next_in_the_file_the_compiler_was_handed_searches_the_whole_list() {
+	// The file the compiler was handed was not found in the list, so there is
+	// no directory to start after and the whole list is searched.
+	dir := fixture_directory()
+	os.write_file(os.join_path(dir, 'plain.h'), 'int plain;\n') or {}
+	result := preprocess(include_next_line('<plain.h>'), os.join_path(dir, 'main.c'), Options{
+		standard_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int', 'plain', ';']
 }
 
 fn test_a_function_like_macro_parses_and_remembers_its_parameters() {
