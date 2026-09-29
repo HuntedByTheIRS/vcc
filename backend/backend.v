@@ -317,6 +317,17 @@ pub fn (t Target) add_immediate(dst arch.Register, value i32) []u8 {
 	return arch.add_immediate(dst, value)
 }
 
+// add_reg64 and imul_immediate are the two steps that reach an element whose
+// stride the scaled address cannot write: multiply the index by the stride, add
+// the array's address.
+pub fn (t Target) add_reg64(dst arch.Register, src arch.Register) []u8 {
+	return arch.add_reg64(dst, src)
+}
+
+pub fn (t Target) imul_immediate(dst arch.Register, value i32) []u8 {
+	return arch.imul_immediate(dst, value)
+}
+
 pub fn (t Target) address_of_slot(base arch.Register, disp i32, dst arch.Register) []u8 {
 	return arch.address_of_slot(base, disp, dst)
 }

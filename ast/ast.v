@@ -201,7 +201,12 @@ pub:
 // the offsets added up on the way in.
 pub struct Field {
 pub:
-	name     string
+	name string
+	// index is set when the object is one element of an array, which is what
+	// `s[i].a` writes: the member is read from the element the index names, so
+	// the address of the object is the address of that element and the stride
+	// between elements is the size of one element's type.
+	index    ?Expr
 	member   string
 	offset   int
 	spelling string

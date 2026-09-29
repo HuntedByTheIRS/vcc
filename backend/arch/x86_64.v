@@ -826,6 +826,37 @@ pub fn add_immediate(dst Register, value i32) []u8 {
 	return out
 }
 
+// add_reg64 adds one register into another at the full width of an address. An
+// element of an aggregate array cannot be scaled by the stride when that stride is
+// not a power of two, so the index is multiplied and this adds the array's address.
+pub fn add_reg64(dst Register, src Register) []u8 {
+	mut out := []u8{cap: 3}
+	out << u8(0x48) | (if dst.code >= 8 { u8(0x01) } else { u8(0) }) | (if src.code >= 8 {
+		u8(0x04)
+	} else {
+		u8(0)
+	}) // REX.W, B for the destination and R for the source
+	out << u8(0x01) // add r/m64, r64
+	out << u8(0xc0 | ((src.code & 0x07) << 3) | (dst.code & 0x07))
+	return out
+}
+
+// imul_immediate multiplies a register by a constant in place, which is how an
+// index becomes a byte offset when the stride is not one the machine's scaled
+// address can write. The constant is four bytes and the result is the full width
+// of the register.
+pub fn imul_immediate(dst Register, value i32) []u8 {
+	mut out := []u8{cap: 7}
+	out << u8(0x48) | (if dst.code >= 8 { u8(0x05) } else { u8(0) }) // REX.W, with B and R for the one register
+	out << u8(0x69) // imul r64, r/m64, imm32
+	out << u8(0xc0 | ((dst.code & 0x07) << 3) | (dst.code & 0x07)) // the register is both operands
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
 pub fn add_reg32(dst Register, src Register) ![]u8 {
 	return rm_reg(0x01, dst, src)
 }
