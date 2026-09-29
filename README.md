@@ -136,15 +136,23 @@ the compiler disagrees with the tag.
 | `parser/` | recursive descent parser for the supported subset |
 | `optimizer/` | `ast` in, `ast` out: `-O` levels and the builtin table |
 | `printer/` | `ast` in, text out: what `-print-ast` prints |
-| `backend/` | target description as tables: registers, opcodes, syscalls, encodings |
+| `backend/` | target description: `arch/` is the machine, `os/` is the system, `backend.v` composes them |
 | `codegen/` | translation unit to bytes: constant folding and the ELF64 container |
 | `tools/` | gate and benchmark scripts; not part of the compiler |
 | `extensions/` | reserved for compiler extensions; empty for now |
 
-A target is data rather than a directory of hand-written emission: `backend/`
-holds the shapes (`Target`, `Register`, `Syscall`, `Encoding`) and one file per
-architecture supplies the tables. Adding a target means adding a file like
-`backend/x86_64.v`, not editing the emitter.
+A target is data rather than a directory of hand-written emission, and it has
+two dimensions. `backend/arch/` describes a machine: its register file, how a
+register is numbered in an instruction, where a function's arguments arrive.
+`backend/os/` describes a system: the kernel entry points a program can call, the
+numbers they take, and the loader constants a container is built from. Neither
+knows the other exists, and every arch-dependent answer the system gives is asked
+for by machine name, which is what lets a second system be written without
+touching the first one's file.
+
+`backend/backend.v` is where the two meet, in a `Target` composed from one of
+each. The emitter asks that, so a new architecture, a new system, or a new fact
+about either is a table that changed and not a branch in `codegen/`.
 
 Tests live next to the code as `*_test.v` files and run with `v test .`.
 

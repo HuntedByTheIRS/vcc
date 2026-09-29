@@ -60,7 +60,7 @@ so the cap turns a frozen desktop into a clean OOM with the peak reported.
 | `parser/` | tokens in, `ast` out. Never writes files. |
 | `optimizer/` | `ast` in, `ast` out. `-O` levels and the builtin table. A pass is a row in a table with the level that turns it on, so adding an optimization is a function beside the table and not a branch in the emitter. `codegen/` never asks it anything. |
 | `printer/` | `ast` in, text out. `-print-ast` is its only caller. `ast/` stays node types only, so nothing that renders a tree belongs in it. |
-| `backend/` | target tables: registers, opcodes, syscalls, encodings, calling convention. One file per architecture; a new target is a new file, not a branch in the emitter. |
+| `backend/` | target description in two dimensions. `arch/` is the machine: registers, encodings, argument positions. `os/` is the system: syscalls, their numbers, loader constants. `backend.v` composes one of each into a `Target`, which is all `codegen/` sees. A new architecture or a new system is a new file, not a branch in the emitter. |
 | `codegen/` | `ast` in, bytes out. Same input, same bytes, every run. Asks `backend/` for every machine fact. |
 | `tools/` | gate and benchmark scripts. Not part of the compiler and not imported by it. |
 | `extensions/` | reserved; empty until something real lands in it. |

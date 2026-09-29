@@ -62,6 +62,10 @@ something.
 Verified by running the compiled programs, and by diffing behavior against tcc's
 output for the same input, not by reading the assembly and approving of it.
 
+A new architecture or a new system is a file under `backend/arch` or
+`backend/os` plus a line in the composition, so this milestone grows by tables
+rather than by platform branches.
+
 ## M4: objects, linking, and output formats
 
 ELF relocatable objects, an `ar` archive reader, executable linking against
