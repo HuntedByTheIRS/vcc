@@ -307,10 +307,19 @@ fn patch(mut image []u8, program Program, target backend.Target, sections Sectio
 				replacement = target.call_slot(disp)
 			}
 			.take_address {
-				register := target.arg_reg(fixup.arg_position) or {
-					return error('no register carries argument ${fixup.arg_position}')
+				register := target.reg(fixup.register) or {
+					return error('no register named ${fixup.register} to compute an address into')
 				}
 				replacement = target.address_of(register, disp)
+			}
+			.jump_local {
+				replacement = target.jump(disp)
+			}
+			.branch_zero {
+				replacement = target.jump_if_zero(disp)
+			}
+			.branch_nonzero {
+				replacement = target.jump_if_not_zero(disp)
 			}
 		}
 		if replacement.len != fixup.length {
@@ -323,7 +332,7 @@ fn patch(mut image []u8, program Program, target backend.Target, sections Sectio
 // referent_of is where one reference points, as an offset into the image.
 fn referent_of(program Program, sections Sections, fixup Fixup) !int {
 	match fixup.kind {
-		.call_local {
+		.call_local, .jump_local, .branch_zero, .branch_nonzero {
 			return sections.text + (program.labels[fixup.name] or {
 				return error('no code for ${fixup.name}')
 			})

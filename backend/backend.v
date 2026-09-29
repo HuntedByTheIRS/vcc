@@ -288,6 +288,17 @@ pub fn (t Target) test(reg arch.Register) ![]u8 {
 	return arch.test_reg32(reg)
 }
 
+// logical_not answers whether a value is zero, as the language's not operator
+// asks: the value is compared with zero and the flags become a value of int
+// width, which is the same shape a comparison has and the reason it is written
+// here rather than as an instruction of its own.
+pub fn (t Target) logical_not(reg arch.Register) ![]u8 {
+	mut out := arch.test_reg32(reg)!
+	out << arch.set_condition(arch.Condition.equal, reg)!
+	out << arch.movzx_byte(reg)!
+	return out
+}
+
 pub fn (t Target) compare(op string, left arch.Register, right arch.Register) ![]u8 {
 	condition := match op {
 		'==' { arch.Condition.equal }

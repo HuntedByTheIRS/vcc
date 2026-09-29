@@ -8,9 +8,9 @@ import tokenize
 
 // The tests below run as part of module codegen, and reach into the parser to
 // build input, which is the shortest path from C source to an AST that the
-// compiler has. String literals and call statements cannot be parsed yet, so the
-// tests that need them build the tree the parser will produce for them: the
-// emitter consumes the same nodes either way.
+// compiler has. String literals, call statements, variables, branches and loops
+// cannot all be parsed yet, so the tests that need them build the tree the
+// parser will produce for them: the emitter consumes the same nodes either way.
 
 fn translation_unit(source string) ast.TranslationUnit {
 	lexed := tokenize.lex(source)
@@ -70,6 +70,88 @@ fn return_statement(value i64) ast.Stmt {
 			value: value
 			text:  '${value}'
 		})
+	}
+}
+
+// The builders below assemble the tree for a body that keeps values in
+// variables, branches on them and loops over them. They are the nodes the ast
+// declares, made by hand because the parser cannot write all of them down yet.
+fn name_node(name string) ast.Expr {
+	return ast.Expr(ast.Ident{
+		name: name
+	})
+}
+
+fn binary_node(op string, left ast.Expr, right ast.Expr) ast.Expr {
+	return ast.Expr(ast.Binary{
+		op:    op
+		left:  left
+		right: right
+	})
+}
+
+fn unary_node(op string, expr ast.Expr) ast.Expr {
+	return ast.Expr(ast.Unary{
+		op:   op
+		expr: expr
+	})
+}
+
+fn call_expression(name string, args []ast.Expr) ast.Expr {
+	return ast.Expr(ast.Call{
+		name: name
+		args: args
+	})
+}
+
+fn declaration(name string, typ string, init ?ast.Expr) ast.Stmt {
+	return ast.Stmt{
+		kind:      .var_decl
+		decl_name: name
+		decl_type: typ
+		init:      init
+	}
+}
+
+fn assignment(target string, expr ast.Expr) ast.Stmt {
+	return ast.Stmt{
+		kind:   .assign
+		target: target
+		expr:   expr
+	}
+}
+
+fn return_expression(expr ast.Expr) ast.Stmt {
+	return ast.Stmt{
+		kind: .return_stmt
+		expr: expr
+	}
+}
+
+fn param(name string, typ string) ast.Param {
+	return ast.Param{
+		name: name
+		typ:  typ
+	}
+}
+
+fn function_in_file(name string, params []ast.Param, body []ast.Stmt) ast.FnDecl {
+	return ast.FnDecl{
+		name:   name
+		ret:    'int'
+		params: params
+		body:   body
+	}
+}
+
+// unit_of is a translation unit whose entry function is main, with the other
+// functions after it: a call written before a definition still binds to it, and
+// this is the order that says so.
+fn unit_of(main_body []ast.Stmt, helpers []ast.FnDecl) ast.TranslationUnit {
+	mut decls := [function_in_file('main', []ast.Param{}, main_body)]
+	decls << helpers
+	return ast.TranslationUnit{
+		decls: decls
 	}
 }
 
@@ -314,20 +396,13 @@ fn test_a_non_constant_return_is_reported_with_the_name() {
 	assert emitted.diagnostics[0].msg.contains('x is not a constant')
 }
 
-fn test_a_call_in_a_constant_expression_is_reported() {
+// A call whose result is read is the shape the -O levels exist for: the builtin
+// table turns a call it knows into a value, and a call the emitter is handed in a
+// value position is reported rather than emitted.
+fn test_a_call_used_as_a_value_is_reported() {
 	emitted := emit(translation_unit('int main() { return f(1); }'), Options{})
 	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('f')
-	assert emitted.bytes.len == 0
-}
-
-fn test_a_call_argument_that_is_not_a_constant_is_reported() {
-	body := [
-		call_statement('puts', [ast.Expr(ast.Ident{ name: 'message' })]),
-	]
-	emitted := emit(program(body), Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('message')
+	assert emitted.diagnostics[0].msg.contains('call to f')
 	assert emitted.bytes.len == 0
 }
 
@@ -338,6 +413,16 @@ fn test_a_call_as_an_argument_of_another_call_is_reported() {
 	emitted := emit(program(body), Options{})
 	assert emitted.diagnostics.len == 1
 	assert emitted.diagnostics[0].msg.contains('name_of')
+	assert emitted.bytes.len == 0
+}
+
+fn test_a_call_argument_that_is_not_a_constant_is_reported() {
+	body := [
+		call_statement('puts', [ast.Expr(ast.Ident{ name: 'message' })]),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('message')
 	assert emitted.bytes.len == 0
 }
 
@@ -414,6 +499,265 @@ fn test_an_unknown_target_names_the_targets_that_exist() {
 	assert emitted.diagnostics.len == 1
 	assert emitted.diagnostics[0].msg.contains('unknown target riscv64-linux')
 	assert emitted.diagnostics[0].msg.contains('x86_64-linux')
+}
+
+// A frame with two locals in it: each declaration takes a slot, each initializer
+// writes it, and the return reads both back out.
+fn test_two_locals_are_summed() {
+	body := [
+		declaration('a', 'int', int_argument(40)),
+		declaration('b', 'int', int_argument(2)),
+		return_expression(binary_node('+', name_node('a'), name_node('b'))),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 42
+}
+
+// A declaration without an initializer is storage: the value is whatever the
+// function writes into it before it reads it.
+fn test_a_declaration_without_an_initializer_is_storage() {
+	body := [
+		declaration('n', 'int', none),
+		assignment('n', int_argument(42)),
+		return_expression(name_node('n')),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 42
+}
+
+// A parameter arrives in a register, is stored where a local lives, and is read
+// from there as many times as the expression asks for it.
+fn test_a_parameter_is_used_in_an_expression() {
+	helper := function_in_file('twice', [param('x', 'int')], [
+		call_statement('printf', [string_argument('twice %d\n'), binary_node('+', name_node('x'),
+			name_node('x'))]),
+		return_statement(0),
+	])
+	body := [
+		call_statement('twice', [int_argument(21)]),
+		return_statement(0),
+	]
+	emitted := emit(unit_of(body, [helper]), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+	assert result.output.contains('twice 42')
+}
+
+// An arithmetic answer that is not a constant: the two values are in the frame
+// and the operation happens at run time, where a wrong width or a wrong operand
+// order would show up in the status.
+fn test_arithmetic_on_locals_is_computed() {
+	body := [
+		declaration('a', 'int', int_argument(47)),
+		declaration('b', 'int', int_argument(5)),
+		declaration('sum', 'int', binary_node('+', name_node('a'), name_node('b'))),
+		declaration('product', 'int', binary_node('*', binary_node('-', name_node('a'), name_node('b')),
+			int_argument(2))),
+		return_expression(binary_node('+', binary_node('+', name_node('sum'),
+			name_node('product')), int_argument(0))),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	// 52 + 84, and the low eight bits of 136 are the status.
+	assert run_image(emitted.bytes) == 136
+}
+
+// The two division operators read the quotient and the remainder from the two
+// registers a signed division leaves them in: 47 / 5 is 9 and 47 % 5 is 2.
+fn test_division_and_remainder_on_locals() {
+	body := [
+		declaration('a', 'int', int_argument(47)),
+		declaration('b', 'int', int_argument(5)),
+		return_expression(binary_node('+', binary_node('/', name_node('a'), name_node('b')),
+			binary_node('*', binary_node('%', name_node('a'), name_node('b')), int_argument(10)))),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 29
+}
+
+// A call whose arguments are computed: two locals are read out of the frame and
+// handed over in the registers the definition reads its parameters from, and the
+// definition reads them in a frame of its own. The library call inside the
+// definition prints what arrived, which is what makes the arguments visible.
+fn test_a_call_whose_arguments_are_locals() {
+	helper := function_in_file('show', [param('x', 'int'), param('y', 'int')], [
+		call_statement('printf', [string_argument('sum %d\n'), binary_node('+', name_node('x'),
+			name_node('y'))]),
+		return_statement(0),
+	])
+	body := [
+		declaration('a', 'int', int_argument(40)),
+		declaration('b', 'int', int_argument(2)),
+		call_statement('show', [name_node('a'), name_node('b')]),
+		call_statement('printf', [string_argument('difference %d\n'), binary_node('-', name_node('a'),
+			name_node('b'))]),
+		return_statement(0),
+	]
+	emitted := emit(unit_of(body, [helper]), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+	assert result.output.contains('sum 42')
+	assert result.output.contains('difference 38')
+}
+
+// A pointer local is eight bytes wide and holds the address of a string literal.
+// The library call reads the variable, not a literal written where the call is,
+// and the program prints what the local points at.
+fn test_a_library_call_reads_a_pointer_local() {
+	body := [
+		declaration('message', 'char *', string_argument('a variable says hello')),
+		call_statement('puts', [name_node('message')]),
+		return_statement(0),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+	assert result.output.contains('a variable says hello')
+}
+
+// An int is four bytes and a pointer is eight, and the difference is visible: a
+// pointer local and an int local sit in the same frame, each written and read at
+// its own width. The call says the pointer kept its value and the status says the
+// int kept its.
+fn test_an_int_local_and_a_pointer_local_keep_their_widths() {
+	body := [
+		declaration('message', 'char *', string_argument('widths')),
+		declaration('n', 'int', int_argument(6)),
+		call_statement('puts', [name_node('message')]),
+		return_expression(binary_node('*', name_node('n'), int_argument(7))),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 42
+	assert result.output.contains('widths')
+}
+
+// A function that takes both a pointer and an int and calls the library itself.
+// The call to it is written before its definition, which is where a call has to
+// bind forward, and the variadic call inside it formats a value computed from
+// its parameters.
+fn test_a_helper_takes_a_pointer_and_an_int() {
+	helper := function_in_file('report', [param('message', 'char *'), param('n', 'int')], [
+		call_statement('printf', [string_argument('%s %d\n'), name_node('message'),
+			binary_node('*', name_node('n'), int_argument(2))]),
+		return_statement(0),
+	])
+	body := [
+		declaration('text', 'char *', string_argument('from a helper')),
+		call_statement('report', [name_node('text'), int_argument(21)]),
+		return_statement(0),
+	]
+	emitted := emit(unit_of(body, [helper]), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+	assert result.output.contains('from a helper 42')
+}
+
+// Every comparison is a value of int width, zero or one, and the bits of the
+// status are where the six of them are read back.
+fn test_comparisons_produce_zero_or_one() {
+	operators := ['<', '>', '==', '!=', '<=', '>=']
+	// 3 against 5, 3 against 5, then 3 against 3: true, false, true, false,
+	// true, true. Each answer goes into a bit of the status, so one run reads
+	// back all six.
+	truths := [i64(1), i64(0), i64(1), i64(0), i64(1), i64(1)]
+	mut body := [declaration('a', 'int', int_argument(3))]
+	mut total := i64(0)
+	mut sum := ast.Expr(int_argument(0))
+	for i, op in operators {
+		right := if op in ['<', '>'] { int_argument(5) } else { int_argument(3) }
+		weight := i64(1) << i
+		body << declaration('c${i}', 'int', binary_node(op, name_node('a'), right))
+		total += truths[i] * weight
+		sum = binary_node('+', sum, binary_node('*', name_node('c${i}'), int_argument(weight)))
+	}
+	body << return_expression(sum)
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == int(total)
+}
+
+// The unary operators take one computed value: the sign change negates what is in
+// the frame, and the logical not answers whether it is zero.
+fn test_unary_operators_compute_on_a_local() {
+	negated := emit(program([
+		declaration('minus', 'int', int_argument(-42)),
+		return_expression(unary_node('-', name_node('minus'))),
+	]), Options{})
+	assert negated.diagnostics.len == 0
+	assert run_image(negated.bytes) == 42
+	notted := emit(program([
+		declaration('zero', 'int', int_argument(0)),
+		declaration('five', 'int', int_argument(5)),
+		return_expression(binary_node('+', binary_node('*', unary_node('!', name_node('zero')),
+			int_argument(40)), binary_node('*', unary_node('!', name_node('five')), int_argument(2)))),
+	]), Options{})
+	assert notted.diagnostics.len == 0
+	assert run_image(notted.bytes) == 40
+}
+
+// The short-circuit operators: the left side settles the answer, so the right
+// side is not evaluated at all. The right side here divides by a variable that
+// holds zero, which would stop the process if it were evaluated.
+fn test_and_and_or_do_not_evaluate_the_side_they_do_not_need() {
+	body := [
+		declaration('zero', 'int', int_argument(0)),
+		declaration('one', 'int', int_argument(1)),
+		declaration('conjunction', 'int', binary_node('&&', name_node('zero'),
+			binary_node('/', name_node('one'), name_node('zero')))),
+		declaration('disjunction', 'int', binary_node('||', name_node('one'),
+			binary_node('/', name_node('one'), name_node('zero')))),
+		return_expression(binary_node('+', binary_node('*', name_node('conjunction'), int_argument(2)),
+			name_node('disjunction'))),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+}
+
+fn test_a_local_of_a_type_with_no_instruction_is_reported() {
+	body := [
+		declaration('f', 'double', int_argument(1)),
+		return_statement(0),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('double')
+	assert emitted.bytes.len == 0
+}
+
+fn test_an_operation_on_a_pointer_is_reported() {
+	body := [
+		declaration('s', 'char *', string_argument('x')),
+		declaration('t', 'char *', binary_node('+', name_node('s'), int_argument(1))),
+		return_statement(0),
+	]
+	emitted := emit(program(body), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('pointer')
+	assert emitted.bytes.len == 0
+}
+
+// More parameters than the machine passes in registers: the rest would have to
+// be read off the stack, and that is said rather than emitted.
+fn test_more_parameters_than_the_machine_has_registers_is_reported() {
+	mut params := []ast.Param{}
+	for i in 0 .. 7 {
+		params << param('p${i}', 'int')
+	}
+	helper := function_in_file('many', params, [return_statement(0)])
+	emitted := emit(unit_of([return_statement(0)], [helper]), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('more than 6')
+	assert emitted.bytes.len == 0
 }
 
 // A program header the way the kernel reads it, so a test can say what the image
