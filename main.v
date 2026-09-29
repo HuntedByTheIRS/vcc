@@ -180,16 +180,16 @@ fn write_image(path string, bytes []u8) ! {
 
 // run_image runs what was just compiled and leaves with its exit status, which is
 // what `-run` means: the compiler becomes the program it produced.
+//
+// The program is given the terminal rather than a pipe, because its output is
+// the whole reason for running it: a captured stream would arrive after the
+// program had finished, on the wrong one of the two, and in one lump.
 fn run_image(path string, args []string) {
 	mut command := os.quoted_path(path)
 	for arg in args {
 		command += ' ' + os.quoted_path(arg)
 	}
-	result := os.execute(command)
-	if result.exit_code < 0 {
-		abort('cannot run ${path}: ${result.output}')
-	}
-	exit(result.exit_code)
+	exit(os.system(command))
 }
 
 fn temporary_path() string {
