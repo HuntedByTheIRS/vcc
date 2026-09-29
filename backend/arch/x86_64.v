@@ -245,6 +245,14 @@ pub fn frame_reserve(size u32) []u8 {
 
 pub const frame_reserve_immediate = 3
 
+// align_stack drops the stack pointer to the boundary a call wants. The entry
+// point runs on the stack the kernel handed the process, and what that stack was
+// aligned to is not this compiler's to assume: one instruction here makes every
+// frame below it start where the convention says, whatever the kernel left.
+pub fn align_stack() []u8 {
+	return [u8(0x48), 0x83, 0xe4, 0xf0] // and rsp, -16
+}
+
 // The arithmetic this language's ints are computed with, all of it on the 32-bit
 // names: the values are four bytes wide, and an operation at eight bytes would
 // be an answer about a different value.

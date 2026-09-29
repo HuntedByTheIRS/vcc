@@ -28,6 +28,25 @@ pub mut:
 	// the same decision — and what belongs here is only the order they are
 	// searched in.
 	standard_dirs []string
+	// preludes are the -include and -imacros files, in the order they were
+	// named: read before the source is, as if their lines were the first lines
+	// of it.
+	preludes []Prelude
+	// undef_builtins is -undef: the macros that describe the target are not
+	// defined at all, so a header that asks what machine it is being read on
+	// gets no answer from this compiler.
+	undef_builtins bool
+}
+
+// Prelude is one file to read before the source. `macros_only` is what
+// separates the two flags that name one: an -include file is read as if its
+// lines were the first lines of the source, and an -imacros file is read for
+// what it defines and for nothing else, which is what a build tool uses when it
+// wants the definitions without the declarations.
+pub struct Prelude {
+pub:
+	path        string
+	macros_only bool
 }
 
 // max_include_depth is how many files may be open at once before the
@@ -53,6 +72,23 @@ pub struct Result {
 pub:
 	tokens      []tokenize.Token
 	diagnostics []tokenize.Diagnostic
+	// files are the files that were read, in the order they were first read,
+	// each with whether it came from the standard directories. That is what a
+	// build tool's rule for a file is made of: a file is made of everything it
+	// read, and a header read from ten places is one dependency and not ten.
+	files []SourceFile
+	// macros are what was defined when the read ended, which is what -dM
+	// prints.
+	macros []Macro
+}
+
+// SourceFile is one file that was read. `system` says it came from the standard
+// directories rather than from -I or from beside the file that asked for it,
+// which is the whole difference between -M and -MM.
+pub struct SourceFile {
+pub:
+	path   string
+	system bool
 }
 
 // preprocess reads one source file into the token stream the parser takes.
@@ -63,14 +99,40 @@ pub fn preprocess(source string, path string, opts Options) Result {
 		main_path:  path
 		opts:       opts
 	}
-	p.define_builtins()
+	if !opts.undef_builtins {
+		p.define_builtins()
+	}
 	p.apply_command_line_defines()
-	p.push(path, source, -1)
+	// The -include and -imacros files are read before the source is, which is
+	// what `as if their lines were the first lines of it` means: the source goes
+	// on the stack first so the read comes back to it, and the preludes go on
+	// after it in reverse, because the stack reads from the top.
+	p.push(path, source, -1, false, false)
+	for i := opts.preludes.len - 1; i >= 0; i-- {
+		p.prelude(opts.preludes[i])
+	}
 	p.run()
 	return Result{
 		tokens:      p.out
 		diagnostics: p.diagnostics
+		files:       p.files
+		macros:      p.macro_list()
 	}
+}
+
+// macro_list is what is defined, in the order the names sort, so that two runs
+// over the same file agree to the character.
+fn (p Processor) macro_list() []Macro {
+	mut names := []string{}
+	for name, _ in p.macros {
+		names << name
+	}
+	names.sort()
+	mut macros := []Macro{}
+	for name in names {
+		macros << p.macros[name]
+	}
+	return macros
 }
 
 // Frame is one open file: the path its tokens are reported under, the tokens
@@ -94,6 +156,11 @@ mut:
 	// rather than at the file the compiler is reading.
 	line_delta  int
 	report_path string
+	// silent says the frame's tokens are read and not written out, which is
+	// what an -imacros file is: read for what it defines and for nothing else.
+	// An include from a silent file is silent too, because the text of a file
+	// that is not wanted does not become wanted by being one step further away.
+	silent bool
 }
 
 // mapped is a token of the file being read as the file says to read it. A
@@ -164,6 +231,8 @@ mut:
 	// counter is what __COUNTER__ has counted so far, which is nothing until
 	// something asks.
 	counter int
+	// files are the files that were read, in the order they were first read.
+	files []SourceFile
 	// expanding is the stack of macro names being expanded right now. A name
 	// already on it is left alone, which is what keeps `#define A B` beside
 	// `#define B A` from expanding forever.
@@ -309,7 +378,31 @@ fn (mut p Processor) include(tok tokenize.Token, args string, after bool) {
 		p.problem(tok, 'cannot read ${found.path}')
 		return
 	}
-	p.push(found.path, source, found.index)
+	p.push(found.path, source, found.index, p.frames.last().silent, found.system)
+}
+
+// prelude reads a file that was named on the command line, before the source is
+// read. The file was named where the person is standing, so the working
+// directory is searched first and the -I and standard directories after it.
+fn (mut p Processor) prelude(file Prelude) {
+	mut found := Located{
+		path:  file.path
+		index: -1
+	}
+	if !os.is_file(found.path) {
+		// A file that is not where the command was typed is looked for the way
+		// a quoted include is, with the working directory standing in for the
+		// directory of the file that wrote the line.
+		found = p.find_include(file.path, false, os.join_path(os.getwd(), 'vcc'), false) or {
+			p.problem_at(file.path, 1, 1, 'cannot find ${file.path} to read before the source')
+			return
+		}
+	}
+	source := os.read_file(found.path) or {
+		p.problem_at(found.path, 1, 1, 'cannot read ${found.path}')
+		return
+	}
+	p.push(found.path, source, found.index, file.macros_only, found.system)
 }
 
 // Located is a header the search found: the path to read, and where in the
@@ -319,6 +412,10 @@ fn (mut p Processor) include(tok tokenize.Token, args string, after bool) {
 struct Located {
 	path  string
 	index int
+	// system says the file came from the standard directories rather than from
+	// -I or from beside the file that asked for it, which is the difference
+	// between a header the build owns and one the machine does.
+	system bool
 }
 
 // find_include looks for a header the way C says to: one written with quotes is
@@ -349,8 +446,9 @@ fn (mut p Processor) find_include(name string, angled bool, from string, after b
 		candidate := os.join_path(dirs[i], name)
 		if os.is_file(candidate) {
 			return Located{
-				path:  candidate
-				index: i
+				path:   candidate
+				index:  i
+				system: i >= p.opts.include_dirs.len
 			}
 		}
 	}
@@ -401,7 +499,7 @@ fn include_name(name string, angled bool) string {
 	return if angled { '<${name}>' } else { '"${name}"' }
 }
 
-fn (mut p Processor) push(path string, source string, found_index int) {
+fn (mut p Processor) push(path string, source string, found_index int, silent bool, system bool) {
 	lexed := tokenize.lex(source)
 	for diagnostic in lexed.diagnostics {
 		p.diagnostics << tokenize.Diagnostic{
@@ -411,11 +509,21 @@ fn (mut p Processor) push(path string, source string, found_index int) {
 			file: path
 		}
 	}
+	// The read is offered once per file: a header included from ten places is
+	// one file the program depends on, not ten, and the first read is where it
+	// belongs in the order.
+	if !p.files.any(it.path == path) {
+		p.files << SourceFile{
+			path:   path
+			system: system
+		}
+	}
 	p.frames << Frame{
 		path:            path
 		tokens:          lexed.tokens
 		condition_depth: p.conditionals.len
 		found_index:     found_index
+		silent:          silent
 	}
 }
 
@@ -440,7 +548,7 @@ fn (mut p Processor) run() {
 			segment << p.mapped(t)
 			p.frames[i].pos++
 		}
-		if segment.len > 0 && p.reading() {
+		if segment.len > 0 && p.reading() && !p.frames[i].silent {
 			for expanded in p.expand_all(segment) {
 				p.emit(expanded)
 			}

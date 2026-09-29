@@ -91,12 +91,13 @@ fn (mut s DeclSpec) note_type(t tokenize.Token) {
 }
 
 // type_spelling is the type as it was written, with the pointer stars the
-// declarator put in front of the name. It becomes the return type of a
-// function declaration the tree keeps.
+// declarator put in front of the name. The stars go down as one run, which is
+// how a type is written: `char **argv` is a pointer to a pointer, and `char * *`
+// is not what the file says.
 fn (s DeclSpec) type_spelling(stars int) string {
 	mut text := if s.type_words.len > 0 { s.type_words.join(' ') } else { s.words.join(' ') }
-	for _ in 0 .. stars {
-		text += ' *'
+	if stars > 0 {
+		text += ' ' + '*'.repeat(stars)
 	}
 	return text
 }
@@ -112,6 +113,11 @@ mut:
 	star_at     tokenize.Token
 	array_at    tokenize.Token
 	is_function bool
+	// params are the parameters this declarator names, in the order they were
+	// written. Every function declarator is read for them and the ones that
+	// declare a function by name keep them: a pointer to a function is not
+	// something a call reaches by name, and this compiler emits no such call.
+	params []ast.Param
 	// param_problem says what makes the parameter list one the back end cannot
 	// emit, and stays empty when there is nothing wrong with it. It is recorded
 	// rather than reported because whether it matters is only known when a body
@@ -120,9 +126,14 @@ mut:
 	param_at      tokenize.Token
 }
 
-// Params is what a parameter list turned out to be.
+// Params is what a parameter list turned out to be: the parameters it named, in
+// the order they were written, and the reason it is one a definition cannot use,
+// when there is one. The reason is recorded rather than reported because whether
+// it matters is only known when a body turns up after it: a prototype promises,
+// and a definition is code.
 struct Params {
 mut:
+	params  []ast.Param
 	problem string
 	at      tokenize.Token
 }
@@ -179,11 +190,12 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				// diagnostic is what stops it being compiled.
 				if d.name.len > 0 {
 					decls << ast.FnDecl{
-						name: d.name
-						ret:  spec.type_spelling(d.stars)
-						body: body
-						line: d.name_at.line
-						col:  d.name_at.col
+						name:   d.name
+						ret:    spec.type_spelling(d.stars)
+						params: d.params
+						body:   body
+						line:   d.name_at.line
+						col:    d.name_at.col
 					}
 				}
 				return decls
@@ -191,15 +203,19 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// A prototype. It is kept with an empty body: the declaration is
 			// what names the function whether or not this file defines it, and
 			// the types in it are only a promise, since nothing is emitted for
-			// a declaration. A typedef of a function type is not a function
-			// declaration, so it is not kept as one.
+			// a declaration. The parameters are kept anyway — a name and a type
+			// as written are what the declaration said, and a later stage that
+			// wants to check a call against it would find them here. A typedef
+			// of a function type is not a function declaration, so it is not
+			// kept as one.
 			if !spec.is_typedef {
 				decls << ast.FnDecl{
-					name: d.name
-					ret:  spec.type_spelling(d.stars)
-					body: []
-					line: d.name_at.line
-					col:  d.name_at.col
+					name:   d.name
+					ret:    spec.type_spelling(d.stars)
+					params: d.params
+					body:   []ast.Stmt{}
+					line:   d.name_at.line
+					col:    d.name_at.col
 				}
 			}
 		} else {
@@ -250,19 +266,14 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 
 // check_definition reports what keeps a definition from being emitted. A
 // prototype can promise anything, because nothing is emitted for it; a
-// definition is code, and this back end takes three return types and
-// parameters it can name.
+// definition is code, and this back end takes three return types and parameters
+// it can name.
 fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	if d.name.len == 0 {
 		p.error_at(spec.start, 'unsupported: a function definition needs a name')
 		return
 	}
-	if !(spec.words.len == 1 && spec.words[0] in supported_types) {
-		offender := if spec.words.len > 1 && spec.words[0] in supported_types {
-			spec.words[1]
-		} else {
-			spec.words[0]
-		}
+	if offender := unsupported_type_word(spec) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
 		return
 	}
@@ -273,6 +284,25 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	if d.param_problem.len > 0 {
 		p.error_at(d.param_at, d.param_problem)
 	}
+}
+
+// unsupported_type_word is the word among a declaration's specifiers that keeps
+// the back end from giving an object the type it names, or none when every word
+// is one the emitter has a form for. A definition's return type and a
+// declaration inside a body are the same question, because both are storage the
+// program has to find room for; a prototype is a promise, and a promise is not
+// asked.
+fn unsupported_type_word(spec DeclSpec) ?string {
+	if spec.words.len == 0 {
+		return none
+	}
+	if spec.words.len == 1 && spec.words[0] in supported_types {
+		return none
+	}
+	if spec.words.len > 1 && spec.words[0] in supported_types {
+		return spec.words[1]
+	}
+	return spec.words[0]
 }
 
 // parse_decl_specifiers reads the words in front of a declarator. It accepts
@@ -487,6 +517,7 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			params := p.parse_parameter_list(depth + 1)!
 			if !pointer_to_function {
 				d.is_function = true
+				d.params = params.params
 			}
 			if params.problem.len > 0 && d.param_problem.len == 0 {
 				d.param_problem = params.problem
@@ -499,14 +530,18 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 	return d
 }
 
-// parse_parameter_list reads a parameter list. Parameters are not kept, since
-// the tree records nothing about them yet. What the list is read for is the
-// one question a definition asks: whether the back end could name every
-// parameter. The answer travels back in Params.
+// parse_parameter_list reads a parameter list into the parameters it names and
+// the reason it is one a definition cannot use, when there is one. The
+// parameters are kept with their types as written, because the frame of a call
+// is storage the back end has to name a type for, and a definition's parameter
+// is where that is asked. What a name is spelled is the declarator's business:
+// `char **argv` is `char **`, whatever the emitter later makes of it.
 fn (mut p Parser) parse_parameter_list(depth int) !Params {
 	mut params := Params{}
 	open := p.next() // (
 	if p.at_punct(')') {
+		// `()` names no parameters, which is all the tree records: a call is
+		// not checked against an empty list, so there is nothing to keep.
 		p.next()
 		return params
 	}
@@ -517,9 +552,12 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			return error('unterminated parameter list')
 		}
 		if t.kind == .punct && t.text == '...' {
-			// The ellipsis is the last entry and says nothing about the ones in
-			// front of it.
+			// An ellipsis says there are arguments the list does not name.
+			// Nothing in the tree records that, so a definition with one is a
+			// function whose arguments this back end cannot lay out. For a
+			// prototype it is a promise, and promises are not checked here.
 			p.next()
+			params.note_problem('unsupported: a variadic definition is not implemented', t)
 			if !p.expect_punct(')') {
 				return error('parameter list')
 			}
@@ -528,14 +566,33 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 		spec := p.parse_decl_specifiers(depth)!
 		if p.at_punct(',') || p.at_punct(')') {
 			// A parameter with no declarator: `(void)`, `(int)`, `(size_t)`.
-			// `void` alone is the empty list, which is not a parameter at all.
-			if !(spec.words.len == 1 && spec.words[0] in supported_types) {
-				params.note_problem('unsupported type ${spec.words[0]}', spec.start)
+			if spec.words.len == 1 && spec.words[0] == 'void' {
+				// `void` alone is the empty list, which is not a parameter at
+				// all. Anywhere else it is a parameter with no name.
+				if p.at_punct(',') {
+					params.note_problem('unsupported: void must be the whole parameter list', spec.start)
+				}
+			} else {
+				params.params << ast.Param{
+					typ:  spec.type_spelling(0)
+					line: spec.start.line
+					col:  spec.start.col
+				}
+				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
 			}
 		} else {
 			d := p.parse_declarator(depth + 1)!
-			if d.stars > 0 {
-				params.note_problem('unsupported: pointer parameters are not implemented', d.star_at)
+			params.params << ast.Param{
+				name: d.name
+				typ:  spec.type_spelling(d.stars)
+				line: if d.name.len > 0 { d.name_at.line } else { spec.start.line }
+				col:  if d.name.len > 0 { d.name_at.col } else { spec.start.col }
+			}
+			// The order of the questions is the order a reader asks them: what
+			// keeps this parameter from being named at all, then the shapes the
+			// tree has no form for, then the types the emitter does.
+			if d.name.len == 0 {
+				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
 			} else if d.array_at.line > 0 {
 				params.note_problem('unsupported: array parameters are not implemented', d.array_at)
 			} else if !(spec.words.len == 1 && spec.words[0] in supported_types) {

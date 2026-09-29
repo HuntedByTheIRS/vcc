@@ -625,3 +625,81 @@ fn test_a_warning_is_reported_and_the_read_goes_on() {
 	assert result.diagnostics[0].msg.contains('no such feature')
 	assert result.tokens.map(it.text) == ['int', 'x', ';']
 }
+
+fn test_an_undef_read_takes_the_builtins_away() {
+	// -undef is the command line saying it will describe the target itself.
+	// The macro that is left undefined stays a name the program can use, which
+	// is what a header sees when it asks a compiler that knows nothing.
+	assert processed('__STDC__') == ['1']
+	result := preprocess('__STDC__', 'test.c', Options{
+		undef_builtins: true
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['__STDC__']
+}
+
+fn test_a_prelude_file_is_read_before_the_source() {
+	dir := fixture_directory()
+	prelude := os.join_path(dir, 'pre.h')
+	os.write_file(prelude, '#define N 7\nint from_prelude;\n') or { panic(err) }
+	result := preprocess('int x = N;', os.join_path(dir, 'main.c'), Options{
+		preludes: [
+			Prelude{
+				path: prelude
+			},
+		]
+	})
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['int', 'from_prelude', ';', 'int', 'x', '=', '7', ';']
+}
+
+fn test_a_macros_only_prelude_leaves_its_text_out() {
+	dir := fixture_directory()
+	prelude := os.join_path(dir, 'macros.h')
+	os.write_file(prelude, '#define M 9\nint from_macros;\n') or { panic(err) }
+	result := preprocess('int x = M;', os.join_path(dir, 'main.c'), Options{
+		preludes: [
+			Prelude{
+				path:        prelude
+				macros_only: true
+			},
+		]
+	})
+	assert result.diagnostics.len == 0
+	// The name it defined is defined, and the declaration it held is not in the
+	// stream: that is the whole difference between the two flags.
+	assert result.tokens.map(it.text) == ['int', 'x', '=', '9', ';']
+}
+
+fn test_a_prelude_that_cannot_be_found_is_diagnosed() {
+	result := preprocess('int x;', 'test.c', Options{
+		preludes: [
+			Prelude{
+				path: 'no-such-prelude.h'
+			},
+		]
+	})
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'cannot find no-such-prelude.h to read before the source'
+}
+
+fn test_the_files_the_read_opened_are_reported_in_order() {
+	// What a build tool's rule for a file is made of: the file itself first,
+	// then each header where it was first read, once, with whether it came from
+	// the standard directories.
+	dir := fixture_directory()
+	os.write_file(os.join_path(dir, 'inner.h'), 'int inner;\n') or { panic(err) }
+	os.write_file(os.join_path(dir, 'outer.h'), 'int outer;\n' + include_line('"inner.h"')) or {
+		panic(err)
+	}
+	main_path := os.join_path(dir, 'main.c')
+	source := 'int before;\n' + include_line('"outer.h"') + 'int after;\n'
+	os.write_file(main_path, source) or { panic(err) }
+	result := preprocess(source, main_path, Options{
+		include_dirs: [dir]
+	})
+	assert result.diagnostics.len == 0
+	assert result.files.map(it.path) == [main_path, os.join_path(dir, 'outer.h'),
+		os.join_path(dir, 'inner.h')]
+	assert result.files.map(it.system) == [false, false, false]
+}

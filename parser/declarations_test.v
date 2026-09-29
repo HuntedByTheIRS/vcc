@@ -135,10 +135,71 @@ fn test_a_definition_of_an_object_is_still_reported() {
 	assert result.diagnostics[0].msg.contains('only function definitions')
 }
 
-fn test_a_definition_with_pointer_parameters_is_reported() {
+fn test_a_definition_keeps_its_parameters() {
+	result := declarations_of('int add(int a, int b) { return a + b; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params.len == 2
+	assert params[0].name == 'a'
+	assert params[0].typ == 'int'
+	assert params[0].line == 1
+	assert params[1].name == 'b'
+	assert params[1].typ == 'int'
+}
+
+// A pointer parameter is a type as written, and the stars are part of it.
+// Whether the emitter can lay the call out is its question, and this front end
+// does not answer it by throwing the type away.
+fn test_a_pointer_parameter_keeps_the_stars_it_was_written_with() {
 	result := declarations_of('int main(int argc, char **argv) { return 0; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params.len == 2
+	assert params[0].typ == 'int'
+	assert params[1].name == 'argv'
+	assert params[1].typ == 'char **'
+}
+
+fn test_void_alone_is_a_list_of_no_parameters() {
+	result := declarations_of('int main(void) { return 0; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].params.len == 0
+}
+
+fn test_an_empty_parameter_list_is_a_list_of_no_parameters() {
+	result := declarations_of('int main() { return 0; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].params.len == 0
+}
+
+// The parameters of a prototype are kept too. Nothing is emitted for a
+// declaration, but a name and a type as written are what the declaration says,
+// and a later stage that checks a call against it needs them.
+fn test_a_prototype_keeps_the_parameters_it_promises() {
+	result := declarations_of('int span (const char *__s); int main() { return 0; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params.len == 1
+	assert params[0].name == '__s'
+	assert params[0].typ == 'char *'
+}
+
+fn test_a_variadic_definition_is_reported() {
+	result := declarations_of('int f(int a, ...) { return a; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('pointer parameters')
+	assert result.diagnostics[0].msg.contains('variadic')
+}
+
+fn test_an_array_parameter_of_a_definition_is_reported() {
+	result := declarations_of('int f(char s[10]) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('array parameters')
+}
+
+fn test_a_parameter_of_a_definition_needs_a_name() {
+	result := declarations_of('int f(int) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('needs a name')
 }
 
 fn test_a_declaration_with_no_declarator_is_reported() {

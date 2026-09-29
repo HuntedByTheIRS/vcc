@@ -2,6 +2,7 @@ module cli
 
 import optimizer
 import os
+import preprocess
 
 // version is the compiler's own version. The output of `--version` is not
 // decoration: V asks a C compiler for its version to decide what it is talking
@@ -49,6 +50,22 @@ pub mut:
 	bench            bool
 	debug            bool
 	inhibit_warnings bool
+	// preludes are the -include and -imacros files in the order they were
+	// given: read before the source is, as if their lines were the first lines
+	// of it, with the flag deciding whether their text is kept.
+	preludes []preprocess.Prelude
+	// undef_builtins is -undef: the macros that describe the target are not
+	// defined, which is what a build asks for when it wants to compile for a
+	// target this compiler does not describe.
+	undef_builtins bool
+	// dump_macros is -dM: print what is defined when the read ends.
+	dump_macros bool
+	// deps asks for the make-style rule listing what the file is made of.
+	// deps_system decides whether the headers that came from the standard
+	// directories are in it, and deps_file says where it is written.
+	deps        bool
+	deps_system bool
+	deps_file   string
 	// optimization is the -O level and the builtin settings, which belong to the
 	// optimizer: it owns the flag list for both, and this file only hands the
 	// arguments over.
@@ -159,6 +176,28 @@ pub fn parse(args []string) !Options {
 			opts.include_dirs << arg[2..]
 		} else if arg == '-nostdinc' {
 			opts.nostdinc = true
+		} else if arg == '-undef' {
+			opts.undef_builtins = true
+		} else if arg == '-dM' {
+			opts.dump_macros = true
+		} else if arg == '-M' {
+			opts.deps = true
+			opts.deps_system = true
+		} else if arg == '-MM' {
+			opts.deps = true
+		} else if arg == '-MF' {
+			opts.deps_file = cursor.value_of('')!
+		} else if arg.starts_with('-MF') {
+			opts.deps_file = arg[3..]
+		} else if arg == '-include' {
+			opts.preludes << preprocess.Prelude{
+				path: cursor.value_of('')!
+			}
+		} else if arg == '-imacros' {
+			opts.preludes << preprocess.Prelude{
+				path:        cursor.value_of('')!
+				macros_only: true
+			}
 		} else if arg == '-D' {
 			opts.defines << cursor.value_of('')!
 		} else if arg.starts_with('-D') {
@@ -265,6 +304,14 @@ pub fn usage(all bool) string {
 	out << '  -fno-builtin-NAME  the same for one function'
 	out << '  -Idir -Dname -Uname -Ldir -llib -x type -o outfile'
 	out << '  -nostdinc     do not search the standard directories for headers'
+	out << '  -M -MM        print a make rule for what the file needs instead of'
+	out << '                compiling; -MM leaves the system headers out'
+	out << '  -MF file      write that rule to a file instead of to the output'
+	out << '  -include file read a file before the source, as if its lines were'
+	out << '                the first lines of it'
+	out << '  -imacros file read a file before the source for its macros only'
+	out << '  -undef        do not define the macros that describe the target'
+	out << '  -dM           print the macros that are defined when the read ends'
 	out << '  -std=version  -std version   recorded; one subset is accepted either way'
 	if all {
 		out << ''

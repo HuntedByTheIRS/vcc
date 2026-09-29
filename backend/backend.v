@@ -233,6 +233,13 @@ pub fn (t Target) frame_immediate_offset() int {
 	return arch.frame_reserve_immediate
 }
 
+// align_stack is how the entry point makes the stack aligned before it calls
+// anything: a process is started on whatever stack the kernel left, and every
+// frame this compiler opens assumes the boundary is where the convention puts it.
+pub fn (t Target) align_stack() []u8 {
+	return arch.align_stack()
+}
+
 // load_slot and store_slot move a value between the frame and a register at the
 // width the value has: four bytes for an int, eight for a pointer.
 pub fn (t Target) load_slot(base arch.Register, disp i32, dst arch.Register, width int) ![]u8 {

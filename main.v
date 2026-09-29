@@ -81,10 +81,12 @@ fn main() {
 	// Lexing happens inside the preprocessor, which is the stage that knows
 	// which file it is reading and what to do with the directives it finds.
 	processed := preprocess.preprocess(source, path, preprocess.Options{
-		include_dirs:  opts.include_dirs
-		defines:       opts.defines
-		undefines:     opts.undefines
-		standard_dirs: if opts.nostdinc { []string{} } else { standard_include_dirs() }
+		include_dirs:   opts.include_dirs
+		defines:        opts.defines
+		undefines:      opts.undefines
+		standard_dirs:  if opts.nostdinc { []string{} } else { standard_include_dirs() }
+		preludes:       opts.preludes
+		undef_builtins: opts.undef_builtins
 	})
 	phases << cli.Phase{
 		name:   'preprocess'
@@ -97,6 +99,17 @@ fn main() {
 	report(path, processed.diagnostics, opts.inhibit_warnings)
 	if tokenize.errors(processed.diagnostics).len > 0 {
 		exit(1)
+	}
+	// -M and -dM answer a question about the read and stop there: a build tool
+	// asking what a file is made of does not want an object file at the end of
+	// its command line.
+	if opts.deps {
+		write_dependencies(path, processed.files, opts)
+		return
+	}
+	if opts.dump_macros {
+		print_macros(processed.macros)
+		return
 	}
 	if opts.preprocess {
 		print_tokens(processed.tokens)
@@ -205,6 +218,80 @@ fn temporary_path() string {
 fn print_tokens(tokens []tokenize.Token) {
 	for tok in tokens {
 		println('${tok.file}:${tok.line}:${tok.col}\t${tok.kind}\t${tok.text}')
+	}
+}
+
+// write_dependencies is what `-M` does: the make rule that says what the file
+// is made of. It is printed, or written where -MF says, and the compile stops
+// there — make reads the rule to decide whether to run the compile at all, and
+// running it as well would be doing the work twice.
+//
+// -MM leaves the headers that came from the standard directories out of the
+// rule: a build that already knows where the C library is does not need to be
+// told again, and a rule naming /usr/include changes whenever the machine does.
+fn write_dependencies(source string, files []preprocess.SourceFile, opts cli.Options) {
+	mut words := []string{}
+	for file in files {
+		if !opts.deps_system && file.system {
+			continue
+		}
+		words << escape_for_make(file.path)
+	}
+	rule := '${escape_for_make(dependency_target(source, opts.output))}: ${words.join(' ')}'
+	if opts.deps_file != '' {
+		os.write_file(opts.deps_file, '${rule}\n') or {
+			abort('cannot write ${opts.deps_file}: ${err.msg()}')
+			return
+		}
+		return
+	}
+	// The rule names what a build would have asked for, so the output path is
+	// the object file's; with -M and -MF there is none and the rule goes to the
+	// standard output, which is where a build reads it from.
+	println(rule)
+}
+
+// dependency_target is what the rule is for: the file named with -o when there
+// is one, and the source with its last extension changed to .o otherwise, which
+// is the file make would look for.
+fn dependency_target(source string, output string) string {
+	if output != '' {
+		return output
+	}
+	dot := source.last_index('.') or { return '${source}.o' }
+	return '${source[..dot]}.o'
+}
+
+// escape_for_make writes a path so that make reads it as one word: a space ends
+// a word in a rule, so a file whose name has one has to say so.
+fn escape_for_make(path string) string {
+	return path.replace(' ', '\\ ')
+}
+
+// print_macros is what `-dM` does: what is defined when the read ends, one
+// definition per line, in the shape the program itself would have written it.
+// It is how a build checks what a compiler believes about the target before it
+// relies on it, and how a person asks why a branch was not taken.
+fn print_macros(macros []preprocess.Macro) {
+	for macro in macros {
+		mut texts := []string{}
+		for token in macro.body {
+			texts << token.text
+		}
+		mut head := '#define ${macro.name}'
+		if macro.takes_arguments() {
+			mut params := macro.params.clone()
+			if macro.variadic {
+				params << '...'
+			}
+			head += '(${params.join(', ')})'
+		}
+		body := texts.join(' ')
+		if body == '' {
+			println(head)
+			continue
+		}
+		println('${head} ${body}')
 	}
 }
 
