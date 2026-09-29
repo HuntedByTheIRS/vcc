@@ -15,10 +15,14 @@ dynamically linked Linux x86-64 executable that calls into libc, so `#include
 variables and control flow — `if`/`else`, `while`, `for` with `break` and
 `continue` — run as well, arrays and objects defined at the top level run with
 them, the address of a local is one thing more, and so does a call whose value is
-read, as in `int x = add(y, 3) + 2;`. What is left is `double` and `struct` in the
-tree, the arguments past the sixth, and the rest of the list in the README. The
-command line already accepts the flag surface V uses, because getting that wrong
-later is a rewrite rather than a fix.
+read, as in `int x = add(y, 3) + 2;`. A `double` is a value the compiler has, in
+the floating-point registers and in the SysV sequence for arguments and returns,
+and a typedef is followed to the type it names wherever a type can be written.
+`-l` links the library it names, so `-lm` puts `libm.so.6` in the image's
+`DT_NEEDED` and `sqrt` resolves. What is left is `struct`, unions and enums, casts,
+the arguments past the sixth, and the rest of the list in the README. The command
+line already accepts the flag surface V uses, because getting that wrong later is
+a rewrite rather than a fix.
 Everything else exits non-zero with a diagnostic naming the construct.
 
 The numbers, from `tools/bench.vsh` against the tcc V vendors: on a 20000-term
