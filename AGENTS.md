@@ -91,6 +91,11 @@ notes. None of it is committed, and no harness, lane checklist, or golden
 generator written to check a single change belongs in this tree. A repository
 keeps the tests its maintainers will run.
 
+`.gitignore` carries the same rule for the coding tools that drop a directory in
+a working tree: `.claude/`, `.codex/`, `.opencode/`, `.omo/`, `.cursor/`,
+`.gemini/`, `.continue/`, `.aider*` and the rest, one line each. None of them is
+project content. A new tool gets a line in that list, not a commit.
+
 ## Prose
 
 Comments, commit bodies, and markdown here are read by people. Plain sentences,
