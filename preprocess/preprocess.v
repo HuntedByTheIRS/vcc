@@ -1,6 +1,7 @@
 module preprocess
 
 import os
+import standard
 import tokenize
 
 // The preprocessor reads a file and everything it includes and hands the parser
@@ -36,6 +37,13 @@ pub mut:
 	// defined at all, so a header that asks what machine it is being read on
 	// gets no answer from this compiler.
 	undef_builtins bool
+	// dialect is the mode the command line selected: `-std=c99`, a GNU dialect,
+	// or a spelling this compiler does not implement. It is here because phase 1
+	// asks the language a question before a token exists — whether a `??x` is
+	// replaced — and `standard.replaces_trigraphs` is where the answer is
+	// written down. `.none`, no `-std` at all, is the default dialect, which is
+	// gnu-like, so it leaves the bytes alone too.
+	dialect standard.Mode
 }
 
 // Prelude is one file to read before the source. `macros_only` is what
@@ -529,7 +537,13 @@ fn include_name(name string, angled bool) string {
 }
 
 fn (mut p Processor) push(path string, source string, found_index int, silent bool, system bool) {
-	lexed := tokenize.lex(source)
+	// Phase 1 is the selected mode's answer and not the lexer's, so the mode is
+	// handed to the read rather than assumed by it: the strict ISO modes up to
+	// C17 replace a trigraph, and a GNU dialect, C23 and a spelling this compiler
+	// does not implement leave the bytes alone.
+	lexed := tokenize.lex_with(source, tokenize.Options{
+		trigraphs: standard.replaces_trigraphs(p.opts.dialect)
+	})
 	for diagnostic in lexed.diagnostics {
 		p.diagnostics << tokenize.Diagnostic{
 			line: diagnostic.line
@@ -920,8 +934,26 @@ fn (mut p Processor) undef(tok tokenize.Token, args string) {
 // emit is where every token that reaches the parser goes: the file it came
 // from is the file being read when it was written out, which is the frame on
 // top of the stack.
+//
+// Phase 6 happens here, because this stream is what it is about: two adjacent
+// string literals are one string literal by the time the parser sees them,
+// whenever they were written and whatever produced them. A macro that expands
+// to a literal, or a header included between two of them, is the same thing to
+// this: gcc concatenates the `"a"` written before an #include with the `"b"`
+// written in it, and the array is three bytes (measured), so adjacency is the
+// token stream's and not a line's.
 fn (mut p Processor) emit(tok tokenize.Token) {
 	where := if p.frames.len > 0 { p.frames.last().path } else { tok.file }
+	if tok.kind == .string && p.out.len > 0 && p.out.last().kind == .string {
+		p.join_string(tok, where)
+		return
+	}
+	p.append(tok, where)
+}
+
+// append is the plain end of the token stream: what emit does when there is
+// nothing to join.
+fn (mut p Processor) append(tok tokenize.Token, where string) {
 	p.out << tokenize.Token{
 		kind: tok.kind
 		text: tok.text
@@ -929,6 +961,173 @@ fn (mut p Processor) emit(tok tokenize.Token) {
 		col:  tok.col
 		file: where
 	}
+}
+
+// join_string is phase 6: the last token in the stream is a string literal and
+// so is this one, and the program wrote one literal. The parser is handed one,
+// with the quotes between the two removed: `"a" "b"` is `"ab"`.
+//
+// The prefix follows C99 6.4.5p4: a run of adjacent narrow and wide string
+// literals is concatenated, and the result is wide if any of them was wide.
+// Measured: `sizeof(L"a" "b")` is 12, which is three wide characters.
+//
+// C99 has no `u8`, `u` or `U` literal at all — there is no pair to join, because
+// under `-std=c99` gcc reads `u8"b"` as a name and a stray literal — and what C11
+// says about a pair that mixes them is not one rule. Measured on gcc 16.2.1 under
+// `-std=c11`, one pair at a time: `"a" u8"b"` and `u8"a" "b"` are accepted,
+// because both sides are `char`; `"a" u"b"` and `"a" U"b"` are concatenated and
+// the result carries the prefixed type, so the pair fails on what it initializes
+// and not on the join; and `unsupported non-standard concatenation of string
+// literals` is what the pairs of two *different* prefixes draw — `L`+`u`,
+// `L`+`U`, `L`+`u8`, `u`+`U`, `u`+`u8`, `U`+`u8`, and the same pairs the other
+// way round. So gcc refuses exactly that list by that name, and accepts the
+// narrow-and-`u8` pair from C11 on.
+//
+// This compiler has no C11 literal of those types and no place for the result, so
+// it refuses every pair whose two sides are not both narrow or wide by name
+// rather than joining them into a type the program did not ask for. That is
+// wider than gcc's refusal by the `u8` pair, and joining it is C11 work.
+//
+// One join is not made, and the reason is the order of the phases. Each
+// literal's escapes are its own before the literals are joined, which is what
+// gcc does: `"\1" "2"` is three bytes and the first of them is 1 (measured),
+// and so is `"\x41" "b"`, whose first byte is 65 and whose second is 98. Joined
+// as spellings they would be `"\12"` and `"\x41b"`, and `"\x41b"` is one byte
+// with the value 27 and a warning from gcc about a hex escape out of range,
+// which is a value the program did not write. This compiler's literal reader
+// interprets the escapes of one token, so the join stops there and the
+// diagnostic names the two literals and the escape between them.
+fn (mut p Processor) join_string(tok tokenize.Token, where string) {
+	last := p.out.last()
+	left_prefix, left_inner, left_readable := literal_parts(last.text)
+	right_prefix, right_inner, right_readable := literal_parts(tok.text)
+	if !left_readable || !right_readable {
+		p.append(tok, where)
+		return
+	}
+	prefix := concatenated_prefix(left_prefix, right_prefix) or {
+		p.problem(tok, err.msg())
+		p.append(tok, where)
+		return
+	}
+	if ends_in_open_escape(left_inner) {
+		p.problem(tok, 'adjacent string literals joined across an escape are not implemented: the escape at the end of ${last.text} would take characters from ${tok.text}')
+		p.append(tok, where)
+		return
+	}
+	p.out[p.out.len - 1] = tokenize.Token{
+		kind: .string
+		text: prefix + '"' + left_inner + right_inner + '"'
+		line: last.line
+		col:  last.col
+		file: where
+	}
+}
+
+// literal_parts cuts a string literal into the prefix it was written with and
+// the text between its quotes. What the lexer hands over has that shape, so the
+// third answer is false only if something upstream changes and the text is not
+// a string literal at all, which is the case the caller leaves alone.
+fn literal_parts(text string) (string, string, bool) {
+	mut i := 0
+	for i < text.len && text[i] != `"` {
+		i++
+	}
+	if i >= text.len || text.len < i + 2 || text[text.len - 1] != `"` {
+		return '', '', false
+	}
+	return text[..i], text[i + 1..text.len - 1], true
+}
+
+// concatenated_prefix is the prefix of the literal two adjacent literals make.
+fn concatenated_prefix(left string, right string) !string {
+	if left == right {
+		return left
+	}
+	if c99_prefix(left) && c99_prefix(right) {
+		// C99 6.4.5p4: the result of concatenating narrow and wide string
+		// literals is a wide string literal.
+		return 'L'
+	}
+	return error('concatenation of a ${prefix_name(left)} string literal with a ${prefix_name(right)} string literal is not implemented')
+}
+
+fn c99_prefix(prefix string) bool {
+	return prefix == '' || prefix == 'L'
+}
+
+fn prefix_name(prefix string) string {
+	return match prefix {
+		'' { 'narrow' }
+		'L' { 'wide' }
+		else { prefix }
+	}
+}
+
+// ends_in_open_escape reports whether the text before a literal's closing quote
+// ends inside an escape that is still taking characters, which is the case
+// where joining two literals as spellings would change their value: `\x` reads
+// every hexadecimal digit that follows it, an octal escape reads three, and a
+// universal character name reads four or eight. A backslash with nothing after
+// it is the same kind of thing, an escape that has not been finished. Every
+// other escape is complete when its one character is read, so `"\\" "n"` joins
+// into `"\\n"` and reads the same two characters it read before.
+fn ends_in_open_escape(inner string) bool {
+	mut i := 0
+	for i < inner.len {
+		if inner[i] != `\\` {
+			i++
+			continue
+		}
+		if i + 1 >= inner.len {
+			return true
+		}
+		c := inner[i + 1]
+		if c == `x` {
+			mut j := i + 2
+			for j < inner.len && is_hex_digit(inner[j]) {
+				j++
+			}
+			if j >= inner.len {
+				return true
+			}
+			i = j
+			continue
+		}
+		if c >= `0` && c <= `7` {
+			mut j := i + 1
+			mut read := 0
+			for j < inner.len && read < 3 && inner[j] >= `0` && inner[j] <= `7` {
+				j++
+				read++
+			}
+			if j >= inner.len && read < 3 {
+				return true
+			}
+			i = j
+			continue
+		}
+		if c == `u` || c == `U` {
+			width := if c == `u` { 4 } else { 8 }
+			mut j := i + 2
+			mut read := 0
+			for j < inner.len && read < width && is_hex_digit(inner[j]) {
+				j++
+				read++
+			}
+			if j >= inner.len && read < width {
+				return true
+			}
+			i = j
+			continue
+		}
+		i += 2
+	}
+	return false
+}
+
+fn is_hex_digit(c u8) bool {
+	return (c >= `0` && c <= `9`) || (c >= `a` && c <= `f`) || (c >= `A` && c <= `F`)
 }
 
 fn (mut p Processor) problem(tok tokenize.Token, msg string) {
