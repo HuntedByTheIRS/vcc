@@ -23,8 +23,8 @@ and a typedef is followed to the type it names wherever a type can be written.
 function is a block of the frame with its members at the offsets the layout gives
 them, and the arguments past the machine's registers are passed on the stack, so
 both walls that were standing at the end of M1 are down. What is left is `enum`,
-an aggregate at the top level or passed by value, a member through a pointer or of
-a member, casts, and the rest of the list in the README. The command line already
+an aggregate at the top level or passed by value, an array of aggregates, casts,
+and the rest of the list in the README. The command line already
 accepts the flag surface V uses, because getting that wrong later is a rewrite
 rather than a fix.
 Everything else exits non-zero with a diagnostic naming the construct.
