@@ -15,6 +15,12 @@ still moving. Asking in Discussions costs nothing and often saves an issue.
 | Polls | `polls` | Votes on questions with a small number of real options. Used sparingly. |
 | Announcements | `announcements` | Maintainer posts about milestones and releases. |
 
+Q&A, Ideas, and Show and tell have forms in `.github/DISCUSSION_TEMPLATE/` that
+ask for the detail the answer needs: the input in question, the versions, what
+you already tried, or the numbers if the post is about speed. Starting from the
+form is faster than writing the post from an empty box. General, Announcements,
+and Polls are deliberately free-form.
+
 ## Issue or discussion
 
 If the answer is "the compiler should do X and does not", it is an issue. If the
