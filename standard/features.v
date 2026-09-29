@@ -142,6 +142,61 @@ pub const features = [
 		pedantic:  'the _Static_assert declaration'
 		status:    .unimplemented
 	},
+	// The C99 types the type model resolves and the back end has no form for.
+	// The tree reads each of them, so a prototype naming one is read and kept; a
+	// definition is storage, and a definition of one is refused by name and
+	// location, which is what the unimplemented rule asks of a construct that is
+	// not emitted. The two complex types stay `.unimplemented` because C6's last
+	// tier is where their arithmetic lands, and the floats and `_Bool` say
+	// `.implemented` because the tree does read them and the refusal is the back
+	// end's rather than the reader's.
+	//
+	// `long long` and `long double` have no row, and cannot have one: a row is
+	// found by the text of a single token, and both are written as two tokens
+	// whose first is `long`. The refusal names them in full all the same -
+	// `unsupported type long long`, `unsupported type unsigned long long`,
+	// `unsupported type long double` - because the diagnostic is built from the
+	// type as the declaration wrote it rather than from one word of it.
+	Feature{
+		spellings: ['_Bool']
+		since:     .c99
+		gnu:       false
+		extension: ''
+		pedantic:  'the _Bool type'
+		status:    .implemented
+	},
+	Feature{
+		spellings: ['float']
+		since:     .c89
+		gnu:       false
+		extension: ''
+		pedantic:  'the float type'
+		status:    .implemented
+	},
+	Feature{
+		spellings: ['double']
+		since:     .c89
+		gnu:       false
+		extension: ''
+		pedantic:  'the double type'
+		status:    .implemented
+	},
+	Feature{
+		spellings: ['_Complex']
+		since:     .c99
+		gnu:       false
+		extension: ''
+		pedantic:  'the _Complex type'
+		status:    .unimplemented
+	},
+	Feature{
+		spellings: ['_Imaginary']
+		since:     .c99
+		gnu:       false
+		extension: ''
+		pedantic:  'the _Imaginary type'
+		status:    .unimplemented
+	},
 ]
 
 // Question is what a dialect check is asked under: the mode the command line
