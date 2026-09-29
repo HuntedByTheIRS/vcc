@@ -13,6 +13,11 @@ folded value. The command line already accepts the flag surface V uses, because
 getting that wrong later is a rewrite rather than a fix. Everything else exits
 non-zero with a diagnostic naming the construct.
 
+The numbers, from `tools/bench.vsh` against the tcc V vendors: on a 20000-term
+constant chain vcc is about 8x its wall time and 4x its peak memory, and the
+ratio grows with the input because the current pipeline allocates per token and
+per AST node. That gap is the M6 problem, and it is measured rather than felt.
+
 ## M0: the stub
 
 Done when `v test .` passes, the lexer covers the C preprocessing-token grammar,
@@ -65,6 +70,11 @@ libc, static and shared output, `-L`/`-l` search order, `-shared`, `-r`,
 where the compiler stops producing standalone binaries and starts doing the job
 V actually needs: linking a program against the system libraries.
 
+Archive support is not optional for the V contract: every `-cc tcc` build links
+`thirdparty/tcc/lib/libgc.a`, which V passes on the command line along with
+`-DGC_THREADS=1 -DGC_BUILTIN_ATOMIC=1` and the libgc include directory. A
+compiler that cannot open an archive cannot build V, whatever else it can do.
+
 Verified by linking programs that use libc, libm, pthreads and dl, and running
 them. Then by linking V's own objects and comparing the result with a tcc link.
 
@@ -111,6 +121,30 @@ Point V's `-cc` at vcc for a real build, run V's test suite, and compare against
 the bundled tcc. When a V build with vcc passes the same tests at the same
 speed, the proposal to vendor vcc in place of tcc becomes a question about
 timing rather than about readiness.
+
+## M8: the bootstrap chain
+
+The end of the road, and the definition of done: four builds where the last one
+closes the loop.
+
+```sh
+v -cc tcc -o v-tcc cmd/v              # 1. V, built with the vendored tcc
+v -cc tcc -o vcc-v1 .                 # 2. vcc, built by that V
+v-tcc -cc ./vcc-v1 -o v-v2 cmd/v      # 3. V, built by vcc instead of tcc
+./v-v2 -cc ./vcc-v1 -o vcc-v2 .       # 4. vcc, built by the V that vcc built
+```
+
+Step 3 is the one that cannot be faked. vcc has to compile the megabytes of C V
+emits for itself, link them against libgc and libc, and produce a V that builds
+and passes V's own suite. Step 4 has to produce a vcc that behaves like the one
+it came from, which is where fixed-point bugs show up: a compiler that
+miscompiles itself once is usually miscompiling something subtle every time.
+
+Verified by running the chain on a clean checkout, running `v test` on the V that
+step 3 produced, and comparing the behavior of `vcc-v2` with `vcc-v1` on the same
+inputs. The chain is then part of CI, because a fixed point that is not
+continuously checked is a fixed point nobody has.
+
 
 ## Later, and not yet planned
 

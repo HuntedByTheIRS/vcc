@@ -15,6 +15,26 @@ build, and vcc has to get through it in the time the bundled tcc does, at
 comparable peak memory. A compiler that is correct but slower is not a
 replacement, and it will not be merged in that state.
 
+## The bootstrap chain
+
+The end this project works toward is a compiler that builds the language it is
+written in, and that V can use in place of the tcc it vendors. Four builds, each
+one a check on the step before it:
+
+```sh
+v -cc tcc -o v-tcc cmd/v              # 1. V, built with the vendored tcc
+v -cc tcc -o vcc-v1 .                 # 2. vcc, built by that V
+v-tcc -cc ./vcc-v1 -o v-v2 cmd/v      # 3. V, built by vcc instead of tcc
+./v-v2 -cc ./vcc-v1 -o vcc-v2 .       # 4. vcc, built by the V that vcc built
+```
+
+Step 3 decides everything. vcc has to compile every megabyte of C that V emits
+for itself, link it, and produce a V that passes V's own test suite. Step 4 then
+has to produce a vcc that behaves like the one it was built from. When both hold,
+the loop is closed and no C compiler other than vcc is in it. `ROADMAP.md` has
+the milestones between here and that.
+
+
 ## Status
 
 Early, and honest about it. The tree holds a stub that lexes C, parses a very
@@ -49,6 +69,12 @@ int, any type other than `int`, expressions that are not constant, object files,
 relocatable output, linking against libc, and a real x86-64 back end. `ROADMAP.md`
 maps the order.
 
+The speed constraint is measured, not assumed, and the current numbers are not
+close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a
+constant chain and nothing else), vcc takes about 8x tcc's wall time and 4x its
+peak memory; at 100000 terms it is about 18x. Most of that gap is allocation per
+token and per AST node, which is a design problem rather than a constant factor.
+
 ## Build
 
 Needs V 0.5.x on Linux x86-64.
@@ -56,12 +82,16 @@ Needs V 0.5.x on Linux x86-64.
 ```sh
 v -o vcc .        # build the compiler
 v test .          # lexer, parser, and codegen tests
+v run tools/gate.vsh                          # everything a pull request has to pass
+v run tools/bench.vsh                         # wall time and peak memory, tcc alongside
 v -o vcc . && ./vcc -bench seven.c -o seven   # per-phase timing
 ```
 
 `-bench` prints microseconds per phase. It exists from the first commit because
 the speed target is a hard requirement, and a number nobody prints is a number
-nobody watches.
+nobody watches. `tools/` holds the gate and the benchmark harness; `tools/README.md`
+says what each one checks.
+
 
 ## Layout
 
@@ -72,8 +102,15 @@ nobody watches.
 | `tokenize/` | lexer: source text to tokens |
 | `ast/` | node types the parser produces and the back end consumes |
 | `parser/` | recursive descent parser for the supported subset |
-| `codegen/` | ELF64 output for Linux x86-64 |
+| `backend/` | target description as tables: registers, opcodes, syscalls, encodings |
+| `codegen/` | translation unit to bytes: constant folding and the ELF64 container |
+| `tools/` | gate and benchmark scripts; not part of the compiler |
 | `extensions/` | reserved for compiler extensions; empty for now |
+
+A target is data rather than a directory of hand-written emission: `backend/`
+holds the shapes (`Target`, `Register`, `Syscall`, `Encoding`) and one file per
+architecture supplies the tables. Adding a target means adding a file like
+`backend/x86_64.v`, not editing the emitter.
 
 Tests live next to the code as `*_test.v` files and run with `v test .`.
 
@@ -100,6 +137,13 @@ answer. Notes for whoever works on interoperability, all read off the V tree:
   `-bt25`, `-B<dir>`, `-I<dir>`, `-L<dir>`, `-Wl,` passthroughs, `-lc -lm -ldl
   -lpthread` in that order, `-D` defines, and object files and `.a` archives
   mixed in with sources. Never error on a flag you do not implement.
+- The vendored tcc also carries a garbage collector, and V links it into every
+  tcc build. `v -showcc -cc tcc probe.v` prints the whole list:
+  `-DGC_THREADS=1 -DGC_BUILTIN_ATOMIC=1 -I<v>/thirdparty/libgc/include
+  <v>/thirdparty/tcc/lib/libgc.a -ldl -lpthread -lm`. So a replacement has to
+  link an archive of prebuilt objects against the program it just compiled, which
+  makes the `libgc.a` path part of the drop-in contract rather than an optional
+  library it could decline.
 
 ## Read next
 

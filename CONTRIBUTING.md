@@ -17,10 +17,15 @@ You need V 0.5.x and a Linux x86-64 machine.
 ```sh
 git clone https://github.com/HuntedByTheIRS/vcc
 cd vcc
-v -o vcc .          # build the compiler
-v test .            # the test suite
-./vcc -hh           # the flag surface, annotated
+v -o vcc .            # build the compiler
+v test .              # the test suite
+v run tools/gate.vsh  # format, the pure-V rule, the build, the tests, doc links
+./vcc -hh             # the flag surface, annotated
 ```
+
+The gate is the same set of checks CI runs, so it is worth running before you
+push rather than waiting for a machine to tell you. `tools/README.md` describes
+it and the benchmark harness next to it.
 
 Nothing in this tree needs a C compiler of its own beyond the one V itself uses
 to build it. If you find yourself adding a `cc` invocation, that is the rule
@@ -48,15 +53,19 @@ Three consequences for changes that touch the command line:
 ## Measuring speed
 
 A performance claim needs a number, and the number needs to come from the same
-workload every time. The V self-build is that workload.
+workload every time. `tools/bench.vsh` runs vcc and the vendored tcc on the same
+input and prints wall time and peak memory for both.
 
 ```sh
-# what V actually asks a compiler to do for a given build
-v -showcc -cc tcc -o /tmp/probe probe.v
-
-# wall time and peak RSS for a run
-/usr/bin/time -v ./vcc -o /tmp/probe src.c 2>&1 | grep -E 'Elapsed|Maximum resident'
+v run tools/bench.vsh                 # generated workload, vcc beside tcc
+v run tools/bench.vsh src.c --runs 5  # a file you name, more repetitions
+v -showcc -cc tcc -o /tmp/probe probe.v   # what V actually asks a compiler to do
 ```
+
+The workload that decides this project is the V self-build, and no milestone
+before M3 can run it, so the harness measures what it can compile and the number
+is reported with the file it came from. Quote the command when you quote the
+number.
 
 `./vcc -bench` prints per-phase timings, which is where you find out whether a
 slow build is the lexer, the parser, or the back end. A change that makes the
@@ -77,6 +86,12 @@ Back-end changes want a runnable artifact, not just a unit assertion. The
 pattern the tree already uses compiles a small program, writes it to a scratch
 directory, runs it, and checks the exit status or the output.
 
+Big input is a test case in its own right. The one crash this tree has had was a
+fold that recursed once per term in an operator chain, which took the stack out
+at a few thousand terms; `v run tools/bench.vsh --terms 20000` is what found it.
+A new phase wants a test on input that is large and badly shaped (deep nesting,
+long chains) and not only on input that is interesting.
+
 ## Code and prose
 
 - `v fmt -w` before every commit. Tabs for indentation, per `.editorconfig`.
@@ -94,7 +109,8 @@ body says why the change happened, what the old behavior was, and what the
 measurement showed if speed was involved. One logical change per commit, each
 one building and passing `v test .` on its own.
 
-Areas in use: `tokenize`, `parser`, `ast`, `codegen`, `cli`, `tree`, `docs`.
+Areas in use: `tokenize`, `parser`, `ast`, `backend`, `codegen`, `cli`, `tools`,
+`tree`, `docs`.
 
 ## Review
 

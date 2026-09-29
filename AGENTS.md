@@ -25,11 +25,17 @@ Linux x86-64.
 ```sh
 v -o vcc .                 # build
 v test .                   # the suite
+v run tools/gate.vsh       # format, pure-V rule, build, tests, doc links
+v run tools/bench.vsh      # wall time and peak memory, tcc alongside
 v fmt -w .                 # format before committing
 ./vcc -hh                  # the flag surface
 ./vcc -bench file.c -o out # per-phase timings
 /usr/bin/time -v ./vcc -o /tmp/out src.c   # wall time and peak RSS
 ```
+
+`tools/gate.vsh` is the same set of checks a pull request has to pass, so run it
+before claiming a change is done rather than after CI says otherwise. `-nocache`
+on probe builds, and prefer the gate's build over a binary from an earlier edit.
 
 Building with V 0.5.2 and a source tree you did not just write: cap the compiler
 so a parse loop cannot take the machine down.
@@ -49,10 +55,20 @@ so the cap turns a frozen desktop into a clean OOM with the peak reported.
 | `tokenize/` | source text in, tokens out. No parser knowledge. |
 | `ast/` | node types only. No printing, no emission. |
 | `parser/` | tokens in, `ast` out. Never writes files. |
-| `codegen/` | `ast` in, bytes out. Same input, same bytes, every run. |
+| `backend/` | target tables: registers, opcodes, syscalls, encodings, calling convention. One file per architecture; a new target is a new file, not a branch in the emitter. |
+| `codegen/` | `ast` in, bytes out. Same input, same bytes, every run. Asks `backend/` for every machine fact. |
+| `tools/` | gate and benchmark scripts. Not part of the compiler and not imported by it. |
 | `extensions/` | reserved; empty until something real lands in it. |
 
 Tests sit beside their module as `*_test.v`.
+
+## What this is working toward
+
+The bootstrap chain, which is the definition of done: V built by the vendored
+tcc builds vcc, vcc builds V, and the V that vcc built builds vcc again. Steps 3
+and 4 are in the README with the commands. Nothing in this tree is finished until
+step 3 passes V's own test suite, so a change is judged by whether it moves the
+compiler toward compiling V's generated C.
 
 ## Interop, which is easy to get wrong
 
@@ -82,6 +98,12 @@ this binary is. Say which V source line justifies the change in the commit body.
 - Before saying a test failed, check whether it failed before your change. The
   V toolchain caches aggressively: `-nocache` on probe runs, and a binary built
   before your edit reports the previous source's problems.
+- Long input is a test case. The one crash this tree has had was a fold that
+  recursed once per term in an operator chain, which took the stack out at about
+  three thousand terms; `tools/bench.vsh --terms 20000` is what found it. When
+  you add a phase, run it on input that is large rather than only on input that
+  is interesting, and let a deep structure count against a limit you chose
+  instead of against the stack.
 
 ## Agent working state
 
@@ -107,8 +129,8 @@ Say what the code does and why it is that way.
 ## Commits
 
 `area: what changed`, lowercase, no trailing period, body explaining why. Areas
-in use: `tokenize`, `parser`, `ast`, `codegen`, `cli`, `tree`, `docs`. One
-logical change per commit, each one building on its own.
+in use: `tokenize`, `parser`, `ast`, `backend`, `codegen`, `cli`, `tools`,
+`tree`, `docs`. One logical change per commit, each one building on its own.
 
 ## Do not
 
