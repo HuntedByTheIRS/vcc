@@ -48,6 +48,12 @@ mut:
 	// functions are code; the objects are collected here and travel with the
 	// tree, since a body reads them by name.
 	globals []ast.Global
+	// declared is every name this file declares anywhere, wherever it was
+	// declared: an object, a function, a typedef, a parameter. It is what the
+	// check at the end of the unit asks a name the tree carries against, and it
+	// is a set of names rather than the scope table because that check is about
+	// the unit and not about which block a name was visible in.
+	declared map[string]bool
 }
 
 // supported_types are the ones the back end can emit today.
@@ -64,8 +70,14 @@ pub fn parse(tokens []tokenize.Token) Result {
 		tokens:         tokens
 		scopes:         types.new_table()
 		representation: target_representation()
+		declared:       map[string]bool{}
 	}
 	unit := p.parse_unit()
+	// Every name the tree carries has to be a name this file declares. A name
+	// that is not is refused here, once the whole unit has been read, because
+	// whether a name is declared is a question only the end of the file can
+	// answer: a definition may follow the function that calls it.
+	p.report_undeclared(unit)
 	return Result{
 		unit:        unit
 		diagnostics: p.diagnostics
@@ -208,6 +220,97 @@ fn (p Parser) with_declared_types(stmts []ast.Stmt) []ast.Stmt {
 		out << stmt
 	}
 	return out
+}
+
+// report_undeclared refuses every name the tree carries that nothing in the unit
+// declares.
+//
+// The emitter resolves a name at layout, and a call to a name no declaration
+// describes is written as a call to a symbol the image does not hold: measured,
+// `int main(void) { return missing(1); }` compiled into a binary that died at
+// load with `undefined symbol: missing`. The question is asked here, over the
+// whole unit, rather than where the name is read, because a definition may
+// follow the function that calls it: `int main(void) { return f(); } int f(void)
+// { return 0; }` is a file this compiler reads, and a use it had not met a
+// declaration for by then is not by itself a name nothing declares. A name no
+// declaration in the unit provides is the class C99 refuses as an implicit
+// declaration, and refusing it is what keeps a name the back end cannot place
+// out of an image.
+//
+// One diagnostic per name, at the first use the walk reaches, because three uses
+// of a name nothing declares are one missing declaration and not three.
+fn (mut p Parser) report_undeclared(unit ast.TranslationUnit) {
+	mut reported := map[string]bool{}
+	for decl in unit.decls {
+		p.check_undeclared_statements(decl.body, mut reported)
+	}
+}
+
+fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map[string]bool) {
+	for stmt in stmts {
+		if stmt.kind == .assign {
+			// The name an assignment writes to is a use of it: `missing = 1;`
+			// names a missing declaration just as reading the name does.
+			p.check_undeclared_name(stmt.target, stmt.line, stmt.col, mut reported)
+		}
+		if expr := stmt.expr {
+			p.check_undeclared_expression(expr, mut reported)
+		}
+		if init := stmt.init {
+			p.check_undeclared_expression(init, mut reported)
+		}
+		if index := stmt.index {
+			p.check_undeclared_expression(index, mut reported)
+		}
+		if cond := stmt.cond {
+			p.check_undeclared_expression(cond, mut reported)
+		}
+		p.check_undeclared_statements(stmt.body, mut reported)
+		p.check_undeclared_statements(stmt.then_body, mut reported)
+		p.check_undeclared_statements(stmt.else_body, mut reported)
+		p.check_undeclared_statements(stmt.step, mut reported)
+	}
+}
+
+// check_undeclared_expression walks one expression for the names it carries: the
+// name of a value, the name a call reaches, and the name of an array being
+// subscripted or assigned element by element.
+fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[string]bool) {
+	match expr {
+		ast.Ident {
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+		}
+		ast.Call {
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			for argument in expr.args {
+				p.check_undeclared_expression(argument, mut reported)
+			}
+		}
+		ast.Index {
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			p.check_undeclared_expression(expr.index, mut reported)
+		}
+		ast.Unary {
+			p.check_undeclared_expression(expr.expr, mut reported)
+		}
+		ast.Binary {
+			p.check_undeclared_expression(expr.left, mut reported)
+			p.check_undeclared_expression(expr.right, mut reported)
+		}
+		ast.IntLit, ast.StrLit {}
+	}
+}
+
+fn (mut p Parser) check_undeclared_name(name string, line int, col int, mut reported map[string]bool) {
+	// A reserved word is not a name, and the constructs that put one in the tree
+	// as if it were - a cast, which this reader does not implement - carry their
+	// own diagnostic. Reporting the word here as well would be a second message
+	// about a construct that was already refused.
+	if name.len == 0 || is_keyword(name) || name in p.declared || name in reported {
+		return
+	}
+	reported[name] = true
+	p.error_span(line, col, 'unsupported: ${name} is used here and nothing in this file declares it')
 }
 
 // skip_statement moves past a statement that failed, so the rest of the block

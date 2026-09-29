@@ -104,8 +104,11 @@ fn test_an_inner_declaration_hides_an_outer_one_and_the_outer_one_comes_back() {
 
 fn test_a_declaration_reads_the_names_declared_before_it() {
 	// One pass: the name is typed where it is read, so a use the reader has not
-	// met a declaration for is unresolved rather than guessed at.
-	result := checked('int main() { return missing; }')
+	// met a declaration for is unresolved rather than guessed at. The name is
+	// declared after the function that reads it, which is what keeps the file
+	// compilable at all: a name nothing in the file declares is refused once the
+	// unit has been read.
+	result := checked('int main() { return later; }\nint later;')
 	returned := result.unit.decls[0].body[0].expr or {
 		assert false
 		return
@@ -317,7 +320,7 @@ fn test_a_definition_spelled_with_a_typedef_name_is_refused_where_it_is_written(
 	// The model resolves the name; the emitter reads the spelling, and a spelling
 	// it has no width for is refused rather than emitted as something else. A
 	// definition is storage, so this is a refusal and not a promise.
-	result := parsed('typedef int count;\nint main() { count c = 1; return c; }')
+	result := parsed('typedef int count;\nint main() { int c = 1; count n = 2; return c; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg == 'unsupported type count'
 	assert result.diagnostics[0].line == 2

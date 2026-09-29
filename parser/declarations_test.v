@@ -61,6 +61,7 @@ extern int snprintf (char *restrict __s, size_t __maxlen,
       __attribute__ ((__format__ (__printf__, 3, 4)));
 extern int fscanf (FILE *restrict __stream, const char *restrict __format, ...) __asm__("__isoc99_fscanf")  ;
 extern int __uflow (FILE *);
+extern int puts (const char *__s) ;
 # 2 "hello.c" 2
 int main() {
   puts("Hello, world!");
@@ -89,7 +90,11 @@ fn test_the_stdio_shaped_stream_parses_with_no_diagnostics() {
 	// function whether or not this file defines it.
 	assert 'remove' in names
 	assert 'tmpfile' in names
-	assert 'puts' !in names // the call needs no prototype to parse
+	// The declaration of puts is kept as well, and the call is read against it:
+	// a call to a name nothing in the unit declares is refused once the whole
+	// unit has been read, which is what the stream a preprocessor writes for
+	// `#include <stdio.h>` carries this prototype for.
+	assert 'puts' in names
 	// The types and the object are read and dropped: neither adds code.
 	assert 'stdin' !in names
 	assert 'cookie_read_function_t' !in names

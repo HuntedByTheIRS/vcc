@@ -437,7 +437,14 @@ fn test_division_by_zero_is_a_diagnostic_and_not_a_crash() {
 }
 
 fn test_a_non_constant_return_is_reported_with_the_name() {
-	emitted := emit(translation_unit('int main() { return x; }'), Options{})
+	// The tree is assembled by hand rather than parsed: a name nothing in the
+	// unit declares is refused by the parser once the whole unit has been read,
+	// and what this checks is the message the emitter gives for a name it cannot
+	// place.
+	emitted := emit(program([ast.Stmt{
+		kind: .return_stmt
+		expr: name_node('x')
+	}]), Options{})
 	assert emitted.diagnostics.len == 1
 	assert emitted.diagnostics[0].msg.contains('x is not a constant')
 }

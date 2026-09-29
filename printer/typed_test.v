@@ -140,7 +140,7 @@ fn test_a_node_the_model_has_no_answer_for_is_refused_rather_than_written() {
 	// same file says `unresolved` for that node and for the name beside it,
 	// which is the printer naming what the model did not answer rather than
 	// inventing a type for it.
-	lexed := tokenize.lex('int main(void) { return missing + 4294967296; }')
+	lexed := tokenize.lex('int main(void) { return missing + 4294967296; }\nint missing;')
 	refused := parser.parse(lexed.tokens)
 	assert refused.diagnostics.len == 1
 	assert refused.diagnostics[0].msg.contains('4294967296')
@@ -159,12 +159,13 @@ fn test_a_node_the_model_has_no_answer_for_is_refused_rather_than_written() {
 	// The return type of the definition was resolved, so the function line keeps
 	// its clause and is not written off with the rest.
 	assert clause_of_declaration(printed, 'fn main() int') == 'int (void)'
-	// A call to a name this file does not declare is the one node that carries
-	// an unresolved clause, and the printer says so: the model had no
-	// declaration to check it against, and the emitter resolves the name at
-	// layout and takes the width from the ABI's return width.
-	library := printed_lines(parsed('int main(void) { return abs(-7) - 6; }'))
-	assert clause_of_declaration(library, 'call abs') == 'unresolved'
+	// A call to a name the unit declares is checked against that declaration,
+	// and its clause is what the declaration returns: the model has an answer
+	// for the node because it has a declaration to take it from. A call to a
+	// name nothing in the unit declares is refused once the whole unit has been
+	// read, so no such call reaches the printer as an unresolved node.
+	library := printed_lines(parsed('int abs(int n);\nint main(void) { return abs(-7) - 6; }'))
+	assert clause_of_declaration(library, 'call abs') == 'int'
 }
 
 fn test_a_clause_is_the_models_answer_and_not_the_spelling() {

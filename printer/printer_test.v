@@ -54,14 +54,14 @@ fn test_nesting_reads_as_the_tree_does() {
 }
 
 fn test_a_call_and_its_arguments_are_printed() {
-	printed := lines(tree('int main() { return abs(-7); }'))
+	printed := lines(tree('int abs(int n);\nint main() { return abs(-7); }'))
 	assert line_of(printed, 'call abs with 1 argument(s)') > 0
 	assert line_of(printed, 'unary -') > 0
 	assert line_of(printed, 'int 7') > 0
 }
 
 fn test_an_identifier_is_named() {
-	printed := lines(tree('int main() { return x; }'))
+	printed := lines(tree('int x;\nint main() { return x; }'))
 	assert line_of(printed, 'ident x') > 0
 }
 

@@ -130,9 +130,9 @@ fn test_one_unsupported_statement_does_not_cascade() {
 // call written as a statement is. It parses now, and the return after it is the
 // second statement rather than the first.
 fn test_an_expression_statement_parses() {
-	result := parsed('int main() { printf("hi"); return 0; }')
+	result := parsed('int printf(char *s);\nint main() { printf("hi"); return 0; }')
 	assert result.diagnostics.len == 0
-	body := result.unit.decls[0].body
+	body := result.unit.decls[1].body
 	assert body.len == 2
 	assert body[0].kind == .expr_stmt
 	expr := body[0].expr or {
@@ -158,9 +158,9 @@ fn test_a_string_literal_keeps_its_bytes_and_its_spelling() {
 }
 
 fn test_a_string_literal_carries_every_escape_a_character_constant_takes() {
-	result := parsed('int main() { puts("a\\x41\\102\\n\\\\"); return 0; }')
+	result := parsed('int puts(char *s);\nint main() { puts("a\\x41\\102\\n\\\\"); return 0; }')
 	assert result.diagnostics.len == 0
-	expr := result.unit.decls[0].body[0].expr or {
+	expr := result.unit.decls[1].body[0].expr or {
 		assert false
 		return
 	}
@@ -169,7 +169,7 @@ fn test_a_string_literal_carries_every_escape_a_character_constant_takes() {
 }
 
 fn test_an_escape_that_names_more_than_a_byte_is_reported() {
-	result := parsed('int main() { puts("\\x1ff"); return 0; }')
+	result := parsed('int puts(char *s);\nint main() { puts("\\x1ff"); return 0; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('not a byte')
 }
@@ -429,7 +429,7 @@ fn test_an_if_keeps_its_condition_and_both_branches() {
 }
 
 fn test_an_if_without_an_else_leaves_the_else_empty() {
-	result := parsed('int main() { if (x) return 1; return 2; }')
+	result := parsed('int x;\nint main() { if (x) return 1; return 2; }')
 	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
 	assert body[0].kind == .if_stmt
@@ -439,7 +439,7 @@ fn test_an_if_without_an_else_leaves_the_else_empty() {
 }
 
 fn test_an_else_if_is_an_if_in_the_else() {
-	result := parsed('int main() { if (a) return 1; else if (b) return 2; else return 3; }')
+	result := parsed('int a;\nint b;\nint main() { if (a) return 1; else if (b) return 2; else return 3; }')
 	assert result.diagnostics.len == 0
 	first := result.unit.decls[0].body[0]
 	assert first.kind == .if_stmt
@@ -452,7 +452,7 @@ fn test_an_else_if_is_an_if_in_the_else() {
 // A branch written as a block is a block statement, which is the shape a block
 // already had inside a body.
 fn test_a_branch_that_is_a_block_is_a_block_statement() {
-	result := parsed('int main() { if (x) { return 1; } return 0; }')
+	result := parsed('int x;\nint main() { if (x) { return 1; } return 0; }')
 	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
 	assert body[0].then_body.len == 1
@@ -462,9 +462,9 @@ fn test_a_branch_that_is_a_block_is_a_block_statement() {
 }
 
 fn test_a_condition_may_be_a_call() {
-	result := parsed('int main() { if (is_even(x)) return 1; return 0; }')
+	result := parsed('int x;\nint is_even(int n);\nint main() { if (is_even(x)) return 1; return 0; }')
 	assert result.diagnostics.len == 0
-	cond := result.unit.decls[0].body[0].cond or {
+	cond := result.unit.decls[1].body[0].cond or {
 		assert false
 		return
 	}
@@ -498,7 +498,7 @@ fn test_a_while_body_may_be_empty() {
 }
 
 fn test_break_and_continue_are_statements() {
-	result := parsed('int main() { while (1) { if (x) break; continue; } return 0; }')
+	result := parsed('int x;\nint main() { while (1) { if (x) break; continue; } return 0; }')
 	assert result.diagnostics.len == 0
 	loop := result.unit.decls[0].body[0]
 	assert loop.kind == .while_stmt
@@ -531,7 +531,7 @@ fn test_an_else_with_no_if_is_reported() {
 // the third part of the for. The tree has no for node, so this is the shape a
 // reader of the tree sees.
 fn test_a_for_is_a_block_holding_a_while() {
-	result := parsed('int main() { int i = 0; for (i = 0; i < 3; i = i + 1) x = i; return 0; }')
+	result := parsed('int x;\nint main() { int i = 0; for (i = 0; i < 3; i = i + 1) x = i; return 0; }')
 	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
 	loop := body[1]
@@ -602,7 +602,7 @@ fn test_a_for_with_no_condition_spells_the_constant() {
 }
 
 fn test_a_for_may_be_the_body_of_another_for() {
-	result := parsed('int main() { for (i = 0; i < 2; i = i + 1) for (j = 0; j < 2; j = j + 1) x = i; return 0; }')
+	result := parsed('int i;\nint j;\nint x;\nint main() { for (i = 0; i < 2; i = i + 1) for (j = 0; j < 2; j = j + 1) x = i; return 0; }')
 	assert result.diagnostics.len == 0
 	outer := result.unit.decls[0].body[0]
 	assert outer.kind == .block
@@ -720,4 +720,51 @@ fn test_two_sizes_of_an_array_are_reported() {
 	result := parsed('int main() { int a[2][3]; return 0; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('only one size')
+}
+
+// A name the tree carries that nothing in the file declares is refused once the
+// whole unit has been read. The emitter resolves a name at layout and writes a
+// call to one as a symbol the image does not hold: measured, `int main(void) {
+// return missing(1); }` compiled into an image that died at load with `undefined
+// symbol: missing`, and `int main(void) { puts("hi"); return 0; }` compiled and
+// ran. Both are refused now, naming the name and the line it is written on.
+fn test_a_name_nothing_declares_is_refused_with_the_name_and_its_location() {
+	for source in [
+		'int main(void) { return missing(1); }',
+		'int main(void) { puts("hi"); return 0; }',
+		'int main(void) { return missing; }',
+	] {
+		result := parsed(source)
+		assert result.diagnostics.len == 1
+		assert result.diagnostics[0].msg.contains('is used here and nothing in this file declares it')
+		assert result.diagnostics[0].line == 1
+	}
+	// The location is the use itself rather than the end of the file the check
+	// runs at.
+	spread := parsed('int main(void) {\n  return missing(1);\n}')
+	assert spread.diagnostics.len == 1
+	assert spread.diagnostics[0].line == 2
+	assert spread.diagnostics[0].col == 10
+}
+
+// One diagnostic per name, however many times it is read: three uses of a name
+// nothing declares are one missing declaration.
+fn test_an_undeclared_name_costs_one_diagnostic() {
+	result := parsed('int main(void) { return missing(1) + missing(2); }')
+	assert result.diagnostics.len == 1
+}
+
+// A name declared anywhere in the unit satisfies the check, which is why it is
+// asked over the whole unit rather than where the name is read: a definition may
+// follow the function that calls it, and the call the reader had not met a
+// declaration for is typed as unresolved rather than refused.
+fn test_a_name_declared_later_in_the_file_is_not_refused() {
+	result := parsed('int main(void) { return f(); }\nint f(void) { return 0; }')
+	assert result.diagnostics.len == 0
+	call := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert call is ast.Call
+	assert (call as ast.Call).typ.kind == .unknown
 }

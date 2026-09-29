@@ -41,6 +41,28 @@ const builtin_types = ['void', 'char', 'short', 'int', 'long', 'signed', 'unsign
 // tag_keywords open the specifier that names a struct, a union or an enum.
 const tag_keywords = ['struct', 'union', 'enum']
 
+// keywords are the words the language reserves for itself. A keyword can never
+// name a declarator and can never be a use of a name either, and the lexer does
+// not tell one from an identifier: that table lives in `tokenize/`, which is
+// another lane's file. So a keyword read as an identifier here is a construct
+// this reader has not implemented - a cast is where it happens, `(int)d` reads
+// its `int` as a name - and it is refused by the diagnostic for that construct
+// rather than reported a second time as a missing declaration.
+const keywords = ['_Atomic', '_Bool', '_Complex', '_Imaginary', '_Thread_local', 'auto', 'break',
+	'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float',
+	'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed',
+	'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile',
+	'while', '__asm', '__asm__', '__attribute__', '__const', '__const__', '__extension__', '__inline',
+	'__inline__', '__restrict', '__restrict__', '__signed', '__signed__', '__thread', '__volatile',
+	'__volatile__']
+
+// is_keyword says whether a spelling is one of the reserved words. Nothing in the
+// language may use one as an identifier, so the question is asked by the declarator
+// reader and by the check that refuses a name nothing declares.
+fn is_keyword(text string) bool {
+	return text in keywords
+}
+
 // gnu_postfix are the words that can follow a declarator and have to be read
 // past: an attribute list and an assembler name. Both arrive in system
 // headers, and a parser that stops at one stops in the middle of the
@@ -944,8 +966,11 @@ fn (mut p Parser) note_declaration(d Declarator, depth int) {
 }
 
 // declare_name writes a declaration into the scope being read, with the linkage
-// its storage class and its scope give it.
+// its storage class and its scope give it. The name is recorded in the unit's
+// own set of declared names as well, which is what the check at the end of the
+// unit asks a name the tree carries against.
 fn (mut p Parser) declare_name(name string, typ types.Type, at tokenize.Token, defined bool) {
+	p.declared[name] = true
 	previous := p.scopes.lookup(name)
 	linkage := types.linkage_for(p.pending_storage, p.scopes.at_file_scope(), previous)
 	p.scopes.declare(types.Symbol{
@@ -1218,6 +1243,7 @@ fn (mut p Parser) register_typedef(name string) {
 	if name.len == 0 {
 		return
 	}
+	p.declared[name] = true
 	if symbol := p.scopes.lookup(name) {
 		if symbol.is_typedef() {
 			return
