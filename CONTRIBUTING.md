@@ -12,7 +12,10 @@ sit above everything else here:
 
 ## Getting set up
 
-You need V 0.5.x and a Linux x86-64 machine.
+You need V built from source at a commit that accepts this tree, and a Linux
+x86-64 machine. The 0.5.2 release does not: its checker rejects a `for {}` whose
+every path returns, which `parser/parser.v` uses. README.md, under Build, says
+which commit CI pins.
 
 ```sh
 git clone https://github.com/HuntedByTheIRS/vcc
@@ -93,15 +96,34 @@ at a few thousand terms; `v run tools/bench.vsh --terms 20000` is what found it.
 A new phase wants a test on input that is large and badly shaped (deep nesting,
 long chains) and not only on input that is interesting.
 
-## Code and prose
+## Code
 
 - `v fmt -w` before every commit. Tabs for indentation, per `.editorconfig`.
 - One module per directory. `parser` does not know about `codegen`, and neither
   of them reaches into `cli`.
 - Doc comments explain why a thing exists and what would break without it. They
   read as plain sentences, not as a summary of the function name.
-- The same goes for the markdown here. Write it the way you would say it out
-  loud; cut the padding and the "this serves as a reminder that" phrasing.
+
+## Prose
+
+Comments, commit bodies, and pull request text here are read by people. Write them
+the way you would say them out loud, and leave these shapes out:
+
+- "This serves as a reminder that" and its relatives. Say what the code does and
+  why it is that way; the reason is the part worth reading.
+- "Serves as", "features", "stands as" where `is`, `has`, or `does` would do.
+- The three-item list assembled to sound thorough, the synonym carousel where one
+  thing becomes a catalyst, a partner, and a foundation, and the bolded label at
+  the start of every bullet.
+- Signposting before the point, em dashes for punch, and the upbeat close.
+  Stop when the point is made.
+- Qualifiers stacked to avoid a decision. If something is uncertain, say what
+  would settle it.
+- Measurements without their number and the command that produced it. An
+  adjective is not evidence.
+
+This applies to text an agent writes into this repository. A generated paragraph
+that reads like machine output is a defect in the change, not a matter of taste.
 
 ## Commits
 
@@ -110,8 +132,8 @@ body says why the change happened, what the old behavior was, and what the
 measurement showed if speed was involved. One logical change per commit, each
 one building and passing `v test .` on its own.
 
-Areas in use: `tokenize`, `parser`, `ast`, `backend`, `codegen`, `cli`, `tools`,
-`tree`, `docs`.
+Areas in use: `tokenize`, `parser`, `ast`, `optimizer`, `printer`, `backend`,
+`codegen`, `cli`, `tools`, `github`, `tree`, `docs`.
 
 ## Review
 

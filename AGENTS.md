@@ -128,17 +128,38 @@ project content. A new tool gets a line in that list, not a commit.
 
 ## Prose
 
-Comments, commit bodies, and markdown here are read by people. Plain sentences,
-specific claims, no throat-clearing. Skip the phrasing that makes text read as
-machine output: "this serves as", "it's not just X, it's Y", the three-item list
-that exists to sound thorough, the bolded label at the start of every bullet.
-Say what the code does and why it is that way.
+Comments, commit bodies, pull request text, and the markdown here are read by
+people. Write them the way you would say them out loud: plain sentences, specific
+claims. This binds text an agent writes as much as text a person writes, because
+these shapes are recognisable and every one of them costs the reader time before
+it costs anything else.
+
+- "Serves as", "stands as", "marks a pivotal moment", and the rest of the
+  vocabulary that inflates what the code does into what it means.
+- "It's not just X, it's Y", and the clipped negation hung off the end of a
+  sentence ("no guessing"). Write the clause.
+- The three-item list assembled to sound thorough, and the synonym carousel where
+  one thing is first a catalyst, then a partner, then a foundation.
+- A bolded label at the start of every bullet. That is a table pretending to be
+  prose.
+- Signposting before the point: "let's look at", "here's what you need to know",
+  "in this section we will".
+- Em dashes for punch. A comma, a colon, or a full stop is usually what was meant.
+- Upbeat closes and unasked-for reassurance: "the future looks bright", "and
+  that's okay". Stop when the point is made.
+- Hedging that hides a decision. If something is uncertain, name what would settle
+  it rather than stacking qualifiers.
+
+Prefer `is`, `has`, and `does` to "serves as", "features", and "stands as". And
+when the claim is a measurement, print the number and the command that produced
+it, because an adjective is not evidence.
 
 ## Commits
 
 `area: what changed`, lowercase, no trailing period, body explaining why. Areas
-in use: `tokenize`, `parser`, `ast`, `backend`, `codegen`, `cli`, `tools`,
-`tree`, `docs`. One logical change per commit, each one building on its own.
+in use: `tokenize`, `parser`, `ast`, `optimizer`, `printer`, `backend`,
+`codegen`, `cli`, `tools`, `github`, `tree`, `docs`. One logical change per
+commit, each one building on its own.
 
 ## Do not
 
