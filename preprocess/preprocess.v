@@ -920,8 +920,26 @@ fn (mut p Processor) undef(tok tokenize.Token, args string) {
 // emit is where every token that reaches the parser goes: the file it came
 // from is the file being read when it was written out, which is the frame on
 // top of the stack.
+//
+// Phase 6 happens here, because this stream is what it is about: two adjacent
+// string literals are one string literal by the time the parser sees them,
+// whenever they were written and whatever produced them. A macro that expands
+// to a literal, or a header included between two of them, is the same thing to
+// this: gcc concatenates the `"a"` written before an #include with the `"b"`
+// written in it, and the array is three bytes (measured), so adjacency is the
+// token stream's and not a line's.
 fn (mut p Processor) emit(tok tokenize.Token) {
 	where := if p.frames.len > 0 { p.frames.last().path } else { tok.file }
+	if tok.kind == .string && p.out.len > 0 && p.out.last().kind == .string {
+		p.join_string(tok, where)
+		return
+	}
+	p.append(tok, where)
+}
+
+// append is the plain end of the token stream: what emit does when there is
+// nothing to join.
+fn (mut p Processor) append(tok tokenize.Token, where string) {
 	p.out << tokenize.Token{
 		kind: tok.kind
 		text: tok.text
@@ -929,6 +947,159 @@ fn (mut p Processor) emit(tok tokenize.Token) {
 		col:  tok.col
 		file: where
 	}
+}
+
+// join_string is phase 6: the last token in the stream is a string literal and
+// so is this one, and the program wrote one literal. The parser is handed one,
+// with the quotes between the two removed: `"a" "b"` is `"ab"`.
+//
+// The prefix follows C99 6.4.5p4: a run of adjacent narrow and wide string
+// literals is concatenated, and the result is wide if any of them was wide.
+// Measured: `sizeof(L"a" "b")` is 12, which is three wide characters. A pair
+// with a `u8`, `u` or `U` on one side and something else on the other has no
+// C99 rule at all, and gcc refuses it in C11 mode as `unsupported non-standard
+// concatenation of string literals`, so it is refused here by name.
+//
+// One join is not made, and the reason is the order of the phases. Each
+// literal's escapes are its own before the literals are joined, which is what
+// gcc does: `"\1" "2"` is three bytes and the first of them is 1 (measured),
+// and so is `"\x41" "b"`, whose first byte is 65 and whose second is 98. Joined
+// as spellings they would be `"\12"` and `"\x41b"`, and `"\x41b"` is one byte
+// with the value 27 and a warning from gcc about a hex escape out of range,
+// which is a value the program did not write. This compiler's literal reader
+// interprets the escapes of one token, so the join stops there and the
+// diagnostic names the two literals and the escape between them.
+fn (mut p Processor) join_string(tok tokenize.Token, where string) {
+	last := p.out.last()
+	left_prefix, left_inner, left_readable := literal_parts(last.text)
+	right_prefix, right_inner, right_readable := literal_parts(tok.text)
+	if !left_readable || !right_readable {
+		p.append(tok, where)
+		return
+	}
+	prefix := concatenated_prefix(left_prefix, right_prefix) or {
+		p.problem(tok, err.msg())
+		p.append(tok, where)
+		return
+	}
+	if ends_in_open_escape(left_inner) {
+		p.problem(tok, 'adjacent string literals joined across an escape are not implemented: the escape at the end of ${last.text} would take characters from ${tok.text}')
+		p.append(tok, where)
+		return
+	}
+	p.out[p.out.len - 1] = tokenize.Token{
+		kind: .string
+		text: prefix + '"' + left_inner + right_inner + '"'
+		line: last.line
+		col:  last.col
+		file: where
+	}
+}
+
+// literal_parts cuts a string literal into the prefix it was written with and
+// the text between its quotes. What the lexer hands over has that shape, so the
+// third answer is false only if something upstream changes and the text is not
+// a string literal at all, which is the case the caller leaves alone.
+fn literal_parts(text string) (string, string, bool) {
+	mut i := 0
+	for i < text.len && text[i] != `"` {
+		i++
+	}
+	if i >= text.len || text.len < i + 2 || text[text.len - 1] != `"` {
+		return '', '', false
+	}
+	return text[..i], text[i + 1..text.len - 1], true
+}
+
+// concatenated_prefix is the prefix of the literal two adjacent literals make.
+fn concatenated_prefix(left string, right string) !string {
+	if left == right {
+		return left
+	}
+	if c99_prefix(left) && c99_prefix(right) {
+		// C99 6.4.5p4: the result of concatenating narrow and wide string
+		// literals is a wide string literal.
+		return 'L'
+	}
+	return error('concatenation of a ${prefix_name(left)} string literal with a ${prefix_name(right)} string literal is not implemented')
+}
+
+fn c99_prefix(prefix string) bool {
+	return prefix == '' || prefix == 'L'
+}
+
+fn prefix_name(prefix string) string {
+	return match prefix {
+		'' { 'narrow' }
+		'L' { 'wide' }
+		else { prefix }
+	}
+}
+
+// ends_in_open_escape reports whether the text before a literal's closing quote
+// ends inside an escape that is still taking characters, which is the case
+// where joining two literals as spellings would change their value: `\x` reads
+// every hexadecimal digit that follows it, an octal escape reads three, and a
+// universal character name reads four or eight. A backslash with nothing after
+// it is the same kind of thing, an escape that has not been finished. Every
+// other escape is complete when its one character is read, so `"\\" "n"` joins
+// into `"\\n"` and reads the same two characters it read before.
+fn ends_in_open_escape(inner string) bool {
+	mut i := 0
+	for i < inner.len {
+		if inner[i] != `\\` {
+			i++
+			continue
+		}
+		if i + 1 >= inner.len {
+			return true
+		}
+		c := inner[i + 1]
+		if c == `x` {
+			mut j := i + 2
+			for j < inner.len && is_hex_digit(inner[j]) {
+				j++
+			}
+			if j >= inner.len {
+				return true
+			}
+			i = j
+			continue
+		}
+		if c >= `0` && c <= `7` {
+			mut j := i + 1
+			mut read := 0
+			for j < inner.len && read < 3 && inner[j] >= `0` && inner[j] <= `7` {
+				j++
+				read++
+			}
+			if j >= inner.len && read < 3 {
+				return true
+			}
+			i = j
+			continue
+		}
+		if c == `u` || c == `U` {
+			width := if c == `u` { 4 } else { 8 }
+			mut j := i + 2
+			mut read := 0
+			for j < inner.len && read < width && is_hex_digit(inner[j]) {
+				j++
+				read++
+			}
+			if j >= inner.len && read < width {
+				return true
+			}
+			i = j
+			continue
+		}
+		i += 2
+	}
+	return false
+}
+
+fn is_hex_digit(c u8) bool {
+	return (c >= `0` && c <= `9`) || (c >= `a` && c <= `f`) || (c >= `A` && c <= `F`)
 }
 
 fn (mut p Processor) problem(tok tokenize.Token, msg string) {
