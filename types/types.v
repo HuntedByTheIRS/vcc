@@ -370,10 +370,15 @@ fn same_pointer(a &Type, b &Type) bool {
 // is compatible with the same name rather than with any other.
 //
 // `char`, `signed char` and `unsigned char` are three distinct types (6.2.5p15)
-// and are not interchangeable here. Measured, gcc 16.2.1 refuses all three
-// mixes: `void f1(char *); void f1(unsigned char *);` is `conflicting types for
-// f1`, and passing a `char *` where an `unsigned char *` is wanted is `pointer
-// targets in passing argument 1 of wants differ in signedness`.
+// and are not interchangeable here. Measured, gcc 16.2.1, and the flags are worth
+// naming because the two mixes are not both refused by the default reading:
+// `void f1(char *); void f1(unsigned char *);` is `error: conflicting types for
+// f1` under `-std=c99` and under `-std=c99 -pedantic-errors` alike, while passing
+// a `char *` where an `unsigned char *` is wanted is silent under `-std=c99`, is
+// `warning: pointer targets in passing argument 1 of wants differ in signedness
+// [-Wpointer-sign]` under `-std=c99 -Wpointer-sign`, and is an error under
+// `-std=c99 -pedantic-errors`. The relation asked here is the one the pedantic
+// reading asks.
 pub fn (t Type) compatible(other Type) bool {
 	if t.kind == .unknown || other.kind == .unknown {
 		return false

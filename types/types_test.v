@@ -211,10 +211,12 @@ fn test_compatibility_is_sameness() {
 	assert int_type().compatible(int_type())
 	assert !int_type().compatible(unsigned_int_type())
 	// The three character types are three distinct types (6.2.5p15), and the
-	// mixes are refused rather than allowed: measured, gcc 16.2.1 reports
-	// `conflicting types for f1` for `void f1(char *); void f1(unsigned char *);`
-	// and `pointer targets in passing argument 1 of wants differ in signedness`
-	// for a `char *` argument to a parameter of `unsigned char *`.
+	// mixes are refused rather than allowed: measured, gcc 16.2.1 under
+	// `-std=c99 -pedantic-errors` reports `conflicting types for f1` for
+	// `void f1(char *); void f1(unsigned char *);` and `pointer targets in passing
+	// argument 1 of wants differ in signedness` for a `char *` argument to a
+	// parameter of `unsigned char *` - the second of which plain `-std=c99`
+	// accepts, saying nothing, and `-std=c99 -Wpointer-sign` gives as a warning.
 	assert !char_type().compatible(signed_char_type())
 	assert !char_type().compatible(unsigned_char_type())
 	assert !signed_char_type().compatible(char_type())

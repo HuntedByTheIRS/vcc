@@ -291,10 +291,18 @@ fn (mut e Emitter) build() ![]u8 {
 // four-byte int, so a constant the model left unresolved and whose value that int
 // cannot hold would be written as a different number than the program asked for.
 // It is refused before a byte is written, so no image comes out of it. Every
-// other clause the model did not resolve is refused where it was read, in
-// parser/, which names the construct and its location; a node reached here with
-// the zero type and a value an int holds is one the emitter writes correctly,
-// which is what keeps a tree the tests assemble by hand emittable.
+// other clause the model did not resolve is refused in parser/, which names the
+// construct and its location: a construct the parser refused where it was read, or
+// a name nothing in the unit declares, which is refused once the whole unit has
+// been read because a definition may follow the function that calls it. A call is
+// the one node both of those can leave standing: a call to a name the unit declares
+// as something that is not a function is refused where the call is written, and a
+// call through a name the unit declares as a function is written although nothing
+// in the unit defines it, so the image dies at load with an undefined symbol. That
+// last shape is a linker's business and not this emitter's.
+// A node reached here with the zero type and a value an int holds is one the
+// emitter writes correctly, which is what keeps a tree the tests assemble by hand
+// emittable.
 fn (mut e Emitter) refuse_unresolved() !void {
 	for decl in e.unit.decls {
 		e.check_statements(decl.body, 0)!
