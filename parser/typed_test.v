@@ -208,6 +208,39 @@ fn test_sizeof_answers_a_value_and_a_type_where_it_was_refused_by_name() {
 	assert after.unit.decls.len == 1
 }
 
+fn test_a_cast_is_read_as_a_conversion_to_the_type_it_names() {
+	// `(char *)0` is a conversion and not a parenthesized expression: the clause
+	// on the node is the type that was named and the spelling is what was
+	// written, which is what a refusal has to be able to quote.
+	result := checked('int main() { char *p = (char *)0; return (int)p; }')
+	assert result.diagnostics.len == 0
+	initializer := result.unit.decls[0].body[0].init or {
+		assert false
+		return
+	}
+	conversion := initializer as ast.Cast
+	assert conversion.spelling == 'char *'
+	assert conversion.typ.describe() == 'char *'
+	assert conversion.line == 1
+	assert (conversion.expr as ast.IntLit).value == 0
+	// The other direction, and the operand is read as the unary expression the
+	// grammar says it is.
+	returned := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	second := returned as ast.Cast
+	assert second.spelling == 'int'
+	assert second.typ.describe() == 'int'
+	assert (second.expr as ast.Ident).name == 'p'
+	// A conversion to void is refused by name: a conversion is a value here, and
+	// this one has none to be.
+	refused := parsed('int main() { int x = 3; (void)x; return 0; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('void')
+	assert refused.diagnostics[0].line == 1
+}
+
 fn test_a_string_literal_is_an_array_of_char_with_room_for_the_terminator() {
 	// Three characters and the terminator the literal does not write. The
 	// argument is checked against `char *`, which it matches because a value of

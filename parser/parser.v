@@ -301,6 +301,9 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 		ast.Unary {
 			p.check_undeclared_expression(expr.expr, mut reported)
 		}
+		ast.Cast {
+			p.check_undeclared_expression(expr.expr, mut reported)
+		}
 		ast.Binary {
 			p.check_undeclared_expression(expr.left, mut reported)
 			p.check_undeclared_expression(expr.right, mut reported)
@@ -558,6 +561,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.StrLit { 'a string literal' }
 		ast.Call { 'a call to ${expr.name}' }
 		ast.Unary { 'a value with ${expr.op} applied to it' }
+		ast.Cast { 'a value converted to ${expr.spelling}' }
 		ast.Binary { 'a value of ${expr.op}' }
 	}
 }
@@ -617,6 +621,15 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	if t.kind == .identifier && t.text == 'sizeof' {
 		return p.parse_sizeof(t)
 	}
+	// A conversion is written as a type name in parentheses, and it is read here
+	// because that is where it binds: `(char *)p + 1` adds one to the address and
+	// not to the char, and `*(int *)p` reads through the pointer rather than
+	// multiplying. Which of the two a `(` opens - a type name or an expression -
+	// is the token after it: a specifier word or a name this file declared as a
+	// type is a conversion, and a name that is not is a value in parentheses.
+	if t.kind == .punct && t.text == '(' && p.starts_declaration(p.peek_at(1)) {
+		return p.parse_cast(t)
+	}
 	// `&` is here with the other prefix operators: it is one, and it binds as
 	// tightly as they do - `&x + 1` is the address of x plus one. Whether what
 	// follows is something with an address is the back end's question, since
@@ -633,6 +646,33 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 		})
 	}
 	return p.parse_primary()
+}
+
+// parse_cast reads a conversion: the type name in parentheses, and the operand it
+// converts. The operand is a unary expression, which is what the grammar says and
+// why `(char)-x` and `(char)*p` are conversions of a value rather than of a sum.
+//
+// A conversion to `void` is refused here rather than in the back end, because it
+// is the one conversion that produces no value: `(void)f()` is a statement that
+// throws a result away, and this tree has no node for a value that is not one.
+fn (mut p Parser) parse_cast(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	name := p.parse_type_name(1)!
+	if !p.expect_punct(')') {
+		return error('unclosed cast')
+	}
+	if name.typ.kind == .void_ {
+		p.error_at(at, 'unsupported: a conversion to void throws its operand away, and this compiler reads a conversion as a value')
+		return error('a conversion to void')
+	}
+	operand := p.parse_unary()!
+	return ast.Expr(ast.Cast{
+		spelling: name.spelling
+		expr:     operand
+		typ:      name.typ
+		line:     at.line
+		col:      at.col
+	})
 }
 
 // max_size_constant is the largest value the back end writes a constant at,

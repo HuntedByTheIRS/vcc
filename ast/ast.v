@@ -200,7 +200,20 @@ pub:
 // type of the constant, a name the type it was declared with, an operator the
 // type its operands convert to. Where the model has no answer the clause is
 // unresolved, and the printer says nothing about it.
-pub type Expr = Binary | Unary | IntLit | FloatLit | Ident | Call | StrLit | Index | Field
+pub type Expr = Binary | Unary | Cast | IntLit | FloatLit | Ident | Call | StrLit | Index | Field
+
+// Cast is a conversion written as a type name in parentheses, `(char *)p`. The
+// type is what the operand is converted to and what the node is worth; spelling
+// is the type as the file wrote it, which is what a diagnostic about the
+// conversion names.
+pub struct Cast {
+pub:
+	spelling string
+	expr     Expr
+	typ      types.Type
+	line     int
+	col      int
+}
 
 // Index is one element of an array, written `a[i]`: the name of the array and
 // the expression that says which element. An element of a named array is the one

@@ -203,6 +203,39 @@ fn test_the_exit_status_is_the_returned_constant() {
 	assert run_image(emitted.bytes) == 7
 }
 
+fn test_a_cast_converts_between_the_classes_the_back_end_carries() {
+	// Measured with gcc 16.2.1 on the same program: `(char)300` is 44 and
+	// `(int)(char *)0` is 0, so the three conversions in one program add up to
+	// 51, which is what the exit status is.
+	emitted := emit(translation_unit('int main() { int x = 7; char *p = (char *)0; double d = (double)x; return (int)d + (char)300 + (int)p; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 51
+	// A conversion of an int to an address keeps the sign: `(char *)-1` is an
+	// address whose upper half is ones, and reading the int back out of it
+	// answers -1 rather than 2147483647.
+	signed := emit(translation_unit('int main() { char *p = (char *)-1; return (int)p == -1; }'), Options{})
+	assert signed.diagnostics.len == 0
+	assert run_image(signed.bytes) == 1
+}
+
+fn test_a_cast_with_no_conversion_behind_it_is_reported() {
+	// A conversion to a type this back end has no register for is refused by
+	// name rather than written as a value of the wrong width.
+	unsupported := emit(translation_unit('int main() { int x = 3; return (long)x; }'),
+		Options{})
+	assert unsupported.diagnostics.len == 1
+	assert unsupported.diagnostics[0].msg.contains('long')
+	assert unsupported.bytes.len == 0
+	// A floating type and an address are not converted into one another, and
+	// that is said rather than emitted as a pointer whose bits are a double.
+	wrong_class := emit(translation_unit('int main() { double d = 1.5; char *p = (char *)d; return 0; }'),
+		Options{})
+	assert wrong_class.diagnostics.len == 1
+	assert wrong_class.diagnostics[0].msg.contains('char *')
+	assert wrong_class.bytes.len == 0
+}
+
 fn test_a_constant_expression_is_folded() {
 	emitted := emit(translation_unit('int main() { return 6 * 7; }'), Options{})
 	assert emitted.diagnostics.len == 0

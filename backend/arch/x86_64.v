@@ -1002,6 +1002,36 @@ pub fn movzx_byte(reg Register) ![]u8 {
 	return [u8(0x0f), 0xb6, u8(0xc0 | ((reg.code & 0x07) << 3) | (reg.code & 0x07))]
 }
 
+// sign_extend_byte widens a byte into the whole register with its sign kept,
+// which is the instruction a value converted to a char is narrowed with: the low
+// byte of the register is the char and the bits above it are its sign, not zero.
+pub fn sign_extend_byte(reg Register) ![]u8 {
+	byte_operand(reg)!
+	return [u8(0x0f), 0xbe, u8(0xc0 | ((reg.code & 0x07) << 3) | (reg.code & 0x07))]
+}
+
+// sign_extend_word widens a four-byte value into the whole register with its sign
+// kept. A pointer is eight bytes and an int is four, so a conversion between them
+// is this instruction: `(char *)0` is zero either way, and an int with the top bit
+// set is an address whose upper half cannot be left as whatever was there.
+pub fn sign_extend_word(dst Register, src Register) ![]u8 {
+	if dst.width != 4 || src.width != 4 {
+		return error('${name}: movsxd takes two registers with a four-byte name, and ${src.name} into ${dst.name} is not')
+	}
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x48) // REX.W: the destination is the whole register
+	if src.code >= 8 {
+		rex |= 0x04 // REX.R reaches the source
+	}
+	if dst.code >= 8 {
+		rex |= 0x01 // REX.B reaches the destination
+	}
+	out << rex
+	out << u8(0x63) // movsxd r64, r/m32
+	out << u8(0xc0 | ((src.code & 0x07) << 3) | (dst.code & 0x07))
+	return out
+}
+
 // byte_operand refuses a destination that has no one-byte name. The table lists
 // registers at their 32-bit spelling, and the low byte of the first four of them
 // is what a conditional set can reach; a wider register number would need a REX

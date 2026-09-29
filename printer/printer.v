@@ -217,5 +217,9 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			object := if _ := expr.index { '${expr.name}[...]' } else { expr.name }
 			out << '${indent}member ${object}.${expr.member} at +${expr.offset} bytes, ${expr.spelling}, at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
+		ast.Cast {
+			out << '${indent}cast to ${expr.spelling} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			dump_expression(expr.expr, depth + 1, mut out)
+		}
 	}
 }

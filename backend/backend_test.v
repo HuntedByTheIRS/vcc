@@ -123,6 +123,18 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 	assert arch.load_slot(rbp, -8, eax, 2) or { []u8{} }.len == 0
 }
 
+fn test_a_conversion_widens_a_value_with_its_sign_kept() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	eax := target.reg('eax') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	// movsx eax, al is a value narrowed to a char, and movsxd rax, eax is an
+	// address made out of an int: 6.3.1.3 says the sign is the one kept.
+	assert arch.sign_extend_byte(eax) or { panic(err) } == [u8(0x0f), 0xbe, 0xc0]
+	assert arch.sign_extend_word(rax, eax) or { panic(err) } == [u8(0x48), 0x63, 0xc0]
+	assert target.sign_extend_byte(eax) or { panic(err) } == [u8(0x0f), 0xbe, 0xc0]
+	assert target.sign_extend_word(rax, eax) or { panic(err) } == [u8(0x48), 0x63, 0xc0]
+}
+
 fn test_the_frame_instructions_are_the_bytes_the_machine_reads() {
 	target := lookup('x86_64-linux') or { panic(err) }
 	// sub rsp, 32, and the immediate is where the emitter will fill the size in

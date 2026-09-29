@@ -4,6 +4,7 @@ import ast
 import backend
 import math
 import tokenize
+import types
 
 // Options is what the caller asks for. An empty target means the machine this
 // binary runs on, and an empty entry means `main`.
@@ -478,6 +479,9 @@ fn (mut e Emitter) check_expression(expr ast.Expr, depth int) !void {
 		ast.Binary {
 			e.check_expression(expr.left, depth + 1)!
 			e.check_expression(expr.right, depth + 1)!
+		}
+		ast.Cast {
+			e.check_expression(expr.expr, depth + 1)!
 		}
 		ast.Unary {
 			e.check_expression(expr.expr, depth + 1)!
@@ -1796,6 +1800,12 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 				e.floating_at(expr.left, depth + 1) || e.floating_at(expr.right, depth + 1)
 			}
 		}
+		ast.Cast {
+			// A conversion says what the value is afterwards, so the target type
+			// is the answer: a double is a double whichever class its operand
+			// was, and the type the reader resolved says which one this is.
+			expr.typ.is_floating()
+		}
 		ast.Index {
 			// An element of an array of doubles is a double, and the array it
 			// belongs to is what says so: a counted slot or a top-level object
@@ -2054,6 +2064,9 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		ast.Unary {
 			e.emit_unary(expr, depth)!
 		}
+		ast.Cast {
+			e.emit_cast(expr, depth)!
+		}
 		ast.Binary {
 			e.emit_binary(expr, depth)!
 		}
@@ -2241,6 +2254,59 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 			e.diagnostics << problem(unary.line, unary.col, 'unsupported unary operator ${unary.op}')
 			return error('unsupported unary operator')
 		}
+	}
+}
+
+// emit_cast writes a conversion. The operand is computed first and what the
+// target type is decides whether anything else is written, because the four
+// classes this back end carries are the ones a conversion can move between: an
+// int of four bytes, the char such a value is narrowed to, a double of eight
+// bytes in the floating-point file, and a pointer, which is the machine's word.
+//
+// A conversion inside one class writes nothing, because the value is already the
+// one the target asks for: `(char *)p` is the same bits, `(int)c` is the int the
+// load widened the char to, and `(int)p` is the low half of the address, which is
+// the half a value of int width is read from. A conversion between two classes is
+// the one instruction that widens or narrows the value, and the widening keeps
+// its sign, which is what the language asks for when an int becomes a pointer.
+//
+// A conversion to anything else is refused by name: this back end has no register
+// for an unsigned char or a long, and converting a value to one it cannot hold
+// would be writing an answer nothing asked for.
+fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
+	target := cast.typ
+	if target.kind !in [.int_, .char_, .signed_char, .double, .pointer] {
+		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion to ${cast.spelling} is not one this back end makes, and it converts between int, char, double and a pointer')
+		return error('unsupported conversion')
+	}
+	floating := e.floating_of(cast.expr)
+	if target.kind == .double {
+		e.emit_expr_at(cast.expr, depth + 1)!
+		// A pointer is refused here by the conversion itself, by name.
+		e.convert_to_double(cast.expr, cast.line, cast.col)!
+		return
+	}
+	e.emit_expr_at(cast.expr, depth + 1)!
+	if floating {
+		if target.kind == .pointer {
+			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from a double to ${cast.spelling}, and a floating type is not a value an address is made of')
+			return error('double to a pointer')
+		}
+		e.convert_to_int(cast.expr, cast.line, cast.col)!
+	}
+	register := e.accumulator(cast.line, cast.col)!
+	if target.kind == .pointer {
+		if !e.is_a_pointer(cast.expr) {
+			// An int is four bytes and an address is eight: the value is
+			// widened into the whole register with its sign kept.
+			e.append(e.target.sign_extend_word(register, register)!)
+		}
+		return
+	}
+	if target.kind in [.char_, .signed_char] {
+		// The low byte of the register is the char, and the bits above it are
+		// that byte's sign, which is what this target's char is.
+		e.append(e.target.sign_extend_byte(register)!)
 	}
 }
 
@@ -2473,6 +2539,20 @@ fn (mut e Emitter) move_to_scratch(line int, col int) !void {
 	e.append(e.target.move_register32(other, result)!)
 }
 
+// converted_width is the width of a value held under a type a conversion named:
+// four bytes for an int, and the same four for the char such a value is narrowed
+// to, because a char in a register is the int the load widened it to. A double is
+// eight bytes in the floating-point file and a pointer is the machine's word, and
+// a type the back end has no register for answers none.
+fn (e Emitter) converted_width(t types.Type) ?int {
+	return match t.kind {
+		.int_, .char_, .signed_char { 4 }
+		.double { 8 }
+		.pointer, .array { e.target.word_size }
+		else { none }
+	}
+}
+
 // width_of is the width of the value an expression has, four bytes for an int
 // and the machine's word for a pointer. It is what keeps an int and a pointer
 // apart where the machine would otherwise take one for the other, and none is
@@ -2559,6 +2639,13 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			} else {
 				e.width_of(expr.expr) or { return none }
 			}
+		}
+		ast.Cast {
+			// The width of a converted value is the class of the type it was
+			// converted to and not the width of its storage: a char in a register
+			// is the int the language promotes it to, and a pointer is the
+			// machine's word whatever it points at.
+			e.converted_width(expr.typ)
 		}
 		ast.Binary {
 			if expr.op in ['==', '!=', '<', '>', '<=', '>=', '&&', '||'] {
@@ -3532,6 +3619,7 @@ fn expr_line(expr ast.Expr) int {
 		ast.StrLit { expr.line }
 		ast.Ident { expr.line }
 		ast.Unary { expr.line }
+		ast.Cast { expr.line }
 		ast.Binary { expr.line }
 		ast.Call { expr.line }
 		ast.Index { expr.line }
@@ -3546,6 +3634,7 @@ fn expr_col(expr ast.Expr) int {
 		ast.StrLit { expr.col }
 		ast.Ident { expr.col }
 		ast.Unary { expr.col }
+		ast.Cast { expr.col }
 		ast.Binary { expr.col }
 		ast.Call { expr.col }
 		ast.Index { expr.col }

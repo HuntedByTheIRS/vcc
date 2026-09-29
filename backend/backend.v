@@ -344,6 +344,18 @@ pub fn (t Target) store_indirect(address arch.Register, src arch.Register, width
 	return arch.store_indirect(address, src, width)
 }
 
+// The two widenings a conversion between the value classes needs. A byte is
+// widened with its sign kept, which is what converting a value to a char is; a
+// word is widened into the whole register, which is what converting an int to a
+// pointer is, because a pointer is the machine's word.
+pub fn (t Target) sign_extend_byte(reg arch.Register) ![]u8 {
+	return arch.sign_extend_byte(reg)
+}
+
+pub fn (t Target) sign_extend_word(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.sign_extend_word(dst, src)
+}
+
 // The arithmetic, named for what the language asks for rather than for the
 // instruction that carries it.
 pub fn (t Target) add(dst arch.Register, src arch.Register) ![]u8 {

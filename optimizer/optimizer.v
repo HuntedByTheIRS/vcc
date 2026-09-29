@@ -400,6 +400,19 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 				col:  expr.col
 			})
 		}
+		ast.Cast {
+			// A conversion is not a call to a builtin, so the only thing inside
+			// it to rewrite is its operand. The clause travels with it: what the
+			// node is worth is the type converted to, and nothing in the operand
+			// says which conversion this is.
+			return ast.Expr(ast.Cast{
+				spelling: expr.spelling
+				expr:     rewrite(expr.expr, opts, depth + 1)
+				typ:      expr.typ
+				line:     expr.line
+				col:      expr.col
+			})
+		}
 		ast.Call {
 			// The arguments are rewritten first, so `abs(abs(-3))` folds the
 			// inner call and then has a constant to work with.
