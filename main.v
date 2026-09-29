@@ -6,6 +6,7 @@ import codegen
 import optimizer
 import os
 import parser
+import preprocess
 import printer
 import time
 import tokenize
@@ -70,21 +71,27 @@ fn main() {
 	}
 	mut phases := []cli.Phase{}
 	mut started := time.now()
-	lexed := tokenize.lex(source)
+	// Lexing happens inside the preprocessor, which is the stage that knows
+	// which file it is reading and what to do with the directives it finds.
+	processed := preprocess.preprocess(source, path, preprocess.Options{
+		include_dirs: opts.include_dirs
+		defines:      opts.defines
+		undefines:    opts.undefines
+	})
 	phases << cli.Phase{
-		name:   'lex'
+		name:   'preprocess'
 		micros: time.since(started).microseconds()
 	}
-	if lexed.diagnostics.len > 0 {
-		report(path, lexed.diagnostics)
+	report(path, processed.diagnostics)
+	if processed.diagnostics.len > 0 {
 		exit(1)
 	}
 	if opts.preprocess {
-		print_tokens(lexed.tokens)
+		print_tokens(processed.tokens)
 		return
 	}
 	started = time.now()
-	parsed := parser.parse(lexed.tokens)
+	parsed := parser.parse(processed.tokens)
 	phases << cli.Phase{
 		name:   'parse'
 		micros: time.since(started).microseconds()
@@ -181,15 +188,11 @@ fn temporary_path() string {
 	return os.join_path(os.temp_dir(), 'vcc-run-${os.getpid()}')
 }
 
-// print_tokens is what `-E` does today: the token stream, one token per line.
-// The preprocessor is a later milestone, so nothing is expanded and the text is
-// what was written.
+// print_tokens is what `-E` does: the stream the parser would be handed, one
+// token per line, with the file and the position each token was written at.
 fn print_tokens(tokens []tokenize.Token) {
 	for tok in tokens {
-		if tok.kind == .eof {
-			break
-		}
-		println('${tok.line}:${tok.col}\t${tok.kind}\t${tok.text}')
+		println('${tok.file}:${tok.line}:${tok.col}\t${tok.kind}\t${tok.text}')
 	}
 }
 
