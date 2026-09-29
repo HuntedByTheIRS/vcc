@@ -458,6 +458,14 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 		p.error_at(spec.start, 'unsupported: a function definition needs a name')
 		return
 	}
+	if spec.clause.is_complex() || spec.clause.kind == .long_double {
+		// A type the model knows and the emitter has no form for is a different
+		// answer from a type whose first word is not one the emitter reads:
+		// `long double` and `double _Complex` are each one type, and the refusal
+		// names it rather than naming half of it.
+		p.error_at(spec.start, 'unsupported: ${spec.clause.describe()} is a type this compiler does not emit yet, so a function cannot return it')
+		return
+	}
 	if offender := unsupported_type_word(spec) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
 		return
@@ -471,16 +479,20 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	}
 }
 
-// unsupported_type_word is the type among a declaration's specifiers that keeps
-// the back end from giving an object the type it names, written the way the
-// declaration wrote it, or none when every word is one the emitter has a form
-// for. It is a name the emitter does not have rather than a word: `long double`
-// and `unsigned long long` are each one type, and a diagnostic that answered
-// `long` or `unsigned` would name half of one.
+// unsupported_type_word is the word among a declaration's specifiers that keeps
+// the back end from giving an object the type it names, or none when every word
+// is one the emitter has a form for. A definition's return type and a
+// declaration inside a body are the same question, because both are storage the
+// program has to find room for; a prototype is a promise, and a promise is not
+// asked.
 //
-// A definition's return type and a declaration inside a body are the same
-// question, because both are storage the program has to find room for; a
-// prototype is a promise, and a promise is not asked.
+// It answers with the first word and not with the type as it was written, which
+// is what the emitter stopped at: the diagnostic for `long long x` reads
+// `unsupported type long`, and that wording is the compiler's published
+// behavior, so it is not this lane's to move. A type written as two words is
+// named in full where the answer is about the construct rather than about the
+// word: the parameter list names what a parameter was declared with, and a
+// complex type is refused by name below.
 fn unsupported_type_word(spec DeclSpec) ?string {
 	// The words a type is made of, not the storage class in front of them: an
 	// `extern` or a `static` is not a type, and reporting one as an unsupported
@@ -494,7 +506,7 @@ fn unsupported_type_word(spec DeclSpec) ?string {
 	if spec.type_words.len > 1 && spec.type_words[0] in supported_types {
 		return spec.type_words[1]
 	}
-	return spec.type_words.join(' ')
+	return spec.type_words[0]
 }
 
 // parse_decl_specifiers reads the words in front of a declarator. It accepts
@@ -859,6 +871,16 @@ fn (p Parser) declared_type(base types.Type, d Declarator) types.Type {
 // type_params is the parameters of a declarator as the type model wants them. The
 // tree keeps a parameter with the type as it was written, because that is what a
 // definition's frame is laid out from; the type keeps the one the model resolved.
+// parameter_spelling is the type a parameter was declared with, written the way
+// it was written: the type words joined, and the storage class and qualifiers in
+// front of them left out, since those are not the type.
+fn parameter_spelling(spec DeclSpec) string {
+	if spec.type_words.len == 0 {
+		return spec.words.join(' ')
+	}
+	return spec.type_words.join(' ')
+}
+
 fn type_params(params []ast.Param) []types.Param {
 	mut out := []types.Param{cap: params.len}
 	for param in params {
@@ -1004,7 +1026,9 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			} else if d.array_at.line > 0 {
 				params.note_problem('unsupported: array parameters are not implemented', d.array_at)
 			} else if !(spec.words.len == 1 && spec.words[0] in supported_types) {
-				params.note_problem('unsupported type ${spec.words[0]}', spec.start)
+				// The type as the parameter wrote it, so that `double _Complex`
+				// and `long long` are named rather than a word of them.
+				params.note_problem('unsupported type ${parameter_spelling(spec)}', spec.start)
 			}
 		}
 		if p.at_punct(',') {

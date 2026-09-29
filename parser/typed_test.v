@@ -277,28 +277,48 @@ fn test_the_float_family_is_refused_by_name_and_by_location() {
 	// DELIVERABLE 2's own test: a float the back end has no form for is refused
 	// by name and location rather than misread as something the emitter does
 	// have a form for.
-	for spelled in ['float', 'double', 'long double'] {
+	for spelled in ['float', 'double'] {
 		result := parsed('${spelled} f(void) { return 0; }')
 		assert result.diagnostics.len == 1
 		assert result.diagnostics[0].msg == 'unsupported type ${spelled}'
 		assert result.diagnostics[0].line == 1
 		assert result.diagnostics[0].col == 1
 	}
+	// `long double` is one type written as two words, so the refusal names it
+	// rather than the first word of it.
+	wide := parsed('long double f(void) { return 0; }')
+	assert wide.diagnostics.len == 1
+	assert wide.diagnostics[0].msg == 'unsupported: long double is a type this compiler does not emit yet, so a function cannot return it'
+	assert wide.diagnostics[0].line == 1
 	// The model answers for the type all the same, which is what makes the
 	// refusal the back end's and not the reader's.
 	prototype := checked('long double f(void);')
 	assert prototype.unit.decls[0].ret_type.same(types.long_double_type())
 }
 
-fn test_the_unsupported_types_are_named_as_they_were_written() {
-	// The model has these types; the emitter has no form for them, and the
-	// diagnostic names the type rather than the first word of it.
+fn test_a_complex_type_is_refused_by_name() {
+	// The model has the complex types and the emitter has no arithmetic for
+	// them, so a definition of one is refused by name and location. The refusal
+	// says which type it was, not the first word of its spelling.
 	complex := parsed('double _Complex f(void) { return 0; }')
 	assert complex.diagnostics.len == 1
-	assert complex.diagnostics[0].msg == 'unsupported type double _Complex'
+	assert complex.diagnostics[0].msg == 'unsupported: double _Complex is a type this compiler does not emit yet, so a function cannot return it'
 	assert complex.diagnostics[0].line == 1
-	long_double := parsed('long double g(void) { return 0; }')
-	assert long_double.diagnostics[0].msg == 'unsupported type long double'
+	imaginary := parsed('_Imaginary g(void) { return 0; }')
+	assert imaginary.diagnostics.len == 1
+	assert imaginary.diagnostics[0].msg == 'unsupported type _Imaginary'
+	// The parameter list names what a parameter was declared with, which is the
+	// one place a type written as two words is spelled in full.
+	parameter := parsed('int h(double _Complex z) { return 0; }')
+	assert parameter.diagnostics.len == 1
+	assert parameter.diagnostics[0].msg == 'unsupported type double _Complex'
+}
+
+fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
+	// The wording for a definition of an object: the emitter stops at the first
+	// word of the type, and that is the message the compiler has published.
 	wider := parsed('unsigned long long h(void) { return 0; }')
-	assert wider.diagnostics[0].msg == 'unsupported type unsigned long long'
+	assert wider.diagnostics.len == 1
+	assert wider.diagnostics[0].msg == 'unsupported type unsigned'
+	assert wider.diagnostics[0].line == 1
 }
