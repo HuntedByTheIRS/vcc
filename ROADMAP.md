@@ -7,16 +7,21 @@ self-build does not get slower.
 
 ## Where the tree is
 
-A stub. It lexes C, parses function definitions returning `int` with constant
-return expressions, and writes a Linux x86-64 executable that exits with the
-folded value. The command line already accepts the flag surface V uses, because
-getting that wrong later is a rewrite rather than a fix. Everything else exits
-non-zero with a diagnostic naming the construct.
+Past the stub, at the end of M1. The preprocessor is real — it reads the glibc
+headers this machine has — and the front end reads the declarations such a header
+is made of and the function definitions after them, and the back end writes a
+dynamically linked Linux x86-64 executable that calls into libc, so `#include
+<stdio.h>` and `puts` work end to end. Function bodies with local variables and
+control flow are the open edge and the next thing to land. The command line
+already accepts the flag surface V uses, because getting that wrong later is a
+rewrite rather than a fix. Everything else exits non-zero with a diagnostic
+naming the construct.
 
 The numbers, from `tools/bench.vsh` against the tcc V vendors: on a 20000-term
-constant chain vcc is about 8x its wall time and 4x its peak memory, and the
-ratio grows with the input because the current pipeline allocates per token and
-per AST node. That gap is the M6 problem, and it is measured rather than felt.
+constant chain vcc is about 12x its wall time and 10x its peak memory, and at
+100000 terms about 28x and 35x — the ratio grows with the input because the
+pipeline allocates per token and per AST node. That gap is the M6 problem, and it
+is measured rather than felt.
 
 ## M0: the stub
 
