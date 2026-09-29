@@ -209,6 +209,12 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 			diagnostics: emitter.diagnostics
 		}
 	}
+	emitter.refuse_floating_initializers() or {
+		return Result{
+			target:      target
+			diagnostics: emitter.diagnostics
+		}
+	}
 	image := emitter.build() or {
 		return Result{
 			target:      target
@@ -340,6 +346,19 @@ fn (mut e Emitter) build() ![]u8 {
 fn (mut e Emitter) refuse_unresolved() !void {
 	for decl in e.unit.decls {
 		e.check_statements(decl.body, 0)!
+	}
+}
+
+// refuse_floating_initializers reports every top-level object whose initializer
+// is a floating constant. The image holds the two's complement of an integer, so
+// a definition that became a different number would be a program that says one
+// thing and does another; it is refused instead.
+fn (mut e Emitter) refuse_floating_initializers() !void {
+	for global in e.unit.globals {
+		if _ := global.init_float {
+			e.diagnostics << problem(global.line, global.col, 'unsupported: ${global.name} is initialized with a floating constant, and this back end writes integer initializers only')
+			return error('floating initializer')
+		}
 	}
 }
 

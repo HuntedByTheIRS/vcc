@@ -295,6 +295,11 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut data_count := 0
 	mut data_clause := types.Type{}
 	mut data_init := ?i64(none)
+	// data_init_float is the same initializer when it was written as a floating
+	// constant. The two are kept apart while the declaration is read because the
+	// object's type is not known until the declarator has been read, and which
+	// one is written into the image is a question about that type.
+	mut data_init_float := ?f64(none)
 	// literal_refused says the initializer was a number the literal reader
 	// refused and reported, which is a different answer from an initializer that
 	// is not a number at all: the first has its own diagnostic at its own
@@ -384,7 +389,9 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_defined = true
 				p.next()
 				before := p.diagnostics.len
-				data_init = p.file_scope_constant()
+				constant := p.file_scope_constant()
+				data_init = constant.integer
+				data_init_float = constant.floating
 				literal_refused = p.diagnostics.len > before
 				p.skip_to_separator() or {
 					p.skip_declaration()
@@ -428,7 +435,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.error_at(data_at, 'unsupported type ${offender}')
 			return decls
 		}
-		if data_defined && data_init == none {
+		if data_defined && data_init == none && data_init_float == none {
 			// Either way the definition is refused. When the initializer was a
 			// number the literal reader refused, it has already been named at
 			// its own location and this report would be a second message about
@@ -446,18 +453,37 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		// function reads and writes by name. Everything the back end needs to
 		// lay the bytes out is known here - the type, how many elements, and the
 		// constant the storage starts at - so no later stage has to ask.
+		//
+		// The initializer is made the class the object was declared with while
+		// the tree is built, because the two are one value of one type: an
+		// integer initializing a double object is that integer's value as a
+		// double, and a floating constant initializing an int or a char is
+		// truncated towards zero, which is the conversion an assignment makes
+		// and the reason neither of these needs a diagnostic of its own.
+		init, init_float := initializer_for(data_type, data_init, data_init_float)
 		p.declare_name(data_name, data_clause, data_at, true)
 		p.globals << ast.Global{
-			name:     data_name
-			typ:      data_type
-			resolved: data_clause
-			count:    data_count
-			init:     data_init
-			line:     data_at.line
-			col:      data_at.col
+			name:       data_name
+			typ:        data_type
+			resolved:   data_clause
+			count:      data_count
+			init:       init
+			init_float: init_float
+			line:       data_at.line
+			col:        data_at.col
 		}
 	}
 	return decls
+}
+
+// FileConstant is the number a file-scope definition was initialized with. One of
+// the two fields is set: `integer` for an integer constant, `floating` for a
+// floating one, and neither for a shape this reader does not take. Keeping them
+// apart here is what lets the caller check the class against the object's type
+// rather than converting one into the other and losing what was written.
+struct FileConstant {
+	integer  ?i64
+	floating ?f64
 }
 
 // file_scope_constant reads the initializer a file-scope definition may have: a
@@ -472,7 +498,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 // for an initializer that is not a number at all: measured, `int x = 0x1p3;`
 // used to exit with `x is initialized with something that is not a number`
 // instead of naming the construct.
-fn (mut p Parser) file_scope_constant() ?i64 {
+fn (mut p Parser) file_scope_constant() FileConstant {
 	sign := if p.at_punct('-') {
 		p.next()
 		-1
@@ -483,15 +509,52 @@ fn (mut p Parser) file_scope_constant() ?i64 {
 		1
 	}
 	if p.peek().kind != .number {
-		return none
+		return FileConstant{}
 	}
 	t := p.peek()
 	p.next()
+	if is_floating_constant(t.text) {
+		value := parse_floating_literal(t.text) or {
+			p.error_at(t, err.msg())
+			return FileConstant{}
+		}
+		return FileConstant{
+			floating: if sign < 0 { -value } else { value }
+		}
+	}
 	value := parse_integer_literal(t.text) or {
 		p.error_at(t, err.msg())
-		return none
+		return FileConstant{}
 	}
-	return sign * value
+	return FileConstant{
+		integer: sign * value
+	}
+}
+
+// initializer_for makes a file-scope initializer the class the object was
+// declared with, and answers with the pair the tree carries: at most one of them
+// is set, and it is the one the object's type asks for. An object with no
+// initializer answers with neither, which is the storage a definition starts
+// zeroed. A floating initializer for an integer object and an integer one for a
+// double are both conversions the language makes, so neither is reported.
+fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
+	mut value := integer
+	mut fraction := floating
+	if written == 'double' {
+		if number := integer {
+			return none, f64(number)
+		}
+		return none, fraction
+	}
+	if fraction_value := fraction {
+		// The truncation is towards zero, which is what the conversion from a
+		// floating type to an integer one is defined to do.
+		if fraction_value != fraction_value {
+			return none, none
+		}
+		return i64(fraction_value), none
+	}
+	return value, none
 }
 
 // check_definition reports what keeps a definition from being emitted. A
