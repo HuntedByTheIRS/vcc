@@ -113,11 +113,16 @@ fn test_a_gnu_construct_is_pedantic_in_a_strict_mode() {
 	tokens := [token('int'), token('f'), token('__attribute__'), token('(')]
 	messages := pedantic_messages(tokens, asking(.c99))
 	assert messages.len == 1
-	assert messages[0].msg == 'ISO C99 forbids an attribute on a declarator'
+	assert messages[0].msg == 'ISO C99 forbids an attribute'
 	assert messages[0].class == .pedantic
 	assert messages[0].warning
 	assert messages[0].line == 1
 	assert messages[0].file == 'f.c'
+	// The phrase names no position, because the spelling's position is not
+	// something the token-text check can see: a prefix attribute and a postfix
+	// one get the same message, and both are attributes.
+	prefix := [token('__attribute__'), token('int'), token('f')]
+	assert pedantic_messages(prefix, asking(.c99))[0].msg == messages[0].msg
 }
 
 fn test_the_asm_row_names_every_shape_the_spelling_marks() {

@@ -56,12 +56,21 @@ pub:
 // yet are read by nothing; the day one lands, its row changes status, gains its
 // spellings and starts being checked.
 pub const features = [
+	// An attribute can be written before the declaration
+	// (`__attribute__((unused)) int f(void);`), between the specifiers and the
+	// declarator, and after the declarator
+	// (`int f(void) __attribute__((unused));`). The check finds the spelling by
+	// token text and cannot tell the positions apart, so the phrase is the one
+	// true of all of them and names no position at all. The tree reads the
+	// postfix position only (`parser/declarations.v`), and the prefix one is
+	// refused by the parser on its own account. gcc 16.2.1 says nothing about
+	// any of the positions under `-std=c99 -pedantic-errors`, measured.
 	Feature{
 		spellings: ['__attribute__']
 		since:     .none
 		gnu:       true
 		extension: ''
-		pedantic:  'an attribute on a declarator'
+		pedantic:  'an attribute'
 		status:    .implemented
 	},
 	// The asm row's phrase has to be true of both constructs the spelling
