@@ -210,5 +210,11 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			out << '${indent}element ${expr.name}[] at ${expr.line}:${expr.col}${typed(expr.typ)}'
 			dump_expression(expr.index, depth + 1, mut out)
 		}
+		ast.Field {
+			// The offset is printed because it is the part of the node the
+			// source does not say: `x.b` is where the layout put b, and that
+			// number is what the emitter reads.
+			out << '${indent}member ${expr.name}.${expr.member} at +${expr.offset} bytes, ${expr.spelling}, at ${expr.line}:${expr.col}${typed(expr.typ)}'
+		}
 	}
 }

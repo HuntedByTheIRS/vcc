@@ -414,6 +414,115 @@ fn test_a_definition_spelled_with_a_typedef_name_is_the_definition_it_names() {
 	assert result.unit.decls[0].body[1].decl_type == 'int'
 }
 
+// An object of an aggregate type is a block of storage, and the size of it is
+// the model's layout of the members rather than anything the declaration says:
+// `struct S` is a tag, and a tag has no width of its own. What the back end is
+// handed is the number, because a spelling it cannot size is a spelling it would
+// have to refuse.
+fn test_an_object_of_an_aggregate_type_carries_the_size_of_its_layout() {
+	// int at 0, char at 4, and the object rounded up to four: 8 bytes, measured
+	// against gcc 16.2.1 with `sizeof`.
+	decl := first('struct S { int a; char c; };\nint main() { struct S s; return 0; }')
+	body := decl.body
+	assert body.len == 2
+	assert body[0].decl_type == 'struct S'
+	assert body[0].bytes == 8
+}
+
+// A member is a value at an offset into the object, and the offset comes from the
+// layout: `c` is at 4 because an int comes first, and what is read there is a
+// char, which is the type the tag declared it with.
+fn test_a_member_is_read_at_the_offset_the_layout_puts_it_at() {
+	decl := first('struct S { int a; char c; };\nint main() { struct S s; return s.c; }')
+	body := decl.body
+	assert body.len == 2
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.name == 's'
+	assert member.member == 'c'
+	assert member.offset == 4
+	assert member.spelling == 'char'
+	assert member.typ.same(types.char_type())
+}
+
+// A member of a union starts at the beginning of the object, whatever its type.
+fn test_a_member_of_a_union_is_at_the_beginning_of_it() {
+	decl := first('union U { int a; char b; };\nint main() { union U u; return u.b; }')
+	body := decl.body
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.offset == 0
+	assert member.spelling == 'char'
+}
+
+// A member written into is the same offset read the other way, and the statement
+// carries the member rather than a name: `s.c = 5` writes four bytes into the
+// object at four, where a plain name would write a slot of its own.
+fn test_an_assignment_to_a_member_carries_the_member() {
+	decl := first('struct S { int a; char c; };\nint main() { struct S s; s.c = 5; return 0; }')
+	body := decl.body
+	assert body.len == 3
+	assert body[1].kind == .assign
+	target := body[1].field or {
+		assert false
+		return
+	}
+	assert target.offset == 4
+	assert target.spelling == 'char'
+}
+
+// A tag that was declared and never defined is a type whose size nobody knows,
+// so an object of it is refused by the tag as it was written and not at the use.
+fn test_an_object_of_an_incomplete_tag_is_refused_by_the_tag() {
+	result := parsed('struct S;\nint main() { struct S s; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'unsupported type struct S'
+	assert result.diagnostics[0].line == 2
+}
+
+// An object defined at the top level is storage in the image, which is laid out
+// by a path that has no room for an aggregate yet. Refusing it where it is
+// written is what keeps an object nothing uses from being dropped silently.
+fn test_an_aggregate_defined_at_the_top_level_is_refused_where_it_is_written() {
+	result := parsed('struct S { int a; };\nstruct S g;\nint main() { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('aggregate at the top level')
+	assert result.diagnostics[0].line == 2
+}
+
+// A member of a member is a general lvalue the tree does not have, and the
+// refusal names the shape rather than stopping at the punctuation after it.
+fn test_a_member_of_a_member_is_refused_by_name() {
+	result := parsed('struct I { int a; };\nstruct O { struct I in; };\nint main() { struct O o; return o.in.a; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('a member of a member is not implemented')
+}
+
+// Reading a member through a pointer is the arrow form, which is a different
+// shape and is named as the one it is.
+fn test_a_member_read_through_a_pointer_is_refused_by_name() {
+	result := parsed('struct S { int a; };\nint main() { struct S s; struct S *p = &s; return p->a; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('-> is not implemented')
+}
+
+// A name whose type has no members has no member, and a member a tag does not
+// declare is not one either: both are refused where they are written.
+fn test_a_member_of_something_without_members_is_refused() {
+	plain := parsed('int main() { int n = 1; return n.a; }')
+	assert plain.diagnostics.len == 1
+	assert plain.diagnostics[0].msg.contains('a member is read from an object whose type has members')
+	unknown := parsed('struct S { int a; };\nint main() { struct S s; return s.zz; }')
+	assert unknown.diagnostics.len == 1
+	assert unknown.diagnostics[0].msg.contains('has no member called zz')
+}
+
 fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type() {
 	// The name is not what is asked about, the type it names is: `Big` is a
 	// `long` here, and a `long` is a type this compiler has no width for. The

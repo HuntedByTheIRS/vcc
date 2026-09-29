@@ -129,6 +129,15 @@ fn (p Parser) starts_assignment() bool {
 	// anything, so the tokens are scanned to the bracket that closes it: the
 	// operator after that is what says whether this is an assignment. Nothing is
 	// consumed here — it is a lookahead, and the reading happens once.
+	// `x.a = v` starts with a name, a dot and a member. A member is one name, so
+	// three tokens say whether this is an assignment to a member: the operator
+	// after the member is the one that writes.
+	if next.kind == .punct && next.text == '.' {
+		member := p.peek_at(2)
+		after := p.peek_at(3)
+		return member.kind == .identifier && after.kind == .punct
+			&& after.text in assignment_operators
+	}
 	if next.kind == .punct && next.text == '[' {
 		mut depth := 0
 		mut ahead := 1
@@ -162,6 +171,7 @@ fn (p Parser) starts_assignment() bool {
 fn (mut p Parser) parse_assignment() !ast.Stmt {
 	t := p.next() // the name
 	mut index := ?ast.Expr(none)
+	mut field := ?ast.Field(none)
 	if p.at_punct('[') {
 		p.next()
 		index = p.parse_expression() or { return error('bad subscript') }
@@ -170,19 +180,26 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 			return error('expected ]')
 		}
 		p.next()
+	} else if p.at_punct('.') {
+		field = p.parse_member(t.text, t)!
 	}
 	op := p.next() // = or a compound spelling
 	if op.text == '=' {
 		expr := p.parse_expression()!
-		p.check_assignment(p.assignment_target_type(t.text, index), expr, op)
+		p.check_assignment(p.assignment_target_type(t.text, index, field), expr, op)
 		return ast.Stmt{
 			kind:   .assign
 			target: t.text
 			index:  index
+			field:  field
 			expr:   expr
 			line:   t.line
 			col:    t.col
 		}
+	}
+	if member := field {
+		p.error_at(op, 'unsupported: a compound assignment to the member ${member.name}.${member.member} is not implemented')
+		return error('compound assignment to a member')
 	}
 	return p.parse_compound_assignment(t, op, index)
 }
@@ -192,7 +209,13 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 // written with a subscript. A name no declaration describes answers with the zero
 // type, and the constraint below takes no position on that: the name is what the
 // check at the end of the unit is for.
-fn (p Parser) assignment_target_type(name string, index ?ast.Expr) types.Type {
+fn (p Parser) assignment_target_type(name string, index ?ast.Expr, field ?ast.Field) types.Type {
+	// A member is written at an offset into an object, and what the value written
+	// there converts to is the type of the member, which the reader worked out
+	// when it read the member.
+	if member := field {
+		return member.typ
+	}
 	declared := p.resolve(name)
 	if index == none {
 		return declared
@@ -555,6 +578,11 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			decl_name:  d.name
 			decl_type:  p.spelling_of(spec, d.stars)
 			decl_count: d.array_count
+			// The declarator decides whether the object is the aggregate or
+			// something derived from it: `struct S x;` is the object, and
+			// `struct S *p;` is one word holding an address, which the back end
+			// sizes from the spelling.
+			bytes:      p.aggregate_bytes(p.declared_type(spec.clause, d))
 			line:       d.name_at.line
 			col:        d.name_at.col
 		}

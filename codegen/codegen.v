@@ -126,6 +126,13 @@ struct Slot {
 	// floating is set for a slot holding a double, which is a value the machine
 	// moves with a different instruction than an integer of the same width.
 	floating bool
+	// bytes is the size of a slot that holds an object of an aggregate type, and
+	// zero for a slot that holds a scalar or an array: an object of a struct
+	// type has no spelling this back end can size, so the size the model laid
+	// out travels with the declaration and the frame reserves that many bytes.
+	// The name of such a slot is the address of the object, which is what a
+	// member is read and written through.
+	bytes int
 }
 
 // LoopLabels are the two places a loop's body can leave by: where the loop ends,
@@ -506,7 +513,10 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	mut integers := 0
 	mut doubles := 0
 	for _, param in decl.params {
-		slot := e.declare(param.name, param.typ, 0, param.line, param.col)!
+		// A parameter is one value in a register, and an object of an
+		// aggregate type passed by value is not one value this back end hands
+		// over: its spelling reaches `type_width` and is refused there by name.
+		slot := e.declare(param.name, param.typ, 0, 0, param.line, param.col)!
 		if slot.floating {
 			register := e.target.float_arg_reg(doubles) or {
 				e.diagnostics << problem(param.line, param.col, 'unsupported: ${decl.name} takes more than ${doubles} doubles, and the machine passes only that many in registers')
@@ -642,8 +652,16 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 // storage and nothing else, which is what C says it is: the slot is there for
 // whatever the function writes into it next.
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
-	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.line, stmt.col)!
+	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.line, stmt.col)!
 	init := stmt.init or { return }
+	if slot.bytes > 0 {
+		// An object of an aggregate type is a block of the frame, and the value
+		// of an initializer for one would have to be copied into it. A member
+		// written one at a time is the shape this back end has, and an
+		// initializer with braces is refused where it is read.
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is an object of an aggregate type declared with an initializer, and initializing one is not implemented')
+		return error('aggregate initializer')
+	}
 	if stmt.decl_count > 0 {
 		// An array is storage, and the elements of it are whatever the frame
 		// held: an initializer for one is a shape this back end does not copy
@@ -663,6 +681,9 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned without a value')
 		return error('assignment without a value')
 	}
+	if member := stmt.field {
+		return e.assign_member(stmt, member, expr)
+	}
 	if subscript := stmt.index {
 		return e.assign_element(stmt, subscript, expr)
 	}
@@ -677,6 +698,63 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 	}
 	e.emit_expr(expr)!
 	e.store_value(target, expr, stmt.line, stmt.col)!
+}
+
+// assign_member writes a value into one member of an object. The address of the
+// member is the address of the object plus the offset the layout put it at, parked
+// in a scratch slot while the value is computed, and the value is written through
+// it: the shape an element of an array is written with, because a member is an
+// element of the object at a fixed offset rather than at a computed one.
+fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr) !void {
+	slot := e.lookup(member.name) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${member.name} is written as an object with a member, and no local of that name is in scope')
+		return error('unknown object')
+	}
+	if slot.bytes == 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${member.name} is not an object whose type has members')
+		return error('not an aggregate')
+	}
+	width := e.type_width(member.spelling) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, doubles and pointers only')
+		return error('unsupported member type')
+	}
+	base := e.frame_pointer(stmt.line, stmt.col)!
+	register := e.accumulator(stmt.line, stmt.col)!
+	e.append(e.target.address_of_slot(base, slot.offset + member.offset, register))
+	address := e.value_slot(0)
+	e.store_accumulator(address, stmt.line, stmt.col)!
+	e.emit_expr_at(expr, 1)!
+	address_register := e.scratch(stmt.line, stmt.col)!
+	member_name := '${member.name}.${member.member}'
+	if e.writes_a_double(member.spelling) {
+		if !e.floating_of(expr) && e.is_a_pointer(expr) {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored in the member ${member_name}, which holds a double, and there is no conversion between them')
+			return error('pointer into a double')
+		}
+		e.convert_to_double(expr, stmt.line, stmt.col)!
+		value := e.float_accumulator(stmt.line, stmt.col)!
+		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+		e.append(e.target.store_double_indirect(address_register, value)!)
+		return
+	}
+	if e.floating_of(expr) {
+		e.convert_to_int(expr, stmt.line, stmt.col)!
+		value := e.accumulator(stmt.line, stmt.col)!
+		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+		e.append(e.target.store_indirect(address_register, value, width)!)
+		return
+	}
+	value_width := e.width_of(expr) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
+		return error('unknown width')
+	}
+	if value_width != width && !(width == 1 && value_width == 4) {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into the member ${member_name}, which holds ${width}')
+		return error('width mismatch')
+	}
+	value := e.accumulator(stmt.line, stmt.col)!
+	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.store_indirect(address_register, value, width)!)
 }
 
 // assign_element writes a value into one element of an array. The address of the
@@ -905,23 +983,31 @@ fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
 // element after another, and what the name is worth in an expression is the
 // address of the first of them. The block is rounded up to the machine's word
 // like every other slot, so no element straddles the end of it.
-fn (mut e Emitter) declare(name string, written string, count int, line int, col int) !Slot {
+fn (mut e Emitter) declare(name string, written string, count int, bytes int, line int, col int) !Slot {
 	if e.scopes.len > 0 {
 		if name in e.scopes[e.scopes.len - 1] {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared twice in the same block')
 			return error('redeclared')
 		}
 	}
-	width := e.type_width(written) or {
-		e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints, chars, doubles and pointers only')
-		return error('unsupported type')
+	// An object of an aggregate type is sized by the layout the reader worked
+	// out rather than by its spelling: `struct S` is a name the back end has no
+	// width for, and the members are what say how many bytes the object is.
+	width := if bytes > 0 {
+		bytes
+	} else {
+		e.type_width(written) or {
+			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints, chars, doubles and pointers only')
+			return error('unsupported type')
+		}
 	}
 	slot := if count > 0 { e.reserve(count * width) } else { e.reserve(width) }
 	block := Slot{
 		offset:   slot.offset
 		width:    width
 		count:    count
-		floating: e.writes_a_double(written)
+		floating: bytes == 0 && e.writes_a_double(written)
+		bytes:    bytes
 	}
 	e.scopes[e.scopes.len - 1][name] = block
 	return block
@@ -1240,6 +1326,11 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 				e.global_element_is_double(expr.name)
 			}
 		}
+		ast.Field {
+			// A member whose declared type is a double is a double, and the
+			// reader kept that type as the spelling of the member.
+			e.writes_a_double(expr.spelling)
+		}
 		ast.Call {
 			e.returns[expr.name] == 'double'
 		}
@@ -1426,6 +1517,15 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a constant and is not a local of this function')
 				return error('unknown name')
 			}
+			if slot.bytes > 0 {
+				// The name of an object of an aggregate type is the object, and
+				// a value of a struct type is not a value this back end moves:
+				// a member of it and its address are, so the refusal names the
+				// shape that is not implemented instead of reading the object's
+				// first bytes as an int.
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is an object of an aggregate type, and using it as a value is not implemented; a member of it, or its address, is')
+				return error('aggregate value')
+			}
 			if slot.count > 0 {
 				// An array's name is worth the address of its first element: in
 				// an expression it is what a pointer is, which is what makes
@@ -1440,6 +1540,34 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				return
 			}
 			e.load_accumulator(slot, expr.line, expr.col)!
+		}
+		ast.Field {
+			// A member is the value at an offset into an object: the address of
+			// the object plus the offset the model's layout put the member at,
+			// read at the width of the member's type. A double member is read
+			// with the instruction that moves one rather than with the integer
+			// load of the same width.
+			slot := e.lookup(expr.name) or {
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is read as an object with a member, and no local of that name is in scope')
+				return error('unknown object')
+			}
+			if slot.bytes == 0 {
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not an object whose type has members')
+				return error('not an aggregate')
+			}
+			width := e.type_width(expr.spelling) or {
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores ints, chars, doubles and pointers only')
+				return error('unsupported member type')
+			}
+			base := e.frame_pointer(expr.line, expr.col)!
+			register := e.accumulator(expr.line, expr.col)!
+			e.append(e.target.address_of_slot(base, slot.offset + expr.offset, register))
+			if e.writes_a_double(expr.spelling) {
+				double_register := e.float_accumulator(expr.line, expr.col)!
+				e.append(e.target.load_double_indirect(register, double_register)!)
+				return
+			}
+			e.append(e.target.load_indirect(register, register, width)!)
 		}
 		ast.StrLit {
 			// A string is the address of its bytes: the image holds the bytes
@@ -1888,6 +2016,15 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 		ast.StrLit {
 			// The value of a string is the address of its bytes.
 			e.target.word_size
+		}
+		ast.Field {
+			// What is read at the member's offset is a value of the member's
+			// type, and the member's type is what the reader worked out from
+			// the layout. A char member is an int when it is read, which is the
+			// promotion every char gets and the same answer an element of a char
+			// array is sized at.
+			width := e.type_width(expr.spelling) or { return none }
+			return if width == 1 { 4 } else { width }
 		}
 		ast.Ident {
 			slot := e.lookup(expr.name) or {
@@ -2470,6 +2607,7 @@ fn expr_line(expr ast.Expr) int {
 		ast.Binary { expr.line }
 		ast.Call { expr.line }
 		ast.Index { expr.line }
+		ast.Field { expr.line }
 	}
 }
 
@@ -2483,6 +2621,7 @@ fn expr_col(expr ast.Expr) int {
 		ast.Binary { expr.col }
 		ast.Call { expr.col }
 		ast.Index { expr.col }
+		ast.Field { expr.col }
 	}
 }
 

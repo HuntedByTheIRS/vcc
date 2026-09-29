@@ -373,6 +373,12 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 		ast.StrLit {
 			return expr
 		}
+		ast.Field {
+			// A member of an object is a place a value is read from, at an
+			// offset the reader worked out from the layout. There is no
+			// expression inside it to rewrite, so it is returned as it is.
+			return expr
+		}
 		ast.Index {
 			// An element is a place a value is read from, and the expression
 			// that says which element is rewritten like any other.

@@ -124,11 +124,20 @@ pub:
 	decl_type  string
 	decl_count int
 	resolved   types.Type
-	// target is the name an assignment writes to, and index is the subscript of
+	// bytes is how many bytes of storage the object is when its type is an
+	// aggregate, and zero for an object the back end sizes from its spelling.
+	// A struct is not the address of anything and has no spelling the back end
+	// can size, so how much room it takes is a fact the reader got from the
+	// model's layout and the back end is handed rather than asked for.
+	bytes int
+	// target is the name an assignment writes to, index is the subscript of
 	// an array element: `a[i] = v` writes to an element, and a plain `x = v`
-	// has none.
+	// has none. field is the member of an aggregate the assignment writes to,
+	// `x.a = v`, which is an offset into the object rather than a name of its
+	// own.
 	target string
 	index  ?Expr
+	field  ?Field
 	// cond is the controlling expression of an if or a while: what has to be
 	// true for the branch to be taken, or for the loop to go round again.
 	cond ?Expr
@@ -157,7 +166,7 @@ pub:
 // type of the constant, a name the type it was declared with, an operator the
 // type its operands convert to. Where the model has no answer the clause is
 // unresolved, and the printer says nothing about it.
-pub type Expr = Binary | Unary | IntLit | FloatLit | Ident | Call | StrLit | Index
+pub type Expr = Binary | Unary | IntLit | FloatLit | Ident | Call | StrLit | Index | Field
 
 // Index is one element of an array, written `a[i]`: the name of the array and
 // the expression that says which element. An element of a named array is the one
@@ -171,6 +180,26 @@ pub:
 	typ   types.Type
 	line  int
 	col   int
+}
+
+// Field is one member of an aggregate object, written `x.a`. The object is named
+// rather than held as a nested expression, because a member of a named object is
+// the one place this tree reads and writes a field: a member of a member, of a
+// call's result, or of a pointer needs a general lvalue the tree does not have.
+//
+// offset is where the member sits in the object, which is a fact about the
+// target's layout that the model answered when the member was read. spelling is
+// the member's type as this compiler writes a type, because what is read at that
+// offset is a value of the member's type and the back end sizes a load from that.
+pub struct Field {
+pub:
+	name     string
+	member   string
+	offset   int
+	spelling string
+	typ      types.Type
+	line     int
+	col      int
 }
 
 pub struct IntLit {

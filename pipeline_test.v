@@ -389,6 +389,77 @@ fn test_a_double_argument_reaches_a_library_call() {
 	os.rm(binary) or {}
 }
 
+// An object of a struct type is a block of the frame, and a member of it is read
+// and written at the offset the layout gave it. The program is run, so what is
+// checked is the bytes and not the tree: three members of three widths, each
+// written and read back, and the answer depends on all three offsets.
+fn test_a_member_of_a_struct_is_read_and_written_at_its_offset() {
+	source := scratch('structmembers.c')
+	binary := scratch('structmembers')
+	program := 'struct S { int a; int b; char c; };\nint main(void) { struct S x; x.a = 3; x.b = 4; x.c = 5; return x.a * 100 + x.b * 10 + x.c; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 89
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// Where a char member puts the member after it is the char's width, so this is
+// the case that catches a wrong width in the description: the int has to be read
+// from offset four, and a layout that gave it offset one would read the padding.
+fn test_a_char_member_puts_the_next_member_where_the_char_ends() {
+	source := scratch('structpad.c')
+	binary := scratch('structpad')
+	program := 'struct M { char c; int i; };\nint main(void) { struct M m; m.c = 1; m.i = 2; return m.c * 10 + m.i; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 12
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A double member is a value in the floating-point registers, read and written
+// with the instruction that moves one rather than with the integer store of the
+// same width, which would write half of it.
+fn test_a_double_member_is_a_double() {
+	source := scratch('structdouble.c')
+	binary := scratch('structdouble')
+	program := 'struct P { double x; double y; };\nint main(void) { struct P p; p.x = 1.5; p.y = 2.25; return (p.x + p.y) * 4; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 15
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// Every member of a union starts at the beginning of the object, so the second
+// member written is the one read back.
+fn test_a_member_of_a_union_is_at_the_beginning_of_the_object() {
+	source := scratch('unionmember.c')
+	binary := scratch('unionmember')
+	program := 'union U { int a; char b; };\nint main(void) { union U u; u.a = 0; u.b = 7; return u.b; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 7
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The shapes this slice does not implement are refused where they are written:
+// a member through a pointer, and a member of a member. The refusal goes through
+// the lexer and the parser because that is the stage that refuses them, and it
+// names the construct rather than the punctuation that stopped the reader.
+fn test_a_member_shape_this_slice_does_not_have_is_refused_by_name() {
+	arrow := 'struct S { int a; };\nint main(void) { struct S s; struct S *p = &s; return p->a; }\n'
+	lexed := tokenize.lex(arrow)
+	assert lexed.diagnostics.len == 0
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 1
+	assert parsed.diagnostics[0].msg.contains('-> is not implemented')
+	nested := 'struct I { int a; };\nstruct O { struct I in; };\nint main(void) { struct O o; return o.in.a; }\n'
+	lexed_nested := tokenize.lex(nested)
+	assert lexed_nested.diagnostics.len == 0
+	parsed_nested := parser.parse(lexed_nested.tokens)
+	assert parsed_nested.diagnostics.len == 1
+	assert parsed_nested.diagnostics[0].msg.contains('a member of a member is not implemented')
+}
+
 // A typedef is a name for a type and not a type of its own: the declaration is
 // read, and every use of the name afterwards is a use of the type it stands for,
 // wherever a type can be written. These run the programs, so what is checked is

@@ -290,6 +290,9 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
 			p.check_undeclared_expression(expr.index, mut reported)
 		}
+		ast.Field {
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+		}
 		ast.Unary {
 			p.check_undeclared_expression(expr.expr, mut reported)
 		}
@@ -422,12 +425,79 @@ fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) 
 	return types.Type{}
 }
 
+// parse_member reads `.name` after the name of an object and answers what the
+// member is: how many bytes into the object it starts, what type the value at
+// that offset has, and what to call both of those in a diagnostic.
+//
+// None of those is a fact about the source. The offset is where the model's
+// layout of the object's type puts the member, and the type is the one the tag
+// was declared with, so this is one of the places a declaration's type is asked
+// rather than worked out from the words of the declaration. A member of a member,
+// of a call's result, or of a pointer through `->` is a general lvalue the tree
+// does not have, and each of those is refused where it is written rather than
+// read as something else.
+fn (mut p Parser) parse_member(base string, base_at tokenize.Token) !ast.Field {
+	dot := p.next() // .
+	if p.peek().kind != .identifier {
+		p.error_at(p.peek(), 'unsupported: expected a member name after ., found ${describe(p.peek())}')
+		return error('member name')
+	}
+	name := p.next()
+	symbol := p.scopes.lookup(base) or {
+		p.error_at(base_at, 'unsupported: ${base} is read as an object with a member, and no declaration of that name is in scope')
+		return error('unknown object')
+	}
+	aggregate := symbol.typ
+	if aggregate.kind !in [types.Kind.struct_, .union_] {
+		p.error_at(dot, 'unsupported: ${base} is declared ${aggregate.describe()}, and a member is read from an object whose type has members')
+		return error('not an aggregate')
+	}
+	mut index := -1
+	for i, member in aggregate.members {
+		if member.name == name.text {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		p.error_at(name, 'unsupported: ${aggregate.describe()} has no member called ${name.text}')
+		return error('unknown member')
+	}
+	layout := p.representation.layout(aggregate) or {
+		p.error_at(name, 'unsupported: the members of ${aggregate.describe()} are not a layout this compiler knows, so the member ${name.text} cannot be read')
+		return error('no layout')
+	}
+	member := aggregate.members[index]
+	return ast.Field{
+		name:     base
+		member:   name.text
+		offset:   layout.offsets[index]
+		spelling: member.typ.describe()
+		typ:      member.typ
+		line:     dot.line
+		col:      dot.col
+	}
+}
+
+// aggregate_bytes is how many bytes of storage an object of this type takes when
+// the type is one the back end cannot size from a spelling. A struct whose layout
+// the model gave is that many bytes; everything else answers zero, which is what
+// a declaration of a scalar asks for and never looks at.
+fn (p Parser) aggregate_bytes(declared types.Type) int {
+	if declared.kind !in [types.Kind.struct_, .union_] || !declared.is_complete() {
+		return 0
+	}
+	layout := p.representation.layout(declared) or { return 0 }
+	return layout.size
+}
+
 // describe_operand names an operand of an operator for a diagnostic, so the
 // refusal says which expression the operator was written between.
 fn describe_operand(expr ast.Expr) string {
 	return match expr {
 		ast.Ident { expr.name }
 		ast.Index { '${expr.name}[...]' }
+		ast.Field { '${expr.name}.${expr.member}' }
 		ast.IntLit { expr.text }
 		ast.FloatLit { expr.text }
 		ast.StrLit { 'a string literal' }
@@ -591,6 +661,22 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 				line:  t.line
 				col:   t.col
 			})
+		}
+		if p.at_punct('.') {
+			// One member of an object, read where a value is expected. A second
+			// dot is a member of a member, which is a general lvalue the tree
+			// does not have, and it is named here rather than left for the
+			// statement reader to stop at the punctuation.
+			member := p.parse_member(t.text, t)!
+			if p.at_punct('.') {
+				p.error_at(p.peek(), 'unsupported: a member of a member is not implemented; ${t.text}.${member.member} is a value of ${member.spelling}, and a member is read from an object of an aggregate type')
+				return error('member of a member')
+			}
+			return ast.Expr(member)
+		}
+		if p.at_punct('->') {
+			p.error_at(p.peek(), 'unsupported: -> is not implemented; a member through a pointer is read from the object the pointer names')
+			return error('arrow')
 		}
 		typ := p.resolve(t.text)
 		return ast.Expr(ast.Ident{

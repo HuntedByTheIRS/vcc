@@ -470,6 +470,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.error_at(data_at, 'unsupported type ${offender}')
 			return decls
 		}
+		if spec.clause.kind in [types.Kind.struct_, .union_] {
+			// An aggregate inside a function is a block of the frame, and the
+			// frame is where this compiler lays one out. An object at the top
+			// level is storage in the image, which is laid out by a different
+			// path that has no room for one yet. Refusing it here is what keeps
+			// an object nothing uses from being dropped without a word.
+			p.error_at(data_at, 'unsupported: ${data_name} is defined at the top level with the type ${spec.clause.describe()}, and an aggregate at the top level is storage this compiler does not lay out yet')
+			return decls
+		}
 		if data_defined && data_init == none && data_init_float == none {
 			// Either way the definition is refused. When the initializer was a
 			// number the literal reader refused, it has already been named at
@@ -665,6 +674,20 @@ fn (p Parser) unsupported_type_word(spec DeclSpec) ?string {
 	// The words a type is made of, not the storage class in front of them: an
 	// `extern` or a `static` is not a type, and reporting one as an unsupported
 	// type would be reporting the wrong word for the right reason.
+	// An object of an aggregate type is storage of the size the model lays out,
+	// and the words of the declaration say nothing about that size: `struct S`
+	// is a tag, and its members are what decide how many bytes the object is. A
+	// tag written with no body leaves the size unknown, so the refusal is the
+	// tag as it was written.
+	if spec.clause.kind in [types.Kind.struct_, .union_] {
+		// A tag that was declared and never defined is not complete, so there is
+		// no size to give an object of it: the refusal names the tag as it was
+		// written, and it happens here rather than where the object is used.
+		if !spec.clause.is_complete() || p.representation.layout(spec.clause) == none {
+			return spec.type_words.join(' ')
+		}
+		return none
+	}
 	if spec.type_words.len == 0 {
 		return none
 	}
