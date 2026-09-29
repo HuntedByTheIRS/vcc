@@ -55,6 +55,8 @@ so the cap turns a frozen desktop into a clean OOM with the peak reported.
 | `tokenize/` | source text in, tokens out. No parser knowledge. |
 | `ast/` | node types only. No printing, no emission. |
 | `parser/` | tokens in, `ast` out. Never writes files. |
+| `optimizer/` | `ast` in, `ast` out. `-O` levels and the builtin table. A pass is a row in a table with the level that turns it on, so adding an optimization is a function beside the table and not a branch in the emitter. `codegen/` never asks it anything. |
+| `printer/` | `ast` in, text out. `-print-ast` is its only caller. `ast/` stays node types only, so nothing that renders a tree belongs in it. |
 | `backend/` | target tables: registers, opcodes, syscalls, encodings, calling convention. One file per architecture; a new target is a new file, not a branch in the emitter. |
 | `codegen/` | `ast` in, bytes out. Same input, same bytes, every run. Asks `backend/` for every machine fact. |
 | `tools/` | gate and benchmark scripts. Not part of the compiler and not imported by it. |
@@ -98,6 +100,9 @@ this binary is. Say which V source line justifies the change in the commit body.
 - Before saying a test failed, check whether it failed before your change. The
   V toolchain caches aggressively: `-nocache` on probe runs, and a binary built
   before your edit reports the previous source's problems.
+- Read the tree instead of guessing at it: `./vcc -print-ast file.c` prints what
+  the emitter would be handed, which is faster than adding a print statement to
+  a walk and taking it out again.
 - Long input is a test case. The one crash this tree has had was a fold that
   recursed once per term in an operator chain, which took the stack out at about
   three thousand terms; `tools/bench.vsh --terms 20000` is what found it. When

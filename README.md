@@ -15,6 +15,12 @@ build, and vcc has to get through it in the time the bundled tcc does, at
 comparable peak memory. A compiler that is correct but slower is not a
 replacement, and it will not be merged in that state.
 
+The default pipeline builds an AST, because that is what an optimizer, a type
+checker and a second target are built on. A second path that skips the tree
+entirely (`-no-ast`, planned) is where beating tcc outright is expected to come
+from, and `ROADMAP.md` M6a carries the rule that keeps it honest: the same input
+produces the same bytes whichever path compiles it.
+
 ## The bootstrap chain
 
 The end this project works toward is a compiler that builds the language it is
@@ -54,14 +60,28 @@ that would fail later.
 
 It accepts the flags V passes to a C compiler (`-std=`, `-w`, `-fwrapv`, `-g`,
 `-B`, `-I`, `-L`, `-l`, `-Wl,` passthroughs, `-bt25`, `-x`, `@listfile`, `-`),
-plus `--version`, `-v`, `-h`, `-hh`, `-run`, `-E`, `-c`, `-o`, `-bench`. See
-`vcc -hh` for the annotated list.
+plus `--version`, `-v`, `-h`, `-hh`, `-run`, `-E`, `-c`, `-o`, `-bench`,
+`-print-ast`, and the `-O` and `-f(no-)builtin` flags below. See `vcc -hh` for the
+annotated list.
 
 The parser currently handles function definitions returning `int`, `return`
 statements, and integer constant expressions with `+ - * / %` and parentheses.
 The back end has no instruction selection yet: it emits an `exit` syscall with
 the folded value of `main`'s return, so `int main() { return 7; }` works and
 `int main() { return x; }` does not.
+
+`optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
+spellings. What a level turns on today is one pass: a call whose value the
+compiler knows (`abs`, `labs`, `llabs`, and the reserved `__builtin_` spellings
+of each) with a literal argument folds to that value. Since the stub cannot emit
+a call at all, `-O0` leaves `abs(-7)` as a diagnostic while `-O2` turns it into
+`7`. `-fno-builtin` and `-fno-builtin-abs` take that back; a call written
+`__builtin_abs` is an explicit request and folds at any level.
+
+`-print-ast` parses, prints the tree the emitter would be given, and stops
+without writing anything. It is how a parse or an optimization is read rather
+than guessed at. `-c` is the other half of that: it is accepted and says it
+cannot write an object file yet, which is M4.
 
 Not implemented, in rough order of how much of the tree depends on it: the
 preprocessor, declarations and statements beyond a function returning a constant
@@ -102,6 +122,8 @@ says what each one checks.
 | `tokenize/` | lexer: source text to tokens |
 | `ast/` | node types the parser produces and the back end consumes |
 | `parser/` | recursive descent parser for the supported subset |
+| `optimizer/` | `ast` in, `ast` out: `-O` levels and the builtin table |
+| `printer/` | `ast` in, text out: what `-print-ast` prints |
 | `backend/` | target description as tables: registers, opcodes, syscalls, encodings |
 | `codegen/` | translation unit to bytes: constant folding and the ELF64 container |
 | `tools/` | gate and benchmark scripts; not part of the compiler |

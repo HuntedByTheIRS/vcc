@@ -75,6 +75,10 @@ Archive support is not optional for the V contract: every `-cc tcc` build links
 `-DGC_THREADS=1 -DGC_BUILTIN_ATOMIC=1` and the libgc include directory. A
 compiler that cannot open an archive cannot build V, whatever else it can do.
 
+`-c` becomes real here. Until then it exits with a message rather than writing an
+object file that is not one, because a file that cannot be linked is worse than a
+compiler that says it cannot make it.
+
 Verified by linking programs that use libc, libm, pthreads and dl, and running
 them. Then by linking V's own objects and comparing the result with a tcc link.
 
@@ -114,6 +118,31 @@ C of a V self-build.
   fast.
 
 Verified by the numbers, in every pull request that touches a hot path.
+
+## M6a: two pipelines behind one command line
+
+The default builds an AST. Parse into a tree, run `optimizer/` over it, emit from
+it. That is the path correctness is proven on, and it is where the diagnostics
+and the tests live. An AST is what makes an optimizer, a type checker and a
+second target possible later, so it stays.
+
+`-no-ast` is the second path: skip the tree and compile while reading the tokens,
+deciding as it goes. Nothing is allocated per node, nothing is walked, nothing is
+freed. That is where the rest of the distance to tcc's speed sits, since tcc
+does the same and allocates almost nothing on the way. The intent for this path
+is to beat tcc on the V self-build rather than to match it, and the AST path is
+the one that has to stay close to it.
+
+The rule that keeps it honest: **the same input produces the same bytes on both
+paths.** The AST path is the reference implementation and the streaming path is a
+verified fast version of it, not a second compiler with its own opinions. Any
+difference is a bug in the streaming path, and the comparison belongs in the gate
+over the same corpus the tests use, not in a one-off experiment.
+
+Sequencing: M3 first (a streaming emitter cannot exist before there is an
+emitter), then the streaming path as an alternative front end feeding the same
+back end, then the byte-for-byte comparison, and only then a number that claims
+to beat tcc.
 
 ## M7: the swap
 
