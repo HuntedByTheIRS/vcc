@@ -97,23 +97,32 @@ nothing else and gets them erased. `-E` prints the stream as a table of
 
 The parser reads what a preprocessed header is made of — typedefs, prototypes,
 structs — and the function definitions after them: parameters, local variables,
-assignments, arithmetic, calls, string literals, `if`/`else`, `while`, and `for`
-with `break` and `continue`. Anything outside the subset is diagnosed rather than
-miscompiled.
+assignments, arithmetic, calls, string literals, `double` values, `if`/`else`,
+`while`, and `for` with `break` and `continue`. A typedef is a name for the type
+it was declared as and is followed wherever a type can be written, so a
+declaration written through one is the declaration of the type behind it; a name
+standing for a type the back end has no form for is refused as that type and not
+as the name, so `typedef long Big; Big x;` says `unsupported type long`. Anything
+outside the subset is diagnosed rather than miscompiled.
 
 The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
 `_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
-loader, which is what makes `puts` work without a linker. A frame holds ints,
-pointers and chars — a char is one byte in its slot and an int when it is read,
-which is where the language's promotion of it happens. An array is a block of
-that frame and its name is the address of its first element, so `puts(buf)`
+loader, which is what makes `puts` work without a linker. `-l` adds the library
+it names to that list: each `-l<name>` is resolved the way a linker would, through
+the ld script in `/usr/lib` when the file it finds is one, and the SONAME of the
+file at the end of that is what the image asks the loader for, which is how
+`-lm` gets `sqrt` to resolve. A frame holds ints, pointers, chars and doubles — a
+char is one byte in its slot and an int when it is read, which is where the
+language's promotion of it happens, and a double is eight bytes in its slot and a
+value in the floating-point registers while it is worked on. An array is a block
+of that frame and its name is the address of its first element, so `puts(buf)`
 passes the bytes themselves. An object defined at the top level is storage the
 image holds instead: one blob laid out beside the code, with the constant it
-starts at written into it, and every function that names it reads and writes the
-same bytes. Taking the address of a local with `&` is an address like any other,
-which is what makes `scanf("%d", &x)` write into the local itself, and a
-definition that returns `void` is a definition with nothing in the return
-register to read.
+starts at written into it, eight bytes of it when the object is a double, and
+every function that names it reads and writes the same bytes. Taking the address
+of a local with `&` is an address like any other, which is what makes
+`scanf("%d", &x)` write into the local itself, and a definition that returns
+`void` is a definition with nothing in the return register to read.
 
 `optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
 spellings. What a level turns on today is one pass: a call whose value the
@@ -134,11 +143,13 @@ what a file is made of — `-MM` leaves the system headers out of it, `-MD` and
 names its target — `-dM` prints what is defined when the read ends, and
 `-include` and `-imacros` read a file before the source does.
 
-Not implemented, in rough order of how much of the tree depends on it: `double`
-and `struct`, which are not in the tree yet; more than six arguments because the
-machine passes only six in registers; `switch`; an array with an initializer or
-more than one size; a pointer defined at the top level; object files and
-relocatable output; and V's own generated C. `ROADMAP.md` maps the order.
+Not implemented, in rough order of how much of the tree depends on it: `struct`,
+unions and enums, which are read as declarations and refused where one is used;
+more than six arguments because the machine passes only six in registers; casts,
+so a read of a `double` as an int goes through a variable of the type wanted;
+`switch`; an array with an initializer or more than one size; a pointer defined
+at the top level; object files and relocatable output; and V's own generated C.
+`ROADMAP.md` maps the order.
 
 The speed constraint is measured, not assumed, and the current numbers are not
 close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a
