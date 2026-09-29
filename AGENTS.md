@@ -65,7 +65,7 @@ so the cap turns a frozen desktop into a clean OOM with the peak reported.
 | `backend/` | target description in two dimensions. `arch/` is the machine: registers, encodings, argument positions. `os/` is the system: syscalls, their numbers, loader constants. `backend.v` composes one of each into a `Target`, which is all `codegen/` sees. A new architecture or a new system is a new file, not a branch in the emitter. |
 | `codegen/` | `ast` in, bytes out. Same input, same bytes, every run. Asks `backend/` for every machine fact. |
 | `tools/` | gate and benchmark scripts. Not part of the compiler and not imported by it. |
-| `extensions/` | reserved; empty until something real lands in it. |
+| `extensions/` | the vendor extensions the `-fvcc-exts=` family names: a row is a name, what the extension will bring down, and whether it is honored. None is honored yet, so the flag records names and changes nothing about what compiles. |
 
 Tests sit beside their module as `*_test.v`.
 
