@@ -1738,7 +1738,15 @@ fn (e Emitter) writes_a_double(written string) bool {
 // is what decides whether a slot is an object of sixteen bytes or a value: the two
 // 128-bit kinds are the only types this back end stores without a value.
 fn (e Emitter) writes_a_128(written string) bool {
-	return written.contains('__int128')
+	// A pointer to the type is a pointer. It is one word, type_width already says
+	// so for any spelling with a star in it, and what it points at is a separate
+	// question this back end answers with a whole-object read. Asking whether the
+	// spelling contains the type's name is not enough, because `__int128 *` does:
+	// a declaration of one was given sixteen bytes as if it were the object, and
+	// then refused the address being stored in it as `a pointer is stored in an
+	// object of 128 bits`. Every caller wants the type itself and not a pointer to
+	// it: parameters, returns, members, top-level objects and casts all read this.
+	return written.contains('__int128') && !written.contains('*')
 }
 
 // reserve claims a place in the frame for one value. Offsets count down from the

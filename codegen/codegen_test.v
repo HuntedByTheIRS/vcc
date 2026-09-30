@@ -1231,6 +1231,45 @@ fn test_a_top_level_object_of_128_bits_is_written_and_read_at_its_address() {
 // positive. The assignment case above was always right, which is what makes this the
 // initializer alone. Measured on gcc 16.2.1, the programs below return 255, 1, 0,
 // 255, 242 and 254.
+// A pointer to the type is a pointer, one word, and this back end stores an address
+// in one the way it does for every other pointee. It was not: the question the
+// reader asked was whether the spelling contains the type's name, and `__int128 *`
+// does, so the declaration was given sixteen bytes as if it were the object and the
+// address was then refused as `a pointer is stored in an object of 128 bits`, naming
+// the opposite of what the source says. Measured on gcc 16.2.1, the programs below
+// return 5 and 7.
+//
+// What a pointer to the type still cannot do is refused by name: reading through
+// one is a whole-object read, and an element of the type is sixteen bytes one
+// instruction cannot move. Both of those are the refusals they always were.
+fn test_a_pointer_to_the_type_is_a_pointer() {
+	declared := emit(translation_unit('int main() { __int128 a = 5; __int128 *p = &a; return (int)a; }'), Options{})
+	assert declared.diagnostics.len == 0
+	assert run_image(declared.bytes) == 5
+	assigned := emit(translation_unit('int main() { __int128 a = 5; __int128 *p; p = &a; return (int)a; }'),
+		Options{})
+	assert assigned.diagnostics.len == 0
+	assert run_image(assigned.bytes) == 5
+	global := emit(translation_unit('__int128 g = 7; int main() { __int128 *p = &g; return (int)g; }'), Options{})
+	assert global.diagnostics.len == 0
+	assert run_image(global.bytes) == 7
+	// A parameter of this type is one argument register, which the same question
+	// used to answer as a pair of them.
+	passed := emit(translation_unit('int f(__int128 *p) { return 1; } int main() { __int128 a = 5; return f(&a); }'),
+		Options{})
+	assert passed.diagnostics.len == 0
+	assert run_image(passed.bytes) == 1
+	read_through := emit(translation_unit('int main() { __int128 a = 5; __int128 *p = &a; return (int)(*p); }'),
+		Options{})
+	assert read_through.diagnostics.len == 1
+	assert read_through.diagnostics[0].msg.contains('reads through an address')
+	assert read_through.bytes.len == 0
+	element := emit(translation_unit('int main() { __int128 a[2]; __int128 *p = a; return (int)p[0]; }'), Options{})
+	assert element.diagnostics.len == 1
+	assert element.diagnostics[0].msg.contains('an object of 128 bits')
+	assert element.bytes.len == 0
+}
+
 fn test_a_top_level_object_of_128_bits_keeps_the_sign_of_its_initializer() {
 	shifted := emit(translation_unit('__int128 g = -100; int main() { return (int)(g >> 64); }'), Options{})
 	assert shifted.diagnostics.len == 0
