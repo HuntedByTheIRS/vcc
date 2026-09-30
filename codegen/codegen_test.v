@@ -1749,6 +1749,83 @@ fn test_two_128_bit_values_are_multiplied() {
 // the quotient times the divisor plus the remainder is the dividend, and the
 // remainder is the smaller — which pins the quotient exactly, given the multiply
 // and the comparison the identity is written with are already held to gcc.
+// The shifts and the bitwise operators, on a narrow value and on a pair. The
+// count of a shift is written into the instruction, so every program here shifts
+// by a constant; a count the program computes is refused, and that refusal is the
+// next test. Every answer here is one gcc 16.2.1 gives the same status for.
+fn test_a_shift_and_a_bitwise_operator_on_a_narrow_value() {
+	cases := [
+		'\tint a = 1;\n\treturn (a << 3) == 8;',
+		'\tint a = 256;\n\treturn (a >> 4) == 16;',
+		// The shift that keeps the sign: a negative value shifted right stays
+		// negative, and one shifted down to the sign bit is -1.
+		'\tint a = -8;\n\treturn (a >> 1) == -4;',
+		'\tint a = -8;\n\treturn (a >> 31) == -1;',
+		'\tint a = 1;\n\treturn (a << 31) < 0;',
+		'\tint a = 6;\n\tint b = 3;\n\treturn (a & b) == 2 && (a | b) == 7 && (a ^ b) == 5;',
+		'\tint a = 1;\n\tint b = 2;\n\treturn ((a << 3) + (b << 2)) == 16;',
+		'\tint a = 5;\n\treturn (a << 0) == 5 && (a >> 0) == 5;',
+		'\tint a = 0x1234;\n\treturn ((a >> 4) & 0xff) == 0x23;',
+		'\tint a = 6;\n\treturn ~a == -7;',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
+// A shift of a pair moves the other word across, and a count of a word or more
+// moves it over entirely, which is the case the high word can be read with: `a >>
+// 64` of a pair whose low word is 5 and whose high word is 1 is 1. A bitwise
+// operator works on both words at once, which is what the pair's form of it means.
+fn test_a_shift_of_a_pair_moves_the_other_word() {
+	powers := doubling('t64', 64) + doubling('t70', 70) + doubling('t100', 100) + doubling('t127', 127)
+	cases := [
+		'${powers}\t__int128 a = t64 + 5;\n\treturn (a >> 64) == 1;',
+		'${powers}\tunsigned __int128 a = t64 + 5;\n\treturn (a >> 64) == 1;',
+		'${powers}\t__int128 a = t70;\n\treturn (a >> 70) == 1;',
+		'${powers}\t__int128 a = t100;\n\treturn (a >> 100) == 1;',
+		'${powers}\t__int128 a = 5;\n\t__int128 p = a << 64;\n\treturn p == t64 * 5;',
+		'${powers}\t__int128 a = 3;\n\t__int128 p = a << 70;\n\treturn p == t70 * 3;',
+		'${powers}\t__int128 a = 1;\n\treturn (a << 63) == t64 / 2;',
+		'${powers}\t__int128 a = 1;\n\t__int128 p = a << 127;\n\treturn p < 0 && (p >> 127) == -1;',
+		'\t__int128 a = 5;\n\treturn (a << 3) == 40 && (a >> 3) == 0;',
+		'\t__int128 a = 40;\n\treturn (a >> 3) == 5;',
+		'\t__int128 a = -1;\n\treturn (a >> 1) == -1 && (a >> 64) == -1;',
+		'\t__int128 a = 7;\n\treturn (a >> 0) == 7 && (a << 0) == 7;',
+		'${powers}\t__int128 a = t64 + 0xff;\n\t__int128 b = 0x0f;\n\treturn (a & b) == 0x0f;',
+		'\t__int128 a = 0xf0;\n\t__int128 b = 0x0f;\n\treturn (a | b) == 0xff && (a ^ b) == 0xff;',
+		'${powers}\tunsigned __int128 a = t64 + 0x1234;\n\treturn ((a >> 4) & 0xff) == 0x23;',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
+// A shift by a count the program works out is refused by name and by place rather
+// than answered with the count of some other instruction, and a count as wide as
+// the shifted value is refused the same way, because the language calls it
+// undefined and any answer would be invented.
+fn test_a_shift_by_a_count_that_is_not_written_is_refused() {
+	cases := [
+		'int main() { int a = 8;\n\tint n = 2;\n\treturn a << n; }',
+		'int main() { int a = 8;\n\tint n = 2;\n\treturn a >> n; }',
+		'int main() { __int128 a = 8;\n\tint n = 2;\n\treturn (int)(a << n); }',
+		'int main() { __int128 a = 8;\n\tint n = 2;\n\treturn (int)(a >> n); }',
+		'int main() { int a = 1;\n\treturn a << 32; }',
+		'int main() { __int128 a = 1;\n\treturn (int)(a << 128); }',
+	]
+	for source in cases {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 1
+		assert emitted.diagnostics[0].msg.contains('is not implemented')
+		assert emitted.bytes.len == 0
+	}
+}
+
 fn test_one_128_bit_value_is_divided_by_another() {
 	powers := doubling('t64', 64) + doubling('t36', 36) + doubling('t100', 100) + doubling('t127', 127)
 	cases := [

@@ -263,6 +263,22 @@ fn test_an_array_of_128_bit_objects_is_written_at_an_element_address() {
 // A 128-bit division and remainder run: the routine the compiler emits is exercised
 // end to end, through the command line, and the answers are gcc 16.2.1's. The large
 // one is the identity a division is defined by rather than a wished-for quotient.
+// A shift and a bitwise operator on a 128-bit value, run through the command line:
+// the high word of a pair is read by shifting it down, which is the read that the
+// pair had no form for until the shifts existed.
+fn test_a_128_bit_shift_runs() {
+	mut powers := '\tunsigned __int128 t64 = 1;\n'
+	for _ in 0 .. 64 {
+		powers += '\tt64 = t64 + t64;\n'
+	}
+	source := scratch('wide_shift.c')
+	binary := scratch('wide_shift')
+	high := compile_and_run([source, '-o', binary], 'int main(void) {\n${powers}\tunsigned __int128 a = t64 + 0x1234;\n\treturn ((a >> 64) & 0xffff) == 0x1 && ((a >> 4) & 0xff) == 0x23;\n}\n')
+	assert high == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_a_128_bit_division_and_remainder_run() {
 	mut powers := '\tunsigned __int128 t64 = 1;\n'
 	for _ in 0 .. 64 {
