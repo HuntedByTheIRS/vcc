@@ -1066,6 +1066,32 @@ pub fn sign_extend_word(dst Register, src Register) ![]u8 {
 	return out
 }
 
+// shift_right_arithmetic shifts the whole register right and copies the sign into
+// the bits that open at the top, which is how the sign of a value is spread over
+// the bits of it: `sar rax, 63` is every bit of a value that is negative and no
+// bit of one that is not. That is what a value narrower than the word it is
+// stored in needs: the bits above the sign have to be its sign and not whatever
+// the register held. The count is in the instruction rather than in a register,
+// because it is a count the emitter knows when it writes it.
+pub fn shift_right_arithmetic(reg Register, bits u8) ![]u8 {
+	if reg.width != 4 {
+		return error('${name}: ${reg.name} is not a register to shift')
+	}
+	if bits >= 64 {
+		return error('${name}: a shift of ${bits} bits is wider than the register')
+	}
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x48) // REX.W: the whole register is shifted
+	if reg.code >= 8 {
+		rex |= 0x01 // REX.B reaches the register
+	}
+	out << rex
+	out << u8(0xc1) // a shift by the count in the next byte
+	out << u8(0xf8 | (reg.code & 0x07)) // group 7, the arithmetic shift
+	out << bits
+	return out
+}
+
 // byte_operand refuses a destination that has no one-byte name. The table lists
 // registers at their 32-bit spelling, and the low byte of the first four of them
 // is what a conditional set can reach; a wider register number would need a REX

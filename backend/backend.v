@@ -356,6 +356,12 @@ pub fn (t Target) sign_extend_word(dst arch.Register, src arch.Register) ![]u8 {
 	return arch.sign_extend_word(dst, src)
 }
 
+// shift_right_arithmetic spreads the sign of a value over the whole register,
+// which is what storing a value narrower than the word it goes into needs.
+pub fn (t Target) shift_right_arithmetic(reg arch.Register, bits u8) ![]u8 {
+	return arch.shift_right_arithmetic(reg, bits)
+}
+
 // The arithmetic, named for what the language asks for rather than for the
 // instruction that carries it.
 pub fn (t Target) add(dst arch.Register, src arch.Register) ![]u8 {
