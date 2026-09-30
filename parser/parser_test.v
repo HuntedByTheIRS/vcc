@@ -33,6 +33,48 @@ fn test_a_diagnostic_names_the_file_its_token_came_from() {
 	assert result.diagnostics[0].file == '/usr/include/stdlib.h'
 }
 
+// The 128-bit type is gcc's, and the tree reads it by name wherever a type can
+// be written: its size is a question the model answers, and a declaration of an
+// object of one is refused with the spelling that was written, because the back
+// end has no value of that width. Measured on gcc 16.2.1, `sizeof(__int128)` and
+// `sizeof(unsigned __int128)` are both 16.
+fn test_the_128_bit_type_is_read_by_name() {
+	// `sizeof` of it is 16, and so is the unsigned spelling and the one with
+	// `signed` in front of it. Measured on gcc 16.2.1.
+	result := parsed('int main(void) { return sizeof(__int128) + sizeof(unsigned __int128) + sizeof(signed __int128); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	sum := expr as ast.Binary
+	within := sum.left as ast.Binary
+	assert (within.left as ast.IntLit).value == 16
+	assert (within.right as ast.IntLit).value == 16
+	assert (sum.right as ast.IntLit).value == 16
+	// A qualifier written in front of it does not change the type, which is what
+	// makes `const __int128` the same width.
+	qualified := parsed('int main(void) { return sizeof(const __int128); }')
+	assert qualified.diagnostics.len == 0
+	alone := qualified.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (alone as ast.IntLit).value == 16
+}
+
+// An object of the 128-bit type is refused by name rather than compiled into
+// something of another width. The message names the spelling the declaration
+// wrote, which is the same shape the refusal for `long` has.
+fn test_an_object_of_the_128_bit_type_is_refused_by_name() {
+	signed_up := parsed('int main(void) { __int128 v; return 0; }')
+	assert signed_up.diagnostics.len == 1
+	assert signed_up.diagnostics[0].msg == 'unsupported type __int128'
+	unsigned_one := parsed('int main(void) { unsigned __int128 v; return 0; }')
+	assert unsigned_one.diagnostics.len == 1
+	assert unsigned_one.diagnostics[0].msg == 'unsupported type unsigned'
+}
+
 fn test_a_function_that_returns_a_constant() {
 	result := parsed('int main() { return 42; }')
 	assert result.diagnostics.len == 0

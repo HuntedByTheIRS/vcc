@@ -36,7 +36,7 @@ const type_qualifiers = ['const', 'volatile', 'restrict', '_Atomic', '__const', 
 // builtin_types are the type words of the language. A type can also be a name
 // this file has typedef'd, which is why the parser carries that list.
 const builtin_types = ['void', 'char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double',
-	'_Bool', '_Complex', '_Imaginary']
+	'_Bool', '_Complex', '_Imaginary', '__int128']
 
 // tag_keywords open the specifier that names a struct, a union or an enum.
 const tag_keywords = ['struct', 'union', 'enum']
@@ -68,8 +68,9 @@ const keywords = ['_Atomic', '_Bool', '_Complex', '_Imaginary', '_Thread_local',
 	'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed',
 	'sizeof', 'static', 'struct', 'switch', 'typedef', 'typeof', 'typeof_unqual', 'union', 'unsigned',
 	'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
-	'__extension__', '__inline', '__inline__', '__restrict', '__restrict__', '__signed', '__signed__',
-	'__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile', '__volatile__']
+	'__extension__', '__inline', '__inline__', '__int128', '__restrict', '__restrict__', '__signed',
+	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile',
+	'__volatile__']
 
 // is_keyword says whether a spelling is one of the reserved words. Nothing in the
 // language may use one as an identifier, so the question is asked by the declarator
