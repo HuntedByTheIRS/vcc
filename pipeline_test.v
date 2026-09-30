@@ -1267,3 +1267,42 @@ fn test_a_negated_double_reaches_a_comparison_intact() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// A function that returns a 128-bit value and one that takes one, driven through
+// the command line the way every other program here is: the source is written, the
+// image is written out, and the image is run. The three programs cover a pair
+// returned and used, a function of the type answering a narrower expression, and a
+// pair passed beside a pointer and a char. Measured on gcc 16.2.1, the programs
+// exit 42, 19 and 160.
+fn test_a_128_bit_return_and_parameter_run_through_the_command_line() {
+	cases := [
+		'__int128 twice(__int128 a) { return a + a; }\nint main(void) { __int128 r = twice((__int128)21); return (int)r; }\n',
+		'__int128 neg(void) { return -1; }\nint main(void) { __int128 r = neg(); return (int)r + ((int)(r >> 64) + 2) * 20; }\n',
+		'int cp(char *s, __int128 a, char c) { return *s + (int)a + c; }\nint main(void) { return cp("zz", (__int128)34, 4); }\n',
+	]
+	answers := [42, 19, 160]
+	for i, program in cases {
+		source := scratch('wide_call_${i}.c')
+		binary := scratch('wide_call_${i}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A pair the argument registers have no room for is refused through the command
+// line as well, with nothing written out: the driver reports it where the parameter
+// was written and leaves no image behind. Measured on gcc 16.2.1, which compiles
+// this program and reads the pair from 16(%rbp).
+fn test_a_128_bit_parameter_that_will_not_fit_the_registers_is_refused() {
+	source := scratch('wide_memory.c')
+	binary := scratch('wide_memory')
+	image := compile([source, '-o', binary],
+		'int f(int a, int b, int c, int d, int e, __int128 x) { return (int)x; }\nint main(void) { return 0; }\n')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].line == 1
+	assert image.diagnostics[0].msg.contains('two argument registers at once')
+	assert image.bytes.len == 0
+	os.rm(source) or {}
+}

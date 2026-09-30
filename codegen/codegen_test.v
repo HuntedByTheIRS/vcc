@@ -2150,6 +2150,113 @@ fn test_the_logical_not_of_a_double_is_a_comparison_with_zero() {
 	assert run_image(zero.bytes) == 1
 }
 
+// A function of one of the 128-bit types answers with a pair: the low word in the
+// accumulator and the word above it in the register a pair keeps its high word in.
+// Measured on gcc 16.2.1, which writes both registers for `return 5` as well as for
+// a value of the type, so a caller that reads the high word reads zero rather than
+// whatever the body left there.
+fn test_a_128_bit_function_returns_a_pair() {
+	cases := [
+		WideValueCase{'__int128 five(void) { return 5; } int main() { __int128 r = five(); return (int)r * 10 + (int)(r >> 64); }', 50},
+		WideValueCase{'__int128 neg(void) { return -1; } int main() { __int128 r = neg(); return (int)r + ((int)(r >> 64) + 2) * 20; }', 19},
+		WideValueCase{'__int128 big(void) { __int128 t = 1; t = t << 70; return t + 9; } int main() { __int128 r = big(); return (int)((r >> 64) & 0xff); }', 64},
+		WideValueCase{'__int128 fromint(int v) { return v - 100; } int main() { __int128 r = fromint(40); return (int)r + 100; }', 40},
+		WideValueCase{'__int128 make(void) { return 40; } int main() { __int128 r = make() + 2; return (int)r; }', 42},
+		WideValueCase{'unsigned __int128 five(void) { return 5; } int main() { unsigned __int128 r = five(); return (int)r * 10 + (int)(r >> 64); }', 50},
+	]
+	for case in cases {
+		emitted := emit(translation_unit(case.source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == case.status
+	}
+}
+
+// A 128-bit parameter is a pair in two consecutive argument registers of the general
+// file, low word first, and the pair pushes the arguments after it along: a pair
+// with an int before it puts the int in the first register and the pair in the two
+// after that, and a pair with an int after it makes that int the third register.
+// Measured on gcc 16.2.1. The pair order itself is what the two word-order programs
+// assert: a swapped low and high word would answer the other way round.
+fn test_a_128_bit_parameter_arrives_in_two_argument_registers() {
+	cases := [
+		WideValueCase{'__int128 ident(__int128 a) { return a; } int main() { __int128 r = ident((__int128)300); return (int)r; }', 44},
+		WideValueCase{'int before(int x, __int128 a) { return x + (int)a; } int main() { return before(20, (__int128)22); }', 42},
+		WideValueCase{'int after(__int128 a, int y) { return (int)a + y; } int main() { return after((__int128)20, 22); }', 42},
+		WideValueCase{'__int128 sub(__int128 a, __int128 b) { return a - b; } int main() { return (int)sub((__int128)44, (__int128)2); }', 42},
+		WideValueCase{'__int128 three(__int128 a, __int128 b, int y) { return a + b + y; } int main() { return (int)three((__int128)20, (__int128)21, 1); }', 42},
+		WideValueCase{'int four(int a, int b, int c, int d, __int128 x) { return a + b + c + d + (int)x; } int main() { return four(1, 2, 3, 4, (__int128)32); }', 42},
+		WideValueCase{'__int128 first(__int128 a) { return a + 1; } int main() { return (int)first(41); }', 42},
+		WideValueCase{'int order(__int128 a) { return ((a >> 64) & 0xff) == 3 && (int)(a & 0xf) == 7; } int main() { __int128 t = 3; t = t << 64; return order(t + 7); }', 1},
+		WideValueCase{'int order2(__int128 a) { return (int)a == -1 && (int)(a >> 64) == 4; } int main() { __int128 t = 5; t = t << 64; return order2(t - 1); }', 1},
+		WideValueCase{'int pick(unsigned __int128 a, int y) { return (int)((a >> 64) & 0xf) + y; } int main() { unsigned __int128 t = -1; return pick(t, 32); }', 47},
+	]
+	for case in cases {
+		emitted := emit(translation_unit(case.source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == case.status
+	}
+}
+
+// A pair takes its two registers out of the general file and leaves the floating
+// one alone, so a double beside it is numbered from the beginning of its own
+// sequence and a pointer beside it is one more general argument. Measured on gcc
+// 16.2.1, which passes `(char c, double d, __int128 a, int y)` with c in dil, d in
+// xmm0, a in rsi:rdx and y in ecx. The programs also cover the two ways a result
+// reaches the next call: a pair handed on as an argument, and a pair read out of a
+// call made inside the arguments of another call.
+fn test_a_pair_is_passed_beside_ints_doubles_pointers_and_other_calls() {
+	cases := [
+		WideValueCase{'__int128 mix(char c, double d, __int128 a, int y) { return a + c + y + (int)d; } int main() { return (int)mix(3, 4.0, (__int128)30, 5); }', 42},
+		WideValueCase{'__int128 mix(int a, double b, __int128 c, char d) { return c + a + d + (int)b; } int main() { return (int)mix(10, 11.0, (__int128)20, 1); }', 42},
+		WideValueCase{'int all(char c, double d, int *p, __int128 a, int y) { return c + (int)d + *p + (int)a + y; } int main() { int v = 10; return all(1, 2.0, &v, (__int128)20, 9); }', 42},
+		WideValueCase{'int ptr(int *p, __int128 a) { return *p + (int)a; } int main() { int v = 20; return ptr(&v, (__int128)22); }', 42},
+		WideValueCase{'int cp(char *s, __int128 a, char c) { return *s + (int)a + c; } int main() { return cp("zz", (__int128)34, 4); }', 160},
+		WideValueCase{'int f(__int128 a, int b, int c, int d, int e, int g, int h) { return (int)a + b + c + d + e + g + h; } int main() { return f((__int128)20, 1, 2, 3, 4, 11, 1); }', 42},
+		WideValueCase{'__int128 inner(__int128 a) { return a + 1; } __int128 outer(__int128 a, __int128 b) { return inner(a + b); } int main() { return (int)outer((__int128)20, (__int128)21); }', 42},
+		WideValueCase{'__int128 down(__int128 n) { if (n == 0) { return 0; } return 1 + down(n - 1); } int main() { return (int)down(9); }', 9},
+		WideValueCase{'int depth(__int128 n) { if (n == 0) { return 0; } return 1 + depth(n - 1); } int main() { return depth((__int128)42); }', 42},
+		WideValueCase{'__int128 sum(__int128 a, __int128 b) { return a + b; } int main() { return (int)sum((__int128)20, sum((__int128)10, (__int128)12)); }', 42},
+		WideValueCase{'__int128 id(__int128 a) { return a; } __int128 add2(__int128 a, __int128 b) { return a + b; } int main() { return (int)add2(id((__int128)20), id((__int128)22)); }', 42},
+		WideValueCase{'double half(int x, __int128 a) { return x + (int)a + 0.0; } int main() { return (int)half(2, (__int128)40); }', 42},
+		WideValueCase{'int narrow(__int128 a) { return (int)a + (int)(a >> 64); } int main() { __int128 t = (__int128)40; return narrow(t); }', 40},
+		WideValueCase{'__int128 make(void) { __int128 t = 3; return t << 64; } int take(__int128 a) { return (int)(a >> 64); } int main() { return take(make()); }', 3},
+	]
+	for case in cases {
+		emitted := emit(translation_unit(case.source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == case.status
+	}
+}
+
+// A pair the argument registers have no room for is passed in memory by the
+// convention, and this back end does not do that: the callee refuses it by name
+// with the line it was written on, and nothing is written out. Measured on gcc
+// 16.2.1, which reads such a parameter from 16(%rbp) rather than from a register,
+// so a callee that expected it in a register would read whatever was there.
+fn test_a_128_bit_parameter_that_will_not_fit_the_registers_is_reported() {
+	emitted := emit(translation_unit('int f(int a, int b, int c, int d, int e, __int128 x) { return (int)x; }\nint main() { return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].line == 1
+	assert emitted.diagnostics[0].msg.contains('the parameter x is declared __int128')
+	assert emitted.diagnostics[0].msg.contains('two argument registers at once')
+	assert emitted.bytes.len == 0
+}
+
+// The caller reaches the same answer, and it is the call site that reports it: the
+// definition is written after main, so main is emitted first. A caller that put a
+// pair in registers where the callee reads it from memory would hand over words
+// nothing reads.
+fn test_a_128_bit_argument_that_will_not_fit_the_registers_is_reported() {
+	emitted := emit(translation_unit('int g(int a, int b, int c, int d, int e, __int128 x);\nint main() { return g(1, 2, 3, 4, 5, (__int128)6); }\nint g(int a, int b, int c, int d, int e, __int128 x) { return (int)x; }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].line == 2
+	assert emitted.diagnostics[0].msg.contains('argument 6 of the call to g is a 128-bit value')
+	assert emitted.diagnostics[0].msg.contains('two argument registers at once')
+	assert emitted.bytes.len == 0
+}
+
 fn test_a_double_returning_function_with_no_return_statement_answers_zero() {
 	// Running off the end of a function that returns a double answers zero in the
 	// register the caller reads. The language leaves this undefined, so what this
