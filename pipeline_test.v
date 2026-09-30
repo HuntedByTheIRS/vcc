@@ -161,6 +161,27 @@ fn test_a_128_bit_object_is_written_and_read_back() {
 // A 128-bit object is not a value, so a program that reads one without saying what
 // it wants is refused and nothing is written out. The conversion has to be written,
 // which is what makes the reader say which width they meant.
+// A member of a 128-bit type is storage inside an object, and the round trip
+// through the built compiler says the same thing the local does: measured on gcc
+// 16.2.1, the member written with 300 reads back as 44 in its low byte, and a
+// member reached through a pointer is the same member.
+fn test_a_128_bit_member_is_written_and_read_back() {
+	cases := [
+		'struct S { __int128 v; char c; }; int main(void) { struct S s; s.v = 300; return (int)(char)s.v; }',
+		'struct S { __int128 v; }; int main(void) { struct S s; struct S *p = &s; p->v = 300; return (int)(char)s.v; }',
+		'struct S { __int128 v; }; struct S g; int main(void) { g.v = -1; return (int)g.v; }',
+	]
+	answers := [44, 44, 255]
+	for i, source_text in cases {
+		source := scratch('wide_member_${i}.c')
+		binary := scratch('wide_member_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 fn test_reading_a_128_bit_object_it_did_not_ask_for_writes_nothing() {
 	source := scratch('wide_bad.c')
 	binary := scratch('wide_bad')

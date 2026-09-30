@@ -202,16 +202,17 @@ pub const features = [
 	// reads the type wherever a type can be written, the model sizes it and lays
 	// it out, which is what makes `sizeof(__int128)` 16, and an object of one is
 	// storage this back end has: sixteen bytes that are declared, given a value
-	// narrower than them, copied and addressed. Reading one is written as a
-	// conversion to a narrower type, which is its low word: measured on gcc
-	// 16.2.1, `(int)` of a stored 300 is 300, `(char)` of one is 44, and `(int)`
-	// of a stored -1 is -1. What is missing is a *value* of that width, so a
-	// parameter of the type and an implicit narrowing store are refused by name:
-	// `int f(__int128 v) { return 0; }` reports `unsupported type __int128`, and
-	// `__int128 v = 5; int n = v;` reports that the object has no value of that
-	// width to read. A conversion of an object to a double is refused too, since
-	// a double of that value is a rounding of the whole of it and not its low
-	// word, while a prototype naming the type is a promise and is kept.
+	// narrower than them, copied and addressed, at the top level, as a local and
+	// as a member of an object. Reading one is written as a conversion to a
+	// narrower type, which is its low word: measured on gcc 16.2.1, `(int)` of a
+	// stored 300 is 300, `(char)` of one is 44, and `(int)` of a stored -1 is -1.
+	// What is missing is a *value* of that width, so a parameter of the type and
+	// an implicit narrowing store are refused by name: `int f(__int128 v) { return
+	// 0; }` reports `unsupported type __int128`, and `__int128 v = 5; int n = v;`
+	// reports that the object has no value of that width to read. A conversion of
+	// an object to a double is refused too, since a double of that value is a
+	// rounding of the whole of it and not its low word, while a prototype naming
+	// the type is a promise and is kept.
 	Feature{
 		spellings: ['__int128']
 		since:     .none

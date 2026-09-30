@@ -1146,6 +1146,39 @@ fn test_a_128_bit_object_is_read_by_converting_it_to_a_narrower_type() {
 	assert run_image(as_pointer.bytes) == 1
 }
 
+// A member of that width is written and read the way an object of the type is, at
+// the member's own address: the object it lies in may be a local, a pointer's
+// target or a top-level object, so the store cannot be an offset from the frame.
+// Measured on gcc 16.2.1, the four programs here return 44, 7, 44 and 1.
+fn test_a_128_bit_member_is_written_and_read_at_its_address() {
+	local := emit(translation_unit('struct S { __int128 v; char c; }; int main() { struct S s; s.v = 300; return (int)(char)s.v; }'),
+		Options{})
+	assert local.diagnostics.len == 0
+	assert run_image(local.bytes) == 44
+	whole := emit(translation_unit('struct S { __int128 v; }; int main() { struct S s; s.v = 7; return (int)s.v; }'),
+		Options{})
+	assert whole.diagnostics.len == 0
+	assert run_image(whole.bytes) == 7
+	// A member reached through a pointer is at an address the frame does not hold:
+	// the store goes through what the pointer holds plus the member's offset.
+	through_pointer := emit(translation_unit('struct S { __int128 v; }; int main() { struct S s; struct S *p = &s; p->v = 300; return (int)(char)s.v; }'),
+		Options{})
+	assert through_pointer.diagnostics.len == 0
+	assert run_image(through_pointer.bytes) == 44
+	// A member assigned another member of the same type is a copy of the sixteen
+	// bytes rather than a value widened into them.
+	copied := emit(translation_unit('struct S { __int128 v; }; int main() { struct S a; struct S b; a.v = 300; b.v = a.v; return (int)(char)b.v; }'),
+		Options{})
+	assert copied.diagnostics.len == 0
+	assert run_image(copied.bytes) == 44
+	// The bytes after the member are the member's neighbours, not its second half:
+	// a char after it is read back as the char it was written as.
+	neighbour := emit(translation_unit('struct S { __int128 v; char c; }; int main() { struct S s; s.v = 300; s.c = 65; return s.c == 65; }'),
+		Options{})
+	assert neighbour.diagnostics.len == 0
+	assert run_image(neighbour.bytes) == 1
+}
+
 // A floating target is the one conversion out of a 128-bit object that this back
 // end does not make: the double of that value is a rounding of the whole of it and
 // not the low word, so it is refused rather than answered with the low word as

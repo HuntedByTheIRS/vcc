@@ -139,7 +139,9 @@ and kept, since its parameter list is a promise. An object of one is storage: th
 declaration is sixteen bytes, a value narrower than that is widened into its two
 words, one object is copied into another, and the value is read back by converting
 it to a narrower type, which takes its low word (`(int)` of a stored 300 is 300 and
-`(char)` of one is 44, measured on gcc 16.2.1). What this back end has no form for
+`(char)` of one is 44, measured on gcc 16.2.1). A member of that type is the same
+storage at the member's own offset, written and read through a name, a pointer or a
+top-level object. What this back end has no form for
 is a *value* of that width, so an implicit narrowing store, a parameter of the type
 and a conversion of one to a `double` are refused by name rather than answered with
 something narrower than what was asked for.

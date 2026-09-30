@@ -1211,6 +1211,17 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 }
 
 fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr) !void {
+	if e.writes_a_128(member.spelling) {
+		// A member of that width takes a value narrower than it the way an object
+		// of the type does, through the member's own address: the object the
+		// member lies in may be a pointer's target or a top-level object, so the
+		// store cannot be an offset from the frame.
+		e.address_of_member(member.name, member.index, member.offset, member.through_pointer, 1,
+			stmt.line, stmt.col)!
+		address := e.value_slot(0)
+		e.store_accumulator(address, stmt.line, stmt.col)!
+		return e.store_wide_at(address, expr, stmt.line, stmt.col)
+	}
 	width := e.type_width(member.spelling) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, doubles and pointers only')
 		return error('unsupported member type')
@@ -1953,6 +1964,33 @@ fn (e Emitter) wide_value(expr ast.Expr) bool {
 // accumulator, so the low word waits in the third register until the accumulator
 // is free for it.
 fn (mut e Emitter) store_wide(slot Slot, expr ast.Expr, line int, col int) !void {
+	// A slot's two words are written through its address, which is the same store
+	// a member's is: the frame's address plus the slot's offset.
+	frame := e.frame_pointer(line, col)!
+	register := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(frame, slot.offset, register))
+	address := e.value_slot(0)
+	e.store_accumulator(address, line, col)!
+	return e.store_wide_at(address, expr, line, col)
+}
+
+// store_wide_at widens a value narrower than sixteen bytes into the two words at an
+// address the caller has parked in a slot. The store is the same one a frame slot
+// takes, and it goes through an address because the object it is written into may
+// be a member of an object, the target of a pointer, or a top-level object rather
+// than a local of its own.
+//
+// The value is computed first and at a depth below the address, so nothing the
+// expression does can write over where the address is waiting. The sign word goes
+// to the higher of the two addresses and the low word follows: the address register
+// holds the member's first byte, and the second store comes back to it rather than
+// keeping two addresses alive over the expression that produced the value.
+fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int) !void {
+	if e.wide_value(expr) {
+		// An object of the type is a copy of its bytes rather than a value to
+		// widen, which is the shape an assignment between two of them has.
+		return e.assign_object(address, wide_bytes, expr, line, col)
+	}
 	if e.floating_of(expr) {
 		e.diagnostics << problem(line, col, 'unsupported: a double is stored in an object of 128 bits, and this compiler has no conversion from a double to that')
 		return error('double into a 128-bit object')
@@ -1967,20 +2005,17 @@ fn (mut e Emitter) store_wide(slot Slot, expr ast.Expr, line int, col int) !void
 	}
 	accumulator := e.accumulator(line, col)!
 	waiting := e.remainder(line, col)!
-	e.emit_expr(expr)!
+	pointer := e.scratch(line, col)!
+	e.emit_expr_at(expr, 1)!
 	e.append(e.target.sign_extend_word(accumulator, accumulator)!)
 	e.append(e.target.move_register64(waiting, accumulator)!)
 	e.append(e.target.shift_right_arithmetic(accumulator, 63)!)
-	e.store_register(Slot{
-		...slot
-		offset: slot.offset + e.target.word_size
-		width:  e.target.word_size
-	}, accumulator, line, col)!
+	e.load_argument(address, pointer, e.target.word_size, line, col)!
+	e.append(e.target.add_immediate(pointer, e.target.word_size))
+	e.append(e.target.store_indirect(pointer, accumulator, e.target.word_size)!)
 	e.append(e.target.move_register64(accumulator, waiting)!)
-	e.store_register(Slot{
-		...slot
-		width: e.target.word_size
-	}, accumulator, line, col)!
+	e.append(e.target.add_immediate(pointer, -e.target.word_size))
+	e.append(e.target.store_indirect(pointer, accumulator, e.target.word_size)!)
 }
 
 // store_value writes the accumulator into a slot, after checking that the value
