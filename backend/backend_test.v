@@ -259,3 +259,173 @@ fn test_the_address_instructions_are_the_bytes_the_machine_reads() {
 	assert arch.load_indirect(rbp, eax, 4) or { []u8{} }.len == 0
 	assert arch.address_of_element(rbp, rax, 3, -8, rax) or { []u8{} }.len == 0
 }
+
+// A value two words wide lives in a pair of registers, so the instructions that
+// compute one are the ones that say which word they work on: the low word is in
+// the result register and the high word in the register above it. Each encoding
+// is held to the bytes the machine's own assembler produces for it, the way the
+// instructions above are.
+
+fn test_the_wide_arithmetic_is_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	rcx := target.reg('rcx') or { panic(err) }
+	rdx := target.reg('rdx') or { panic(err) }
+	// adc rdx, rax and sbb rdx, rax: the high words of an addition and a
+	// subtraction, after the low words have gone through add and sub.
+	assert arch.adc_reg64(rdx, rax) or { panic(err) } == [u8(0x48), 0x11, 0xc2]
+	assert arch.sbb_reg64(rdx, rax) or { panic(err) } == [u8(0x48), 0x19, 0xc2]
+	assert arch.sub_reg64(rax, rcx) or { panic(err) } == [u8(0x48), 0x29, 0xc8]
+	// adc rdx, 0, which is the carry into the high word of a two-word negation.
+	assert arch.adc_immediate(rdx, 0) or { panic(err) } == [u8(0x48), 0x81, 0xd2, 0, 0, 0, 0]
+	// The bitwise operators on one word of the pair, and the test of one word.
+	assert arch.and_reg64(rax, rcx) or { panic(err) } == [u8(0x48), 0x21, 0xc8]
+	assert arch.or_reg64(rax, rcx) or { panic(err) } == [u8(0x48), 0x09, 0xc8]
+	assert arch.xor_reg64(rax, rcx) or { panic(err) } == [u8(0x48), 0x31, 0xc8]
+	assert arch.test_reg64(rax) or { panic(err) } == [u8(0x48), 0x85, 0xc0]
+	// The registers past the seventh need the prefix byte, and the destination
+	// and the source sit in the two ModRM fields the other way round from each
+	// other: the source is in the reg field and the destination in the r/m one.
+	r8 := target.reg('r8') or { panic(err) }
+	r9 := target.reg('r9') or { panic(err) }
+	assert arch.adc_reg64(r8, r9) or { panic(err) } == [u8(0x4d), 0x11, 0xc8]
+	assert arch.sbb_reg64(r8, r9) or { panic(err) } == [u8(0x4d), 0x19, 0xc8]
+	assert arch.and_reg64(r8, r9) or { panic(err) } == [u8(0x4d), 0x21, 0xc8]
+	// The Target forwards each of them, so the emitter reaches them the way it
+	// reaches every other instruction.
+	assert target.subtract_word(rax, rcx) or { panic(err) } == [u8(0x48), 0x29, 0xc8]
+	assert target.add_with_carry(rdx, rax) or { panic(err) } == [u8(0x48), 0x11, 0xc2]
+	assert target.add_with_carry_immediate(rdx, 0) or { panic(err) } == [u8(0x48), 0x81, 0xd2,
+		0, 0, 0, 0]
+	assert target.subtract_with_borrow(rdx, rax) or { panic(err) } == [u8(0x48), 0x19, 0xc2]
+	assert target.and_word(rax, rcx) or { panic(err) } == [u8(0x48), 0x21, 0xc8]
+	assert target.or_word(rax, rcx) or { panic(err) } == [u8(0x48), 0x09, 0xc8]
+	assert target.xor_word(rax, rcx) or { panic(err) } == [u8(0x48), 0x31, 0xc8]
+	assert target.test_word(rax) or { panic(err) } == [u8(0x48), 0x85, 0xc0]
+	// A register that is not a word is refused rather than encoded at the wrong
+	// width.
+	byte := arch.Register{
+		name:  'al'
+		code:  0
+		width: 1
+	}
+	assert arch.adc_reg64(byte, rcx) or { []u8{} }.len == 0
+	assert arch.adc_reg64(rax, byte) or { []u8{} }.len == 0
+	assert arch.adc_immediate(byte, 1) or { []u8{} }.len == 0
+	assert arch.sbb_reg64(byte, rcx) or { []u8{} }.len == 0
+	assert arch.sub_reg64(rax, byte) or { []u8{} }.len == 0
+	assert arch.test_reg64(byte) or { []u8{} }.len == 0
+}
+
+fn test_the_wide_shifts_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	rcx := target.reg('rcx') or { panic(err) }
+	rdx := target.reg('rdx') or { panic(err) }
+	// shl rax, 3 and shr rdx, 5, which shift one word of the pair each.
+	assert arch.shl_reg64(rax, 3) or { panic(err) } == [u8(0x48), 0xc1, 0xe0, 0x03]
+	assert arch.shr_reg64(rdx, 5) or { panic(err) } == [u8(0x48), 0xc1, 0xea, 0x05]
+	// shld rax, rcx, 3 and shrd rax, rcx, 3: the two registers shifted as one
+	// value twice as wide, so the bits that leave one word arrive in the other.
+	assert arch.shld_immediate(rax, rcx, 3) or { panic(err) } == [u8(0x48), 0x0f, 0xa4, 0xc8, 0x03]
+	assert arch.shrd_immediate(rax, rcx, 3) or { panic(err) } == [u8(0x48), 0x0f, 0xac, 0xc8, 0x03]
+	// The high word of a left shift takes the low word as its source, and 63 is
+	// the widest count that is not the whole register.
+	assert arch.shld_immediate(rdx, rax, 63) or { panic(err) } == [u8(0x48), 0x0f, 0xa4, 0xc2,
+		0x3f]
+	r8 := target.reg('r8') or { panic(err) }
+	r9 := target.reg('r9') or { panic(err) }
+	assert arch.shl_reg64(r8, 3) or { panic(err) } == [u8(0x49), 0xc1, 0xe0, 0x03]
+	assert arch.shr_reg64(r8, 5) or { panic(err) } == [u8(0x49), 0xc1, 0xe8, 0x05]
+	assert arch.shld_immediate(r8, r9, 3) or { panic(err) } == [u8(0x4d), 0x0f, 0xa4, 0xc8, 0x03]
+	assert arch.shrd_immediate(r8, r9, 3) or { panic(err) } == [u8(0x4d), 0x0f, 0xac, 0xc8, 0x03]
+	// A count as wide as the register is not a shift this machine encodes.
+	assert arch.shl_reg64(rax, 64) or { []u8{} }.len == 0
+	assert arch.shrd_immediate(rax, rcx, 64) or { []u8{} }.len == 0
+	// A register that is not a word is refused.
+	byte := arch.Register{
+		name:  'al'
+		code:  0
+		width: 1
+	}
+	assert arch.shl_reg64(byte, 3) or { []u8{} }.len == 0
+	assert arch.shr_reg64(byte, 3) or { []u8{} }.len == 0
+	assert arch.shld_immediate(byte, rcx, 3) or { []u8{} }.len == 0
+	assert arch.shrd_immediate(rcx, byte, 3) or { []u8{} }.len == 0
+	// The Target forwards each of them.
+	assert target.shift_left_word(rax, 3) or { panic(err) } == [u8(0x48), 0xc1, 0xe0, 0x03]
+	assert target.shift_right_word(rdx, 5) or { panic(err) } == [u8(0x48), 0xc1, 0xea, 0x05]
+	assert target.shift_wide_left(rdx, rax, 63) or { panic(err) } == [u8(0x48), 0x0f, 0xa4, 0xc2,
+		0x3f]
+	assert target.shift_wide_right(rax, rcx, 3) or { panic(err) } == [u8(0x48), 0x0f, 0xac, 0xc8,
+		0x03]
+}
+
+fn test_the_wide_multiply_and_divide_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	rcx := target.reg('rcx') or { panic(err) }
+	// mul rcx and imul rcx: the product of the result register and the source in
+	// the pair, read as unsigned values and as signed ones.
+	assert arch.mul_reg64(rcx) or { panic(err) } == [u8(0x48), 0xf7, 0xe1]
+	assert arch.imul_reg64(rcx) or { panic(err) } == [u8(0x48), 0xf7, 0xe9]
+	// div rcx and idiv rcx: the pair divided by the source, the quotient back in
+	// the result register and the remainder above it.
+	assert arch.div_reg64(rcx) or { panic(err) } == [u8(0x48), 0xf7, 0xf1]
+	assert arch.idiv_reg64(rcx) or { panic(err) } == [u8(0x48), 0xf7, 0xf9]
+	// The sign change and the complement, one word of the pair each.
+	assert arch.neg_reg64(rax) or { panic(err) } == [u8(0x48), 0xf7, 0xd8]
+	assert arch.not_reg64(rax) or { panic(err) } == [u8(0x48), 0xf7, 0xd0]
+	r8 := target.reg('r8') or { panic(err) }
+	assert arch.mul_reg64(r8) or { panic(err) } == [u8(0x49), 0xf7, 0xe0]
+	assert arch.imul_reg64(r8) or { panic(err) } == [u8(0x49), 0xf7, 0xe8]
+	assert arch.div_reg64(r8) or { panic(err) } == [u8(0x49), 0xf7, 0xf0]
+	assert arch.idiv_reg64(r8) or { panic(err) } == [u8(0x49), 0xf7, 0xf8]
+	assert arch.neg_reg64(r8) or { panic(err) } == [u8(0x49), 0xf7, 0xd8]
+	assert arch.not_reg64(r8) or { panic(err) } == [u8(0x49), 0xf7, 0xd0]
+	// The Target forwards each of them.
+	assert target.multiply_pair(rcx) or { panic(err) } == [u8(0x48), 0xf7, 0xe1]
+	assert target.multiply_pair_signed(rcx) or { panic(err) } == [u8(0x48), 0xf7, 0xe9]
+	assert target.divide_pair(rcx) or { panic(err) } == [u8(0x48), 0xf7, 0xf1]
+	assert target.divide_pair_signed(rcx) or { panic(err) } == [u8(0x48), 0xf7, 0xf9]
+	assert target.negate_word(rax) or { panic(err) } == [u8(0x48), 0xf7, 0xd8]
+	assert target.complement_word(rax) or { panic(err) } == [u8(0x48), 0xf7, 0xd0]
+	// These take one operand, so a register that is not a word is refused.
+	byte := arch.Register{
+		name:  'al'
+		code:  0
+		width: 1
+	}
+	assert arch.mul_reg64(byte) or { []u8{} }.len == 0
+	assert arch.imul_reg64(byte) or { []u8{} }.len == 0
+	assert arch.div_reg64(byte) or { []u8{} }.len == 0
+	assert arch.idiv_reg64(byte) or { []u8{} }.len == 0
+	assert arch.neg_reg64(byte) or { []u8{} }.len == 0
+	assert arch.not_reg64(byte) or { []u8{} }.len == 0
+}
+
+fn test_the_unsigned_orders_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	// The four orders that read the carry flag, which are the ones a value two
+	// words wide is compared with: setb, setbe, seta and setae.
+	below := arch.Condition.below
+	assert below.code() == u8(0x92)
+	assert arch.set_condition(.below, rax) or { panic(err) } == [u8(0x0f), 0x92, 0xc0]
+	assert arch.set_condition(.below_or_equal, rax) or { panic(err) } == [u8(0x0f), 0x96, 0xc0]
+	assert arch.set_condition(.above, rax) or { panic(err) } == [u8(0x0f), 0x97, 0xc0]
+	assert arch.set_condition(.above_or_equal, rax) or { panic(err) } == [u8(0x0f), 0x93, 0xc0]
+	// setb and then movzx, which is the answer to a comparison as a value of int
+	// width. gcc 16.2.1 lowered `p < q` over two unsigned 128-bit values to cmpq,
+	// sbbq, setc and movzbl, which is the same reading of the carry flag: the
+	// flags come from the subtraction of the pair and not from a comparison of one
+	// word.
+	assert target.set_condition(.below, rax) or { panic(err) } == [u8(0x0f), 0x92, 0xc0]
+	assert target.widen_byte(rax) or { panic(err) } == [u8(0x0f), 0xb6, 0xc0]
+	// A register with no one-byte name cannot be the destination of a conditional
+	// set, and the same refusal stands on the Target.
+	rdi := target.reg('rdi') or { panic(err) }
+	assert arch.set_condition(.below, rdi) or { []u8{} }.len == 0
+	assert target.set_condition(.above, rdi) or { []u8{} }.len == 0
+	assert target.widen_byte(rdi) or { []u8{} }.len == 0
+}

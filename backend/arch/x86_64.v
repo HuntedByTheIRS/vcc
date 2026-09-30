@@ -999,6 +999,15 @@ fn one_operand(reg Register, group u8) ![]u8 {
 
 // Condition is what a comparison is testing for. The names are the orders, and
 // which machine code each one is belongs to this file.
+//
+// The first six read the flags a comparison of signed values leaves: the zero flag
+// for the two equalities, and the sign and overflow flags together for the four
+// orderings. The last four are the same orders for unsigned values, which read the
+// carry flag instead, and they are the ones a value two words wide is read with:
+// the flags standing after the low word of one is subtracted from the low word of
+// the other are the flags of the borrow, and every order of the pair follows from
+// the carry flag of that subtraction and the flags of the subtraction of the high
+// words.
 pub enum Condition {
 	equal
 	not_equal
@@ -1006,6 +1015,10 @@ pub enum Condition {
 	greater
 	less_or_equal
 	greater_or_equal
+	below
+	below_or_equal
+	above
+	above_or_equal
 }
 
 // code is the low nibble the machine numbers each order with.
@@ -1017,6 +1030,10 @@ pub fn (c Condition) code() u8 {
 		.greater { 0x9f }
 		.less_or_equal { 0x9e }
 		.greater_or_equal { 0x9d }
+		.below { 0x92 }
+		.below_or_equal { 0x96 }
+		.above { 0x97 }
+		.above_or_equal { 0x93 }
 	}
 }
 
@@ -1125,4 +1142,237 @@ fn conditional_jump(opcode u8, disp i32) []u8 {
 	value := u32(disp)
 	return [u8(0x0f), opcode, u8(value & 0xff), u8((value >> 8) & 0xff), u8((value >> 16) & 0xff),
 		u8((value >> 24) & 0xff)]
+}
+
+// The instructions a value two words wide needs. Such a value lives in a pair of
+// registers: the low word in the result register, which is where an expression's
+// value is computed and where a function leaves what it returns, and the high word
+// in the register above it, which is also where a division leaves its remainder.
+// Every function below says which side of that pair it works on, because that is
+// the whole difference between adding the low words of two of them and adding the
+// high ones, and a primitive whose side is not written down is one the caller has
+// to guess at.
+//
+// The two registers are the ones the arithmetic above already names: `return_reg`
+// holds the low word of the pair and `remainder_reg` the high one.
+
+// sub_reg64 subtracts the source from the destination at the width of a word. It
+// is the low word of a two-word subtraction, and the borrow it leaves in the carry
+// flag is what sbb_reg64 takes out of the high words next. Both operands are the
+// low words of the pair.
+pub fn sub_reg64(dst Register, src Register) ![]u8 {
+	return rm_reg64(0x29, dst, src)
+}
+
+// adc_reg64 adds the source and the carry flag into the destination. It is the
+// high word of a two-word addition: the low words go through add first and the
+// carry out of that addition is added in here, so the pair of an addition is add
+// then adc. Both operands are the high words of the pair.
+pub fn adc_reg64(dst Register, src Register) ![]u8 {
+	return rm_reg64(0x11, dst, src)
+}
+
+// adc_immediate adds a constant and the carry flag into the destination, in the
+// four bytes of immediate the machine extends. It is the carry into the high word
+// of a two-word negation: negating the low word leaves a borrow in the flag when
+// that word was not zero, and this is how that borrow reaches the high word, with
+// a constant of zero. The immediate is written in four bytes rather than the one
+// the machine has for a small constant, because every immediate this file writes
+// is four bytes wide and the length of an instruction may not depend on its value.
+pub fn adc_immediate(dst Register, value i32) ![]u8 {
+	if dst.width != 4 {
+		return error('${name}: an addition with carry and an immediate takes a register four bytes wide, and ${dst.name} is not one')
+	}
+	mut out := []u8{cap: 7}
+	out << u8(0x48) | (if dst.code >= 8 { u8(0x01) } else { u8(0) }) // REX.W, with B when the code needs it
+	out << u8(0x81) // the group opcode, with /2 for the addition with carry
+	out << u8(0xd0 | (dst.code & 0x07))
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
+// sbb_reg64 subtracts the source and the carry flag from the destination, which is
+// the high word of a two-word subtraction: sub leaves the borrow of the low words
+// in the carry flag and this takes it out of the high ones. Both operands are the
+// high words of the pair.
+//
+// The same instruction is how two words are compared as unsigned values, read for
+// its flags rather than for its result: the low words are subtracted from each
+// other and then the high ones, and the flags standing after the second
+// subtraction are the order of the two values. `setb` over flags from `sub` alone
+// would answer about the low words, which is why the borrow has to be carried into
+// the high word before the flags are read.
+pub fn sbb_reg64(dst Register, src Register) ![]u8 {
+	return rm_reg64(0x19, dst, src)
+}
+
+// and_reg64, or_reg64 and xor_reg64 apply a bitwise operator to one word of the
+// pair. A two-word value needs one instruction per word, because the machine's
+// operators are a word wide: the low words are combined with each other and the
+// high words with each other, and neither answer depends on the other word.
+pub fn and_reg64(dst Register, src Register) ![]u8 {
+	return rm_reg64(0x21, dst, src)
+}
+
+pub fn or_reg64(dst Register, src Register) ![]u8 {
+	return rm_reg64(0x09, dst, src)
+}
+
+pub fn xor_reg64(dst Register, src Register) ![]u8 {
+	return rm_reg64(0x31, dst, src)
+}
+
+// test_reg64 compares one word of the pair with zero and sets the flags without
+// producing a value. It is how the low word of a two-word value is asked whether
+// it is zero, as the first half of asking whether the whole value is.
+pub fn test_reg64(reg Register) ![]u8 {
+	return rm_reg64(0x85, reg, reg)
+}
+
+// shl_reg64 and shr_reg64 shift one word of the pair left or right by a count in
+// the instruction. They are the word-local half of a two-word shift: a shift left
+// of the pair is shld_immediate of the high word with the low word's top bits
+// coming down into it, then shl of the low word, and a shift right is the same
+// with shrd_immediate and shr.
+pub fn shl_reg64(reg Register, bits u8) ![]u8 {
+	return shift_immediate(0x04, reg, bits)
+}
+
+pub fn shr_reg64(reg Register, bits u8) ![]u8 {
+	return shift_immediate(0x05, reg, bits)
+}
+
+// shld_immediate shifts the destination left and fills the bits that open at the
+// bottom with the top bits of the source, as if the two registers held one value
+// twice as wide. It is how the high word of a two-word left shift is made, with
+// the low word as the source. shrd_immediate is the same to the right and is how
+// the low word of a two-word right shift is made, with the high word as the
+// source. A single word's shift cannot do either: the bits that belong at the
+// bottom of the high word are in the low word, and a shl would bring zeros down
+// instead.
+//
+// The count is in the instruction rather than in a register because it is a count
+// the emitter knows when it writes the instruction. A count of zero shifts nothing
+// and is allowed.
+pub fn shld_immediate(dst Register, src Register, bits u8) ![]u8 {
+	return shift_pair_immediate(0xa4, dst, src, bits)
+}
+
+pub fn shrd_immediate(dst Register, src Register, bits u8) ![]u8 {
+	return shift_pair_immediate(0xac, dst, src, bits)
+}
+
+// shift_immediate is a shift whose count is in the instruction, one of the
+// operations the machine's C1 opcode holds: the operation is in the reg field and
+// the operand is the r/m one. The arithmetic shift above writes the same shape
+// with the opcode of its own operation.
+fn shift_immediate(group u8, reg Register, bits u8) ![]u8 {
+	if reg.width != 4 {
+		return error('${name}: a shift of a word names a register four bytes wide, and ${reg.name} is not one')
+	}
+	if bits >= 64 {
+		return error('${name}: a shift of ${bits} bits is wider than the register')
+	}
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x48) // REX.W: the whole word is shifted
+	if reg.code >= 8 {
+		rex |= 0x01 // REX.B reaches the register
+	}
+	out << rex
+	out << u8(0xc1) // a shift by the count in the next byte
+	out << u8(0xc0 | ((group & 0x07) << 3) | (reg.code & 0x07))
+	out << bits
+	return out
+}
+
+// shift_pair_immediate is shld and shrd: the destination is the r/m operand, the
+// source is the reg field, and the count is in the last byte.
+fn shift_pair_immediate(opcode u8, dst Register, src Register, bits u8) ![]u8 {
+	if dst.width != 4 || src.width != 4 {
+		return error('${name}: opcode ${opcode} takes two registers four bytes wide, and ${dst.name} and ${src.name} are not both that')
+	}
+	if bits >= 64 {
+		return error('${name}: a shift of ${bits} bits is wider than the register')
+	}
+	mut out := []u8{cap: 5}
+	mut rex := u8(0x48) // REX.W
+	if src.code >= 8 {
+		rex |= 0x04 // REX.R reaches the source
+	}
+	if dst.code >= 8 {
+		rex |= 0x01 // REX.B reaches the destination
+	}
+	out << rex
+	out << u8(0x0f)
+	out << opcode
+	out << u8(0xc0 | ((src.code & 0x07) << 3) | (dst.code & 0x07))
+	out << bits
+	return out
+}
+
+// mul_reg64 multiplies the result register by the source and leaves the product in
+// the pair, the low word in the result register and the high word above it. Both
+// values are read as unsigned. imul_reg64 is the same multiply with both read as
+// signed, and the two differ in the high word of the product whenever an operand
+// has its top bit set.
+//
+// This is not the two-operand imul above: that one takes a destination and a
+// source and keeps the low word of the product in the destination, where this one
+// takes a single source, multiplies the result register by it, and keeps both
+// words.
+pub fn mul_reg64(src Register) ![]u8 {
+	return one_operand64(src, 0x04)
+}
+
+pub fn imul_reg64(src Register) ![]u8 {
+	return one_operand64(src, 0x05)
+}
+
+// div_reg64 and idiv_reg64 divide the pair by the source: the dividend is the low
+// word in the result register and the high word above it, and the quotient comes
+// back to the result register with the remainder above it. The first reads the
+// pair as unsigned and the second as signed.
+//
+// Dividing a value narrower than the pair is a sign extension of it into the high
+// word first, which is a step of the caller's rather than one of these.
+pub fn div_reg64(src Register) ![]u8 {
+	return one_operand64(src, 0x06)
+}
+
+pub fn idiv_reg64(src Register) ![]u8 {
+	return one_operand64(src, 0x07)
+}
+
+// neg_reg64 is the sign change and not_reg64 the bitwise complement, each at the
+// width of a word, so each of them is one word of the pair. A two-word negation is
+// neither of them alone: the low word is negated, the borrow that leaves is added
+// into the high word with adc_immediate, and the high word is negated too.
+pub fn neg_reg64(reg Register) ![]u8 {
+	return one_operand64(reg, 0x03)
+}
+
+pub fn not_reg64(reg Register) ![]u8 {
+	return one_operand64(reg, 0x02)
+}
+
+// one_operand64 is the group of operations that take a single value at the width
+// of a word: the operation is in the reg field and the value is the r/m one. It is
+// one_operand above with REX.W, which is the whole difference between the same
+// operation on a four-byte value and on an eight-byte one.
+fn one_operand64(reg Register, group u8) ![]u8 {
+	if reg.width != 4 {
+		return error('${name}: ${reg.name} is not a register four bytes wide to name a word operation with')
+	}
+	mut out := []u8{cap: 3}
+	mut rex := u8(0x48) // REX.W: the value is a word
+	if reg.code >= 8 {
+		rex |= 0x01 // REX.B reaches the register
+	}
+	out << rex
+	out << u8(0xf7)
+	out << u8(0xc0 | ((group & 0x07) << 3) | (reg.code & 0x07))
+	return out
 }

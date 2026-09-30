@@ -547,3 +547,127 @@ pub fn (t Target) jump_if_zero(disp i32) []u8 {
 pub fn (t Target) jump_if_not_zero(disp i32) []u8 {
 	return arch.jump_nonzero_rel32(disp)
 }
+
+// The instructions a value two words wide needs. Such a value lives in the pair the
+// result register and the one above it form: the low word in the result register,
+// which is where a value is computed, and the high word in the register above it,
+// which is also where a division leaves its remainder. Each function says which
+// word it works on. Nothing here decides which word a caller wants; it forwards
+// the machine's instruction and the name carries the side.
+
+pub fn (t Target) subtract_word(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.sub_reg64(dst, src)
+}
+
+// add_with_carry is the high word of a two-word addition: it adds the carry out of
+// the addition of the low words as well as the two sources. It reads the flags the
+// instruction before it left, so it is always the second instruction of the pair.
+pub fn (t Target) add_with_carry(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.adc_reg64(dst, src)
+}
+
+// add_with_carry_immediate is the same addition with the second value in the
+// instruction. The high word of a two-word negation takes a carry of zero through
+// it: negating the low word leaves a borrow in the flag when that word was not
+// zero, and no register is free to hold the zero being added.
+pub fn (t Target) add_with_carry_immediate(dst arch.Register, value i32) ![]u8 {
+	return arch.adc_immediate(dst, value)
+}
+
+// subtract_with_borrow is the high word of a two-word subtraction: it takes the
+// borrow out of the subtraction of the low words as well as subtracting the two
+// sources. The flags it leaves are the order of the two words, which is the
+// comparison a value two words wide is made of.
+pub fn (t Target) subtract_with_borrow(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.sbb_reg64(dst, src)
+}
+
+pub fn (t Target) and_word(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.and_reg64(dst, src)
+}
+
+pub fn (t Target) or_word(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.or_reg64(dst, src)
+}
+
+pub fn (t Target) xor_word(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.xor_reg64(dst, src)
+}
+
+// test_word asks one word whether it is zero and sets the flags without producing
+// a value, which is how the first half of a two-word value is asked.
+pub fn (t Target) test_word(reg arch.Register) ![]u8 {
+	return arch.test_reg64(reg)
+}
+
+// shift_left_word and shift_right_word shift one word of the pair by a constant
+// count, and shift_wide_left and shift_wide_right shift the two words as one value
+// twice as wide: the bits that leave the word being shifted are not lost but come
+// in at the other end of the word beside it, which is what the middle word of a
+// shift of a value wider than one word needs.
+pub fn (t Target) shift_left_word(reg arch.Register, bits u8) ![]u8 {
+	return arch.shl_reg64(reg, bits)
+}
+
+pub fn (t Target) shift_right_word(reg arch.Register, bits u8) ![]u8 {
+	return arch.shr_reg64(reg, bits)
+}
+
+pub fn (t Target) shift_wide_left(dst arch.Register, src arch.Register, bits u8) ![]u8 {
+	return arch.shld_immediate(dst, src, bits)
+}
+
+pub fn (t Target) shift_wide_right(dst arch.Register, src arch.Register, bits u8) ![]u8 {
+	return arch.shrd_immediate(dst, src, bits)
+}
+
+// multiply_pair and multiply_pair_signed multiply the result register by the
+// source and leave the two-word product in the pair.
+pub fn (t Target) multiply_pair(src arch.Register) ![]u8 {
+	return arch.mul_reg64(src)
+}
+
+pub fn (t Target) multiply_pair_signed(src arch.Register) ![]u8 {
+	return arch.imul_reg64(src)
+}
+
+// divide_pair and divide_pair_signed divide the pair by the source and leave the
+// quotient in the result register with the remainder above it, which is where the
+// language's two division operators read their answers from.
+pub fn (t Target) divide_pair(src arch.Register) ![]u8 {
+	return arch.div_reg64(src)
+}
+
+pub fn (t Target) divide_pair_signed(src arch.Register) ![]u8 {
+	return arch.idiv_reg64(src)
+}
+
+pub fn (t Target) negate_word(reg arch.Register) ![]u8 {
+	return arch.neg_reg64(reg)
+}
+
+pub fn (t Target) complement_word(reg arch.Register) ![]u8 {
+	return arch.not_reg64(reg)
+}
+
+// Condition is the machine's condition, named here for the same reason Register is
+// above: a caller asks this module for a machine fact and should not have to reach
+// into the machine's own file to say what it received. The unsigned orders are the
+// ones a value two words wide is compared with, because the borrow out of the
+// subtraction of the low words is a carry flag and not a sign flag.
+pub type Condition = arch.Condition
+
+// set_condition writes the outcome of the comparison whose flags are standing into
+// the low byte of a register, as zero or one. It is the instruction a comparison of
+// two words ends with, and it is here rather than inside a comparison method
+// because the flags a caller hands it come from the subtraction of the pair, which
+// that caller wrote. The byte is widened with widen_byte.
+pub fn (t Target) set_condition(condition Condition, reg arch.Register) ![]u8 {
+	return arch.set_condition(condition, reg)
+}
+
+// widen_byte turns that one byte into a value of the language's int width, since a
+// comparison is a value of that width and not a byte.
+pub fn (t Target) widen_byte(reg arch.Register) ![]u8 {
+	return arch.movzx_byte(reg)
+}
