@@ -137,10 +137,34 @@ fn test_a_128_bit_object_is_storage_that_runs() {
 	os.rm(binary) or {}
 }
 
-fn test_reading_a_128_bit_object_writes_nothing() {
+// The write and the read are one fact: a value stored in a 128-bit object is read
+// back by converting it to a narrower type, which takes its low word, and the bytes
+// the conversion reads are the bytes the store wrote. Measured on gcc 16.2.1, the
+// three programs return 44, 255 and 1.
+fn test_a_128_bit_object_is_written_and_read_back() {
+	cases := [
+		'int main(void) { __int128 a = 300; __int128 b = a; return (int)(char)b; }',
+		'int main(void) { __int128 n = -1; return (int)n; }',
+		'int main(void) { __int128 z = 0; char *p = (char *)z; return p == 0; }',
+	]
+	answers := [44, 255, 1]
+	for i, source_text in cases {
+		source := scratch('wide_round_${i}.c')
+		binary := scratch('wide_round_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A 128-bit object is not a value, so a program that reads one without saying what
+// it wants is refused and nothing is written out. The conversion has to be written,
+// which is what makes the reader say which width they meant.
+fn test_reading_a_128_bit_object_it_did_not_ask_for_writes_nothing() {
 	source := scratch('wide_bad.c')
 	binary := scratch('wide_bad')
-	os.write_file(source, 'int main(void) { __int128 a = 5; return (int)a; }\n') or { panic(err) }
+	os.write_file(source, 'int main(void) { __int128 a = 5; int n = a; return n; }\n') or { panic(err) }
 	lexed := tokenize.lex(os.read_file(source) or { '' })
 	parsed := parser.parse(lexed.tokens)
 	assert parsed.diagnostics.len == 0

@@ -2388,6 +2388,40 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion to ${cast.spelling} is not one this back end makes, and it converts between int, char, double and a pointer')
 		return error('unsupported conversion')
 	}
+	if e.wide_value(cast.expr) {
+		// A 128-bit object converts to a narrower type by its low word: the
+		// value of such a type is the two words the object holds, and every
+		// conversion the language allows out of it is that value taken modulo the
+		// width of the target, which is the low word and nothing above it.
+		// Measured on gcc 16.2.1: `(int)(__int128)300` is 300, `(char)` of one is
+		// 44, `(char *)` of one is the low eight bytes, and `(int)(__int128)-1` is
+		// -1.
+		//
+		// The read is made through the object's own address and at the width of
+		// the target, and the bytes it takes are the low ones because this target
+		// stores a value from its least significant byte up.
+		if target.kind == .double {
+			// A double of that value is not the low word's bytes: it is the
+			// rounding of the whole value, which is wider than the word this back
+			// end converts from, so it is refused rather than answered with the
+			// low word as though the top of the value were zero.
+			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from a 128-bit object to ${cast.spelling} is not one this back end makes, and a value that wide does not convert to a floating type here')
+			return error('128-bit to a double')
+		}
+		width := e.storage_width(target) or {
+			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from a 128-bit object to ${cast.spelling}, and there is no read of that width')
+			return error('no read of that width')
+		}
+		e.address_of_object(cast.expr, depth + 1)!
+		register := e.accumulator(cast.line, cast.col)!
+		e.append(e.target.load_indirect(register, register, width)!)
+		if target.kind in [.char_, .signed_char] {
+			// The byte just read is the char, and the bits above it are that
+			// byte's sign, which is what this target's char is.
+			e.append(e.target.sign_extend_byte(register)!)
+		}
+		return
+	}
 	floating := e.floating_of(cast.expr)
 	if target.kind == .double {
 		e.emit_expr_at(cast.expr, depth + 1)!

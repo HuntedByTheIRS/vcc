@@ -1107,6 +1107,57 @@ fn test_a_128_bit_object_is_stored_as_two_words() {
 	assert holds(emitted.bytes, [u8(0x48), 0xc1, 0xf8, 0x3f])
 }
 
+// A 128-bit object is read by converting it to a narrower type, and the read is the
+// low word: the value of the type is the two words the object holds, and a
+// conversion out of it takes that value modulo the width of the target. Measured on
+// gcc 16.2.1, the programs here return 7, 44, 255 and 44, and the last two of them
+// read bytes that a copy and an assignment wrote.
+fn test_a_128_bit_object_is_read_by_converting_it_to_a_narrower_type() {
+	stored := emit(translation_unit('int main() { __int128 v = 7; return (int)v; }'), Options{})
+	assert stored.diagnostics.len == 0
+	assert run_image(stored.bytes) == 7
+	// 300 is 0x12c: the low byte is 44 and the byte above it is 1, which is what
+	// makes the read a read of the value rather than of a byte that happened to
+	// be in the register.
+	low_byte := emit(translation_unit('int main() { __int128 v = 300; return (int)(char)v; }'),
+		Options{})
+	assert low_byte.diagnostics.len == 0
+	assert run_image(low_byte.bytes) == 44
+	// A negative value has the sign in every byte of both words, so the low word
+	// read as an int is the value that was stored.
+	negative := emit(translation_unit('int main() { __int128 v = -1; return (int)v; }'), Options{})
+	assert negative.diagnostics.len == 0
+	assert run_image(negative.bytes) == 255
+	// The bytes the store wrote are the bytes the read takes: through a copy into
+	// another object of the type, and through an assignment to an object that was
+	// declared with no initializer.
+	copied := emit(translation_unit('int main() { __int128 a = 300; __int128 b = a; return (int)(char)b; }'),
+		Options{})
+	assert copied.diagnostics.len == 0
+	assert run_image(copied.bytes) == 44
+	assigned := emit(translation_unit('int main() { __int128 a; a = 300; return (int)(char)a; }'),
+		Options{})
+	assert assigned.diagnostics.len == 0
+	assert run_image(assigned.bytes) == 44
+	// A pointer takes the low word, which is what gcc's `(char *)` of one is.
+	as_pointer := emit(translation_unit('int main() { __int128 v = 0; char *p = (char *)v; return p == 0; }'),
+		Options{})
+	assert as_pointer.diagnostics.len == 0
+	assert run_image(as_pointer.bytes) == 1
+}
+
+// A floating target is the one conversion out of a 128-bit object that this back
+// end does not make: the double of that value is a rounding of the whole of it and
+// not the low word, so it is refused rather than answered with the low word as
+// though the top of the value were zero.
+fn test_a_conversion_from_a_128_bit_object_to_a_double_is_reported() {
+	emitted := emit(translation_unit('int main() { __int128 v = 5; double d = (double)v; return (int)d; }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('128-bit object to double')
+	assert emitted.bytes.len == 0
+}
+
 // A double and a pointer are not widened into a 128-bit object, and saying so is
 // better than writing the bits of one as the low word of the other.
 fn test_a_value_that_cannot_widen_into_a_128_bit_object_is_reported() {
@@ -1116,15 +1167,21 @@ fn test_a_value_that_cannot_widen_into_a_128_bit_object_is_reported() {
 	assert wrong_class.bytes.len == 0
 }
 
-// The value question about a 128-bit object is the one this back end has no answer
-// for, and the refusal says which question it is rather than reading the first
-// four bytes of the object as an int.
-fn test_reading_a_128_bit_object_as_a_value_is_reported() {
-	emitted := emit(translation_unit('int main() { __int128 a = 5; return (int)a; }'), Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('has no value of that width to read')
-	assert emitted.bytes.len == 0
-	member := emit(translation_unit('struct S { __int128 v; }; int main() { struct S s; return (int)s.v; }'),
+// What a 128-bit object is not is a value, so the two places that would read one
+// without saying so are refused by name: an implicit narrowing store, which is a
+// conversion the language allows but this back end writes only where it is asked
+// for with a cast, and a member of that type, which is read at its own width and
+// has no value here.
+fn test_a_128_bit_object_read_without_a_conversion_is_reported() {
+	implicit := emit(translation_unit('int main() { __int128 a = 5; int n = a; return n; }'), Options{})
+	assert implicit.diagnostics.len == 1
+	assert implicit.diagnostics[0].msg.contains('has no value of that width to read')
+	assert implicit.bytes.len == 0
+	// A member of that type is storage inside an object and nothing more: the
+	// object is laid out around its sixteen bytes and the member's address is
+	// part of the object's, and reading it as a value is the question this back
+	// end cannot answer at that width either.
+	member := emit(translation_unit('struct S { __int128 v; }; int main() { struct S s; int n = s.v; return n; }'),
 		Options{})
 	assert member.diagnostics.len == 1
 	assert member.diagnostics[0].msg.contains('has no value of it to read')
