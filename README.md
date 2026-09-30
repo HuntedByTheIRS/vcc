@@ -141,7 +141,9 @@ words, one object is copied into another, and the value is read back by converti
 it to a narrower type, which takes its low word (`(int)` of a stored 300 is 300 and
 `(char)` of one is 44, measured on gcc 16.2.1). A member of that type is the same
 storage at the member's own offset, written and read through a name, a pointer or a
-top-level object. What this back end has no form for
+top-level object, and an array of them is reserved the same way, though an element of
+one is refused by name: an element of sixteen bytes is not a value one instruction
+moves. What this back end has no form for
 is a *value* of that width, so an implicit narrowing store, a parameter of the type
 and a conversion of one to a `double` are refused by name rather than answered with
 something narrower than what was asked for.

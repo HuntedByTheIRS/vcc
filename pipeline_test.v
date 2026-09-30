@@ -182,6 +182,26 @@ fn test_a_128_bit_member_is_written_and_read_back() {
 	}
 }
 
+// An array of 128-bit objects is reserved storage, and an element of it is refused
+// by name with its place in the file rather than reaching the encoding as an internal
+// diagnostic at the top of the file: the message names the size and the instruction
+// that is missing.
+fn test_an_array_of_128_bit_objects_reserves_storage_and_refuses_an_element() {
+	declared := scratch('wide_array.c')
+	binary := scratch('wide_array')
+	exit_status := compile_and_run([declared, '-o', binary], 'int main(void) { __int128 a[3]; return (int)sizeof(a); }\n')
+	assert exit_status == 48
+	os.rm(declared) or {}
+	os.rm(binary) or {}
+	element := scratch('wide_array_element.c')
+	image := compile([element, '-o', scratch('wide_array_element')],
+		'int main(void) { __int128 a[3]; a[0] = 300; return 0; }\n')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('elements of 16 bytes')
+	assert image.bytes.len == 0
+	os.rm(element) or {}
+}
+
 fn test_reading_a_128_bit_object_it_did_not_ask_for_writes_nothing() {
 	source := scratch('wide_bad.c')
 	binary := scratch('wide_bad')

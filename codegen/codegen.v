@@ -1263,6 +1263,36 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr)
 	e.append(e.target.store_indirect(address_register, value, width)!)
 }
 
+// element_address leaves the address of one element of an array in the index
+// register: the index scaled by the size of an element and added to the array's
+// base. The machine scales an index by one, two, four or eight and by no other
+// number, so any other size is a multiply and an add, which is what an array of
+// objects of those sizes needs.
+//
+// An element of sixteen bytes is refused here by name rather than passed on. An
+// address of one is a multiply and an add, but the load or the store that follows it
+// asks the machine for sixteen bytes in one instruction, which it has no encoding
+// for: that reached the emitter as an internal diagnostic at the top of the file with
+// nothing named. An array of 128-bit objects is storage the declaration reserves, and
+// an element of one is the value question this back end has no answer for; a struct
+// of sixteen bytes has the same size and the same refusal. Members of such an object
+// are read and written one value at a time and do not come through here.
+fn (mut e Emitter) element_address(base backend.Register, index backend.Register, stride int, offset int, name string, line int, col int) !void {
+	if stride == wide_bytes {
+		e.diagnostics << problem(line, col, 'unsupported: ${name} holds elements of ${stride} bytes, and this back end moves one, four or eight bytes in one instruction, so an element of that size is not a value it reads or writes')
+		return error('unsupported element size')
+	}
+	if stride == 1 || stride == 2 || stride == 4 || stride == 8 {
+		e.append(e.target.address_of_element(base, index, stride, 0, index)!)
+	} else {
+		e.append(e.target.imul_immediate(index, stride))
+		e.append(e.target.add_reg64(index, base))
+	}
+	if offset != 0 {
+		e.append(e.target.add_immediate(index, offset))
+	}
+}
+
 // assign_element writes a value into one element of an array. The address of the
 // element is computed from the index and the array's place in the frame, parked
 // in a scratch slot while the value is computed, and the value is written
@@ -1283,7 +1313,8 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			register := e.accumulator(stmt.line, stmt.col)!
 			base := e.scratch(stmt.line, stmt.col)!
 			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, base.name)
-			e.append(e.target.address_of_element(base, register, object.width, 0, register)!)
+			e.element_address(base, register, object.width, 0, stmt.target, stmt.line,
+				stmt.col)!
 			address := e.value_slot(0)
 			e.store_accumulator(address, stmt.line, stmt.col)!
 			e.emit_expr_at(expr, 1)!
@@ -1330,7 +1361,8 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	e.emit_expr_at(subscript, 0)!
 	base := e.frame_pointer(stmt.line, stmt.col)!
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.append(e.target.address_of_element(base, register, slot.width, slot.offset, register)!)
+	e.element_address(base, register, slot.width, slot.offset, stmt.target, stmt.line,
+		stmt.col)!
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	e.emit_expr_at(expr, 1)!
@@ -2248,7 +2280,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 					// cannot overwrite it on the way.
 					base := e.scratch(expr.line, expr.col)!
 					e.reference(e.target.address_of(base, 0), .global_address, expr.name, base.name)
-					e.append(e.target.address_of_element(base, register, object.width, 0, register)!)
+					e.element_address(base, register, object.width, 0, expr.name, expr.line, expr.col)!
 					if object.floating {
 						double_register := e.float_accumulator(expr.line, expr.col)!
 						e.append(e.target.load_double_indirect(register, double_register)!)
@@ -2267,7 +2299,8 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.emit_expr_at(expr.index, depth + 1)!
 			base := e.frame_pointer(expr.line, expr.col)!
 			register := e.accumulator(expr.line, expr.col)!
-			e.append(e.target.address_of_element(base, register, slot.width, slot.offset, register)!)
+			e.element_address(base, register, slot.width, slot.offset, expr.name, expr.line,
+				expr.col)!
 			if slot.floating {
 				// An element of an array of doubles: the address is in a general
 				// register and the value is read into a floating-point one, which

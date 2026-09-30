@@ -1179,6 +1179,50 @@ fn test_a_128_bit_member_is_written_and_read_at_its_address() {
 	assert run_image(neighbour.bytes) == 1
 }
 
+// An array of 128-bit objects is storage the declaration reserves, and an element of
+// one is refused by name: the address of an element is a multiply and an add, but the
+// load or the store that follows asks the machine for sixteen bytes in one
+// instruction, which would reach it as an internal diagnostic with no place in the
+// file. A member of such an element is a value at a time and does come through.
+fn test_an_array_of_128_bit_objects_is_storage_with_element_access_refused() {
+	declared := emit(translation_unit('int main() { __int128 a[3]; return (int)sizeof(a); }'), Options{})
+	assert declared.diagnostics.len == 0
+	assert run_image(declared.bytes) == 48
+	stored := emit(translation_unit('int main() { __int128 a[3]; a[0] = 300; return 0; }'), Options{})
+	assert stored.diagnostics.len == 1
+	assert stored.diagnostics[0].msg.contains('elements of 16 bytes')
+	assert stored.bytes.len == 0
+	read := emit(translation_unit('int main() { __int128 a[3]; return (int)a[0]; }'), Options{})
+	assert read.diagnostics.len == 1
+	assert read.diagnostics[0].msg.contains('not handed over by value')
+	// The member of an element is the same widening store the member of any object
+	// takes, at the address of the element plus the member's offset. Measured on gcc
+	// 16.2.1, the program below returns 44.
+	member := emit(translation_unit('struct S { __int128 v; }; struct S s[2]; int main() { s[1].v = 300; return (int)(char)s[1].v; }'),
+		Options{})
+	assert member.diagnostics.len == 0
+	assert run_image(member.bytes) == 44
+}
+
+// The machine scales an index by one, two, four or eight and by no other number, so
+// an array of objects of any other size is a multiply and an add. Measured on gcc
+// 16.2.1, the two programs below return 44, and a whole element of a sixteen-byte
+// struct is refused by name rather than passed to the encoding.
+fn test_an_element_of_a_size_the_machine_does_not_scale_is_a_multiply_and_an_add() {
+	twelve := emit(translation_unit('struct S { int a; int b; int c; }; int main() { struct S s[3]; s[2].b = 300; return (int)(char)s[2].b; }'),
+		Options{})
+	assert twelve.diagnostics.len == 0
+	assert run_image(twelve.bytes) == 44
+	through_an_index := emit(translation_unit('struct S { int a; int b; int c; }; int main() { struct S s[4]; int i = 3; s[i].c = 300; return (int)(char)s[i].c; }'),
+		Options{})
+	assert through_an_index.diagnostics.len == 0
+	assert run_image(through_an_index.bytes) == 44
+	whole := emit(translation_unit('struct S { int a; int b; int c; int d; }; int main() { struct S s[2]; s[0] = s[1]; return 0; }'),
+		Options{})
+	assert whole.diagnostics.len == 1
+	assert whole.diagnostics[0].msg.contains('elements of 16 bytes')
+}
+
 // A floating target is the one conversion out of a 128-bit object that this back
 // end does not make: the double of that value is a rounding of the whole of it and
 // not the low word, so it is refused rather than answered with the low word as

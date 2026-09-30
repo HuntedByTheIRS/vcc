@@ -23,7 +23,7 @@ expression, its value is never evaluated, and the declaration that follows
 declares what that operand's type says. `__int128` is read where a type can be
 written, and the model sizes it and lays it out, which is what makes
 `sizeof(__int128)` 16 and puts a member of one on a 16-byte boundary. An object of
-one is storage the back end has, as a local, a top-level object and a member of one:
+one is storage the back end has, as a local, a top-level object, a member of one and an array of them:
 sixteen bytes, a value narrower than that widened into its two words, one object
 copied into another, and a conversion of one to a narrower type reading its low
 word. A value of that width is what it does not have,
