@@ -38,6 +38,17 @@ const type_qualifiers = ['const', 'volatile', 'restrict', '_Atomic', '__const', 
 const builtin_types = ['void', 'char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double',
 	'_Bool', '_Complex', '_Imaginary', '__int128']
 
+// bitint_words are the spellings that open a _BitInt specifier. C23 added the
+// type, and its width is written in parentheses after the word: `_BitInt(128)`
+// is a type of 128 bits. The width belongs to the specifier rather than to the
+// declarator, which is what the parentheses are for, so the reader below reads
+// the word and the width together and the words of the declaration carry them
+// as one. Measured on gcc 16.2.1: the width may be any integer constant
+// expression - `_BitInt(64 * 2)` is the same type as `_BitInt(128)` - and a
+// width that is not a multiple of the byte, as in `_BitInt(65)`, occupies the
+// bytes the next multiple needs.
+const bitint_words = ['_BitInt']
+
 // tag_keywords open the specifier that names a struct, a union or an enum.
 const tag_keywords = ['struct', 'union', 'enum']
 
@@ -63,11 +74,11 @@ const typeof_unqual_words = ['typeof_unqual', '__typeof_unqual__']
 // this reader has not implemented - a cast is where it happens, `(int)d` reads
 // its `int` as a name - and it is refused by the diagnostic for that construct
 // rather than reported a second time as a missing declaration.
-const keywords = ['_Atomic', '_Bool', '_Complex', '_Imaginary', '_Thread_local', 'auto', 'break',
-	'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float',
-	'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed',
-	'sizeof', 'static', 'struct', 'switch', 'typedef', 'typeof', 'typeof_unqual', 'union', 'unsigned',
-	'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
+const keywords = ['_Atomic', '_BitInt', '_Bool', '_Complex', '_Imaginary', '_Thread_local', 'auto',
+	'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern',
+	'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short',
+	'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'typeof', 'typeof_unqual', 'union',
+	'unsigned', 'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
 	'__extension__', '__inline', '__inline__', '__int128', '__restrict', '__restrict__', '__signed',
 	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile',
 	'__volatile__']
@@ -100,6 +111,7 @@ fn (p Parser) starts_declaration(t tokenize.Token) bool {
 fn is_specifier_word(text string) bool {
 	return text in storage_classes || text in type_qualifiers || text in builtin_types
 		|| text in tag_keywords || text in typeof_words || text in typeof_unqual_words
+		|| text in bitint_words
 }
 
 // storage_of is the storage class a word names. `inline` and `__extension__` say
@@ -952,6 +964,35 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			spec.note_type(t)
 			continue
 		}
+		if t.text in bitint_words && !spec.has_type {
+			// `_BitInt (N)` is one specifier: the width in the parentheses
+			// is read with the word, and the words of the declaration carry
+			// the two as one, because a later stage has no parentheses left
+			// to look at. The width is the type, so it is read here rather
+			// than counted later.
+			//
+			// Only before the declaration has a type, the same as a typeof
+			// specifier: a type word cannot follow one, and `int _BitInt(8)
+			// x;` is two types written where there is room for one.
+			p.next()
+			spec.note(t)
+			width := p.parse_bitint_width(t)!
+			word := '_BitInt(${width})'
+			// The words a declaration carries from here on are the resolved
+			// type's own spelling, which is what a typeof specifier writes
+			// there too, because later stages ask the words what the type is:
+			// `_BitInt(128)` and `__int128` are one type written twice, and a
+			// declaration is not the place to keep both spellings alive. A
+			// width this compiler has no value for stays as the program wrote
+			// it, so that the refusal names the width that was asked for.
+			if resolved := types.from_words([word]) {
+				spec.type_words << resolved.describe()
+			} else {
+				spec.type_words << word
+			}
+			spec.has_type = true
+			continue
+		}
 		if t.text in tag_keywords {
 			p.next()
 			spec.note(t)
@@ -1225,6 +1266,35 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 		}
 	}
 	return members
+}
+
+// parse_bitint_width reads the width of a _BitInt specifier, which is written in
+// parentheses after the word: the `(128)` of `_BitInt(128)`.
+//
+// The width is one written number. C23 reads any integer constant expression
+// there, and `_BitInt(64 * 2)` is a type of 128 bits; this reader reads a number
+// and refuses an expression by name, because a width read as its first term
+// would be a type of the wrong size. A type is not a thing to guess at, and the
+// width a program wrote is the whole of what it asked for.
+fn (mut p Parser) parse_bitint_width(at tokenize.Token) !int {
+	if !p.at_punct('(') {
+		p.error_at(p.peek(), 'unsupported: ${at.text} is written with its width in parentheses, as in ${at.text}(128), found ${describe(p.peek())}')
+		return error('expected the width of ${at.text}')
+	}
+	p.next()
+	if p.peek().kind != .number {
+		p.error_at(p.peek(), 'unsupported: the width of ${at.text} is a written number, found ${describe(p.peek())}')
+		return error('expected the width of ${at.text}')
+	}
+	t := p.next()
+	value := parse_integer_literal(t.text) or {
+		p.error_at(t, 'unsupported: the width of ${at.text} is a written number, and ${t.text} is not one this compiler reads')
+		return error('expected the width of ${at.text}')
+	}
+	if !p.expect_punct(')') {
+		return error('unclosed ${at.text}')
+	}
+	return int(value)
 }
 
 // parse_bitfield_width reads `: N`, the width of a bitfield. A width this reader

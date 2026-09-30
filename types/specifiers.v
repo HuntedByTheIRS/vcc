@@ -138,6 +138,55 @@ pub fn from_specifiers(words []string) ?Kind {
 		}
 		return none
 	}
+	if seen.len > 0 {
+		for word, _ in seen {
+			if !word.starts_with('_BitInt(') {
+				continue
+			}
+			// A _BitInt specifier wrote its width in parentheses, and the
+			// word arrives here whole: `_BitInt(128)`. The width is the
+			// type, and the one value this compiler has of that kind is the
+			// 128-bit pair, so a width it has no value for is refused
+			// rather than answered with the nearest type it does have.
+			// Measured on gcc 16.2.1: `_BitInt(65)` occupies sixteen bytes
+			// and wraps at 65 bits, which is not what the pair does.
+			//
+			// The word is read here as well as where the width was read,
+			// because these words are what any caller hands in.
+			if longs != 0 || ints != 0 || seen['short'] || seen['float'] || seen['double'] {
+				return none
+			}
+			if seen['signed'] && seen['unsigned'] {
+				return none
+			}
+			if word.len < 10 {
+				return none
+			}
+			// The width is written in digits, and a word that is not is
+			// refused here rather than handed to a reader that would answer
+			// for whatever prefix of it it could read.
+			mut digits := true
+			for ch in word[8..word.len - 1] {
+				if ch < 48 || ch > 57 {
+					digits = false
+					break
+				}
+			}
+			if !digits {
+				return none
+			}
+			if word[8..word.len - 1].int() != 128 {
+				return none
+			}
+			if seen['unsigned'] {
+				return Kind.unsigned_int128
+			}
+			if seen.len == 1 || (seen.len == 2 && seen['signed']) {
+				return Kind.int128
+			}
+			return none
+		}
+	}
 	if seen['short'] {
 		if longs != 0 {
 			return none

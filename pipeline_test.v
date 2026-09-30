@@ -1307,6 +1307,38 @@ fn test_a_128_bit_parameter_that_will_not_fit_the_registers_is_refused() {
 	os.rm(source) or {}
 }
 
+// C23 spells the 128-bit type `_BitInt(128)`, and a declaration written that way
+// is the same type as one written `__int128`. Measured on gcc 16.2.1, this
+// program exits 10: a thousand cubed is a thousand million, and the quotient by
+// a hundred million is ten.
+fn test_the_bitint_spelling_names_the_128_bit_type() {
+	source := scratch('wide_bitint.c')
+	binary := scratch('wide_bitint')
+	program := 'int main(void) { _BitInt(128) a = 1000; a = a * 1000; a = a * 1000; return (int)(a / 100000000); }'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 10
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The width of a _BitInt is the type, so a width this compiler has no value for
+// is refused by name rather than answered with the nearest type it does have.
+// The 128-bit pair wraps at 128 bits and a `_BitInt(8)` wraps at eight, which is
+// a different type, so the declaration is reported with the line it was written
+// at. The refusal is the parser's, and it stops the program there rather than
+// leaving a stage below to size a type nothing resolved.
+fn test_a_bitint_width_with_no_value_here_is_refused() {
+	source := scratch('wide_bitint_refused.c')
+	program := 'int main(void) { _BitInt(8) x = 1; return (int)x; }'
+	os.write_file(source, program) or { panic(err) }
+	lexed := tokenize.lex(program)
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 1
+	assert parsed.diagnostics[0].line == 1
+	assert parsed.diagnostics[0].msg.contains('_BitInt(8)')
+	os.rm(source) or {}
+}
+
 // A 128-bit temporary belongs to the frame it was claimed in, and a program that
 // hands two calls to a function of two pairs is where a temporary kept from the
 // function before shows up: the first operand is parked on the slot the second

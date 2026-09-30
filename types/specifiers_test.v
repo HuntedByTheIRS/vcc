@@ -146,6 +146,31 @@ fn test_from_words_answers_the_type_and_not_only_the_kind() {
 	assert from_words([]) == none
 }
 
+// The width of a _BitInt is the type, so the reader answers the 128-bit type for
+// the one width this compiler has a value of that size for, and none for every
+// other width. Measured on gcc 16.2.1: `_BitInt(65)` occupies sixteen bytes and
+// wraps at 65 bits, so it is not the 128-bit pair under another name.
+fn test_a_bitint_word_is_the_128_bit_type_at_one_width_and_no_other() {
+	signed_128 := from_words(['_BitInt(128)']) or {
+		assert false
+		return
+	}
+	assert signed_128.describe() == '__int128'
+	assert (from_specifiers(['_BitInt(128)']) or { Kind.void_ }) == Kind.int128
+	assert (from_specifiers(['signed', '_BitInt(128)']) or { Kind.void_ }) == Kind.int128
+	assert (from_specifiers(['unsigned', '_BitInt(128)']) or { Kind.void_ }) == Kind.unsigned_int128
+	// A width this compiler has no value for is none, and so is a word that is
+	// not a width at all, which is what a caller other than the parser hands in.
+	assert from_specifiers(['_BitInt(64)']) == none
+	assert from_specifiers(['_BitInt(8)']) == none
+	assert from_specifiers(['_BitInt(0)']) == none
+	assert from_specifiers(['_BitInt()']) == none
+	assert from_specifiers(['_BitInt(abc)']) == none
+	assert from_specifiers(['_BitInt(']) == none
+	assert from_specifiers(['_BitInt(128)', 'short']) == none
+	assert from_specifiers(['_BitInt(128)', 'long']) == none
+}
+
 // Every one of these is a declaration gcc 16.2.1 refuses under -std=c99, which is
 // what makes refusing it in the table right rather than cautious. The message for
 // each was measured with `gcc -std=c99 -fsyntax-only`.
