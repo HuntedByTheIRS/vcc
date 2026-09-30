@@ -1742,6 +1742,66 @@ fn test_two_128_bit_values_are_multiplied() {
 	}
 }
 
+// A pair divided by a pair, and the remainder of one by the other. gcc hands this
+// to libgcc and this back end has nothing to call, so the routine is the compiler's
+// own; every program here is one gcc 16.2.1 answers with 1 and this compiler
+// answers with 1 too. The large cases are the identity a division is defined by —
+// the quotient times the divisor plus the remainder is the dividend, and the
+// remainder is the smaller — which pins the quotient exactly, given the multiply
+// and the comparison the identity is written with are already held to gcc.
+fn test_one_128_bit_value_is_divided_by_another() {
+	powers := doubling('t64', 64) + doubling('t36', 36) + doubling('t100', 100) + doubling('t127', 127)
+	cases := [
+		'\tunsigned __int128 a = 40;\n\tunsigned __int128 b = 2;\n\treturn (a / b) == 20;',
+		'\tunsigned __int128 a = 40;\n\treturn (a % 3) == 1;',
+		// A narrow divisor, which is widened into a pair before the routine starts.
+		'\tunsigned __int128 a = 40;\n\treturn (a / 2) == 20;',
+		'\tunsigned __int128 a = 12345;\n\treturn (a / 1) == 12345;',
+		'\tunsigned __int128 a = 987654321;\n\treturn (a / a) == 1 && (a % a) == 0;',
+		// The remainder takes the dividend's sign and the quotient the two signs
+		// together, which is what C asks for.
+		'\t__int128 a = -7;\n\t__int128 b = 3;\n\treturn (a % b) == -1;',
+		'\t__int128 a = 7;\n\t__int128 b = -3;\n\treturn (a % b) == 1;',
+		'\t__int128 a = -7;\n\t__int128 b = -3;\n\treturn (a % b) == -1;',
+		'\t__int128 a = -7;\n\t__int128 b = 3;\n\treturn (a / b) == -2;',
+		'\t__int128 a = 7;\n\t__int128 b = -3;\n\treturn (a / b) == -2;',
+		// A dividend and a divisor too wide for a word, which is what the routine
+		// shifts and subtracts for.
+		'${powers}\tunsigned __int128 D = t100 + 7;\n\tunsigned __int128 q = D / 3;\n\tunsigned __int128 r = D % 3;\n\treturn (q * 3 + r) == D && r < 3;',
+		'${powers}\tunsigned __int128 D = t100 + 7;\n\tunsigned __int128 q = D / 7;\n\tunsigned __int128 r = D % 7;\n\treturn (q * 7 + r) == D && r < 7;',
+		'${powers}\tunsigned __int128 D = t100;\n\treturn (D / t64) == t36;',
+		'${powers}\t__int128 D = t100 + 7;\n\t__int128 q = D / 3;\n\t__int128 r = D % 3;\n\treturn (q * 3 + r) == D && r == 2;',
+		'${powers}\t__int128 D = 0 - t100 - 7;\n\t__int128 q = D / 3;\n\t__int128 r = D % 3;\n\treturn (q * 3 + r) == D && r == -2;',
+		// The one division that would overflow if the signs were put back by
+		// negating the dividend: the answer is the dividend, measured on gcc.
+		'${powers}\t__int128 a = 0 - t127;\n\treturn (a / -1) == a;',
+		'${powers}\t__int128 a = 0 - t127;\n\treturn (a % -1) == 0;',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
+// A divisor of zero is a fault in gcc, in all four forms, and it is the machine's
+// own fault here: the routine reaches a real division by the zero divisor, so the
+// program dies of the same signal gcc's program dies of. The runner this test uses
+// reports that as the number of the signal, 8, where a shell would say 136.
+fn test_a_128_bit_division_by_zero_faults() {
+	cases := [
+		'\t__int128 a = 5;\n\t__int128 b = 0;\n\treturn (int)(a / b);',
+		'\tunsigned __int128 a = 5;\n\tunsigned __int128 b = 0;\n\treturn (int)(a / b);',
+		'\t__int128 a = 5;\n\t__int128 b = 0;\n\treturn (int)(a % b);',
+		'\tunsigned __int128 a = 5;\n\tunsigned __int128 b = 0;\n\treturn (int)(a % b);',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 8
+	}
+}
+
 fn test_a_128_bit_value_is_computed_as_a_pair() {
 	cases := [
 		WideValueCase{'int main() { __int128 a = 40; __int128 b = 2; return (int)(a + b); }', 42},
@@ -1779,19 +1839,6 @@ fn test_the_high_word_of_a_sum_takes_the_carry_of_the_low_one() {
 		Options{})
 	assert emitted.diagnostics.len == 0
 	assert holds(emitted.bytes, [u8(0x48), 0x11, 0xca])
-}
-
-// The operators with no two-word form are refused by name and by place rather than
-// computed wrongly or left to an internal error: a multiplication, a division and
-// a remainder of a 128-bit value each need a routine this back end does not have.
-fn test_a_128_bit_operator_with_no_two_word_form_is_refused_by_name() {
-	for expression in ['a / b', 'a % b'] {
-		source := 'int main() { __int128 a = 40; __int128 b = 2; return (int)(${expression}); }'
-		emitted := emit(translation_unit(source), Options{})
-		assert emitted.diagnostics.len == 1
-		assert emitted.diagnostics[0].msg.contains('is not implemented')
-		assert emitted.bytes.len == 0
-	}
 }
 
 fn test_a_double_is_computed_in_the_floating_register_file() {

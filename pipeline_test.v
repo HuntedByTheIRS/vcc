@@ -260,29 +260,26 @@ fn test_an_array_of_128_bit_objects_is_written_at_an_element_address() {
 	os.rm(element) or {}
 }
 
-// A 128-bit operation this back end has no form for still writes nothing: the
-// operators a pair has no instruction for are what the emitter refuses, and the
-// message names the operator and its place rather than the width of a store that
-// then happened. Division is the one left, and it is a routine of its own rather
-// than a sequence: this back end links no library and has no runtime, so a
-// division of one pair by another cannot be a call.
-fn test_a_128_bit_operation_with_no_two_word_form_writes_nothing() {
-	for expression in ['a / 2', 'a % 2'] {
-		source := scratch('wide_bad.c')
-		binary := scratch('wide_bad')
-		os.write_file(source, 'int main(void) { __int128 a = 5; return (int)(${expression}); }\n') or {
-			panic(err)
-		}
-		lexed := tokenize.lex(os.read_file(source) or { '' })
-		parsed := parser.parse(lexed.tokens)
-		assert parsed.diagnostics.len == 0
-		emitted := codegen.emit(parsed.unit, codegen.Options{})
-		assert emitted.diagnostics.len == 1
-		assert emitted.diagnostics[0].msg.contains('is not implemented')
-		assert emitted.bytes.len == 0
-		assert !os.exists(binary)
-		os.rm(source) or {}
+// A 128-bit division and remainder run: the routine the compiler emits is exercised
+// end to end, through the command line, and the answers are gcc 16.2.1's. The large
+// one is the identity a division is defined by rather than a wished-for quotient.
+fn test_a_128_bit_division_and_remainder_run() {
+	mut powers := '\tunsigned __int128 t64 = 1;\n'
+	for _ in 0 .. 64 {
+		powers += '\tt64 = t64 + t64;\n'
 	}
+	powers += '\tunsigned __int128 t100 = 1;\n'
+	for _ in 0 .. 100 {
+		powers += '\tt100 = t100 + t100;\n'
+	}
+	source := scratch('wide_div.c')
+	binary := scratch('wide_div')
+	small := compile_and_run([source, '-o', binary], 'int main(void) { __int128 a = -7; __int128 b = 3; return (int)(a / b) == -2 && (int)(a % b) == -1; }\n')
+	assert small == 1
+	large := compile_and_run([source, '-o', binary], 'int main(void) {\n${powers}\tunsigned __int128 D = t100 + 7;\n\tunsigned __int128 q = D / 3;\n\tunsigned __int128 r = D % 3;\n\treturn (q * 3 + r) == D && r < 3;\n}\n')
+	assert large == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
 }
 
 // A 128-bit value computed in the program and run: the pair the two words travel

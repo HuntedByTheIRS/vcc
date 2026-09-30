@@ -155,6 +155,17 @@ struct LoopLabels {
 // Emitter writes one translation unit into a Program. It owns statement and
 // expression emission and the constant walk, and it records what it cannot know:
 // where the text will land, and what the loader will do once the program starts.
+// WideWorking is the scratch a division of two pairs needs, taken from one
+// reservation so the four things it holds sit together: the quotient, which starts
+// as the dividend and is shifted a bit at a time, the remainder, the count of bits
+// still to shift, and a word per operand saying whether that operand was negative.
+struct WideWorking {
+	quotient  Slot
+	remainder Slot
+	counter   Slot
+	flags     Slot
+}
+
 struct Emitter {
 	target backend.Target
 	entry  string
@@ -230,6 +241,7 @@ mut:
 	wide_left    []Slot
 	wide_right   []Slot
 	wide_scratch []Slot
+	wide_working []WideWorking
 	// loops is the loops being emitted, innermost last, for break and continue.
 	loops []LoopLabels
 	// next_label numbers the jump labels. It runs across the whole file rather
@@ -2753,6 +2765,60 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 // 128-bit step in: sixteen bytes, because the value is two words, one level per
 // nesting so an outer step's operand survives the step inside it, and one slot
 // per side so the two operands do not overwrite each other.
+// wide_working_slot is the block a division of two pairs works in, one block per
+// level of nesting so a division inside a division still has its own.
+fn (mut e Emitter) wide_working_slot(depth int) WideWorking {
+	for e.wide_working.len <= depth {
+		block := e.reserve(wide_bytes * 4)
+		e.wide_working << WideWorking{
+			quotient:  Slot{ offset: block.offset, width: block.width }
+			remainder: Slot{ offset: block.offset + wide_bytes, width: block.width }
+			counter:   Slot{ offset: block.offset + wide_bytes * 2, width: 8 }
+			flags:     Slot{ offset: block.offset + wide_bytes * 3, width: 8 }
+		}
+	}
+	return e.wide_working[depth]
+}
+
+// wide_load_word and wide_store_word move one word of a pair between a slot and a
+// register, which is what a routine that shifts a pair a bit at a time is made of.
+fn (mut e Emitter) wide_load_word(slot Slot, at int, reg backend.Register, line int, col int) !void {
+	frame := e.frame_pointer(line, col)!
+	word := e.target.word_size
+	e.append(e.target.load_slot(frame, slot.offset + at * word, reg, word)!)
+}
+
+fn (mut e Emitter) wide_store_word(slot Slot, at int, reg backend.Register, line int, col int) !void {
+	frame := e.frame_pointer(line, col)!
+	word := e.target.word_size
+	e.append(e.target.store_slot(frame, slot.offset + at * word, reg, word)!)
+}
+
+// wide_negate_slot negates a pair where it sits, which is the sign change the
+// division needs on an operand and on an answer: the low word is negated, the
+// borrow it leaves is added to the high word, and the high word is negated. It is
+// the sequence emit_wide_unary writes for a sign change in the registers.
+fn (mut e Emitter) wide_negate_slot(slot Slot, line int, col int) !void {
+	low := e.accumulator(line, col)!
+	high := e.remainder(line, col)!
+	e.wide_load_word(slot, 0, low, line, col)!
+	e.wide_load_word(slot, 1, high, line, col)!
+	e.append(e.target.negate_word(low)!)
+	e.append(e.target.add_with_carry_immediate(high, 0)!)
+	e.append(e.target.negate_word(high)!)
+	e.wide_store_word(slot, 0, low, line, col)!
+	e.wide_store_word(slot, 1, high, line, col)!
+}
+
+// wide_copy_slot copies a pair from one slot to another.
+fn (mut e Emitter) wide_copy_slot(from Slot, to Slot, line int, col int) !void {
+	low := e.accumulator(line, col)!
+	e.wide_load_word(from, 0, low, line, col)!
+	e.wide_store_word(to, 0, low, line, col)!
+	e.wide_load_word(from, 1, low, line, col)!
+	e.wide_store_word(to, 1, low, line, col)!
+}
+
 fn (mut e Emitter) wide_pair_slot(mut pairs []Slot, depth int) Slot {
 	for pairs.len <= depth {
 		pairs << e.reserve(wide_bytes)
@@ -2888,15 +2954,12 @@ fn (e Emitter) word_operation(op string, dst backend.Register, src backend.Regis
 // as a pair and a value of a narrower type as a word — the right side is computed,
 // and the operation then reads both operands out of their slots.
 fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
-	// What is left is a gap of its own rather than a shortcut not taken, and it is
-	// refused by name and place before anything is emitted: this back end links no
-	// library and has no runtime of its own, so a division of one pair by another
-	// would have to be emitted as a routine of its own rather than a sequence.
-	// The three bitwise operators have a form here and no caller from source at
-	// all, because the grammar has no bitwise operator: they are the same three
-	// lines as the arithmetic ones and they wait for the grammar rather than for
-	// this back end.
-	if step.op !in ['+', '-', '*', '&', '|', '^', '==', '!=', '<', '>', '<=', '>='] {
+	// Every operator the grammar can put between two pairs is implemented here. The
+	// three bitwise ones are the exception and they are unreachable rather than
+	// unimplemented: they have a form below and no caller from source, because the
+	// grammar has no bitwise operator at all. They are refused rather than emitted
+	// so that a grammar which grows one cannot land on a form nothing has tested.
+	if step.op !in ['+', '-', '*', '/', '%', '&', '|', '^', '==', '!=', '<', '>', '<=', '>='] {
 		e.diagnostics << problem(step.line, step.col, 'unsupported: ${step.op} on a 128-bit value is not implemented, and this back end computes no value of that width with it')
 		return error('wide operator not implemented')
 	}
@@ -2917,6 +2980,154 @@ fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
 	return e.apply_wide_binary(step, left, right, depth)
 }
 
+// emit_wide_division divides one pair by another by shifting and subtracting, which
+// is how a division is done when there is nothing to call. gcc hands this operation
+// to libgcc at every optimization level, and this back end links no library and has
+// no runtime of its own, so the routine is emitted instead of named.
+//
+// The dividend is copied into the quotient, which is shifted left one bit at a time;
+// the remainder is shifted left with the top bit of the quotient coming in at its
+// bottom, and the divisor is subtracted from the remainder whenever it fits, which
+// sets the quotient's lowest bit. After one pass per bit of the value the quotient
+// holds the answer and the remainder holds the remainder.
+//
+// The signed form is the unsigned one on absolute values, with the signs put back at
+// the end: the remainder takes the dividend's sign and the quotient the two signs
+// together, which is what C asks for. INT128_MIN divided by -1 is the case that
+// would overflow if the signs were put back by negating the dividend, and it does
+// not: the absolute value is divided, the quotient comes out as 2^127, and the signs
+// cancel, which is the answer gcc 16.2.1 gives rather than a trap.
+//
+// A divisor of zero is a trap, in gcc and in the C standard both, and it is the
+// machine's own trap here: the routine reaches an actual division by the zero
+// divisor, so the fault a program sees is the same one gcc's program sees.
+fn (mut e Emitter) emit_wide_division(step ast.Binary, left Slot, right Slot, depth int) !void {
+	frame := e.frame_pointer(step.line, step.col)!
+	low := e.accumulator(step.line, step.col)!
+	high := e.remainder(step.line, step.col)!
+	other := e.scratch(step.line, step.col)!
+	word := e.target.word_size
+	signed := !e.wide_unsigned(step.left) && !e.wide_unsigned(step.right)
+	work := e.wide_working_slot(depth)
+	// A zero divisor faults in the machine, which is the behaviour the language
+	// asks for and the one gcc has, so the reachable instruction is a division by
+	// it: nothing after this runs in that case.
+	e.wide_load_word(right, 0, low, step.line, step.col)!
+	e.wide_load_word(right, 1, other, step.line, step.col)!
+	e.append(e.target.or_word(low, other)!)
+	divisor_is_not_zero := e.label()
+	e.branch(.branch_nonzero, divisor_is_not_zero, step.line, step.col)!
+	e.wide_load_word(right, 0, other, step.line, step.col)
+	e.append(e.target.move_immediate32(low, 0)!)
+	e.append(e.target.move_immediate32(high, 0)!)
+	e.append(e.target.divide_pair(other)!)
+	e.place(divisor_is_not_zero)
+	// Each operand is made positive, and whether it had to be is kept: one word per
+	// operand.
+	e.append(e.target.move_immediate32(low, 0)!)
+	e.append(e.target.store_slot(frame, work.flags.offset, low, word)!)
+	e.append(e.target.store_slot(frame, work.flags.offset + word, low, word)!)
+	if signed {
+		for side in 0 .. 2 {
+			operand := if side == 0 { left } else { right }
+			e.wide_load_word(operand, 1, low, step.line, step.col)!
+			e.append(e.target.test_word(low)!)
+			e.append(e.target.set_condition(.less, low)!)
+			e.append(e.target.widen_byte(low)!)
+			e.append(e.target.store_slot(frame, work.flags.offset + side * word, low, word)!)
+			e.append(e.target.test_word(low)!)
+			was_positive := e.label()
+			e.branch(.branch_zero, was_positive, step.line, step.col)!
+			e.wide_negate_slot(operand, step.line, step.col)!
+			e.place(was_positive)
+		}
+	}
+	// The quotient starts as the dividend, the remainder as zero, and there is one
+	// pass per bit of the value.
+	e.wide_copy_slot(left, work.quotient, step.line, step.col)!
+	e.append(e.target.move_immediate32(low, 0)!)
+	e.wide_store_word(work.remainder, 0, low, step.line, step.col)!
+	e.wide_store_word(work.remainder, 1, low, step.line, step.col)!
+	e.append(e.target.move_immediate32(low, 128)!)
+	e.append(e.target.store_slot(frame, work.counter.offset, low, word)!)
+	loop := e.label()
+	no_subtraction := e.label()
+	done := e.label()
+	e.place(loop)
+	// The bit the remainder takes in is the top bit of the quotient.
+	e.wide_load_word(work.quotient, 1, other, step.line, step.col)!
+	e.append(e.target.shift_right_word(other, 63)!)
+	// The quotient and the remainder each shift left one, and the bit joins the
+	// remainder at its bottom, where the shift has just left a zero.
+	e.wide_load_word(work.quotient, 0, low, step.line, step.col)!
+	e.wide_load_word(work.quotient, 1, high, step.line, step.col)!
+	e.append(e.target.shift_wide_left(high, low, 1)!)
+	e.append(e.target.shift_left_word(low, 1)!)
+	e.wide_store_word(work.quotient, 0, low, step.line, step.col)!
+	e.wide_store_word(work.quotient, 1, high, step.line, step.col)!
+	e.wide_load_word(work.remainder, 0, low, step.line, step.col)!
+	e.wide_load_word(work.remainder, 1, high, step.line, step.col)!
+	e.append(e.target.shift_wide_left(high, low, 1)!)
+	e.append(e.target.shift_left_word(low, 1)!)
+	e.append(e.target.or_word(low, other)!)
+	e.wide_store_word(work.remainder, 0, low, step.line, step.col)!
+	e.wide_store_word(work.remainder, 1, high, step.line, step.col)!
+	// The subtraction that decides it is also the comparison: the borrow out of the
+	// high word says whether the divisor fitted.
+	e.wide_load_word(work.remainder, 0, low, step.line, step.col)!
+	e.wide_load_word(right, 0, other, step.line, step.col)!
+	e.append(e.target.subtract_word(low, other)!)
+	e.wide_load_word(work.remainder, 1, low, step.line, step.col)!
+	e.wide_load_word(right, 1, other, step.line, step.col)!
+	e.append(e.target.subtract_with_borrow(low, other)!)
+	e.append(e.target.set_condition(.above_or_equal, low)!)
+	e.append(e.target.widen_byte(low)!)
+	e.append(e.target.test_word(low)!)
+	e.branch(.branch_zero, no_subtraction, step.line, step.col)!
+	e.wide_load_word(work.remainder, 0, low, step.line, step.col)!
+	e.wide_load_word(right, 0, other, step.line, step.col)!
+	e.append(e.target.subtract_word(low, other)!)
+	e.wide_store_word(work.remainder, 0, low, step.line, step.col)!
+	e.wide_load_word(work.remainder, 1, low, step.line, step.col)!
+	e.wide_load_word(right, 1, other, step.line, step.col)!
+	e.append(e.target.subtract_with_borrow(low, other)!)
+	e.wide_store_word(work.remainder, 1, low, step.line, step.col)!
+	e.wide_load_word(work.quotient, 0, low, step.line, step.col)!
+	e.append(e.target.move_immediate32(other, 1)!)
+	e.append(e.target.or_word(low, other)!)
+	e.wide_store_word(work.quotient, 0, low, step.line, step.col)!
+	e.place(no_subtraction)
+	// One fewer bit to go, and the loop ends when there are none.
+	e.append(e.target.load_slot(frame, work.counter.offset, low, word)!)
+	e.append(e.target.add_immediate(low, -1))
+	e.append(e.target.store_slot(frame, work.counter.offset, low, word)!)
+	e.append(e.target.test_word(low)!)
+	e.branch(.branch_nonzero, loop, step.line, step.col)!
+	e.place(done)
+	if signed {
+		// The remainder takes the dividend's sign, and the quotient takes the two
+		// signs together. Both are written out, because which one is the answer
+		// depends on the operator rather than on the routine.
+		remainder_kept := e.label()
+		e.append(e.target.load_slot(frame, work.flags.offset, low, word)!)
+		e.append(e.target.test_word(low)!)
+		e.branch(.branch_zero, remainder_kept, step.line, step.col)!
+		e.wide_negate_slot(work.remainder, step.line, step.col)!
+		e.place(remainder_kept)
+		quotient_kept := e.label()
+		e.append(e.target.load_slot(frame, work.flags.offset, low, word)!)
+		e.append(e.target.load_slot(frame, work.flags.offset + word, other, word)!)
+		e.append(e.target.xor_word(low, other)!)
+		e.append(e.target.test_word(low)!)
+		e.branch(.branch_zero, quotient_kept, step.line, step.col)!
+		e.wide_negate_slot(work.quotient, step.line, step.col)!
+		e.place(quotient_kept)
+	}
+	answer := if step.op == '/' { work.quotient } else { work.remainder }
+	e.wide_load_word(answer, 0, low, step.line, step.col)!
+	e.wide_load_word(answer, 1, high, step.line, step.col)!
+}
+
 // apply_wide_binary does the operation with the left pair in the registers and the
 // right pair in a slot, one word of it at a time in the scratch register. A load
 // between an instruction and the one that carries into it does not disturb the
@@ -2935,6 +3146,12 @@ fn (mut e Emitter) apply_wide_binary(step ast.Binary, left Slot, right Slot, dep
 			e.append(e.word_operation(step.op, low, other, false)!)
 			e.append(e.target.load_slot(frame, right.offset + word, other, word)!)
 			e.append(e.word_operation(step.op, high, other, true)!)
+		}
+		'/', '%' {
+			// A division is a routine rather than a sequence, so it is written
+			// where it is called and given both operands: it works in the frame
+			// for the whole of itself.
+			return e.emit_wide_division(step, left, right, depth)
 		}
 		'*' {
 			// A pair multiplied by a pair, which gcc emits the same way for both
