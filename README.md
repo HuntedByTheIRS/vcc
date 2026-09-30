@@ -113,6 +113,20 @@ in types this reader has no form for, and a program that never calls one should
 not be refused over it. Anything outside the subset is diagnosed rather than
 miscompiled.
 
+`typeof` is a specifier: the operand between the parentheses is a type name or
+an expression, the value written there is never evaluated, and the type of that
+operand is what the declaration that follows declares. So `typeof(x) y = 4;` is
+an object of the type `x` has, `typeof(int) *p` is a pointer to an int, and
+`sizeof(typeof(x))` answers the size of that type. The four spellings are read:
+`typeof` (C23, and a GNU word besides), `__typeof__` and `__typeof` (reserved, so
+they are read in every mode including c89, which is what gcc 16.2.1 does with
+them), and `typeof_unqual`, which is the same type with the qualifiers taken off
+it. Measured on gcc 16.2.1, bare `typeof` is not a word under `-std=c99` and is
+one under `-std=gnu99` and `-std=c23`; this compiler reads it in every mode and
+reports it through the dialect table when the mode does not have it. Two operands
+are refused by name: one whose type was never resolved, and one of an array type,
+which would make the declaration an array the declarator never wrote.
+
 The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
 `_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
 loader, which is what makes `puts` work without a linker. `-l` adds the library

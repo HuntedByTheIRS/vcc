@@ -17,7 +17,10 @@ variables and control flow (`if`/`else`, `while`, `for` with `break` and
 them, the address of a local is one thing more, and so does a call whose value is
 read, as in `int x = add(y, 3) + 2;`. A `double` is a value the compiler has, in
 the floating-point registers and in the SysV sequence for arguments and returns,
-and a typedef is followed to the type it names wherever a type can be written.
+and a typedef is followed to the type it names wherever a type can be written. A
+`typeof` specifier is read the same way: the operand is a type name or an
+expression, its value is never evaluated, and the declaration that follows
+declares what that operand's type says.
 `-l` links the library it names, so `-lm` puts `libm.so.6` in the image's
 `DT_NEEDED` and `sqrt` resolves. An object of a struct or union type inside a
 function is a block of the frame with its members at the offsets the layout gives
