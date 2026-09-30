@@ -1288,6 +1288,107 @@ fn shift_immediate(group u8, reg Register, bits u8) ![]u8 {
 	return out
 }
 
+// shift_register is a shift whose count is in CL, which is the register the machine
+// takes a count in: the operation is in the reg field and the count is in the
+// register rather than in the instruction. The machine reads the low six bits of
+// CL and no more, which is why the count of a computed shift is answered modulo the
+// register's width by the machine itself rather than refused as the immediate form
+// refuses a count as wide as the value. `wide` is the difference between the word
+// form and the four-byte one, and the four-byte one is what a value narrower than a
+// word is shifted with so that its count is read as a narrow one's count is.
+fn shift_register(group u8, reg Register, wide bool) ![]u8 {
+	if reg.width != 4 {
+		return error('${name}: a shift names a register four bytes wide, and ${reg.name} is not one')
+	}
+	mut out := []u8{cap: 3}
+	if wide {
+		mut rex := u8(0x48) // REX.W: the whole word is shifted
+		if reg.code >= 8 {
+			rex |= 0x01
+		}
+		out << rex
+	} else if reg.code >= 8 {
+		out << u8(0x41) // REX.B reaches the register; the four-byte form needs no REX.W
+	}
+	out << u8(0xd3) // the count is in CL
+	out << u8(0xc0 | ((group & 0x07) << 3) | (reg.code & 0x07))
+	return out
+}
+
+// The six forms of it, and each of the four-byte ones shifts a value narrower than
+// a word the way the language shifts it: the machine reads five bits of the count.
+pub fn shift_left_narrow(reg Register) ![]u8 {
+	return shift_register(0x04, reg, false)
+}
+
+pub fn shift_right_narrow(reg Register) ![]u8 {
+	return shift_register(0x05, reg, false)
+}
+
+pub fn shift_right_arithmetic_narrow(reg Register) ![]u8 {
+	return shift_register(0x07, reg, false)
+}
+
+pub fn shift_left_word_register(reg Register) ![]u8 {
+	return shift_register(0x04, reg, true)
+}
+
+pub fn shift_right_word_register(reg Register) ![]u8 {
+	return shift_register(0x05, reg, true)
+}
+
+pub fn shift_right_arithmetic_register(reg Register) ![]u8 {
+	return shift_register(0x07, reg, true)
+}
+
+// shift_pair_register is shld and shrd with the count in CL, which is what a shift
+// of a value two words wide needs when the count is not written in the program: it
+// moves the bits of one word into the other end of the other, and with the count in
+// a register the machine reads six bits of it.
+fn shift_pair_register(opcode u8, dst Register, src Register) ![]u8 {
+	if dst.width != 4 || src.width != 4 {
+		return error('${name}: opcode ${opcode} takes two registers four bytes wide, and ${dst.name} and ${src.name} are not both that')
+	}
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x48) // REX.W: the values are words
+	if dst.code >= 8 {
+		rex |= 0x01
+	}
+	if src.code >= 8 {
+		rex |= 0x04
+	}
+	out << rex
+	out << u8(0x0f)
+	out << opcode
+	out << u8(0xc0 | ((src.code & 0x07) << 3) | (dst.code & 0x07))
+	return out
+}
+
+pub fn shld_register(dst Register, src Register) ![]u8 {
+	return shift_pair_register(0xa5, dst, src)
+}
+
+pub fn shrd_register(dst Register, src Register) ![]u8 {
+	return shift_pair_register(0xad, dst, src)
+}
+
+// test_byte_immediate tests one byte register against a constant and sets the flags
+// for that test, which is how the bit of a shift count that decides which sequence
+// runs is read without changing the count.
+pub fn test_byte_immediate(reg Register, value u8) ![]u8 {
+	if reg.width != 4 {
+		return error('${name}: a byte test names the register four bytes wide whose low byte it tests, and ${reg.name} is not one')
+	}
+	mut out := []u8{cap: 3}
+	if reg.code >= 8 {
+		out << u8(0x41) // REX.B reaches the register's low byte
+	}
+	out << u8(0xf6) // the group whose reg field of zero is the test
+	out << u8(0xc0 | (reg.code & 0x07))
+	out << value
+	return out
+}
+
 // shift_pair_immediate is shld and shrd: the destination is the r/m operand, the
 // source is the reg field, and the count is in the last byte.
 fn shift_pair_immediate(opcode u8, dst Register, src Register, bits u8) ![]u8 {

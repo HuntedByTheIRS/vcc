@@ -382,6 +382,44 @@ fn test_the_wide_shifts_are_the_bytes_the_machine_reads() {
 		0x03]
 }
 
+// The shifts whose count is in CL. Every byte below was taken from `as` and
+// objdump for the instruction the test names, so the encodings are held to the
+// assembler's reading of them and not to mine.
+fn test_a_shift_whose_count_is_in_a_register() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	rcx := target.reg('rcx') or { panic(err) }
+	r8 := target.reg('r8') or { panic(err) }
+	// shl eax, cl and shl rax, cl: the four-byte form and the word form of one
+	// operation, which are the two counts a value of each width is shifted by. The
+	// four-byte form is the one whose count the machine reads as five bits.
+	assert arch.shift_left_narrow(rax) or { panic(err) } == [u8(0xd3), 0xe0]
+	assert arch.shift_left_word_register(rax) or { panic(err) } == [u8(0x48), 0xd3, 0xe0]
+	assert arch.shift_right_narrow(rax) or { panic(err) } == [u8(0xd3), 0xe8]
+	assert arch.shift_right_word_register(rax) or { panic(err) } == [u8(0x48), 0xd3, 0xe8]
+	assert arch.shift_right_arithmetic_narrow(rax) or { panic(err) } == [u8(0xd3), 0xf8]
+	assert arch.shift_right_arithmetic_register(rax) or { panic(err) } == [u8(0x48), 0xd3, 0xf8]
+	// The register the operation is in reaches past the first eight with a REX
+	// prefix, and the four-byte form needs one for that and for nothing else.
+	assert arch.shift_left_narrow(r8) or { panic(err) } == [u8(0x41), 0xd3, 0xe0]
+	assert arch.shift_left_word_register(r8) or { panic(err) } == [u8(0x49), 0xd3, 0xe0]
+	// shld rax, rcx, cl and shrd rax, rcx, cl: the two words shifted as one, with the
+	// count in the register.
+	assert arch.shld_register(rax, rcx) or { panic(err) } == [u8(0x48), 0x0f, 0xa5, 0xc8]
+	assert arch.shrd_register(rax, rcx) or { panic(err) } == [u8(0x48), 0x0f, 0xad, 0xc8]
+	// test cl, 64: the bit of the count that says the count is a word or more.
+	assert arch.test_byte_immediate(rcx, 64) or { panic(err) } == [u8(0xf6), 0xc1, 0x40]
+	// A register narrower than four bytes is not one of these.
+	byte := arch.Register{
+		name:  'al'
+		code:  0
+		width: 1
+	}
+	assert arch.shift_left_narrow(byte) or { []u8{} }.len == 0
+	assert arch.shift_left_word_register(byte) or { []u8{} }.len == 0
+	assert arch.test_byte_immediate(byte, 64) or { []u8{} }.len == 0
+}
+
 fn test_the_wide_multiply_and_divide_are_the_bytes_the_machine_reads() {
 	target := lookup('x86_64-linux') or { panic(err) }
 	rax := target.reg('rax') or { panic(err) }

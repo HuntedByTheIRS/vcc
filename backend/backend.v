@@ -646,6 +646,45 @@ pub fn (t Target) shift_wide_right(dst arch.Register, src arch.Register, bits u8
 	return arch.shrd_immediate(dst, src, bits)
 }
 
+// The shifts whose count is in a register rather than in the instruction. Each is
+// what a shift by a count the program works out needs, and the machine reads the
+// count modulo the register's width rather than being told not to.
+pub fn (t Target) shift_left_narrow_register(reg arch.Register) ![]u8 {
+	return arch.shift_left_narrow(reg)
+}
+
+pub fn (t Target) shift_right_narrow_register(reg arch.Register) ![]u8 {
+	return arch.shift_right_narrow(reg)
+}
+
+pub fn (t Target) shift_right_arithmetic_narrow_register(reg arch.Register) ![]u8 {
+	return arch.shift_right_arithmetic_narrow(reg)
+}
+
+pub fn (t Target) shift_left_word_register(reg arch.Register) ![]u8 {
+	return arch.shift_left_word_register(reg)
+}
+
+pub fn (t Target) shift_right_word_register(reg arch.Register) ![]u8 {
+	return arch.shift_right_word_register(reg)
+}
+
+pub fn (t Target) shift_right_arithmetic_word_register(reg arch.Register) ![]u8 {
+	return arch.shift_right_arithmetic_register(reg)
+}
+
+pub fn (t Target) shift_wide_left_register(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.shld_register(dst, src)
+}
+
+pub fn (t Target) shift_wide_right_register(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.shrd_register(dst, src)
+}
+
+pub fn (t Target) test_byte_immediate(reg arch.Register, value u8) ![]u8 {
+	return arch.test_byte_immediate(reg, value)
+}
+
 // multiply_pair and multiply_pair_signed multiply the result register by the
 // source and leave the two-word product in the pair.
 // multiply_word multiplies one word by another and keeps the low word of the
