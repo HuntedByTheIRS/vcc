@@ -317,6 +317,26 @@ fn test_the_128_bit_row_reports_in_a_strict_mode_only() {
 	assert pedantic_messages(unsigned_run, asking(.c99)).len == 1
 }
 
+// The 128-bit type C23 added is part of C23 and of no earlier standard, so a
+// mode before C23 reports it and a C23 mode does not. Measured on gcc 16.2.1,
+// which warns `ISO C does not support '_BitInt(128)' before C23` under
+// `-std=c99 -pedantic`, says it under c11 and gnu99 too, makes it an error under
+// `-pedantic-errors`, and says nothing under `-std=c23` or `-std=gnu23`.
+fn test_the_bitint_row_reports_before_c23_only() {
+	tokens := [token('_BitInt')]
+	strict := pedantic_messages(tokens, asking(.c99))
+	assert strict.len == 1
+	assert strict[0].msg == 'ISO C99 forbids the _BitInt type'
+	assert pedantic_messages(tokens, asking(.c11)).len == 1
+	// A GNU mode does not grant the type the way it grants a GNU extension:
+	// gnu99 reports it too, which is what the row's gnu flag is not set for.
+	assert pedantic_messages(tokens, asking(.gnu99)).len == 1
+	assert pedantic_messages(tokens, asking(.c23)).len == 0
+	// A declaration written `unsigned _BitInt(128)` is found by the same token.
+	unsigned_run := [token('unsigned'), token('_BitInt')]
+	assert pedantic_messages(unsigned_run, asking(.c99)).len == 1
+}
+
 fn test_a_system_header_is_not_the_program() {
 	tokens := [tokenize.Token{
 		kind: .identifier

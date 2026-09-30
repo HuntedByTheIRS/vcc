@@ -303,6 +303,23 @@ pub const features = [
 		pedantic:  'the __int128 type'
 		status:    .implemented
 	},
+	// The 128-bit type C23 added, written `_BitInt(128)`: the word and the width
+	// in parentheses are one specifier, and the check finds the row by the word.
+	// C23 has the type and no earlier standard does, and a GNU mode does not
+	// grant it the way it grants a GNU extension. Measured on gcc 16.2.1:
+	// `-std=c99 -pedantic` warns `ISO C does not support '_BitInt(128)' before
+	// C23`, c11 and gnu99 say it too, `-pedantic-errors` makes it an error, and
+	// c23 and gnu23 say nothing. What the tree reads is the one width it has a
+	// value of that size for: `_BitInt(128)` is the 128-bit pair under C23's
+	// spelling, and every other width is refused by name with its location.
+	Feature{
+		spellings: ['_BitInt']
+		since:     .c23
+		gnu:       false
+		extension: ''
+		pedantic:  'the _BitInt type'
+		status:    .implemented
+	},
 	Feature{
 		spellings: ['_Complex']
 		since:     .c99
