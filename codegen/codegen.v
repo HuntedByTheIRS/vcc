@@ -486,27 +486,6 @@ fn (mut e Emitter) check_expression(expr ast.Expr, depth int) !void {
 		}
 		return
 	}
-	match expr {
-		ast.Binary {
-			e.check_expression(expr.left, depth + 1)!
-			e.check_expression(expr.right, depth + 1)!
-		}
-		ast.Cast {
-			e.check_expression(expr.expr, depth + 1)!
-		}
-		ast.Unary {
-			e.check_expression(expr.expr, depth + 1)!
-		}
-		ast.Call {
-			for arg in expr.args {
-				e.check_expression(arg, depth + 1)!
-			}
-		}
-		ast.Index {
-			e.check_expression(expr.index, depth + 1)!
-		}
-		else {}
-	}
 }
 
 // is_an_int_value says whether a value is one the four-byte signed int this back
@@ -1137,8 +1116,13 @@ fn (mut e Emitter) address_of_object(expr ast.Expr, depth int) !void {
 		return
 	}
 	if expr is ast.Index {
-		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of an array is not handed over by value in this compiler, so ${expr.name}[...] cannot be an argument')
-		return error('element by value')
+		// An element of an array is at the array's address plus the index scaled by
+		// the size of one element, which is the computation a member of an element
+		// makes with an offset of zero. What this refuses is nothing: the address is
+		// what the caller asked for, and a *value* of an element is the read the
+		// element path refuses, in its own words.
+		e.address_of_member(expr.name, expr.index, 0, false, depth, expr.line, expr.col)!
+		return
 	}
 	e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: an object handed over by value has to be a name, an element or a member, and this expression is not one')
 	return error('not an object')
@@ -1297,16 +1281,20 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr)
 // number, so any other size is a multiply and an add, which is what an array of
 // objects of those sizes needs.
 //
-// An element of sixteen bytes is refused here by name rather than passed on. An
-// address of one is a multiply and an add, but the load or the store that follows it
-// asks the machine for sixteen bytes in one instruction, which it has no encoding
-// for: that reached the emitter as an internal diagnostic at the top of the file with
-// nothing named. An array of 128-bit objects is storage the declaration reserves, and
-// an element of one is the value question this back end has no answer for; a struct
-// of sixteen bytes has the same size and the same refusal. Members of such an object
-// are read and written one value at a time and do not come through here.
-fn (mut e Emitter) element_address(base backend.Register, index backend.Register, stride int, offset int, name string, line int, col int) !void {
-	if stride == wide_bytes {
+// An element of sixteen bytes of an aggregate type is refused here by name rather than
+// passed on. An address of one is a multiply and an add, but the load or the store that
+// follows it asks the machine for sixteen bytes in one instruction, which it has no
+// encoding for: that reached the emitter as an internal diagnostic at the top of the
+// file with nothing named. Members of such an object are read and written one value at
+// a time and do not come through here, and a whole element of one is a copy this back
+// end does not make yet.
+//
+// An element of a 128-bit type is the case the flag allows instead: the caller reads or
+// writes it as the two words an object of the type holds, which is what the declaration
+// and the assignment already do, so the address is computed here and the sixteen-byte
+// instruction is never asked for.
+fn (mut e Emitter) element_address(base backend.Register, index backend.Register, stride int, offset int, wide bool, name string, line int, col int) !void {
+	if stride == wide_bytes && !wide {
 		e.diagnostics << problem(line, col, 'unsupported: ${name} holds elements of ${stride} bytes, and this back end moves one, four or eight bytes in one instruction, so an element of that size is not a value it reads or writes')
 		return error('unsupported element size')
 	}
@@ -1341,10 +1329,16 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			register := e.accumulator(stmt.line, stmt.col)!
 			base := e.scratch(stmt.line, stmt.col)!
 			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, base.name)
-			e.element_address(base, register, object.width, 0, stmt.target, stmt.line,
+			is_wide := !object.object && object.width == wide_bytes
+			e.element_address(base, register, object.width, 0, is_wide, stmt.target, stmt.line,
 				stmt.col)!
 			address := e.value_slot(0)
 			e.store_accumulator(address, stmt.line, stmt.col)!
+			if is_wide {
+				// An element of that width takes the two words an object of the type
+				// takes, through the element's own address.
+				return e.store_wide_at(address, expr, stmt.line, stmt.col)
+			}
 			e.emit_expr_at(expr, 1)!
 			address_register := e.scratch(stmt.line, stmt.col)!
 			if object.floating {
@@ -1389,10 +1383,15 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	e.emit_expr_at(subscript, 0)!
 	base := e.frame_pointer(stmt.line, stmt.col)!
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.element_address(base, register, slot.width, slot.offset, stmt.target, stmt.line,
-		stmt.col)!
+	e.element_address(base, register, slot.width, slot.offset, slot.wide, stmt.target,
+		stmt.line, stmt.col)!
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
+	if slot.wide {
+		// An element of that width takes the two words an object of the type takes,
+		// through the element's own address.
+		return e.store_wide_at(address, expr, stmt.line, stmt.col)
+	}
 	e.emit_expr_at(expr, 1)!
 	address_register := e.scratch(stmt.line, stmt.col)!
 	if slot.floating {
@@ -2308,7 +2307,13 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 					// cannot overwrite it on the way.
 					base := e.scratch(expr.line, expr.col)!
 					e.reference(e.target.address_of(base, 0), .global_address, expr.name, base.name)
-					e.element_address(base, register, object.width, 0, expr.name, expr.line, expr.col)!
+					wide := !object.object && object.width == wide_bytes
+					e.element_address(base, register, object.width, 0, wide, expr.name, expr.line,
+						expr.col)!
+					if wide {
+						e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${expr.name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
+						return error('128-bit element')
+					}
 					if object.floating {
 						double_register := e.float_accumulator(expr.line, expr.col)!
 						e.append(e.target.load_double_indirect(register, double_register)!)
@@ -2327,8 +2332,12 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.emit_expr_at(expr.index, depth + 1)!
 			base := e.frame_pointer(expr.line, expr.col)!
 			register := e.accumulator(expr.line, expr.col)!
-			e.element_address(base, register, slot.width, slot.offset, expr.name, expr.line,
-				expr.col)!
+			e.element_address(base, register, slot.width, slot.offset, slot.wide, expr.name,
+				expr.line, expr.col)!
+			if slot.wide {
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${expr.name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
+				return error('128-bit element')
+			}
 			if slot.floating {
 				// An element of an array of doubles: the address is in a general
 				// register and the value is read into a floating-point one, which
@@ -2493,6 +2502,51 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 // are the same read, so both of them come through here rather than each keeping its
 // own copy of the sequence.
 fn (mut e Emitter) low_word_of_object(expr ast.Expr, width int, line int, col int, depth int) !void {
+	match expr {
+		ast.Index {
+			// An element of an array of 128-bit objects: the address of the element is
+			// the array's base scaled by the index, which is the computation the element
+			// read makes, and the low word is the same read made through that address.
+			// The element itself is still not a value: this is the conversion the
+			// caller asked for, read at the width the caller named.
+			slot := e.lookup(expr.name) or {
+				if object := e.global_of(expr.name) {
+					if object.count == 0 {
+						e.diagnostics << problem(line, col, 'unsupported: an element of ${expr.name} is read as a 128-bit object, and ${expr.name} is not an array')
+						return error('not an array')
+					}
+					e.emit_expr_at(expr.index, depth + 1)!
+					register := e.accumulator(line, col)!
+					// The address of the object goes into the scratch register after
+					// the index is computed, so the index cannot overwrite it.
+					base := e.scratch(line, col)!
+					e.reference(e.target.address_of(base, 0), .global_address, expr.name, base.name)
+					e.element_address(base, register, object.width, 0, !object.object && object.width == wide_bytes, expr.name, line, col)!
+					e.append(e.target.load_indirect(register, register, width)!)
+					if width == 1 {
+						e.append(e.target.sign_extend_byte(register)!)
+					}
+					return
+				}
+				e.diagnostics << problem(line, col, 'unsupported: ${expr.name} is read as an array, and no declaration of that name is in scope')
+				return error('unknown name')
+			}
+			if slot.count == 0 {
+				e.diagnostics << problem(line, col, 'unsupported: an element of ${expr.name} is read, and ${expr.name} is not an array')
+				return error('not an array')
+			}
+			e.emit_expr_at(expr.index, depth + 1)!
+			base := e.frame_pointer(line, col)!
+			register := e.accumulator(line, col)!
+			e.element_address(base, register, slot.width, slot.offset, slot.wide, expr.name, line, col)!
+			e.append(e.target.load_indirect(register, register, width)!)
+			if width == 1 {
+				e.append(e.target.sign_extend_byte(register)!)
+			}
+			return
+		}
+		else {}
+	}
 	e.address_of_object(expr, depth)!
 	register := e.accumulator(line, col)!
 	e.append(e.target.load_indirect(register, register, width)!)

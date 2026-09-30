@@ -203,9 +203,9 @@ pub const features = [
 	// it out, which is what makes `sizeof(__int128)` 16, and an object of one is
 	// storage this back end has: sixteen bytes that are declared, given a value
 	// narrower than them, copied and addressed, at the top level, as a local and
-	// as a member of an object and as an element of an array of them, whose element
-	// access is refused by name (an element of sixteen bytes is not a value one
-	// instruction moves). Reading one is written as a conversion to a
+	// as a member of an object and as an element of an array of them, where the element
+	// is written as the two words an object takes and read by a conversion at its own
+	// address, and an element taken as a *value* is refused by name. Reading one is written as a conversion to a
 	// narrower type or into a narrower slot, which is its low word: measured on gcc
 	// 16.2.1, `(int)` of a stored 300 is 300, `(char)` of one is 44, `(int)` of a
 	// stored -1 is -1, and an int declared from a stored 300 is 300.

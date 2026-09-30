@@ -1179,25 +1179,39 @@ fn test_a_128_bit_member_is_written_and_read_at_its_address() {
 	assert run_image(neighbour.bytes) == 1
 }
 
-// An array of 128-bit objects is storage the declaration reserves, and an element of
-// one is refused by name: the address of an element is a multiply and an add, but the
-// load or the store that follows asks the machine for sixteen bytes in one
-// instruction, which would reach it as an internal diagnostic with no place in the
-// file. A member of such an element is a value at a time and does come through.
-fn test_an_array_of_128_bit_objects_is_storage_with_element_access_refused() {
+// An array of 128-bit objects is storage whose elements are written and read the way
+// the object of the type is, at the element's own address: the store is the two words
+// an object takes, the conversion is the low word at the element's address, and an
+// element taken as a *value* is refused by name, because the type has no value here.
+// Measured on gcc 16.2.1, the programs below return 0, 44, 44 and 255.
+fn test_an_array_of_128_bit_objects_is_written_and_read_at_an_element_address() {
 	declared := emit(translation_unit('int main() { __int128 a[3]; return (int)sizeof(a); }'), Options{})
 	assert declared.diagnostics.len == 0
 	assert run_image(declared.bytes) == 48
 	stored := emit(translation_unit('int main() { __int128 a[3]; a[0] = 300; return 0; }'), Options{})
-	assert stored.diagnostics.len == 1
-	assert stored.diagnostics[0].msg.contains('elements of 16 bytes')
-	assert stored.bytes.len == 0
-	read := emit(translation_unit('int main() { __int128 a[3]; return (int)a[0]; }'), Options{})
+	assert stored.diagnostics.len == 0
+	assert run_image(stored.bytes) == 0
+	converted := emit(translation_unit('int main() { __int128 a[3]; a[0] = 300; int n = a[0]; return n; }'),
+		Options{})
+	assert converted.diagnostics.len == 0
+	assert run_image(converted.bytes) == 44
+	// An element assigned another element is a copy of the sixteen bytes, and the
+	// address of the source is the element's own.
+	copied := emit(translation_unit('int main() { __int128 a[2]; a[0] = 300; a[1] = a[0]; int n = a[1]; return n; }'),
+		Options{})
+	assert copied.diagnostics.len == 0
+	assert run_image(copied.bytes) == 44
+	negative := emit(translation_unit('int main() { __int128 a[2]; a[0] = -1; int n = a[0]; return n; }'), Options{})
+	assert negative.diagnostics.len == 0
+	assert run_image(negative.bytes) == 255
+	// An element read as a value is the one shape left refused, and it is refused by
+	// name: the value of that width is what this back end does not have.
+	read := emit(translation_unit('int main() { __int128 a[3]; a[0] = 5; return a[0]; }'), Options{})
 	assert read.diagnostics.len == 1
-	assert read.diagnostics[0].msg.contains('not handed over by value')
+	assert read.diagnostics[0].msg.contains('is an object of 128 bits')
+	assert read.bytes.len == 0
 	// The member of an element is the same widening store the member of any object
-	// takes, at the address of the element plus the member's offset. Measured on gcc
-	// 16.2.1, the program below returns 44.
+	// takes, at the address of the element plus the member's offset.
 	member := emit(translation_unit('struct S { __int128 v; }; struct S s[2]; int main() { s[1].v = 300; return (int)(char)s[1].v; }'),
 		Options{})
 	assert member.diagnostics.len == 0
