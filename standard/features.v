@@ -206,12 +206,14 @@ pub const features = [
 	// as a member of an object and as an element of an array of them, whose element
 	// access is refused by name (an element of sixteen bytes is not a value one
 	// instruction moves). Reading one is written as a conversion to a
-	// narrower type, which is its low word: measured on gcc 16.2.1, `(int)` of a
-	// stored 300 is 300, `(char)` of one is 44, and `(int)` of a stored -1 is -1.
+	// narrower type or into a narrower slot, which is its low word: measured on gcc
+	// 16.2.1, `(int)` of a stored 300 is 300, `(char)` of one is 44, `(int)` of a
+	// stored -1 is -1, and an int declared from a stored 300 is 300.
 	// What is missing is a *value* of that width, so a parameter of the type and
 	// an implicit narrowing store are refused by name: `int f(__int128 v) { return
 	// 0; }` reports `unsupported type __int128`, and `__int128 v = 5; int n = v;`
-	// reports that the object has no value of that width to read. A conversion of
+	// reports that the object has no value of that width to read (`int n = a;` is
+	// that same read, and takes the low word). A conversion of
 	// an object to a double is refused too, since a double of that value is a
 	// rounding of the whole of it and not its low word, while a prototype naming
 	// the type is a promise and is kept.

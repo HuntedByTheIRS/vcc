@@ -897,6 +897,23 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is an array declared with an initializer, and an array of elements is not initialized here')
 		return error('array initializer')
 	}
+	if e.wide_value(init) {
+		// A slot narrower than the object it is given takes the object's low word,
+		// which is its value modulo the width of the slot. The wide slot and the
+		// wide value are the copy the other branch makes, so what arrives here is
+		// an object of one width and a slot of a smaller one.
+		if slot.floating {
+			// A double of that value is the rounding of the whole of it and not
+			// the low word, so the low word is refused rather than stored as
+			// though the top of the value were zero. Measured on gcc 16.2.1:
+			// `double d = (__int128)5` is 5.0, and the low word read as an integer
+			// into a double slot is a different number entirely.
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a conversion from a 128-bit object to ${stmt.decl_type} is not one this back end makes, and a value that wide does not convert to a floating type here')
+			return error('128-bit to a double')
+		}
+		e.low_word_of_object(init, slot.width, stmt.line, stmt.col, 1)!
+		return e.store_accumulator(slot, stmt.line, stmt.col)
+	}
 	e.emit_expr(init)!
 	e.store_value(slot, init, stmt.line, stmt.col)!
 }
@@ -932,6 +949,17 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 	}
 	if target.bytes > 0 {
 		return e.assign_object_local(stmt, target)
+	}
+	if e.wide_value(expr) {
+		// The same read the declaration makes: the low word of the object, at the
+		// width of the slot it is written into. The floating slot is refused for
+		// the same reason it is there.
+		if target.floating {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a conversion from a 128-bit object to a slot that holds a double is not one this back end makes, and a value that wide does not convert to a floating type here')
+			return error('128-bit to a double')
+		}
+		e.low_word_of_object(expr, target.width, stmt.line, stmt.col, 1)!
+		return e.store_accumulator(target, stmt.line, stmt.col)
 	}
 	e.emit_expr(expr)!
 	e.store_value(target, expr, stmt.line, stmt.col)!
@@ -2450,6 +2478,29 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 // A conversion to anything else is refused by name: this back end has no register
 // for an unsigned char or a long, and converting a value to one it cannot hold
 // would be writing an answer nothing asked for.
+// low_word_of_object leaves the low word of a 128-bit object in the accumulator,
+// read at the width the caller asks for. Every conversion out of such an object is
+// its value taken modulo the width of the target, which is the low word and nothing
+// above it: measured on gcc 16.2.1, `(int)` of a stored 300 is 300, `(char)` of one
+// is 44, and `(int)` of a stored -1 is -1.
+//
+// The read is made through the object's own address and at that width, and the bytes
+// it takes are the low ones because this target stores a value from its least
+// significant byte up. A byte read as a char is given the sign of its own top bit,
+// which is what a char is here.
+//
+// The cast of an object to a narrower type and the store of one into a narrower slot
+// are the same read, so both of them come through here rather than each keeping its
+// own copy of the sequence.
+fn (mut e Emitter) low_word_of_object(expr ast.Expr, width int, line int, col int, depth int) !void {
+	e.address_of_object(expr, depth)!
+	register := e.accumulator(line, col)!
+	e.append(e.target.load_indirect(register, register, width)!)
+	if width == 1 {
+		e.append(e.target.sign_extend_byte(register)!)
+	}
+}
+
 fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 	target := cast.typ
 	if target.kind !in [.int_, .char_, .signed_char, .double, .pointer] {
@@ -2480,15 +2531,7 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from a 128-bit object to ${cast.spelling}, and there is no read of that width')
 			return error('no read of that width')
 		}
-		e.address_of_object(cast.expr, depth + 1)!
-		register := e.accumulator(cast.line, cast.col)!
-		e.append(e.target.load_indirect(register, register, width)!)
-		if target.kind in [.char_, .signed_char] {
-			// The byte just read is the char, and the bits above it are that
-			// byte's sign, which is what this target's char is.
-			e.append(e.target.sign_extend_byte(register)!)
-		}
-		return
+		return e.low_word_of_object(cast.expr, width, cast.line, cast.col, depth + 1)
 	}
 	floating := e.floating_of(cast.expr)
 	if target.kind == .double {

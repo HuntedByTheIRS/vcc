@@ -138,7 +138,7 @@ which is the row the dialect table carries; a prototype naming the type is read
 and kept, since its parameter list is a promise. An object of one is storage: the
 declaration is sixteen bytes, a value narrower than that is widened into its two
 words, one object is copied into another, and the value is read back by converting
-it to a narrower type, which takes its low word (`(int)` of a stored 300 is 300 and
+it to a narrower type or storing it in a narrower slot, which takes its low word (`(int)` of a stored 300 is 300 and
 `(char)` of one is 44, measured on gcc 16.2.1). A member of that type is the same
 storage at the member's own offset, written and read through a name, a pointer or a
 top-level object, and an array of them is reserved the same way, though an element of

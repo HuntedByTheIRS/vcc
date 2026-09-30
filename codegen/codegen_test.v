@@ -1244,25 +1244,43 @@ fn test_a_value_that_cannot_widen_into_a_128_bit_object_is_reported() {
 	assert wrong_class.bytes.len == 0
 }
 
-// What a 128-bit object is not is a value, so the two places that would read one
-// without saying so are refused by name: an implicit narrowing store, which is a
-// conversion the language allows but this back end writes only where it is asked
-// for with a cast, and a member of that type, which is read at its own width and
-// has no value here.
-fn test_a_128_bit_object_read_without_a_conversion_is_reported() {
-	implicit := emit(translation_unit('int main() { __int128 a = 5; int n = a; return n; }'), Options{})
-	assert implicit.diagnostics.len == 1
-	assert implicit.diagnostics[0].msg.contains('has no value of that width to read')
-	assert implicit.bytes.len == 0
-	// A member of that type is storage inside an object and nothing more: the
-	// object is laid out around its sixteen bytes and the member's address is
-	// part of the object's, and reading it as a value is the question this back
-	// end cannot answer at that width either.
-	member := emit(translation_unit('struct S { __int128 v; }; int main() { struct S s; int n = s.v; return n; }'),
+// A 128-bit object stored into a narrower slot takes its low word: the value of the
+// type modulo the width of the slot, which is the conversion the language defines.
+// Measured on gcc 16.2.1, the programs below return 44, 44, 255, 65 and 44.
+fn test_a_128_bit_object_stored_into_a_narrower_slot_takes_its_low_word() {
+	declared := emit(translation_unit('int main() { __int128 v = 300; int n = v; return n; }'), Options{})
+	assert declared.diagnostics.len == 0
+	assert run_image(declared.bytes) == 44
+	as_char := emit(translation_unit('int main() { __int128 v = 300; char c = v; return c; }'), Options{})
+	assert as_char.diagnostics.len == 0
+	assert run_image(as_char.bytes) == 44
+	negative := emit(translation_unit('int main() { __int128 v = -1; int n = v; return n; }'), Options{})
+	assert negative.diagnostics.len == 0
+	assert run_image(negative.bytes) == 255
+	assigned := emit(translation_unit('int main() { __int128 v = 65; char c = 0; c = v; return c; }'), Options{})
+	assert assigned.diagnostics.len == 0
+	assert run_image(assigned.bytes) == 65
+	// A member of that type is read the same way, through the member's own address.
+	member := emit(translation_unit('struct S { __int128 v; }; int main() { struct S s; s.v = 300; int n = s.v; return n; }'),
 		Options{})
-	assert member.diagnostics.len == 1
-	assert member.diagnostics[0].msg.contains('has no value of it to read')
-	assert member.bytes.len == 0
+	assert member.diagnostics.len == 0
+	assert run_image(member.bytes) == 44
+}
+
+// The low word is the answer for an integer slot and the wrong answer for a
+// floating one, where the language converts the whole value: this program answered
+// 0 before the refusal was written, because the low word stored into a double slot
+// is the integer's bits rather than the number. Measured on gcc 16.2.1,
+// `double d = (__int128)5;` is 5.0.
+fn test_the_low_word_is_refused_for_a_floating_slot() {
+	declared := emit(translation_unit('int main() { __int128 v = 5; double d = v; return (int)d; }'), Options{})
+	assert declared.diagnostics.len == 1
+	assert declared.diagnostics[0].msg.contains('does not convert to a floating type')
+	assert declared.bytes.len == 0
+	assigned := emit(translation_unit('int main() { __int128 v = 5; double d = 0; d = v; return (int)d; }'), Options{})
+	assert assigned.diagnostics.len == 1
+	assert assigned.diagnostics[0].msg.contains('slot that holds a double')
+	assert assigned.bytes.len == 0
 }
 
 fn test_a_local_of_a_type_with_no_instruction_is_reported() {

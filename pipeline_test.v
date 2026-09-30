@@ -202,18 +202,49 @@ fn test_an_array_of_128_bit_objects_reserves_storage_and_refuses_an_element() {
 	os.rm(element) or {}
 }
 
-fn test_reading_a_128_bit_object_it_did_not_ask_for_writes_nothing() {
+// A 128-bit object handed to a place this back end has no value for still writes
+// nothing: a parameter of the type is the example the emitter refuses, and the
+// message names the construct rather than the width of a store that then happened.
+fn test_a_128_bit_object_where_the_back_end_has_no_value_writes_nothing() {
 	source := scratch('wide_bad.c')
 	binary := scratch('wide_bad')
-	os.write_file(source, 'int main(void) { __int128 a = 5; int n = a; return n; }\n') or { panic(err) }
+	os.write_file(source, 'int main(void) { __int128 a = 5; return a + 1; }\n') or { panic(err) }
 	lexed := tokenize.lex(os.read_file(source) or { '' })
 	parsed := parser.parse(lexed.tokens)
 	assert parsed.diagnostics.len == 0
 	emitted := codegen.emit(parsed.unit, codegen.Options{})
 	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('has no value of that width to read')
+	assert emitted.bytes.len == 0
 	assert !os.exists(binary)
 	os.rm(source) or {}
+}
+
+// The low word of a 128-bit object is what a narrower slot takes, and the round
+// trip through the built compiler is the same answer the codegen test asserts:
+// measured on gcc 16.2.1, an int declared from a stored 300 is 300 and a char from
+// the same object is 44. A floating slot is the case the low word is wrong for, and
+// it is refused rather than stored.
+fn test_a_128_bit_object_is_stored_into_a_narrower_slot() {
+	cases := ['int main(void) { __int128 v = 300; int n = v; return n; }',
+		'int main(void) { __int128 v = 300; char c = v; return c; }',
+		'int main(void) { __int128 v = 300; int n = 0; n = v; return n; }',
+		'int main(void) { __int128 v = -1; int n = v; return n; }']
+	answers := [44, 44, 44, 255]
+	for i, source_text in cases {
+		source := scratch('wide_narrow_${i}.c')
+		binary := scratch('wide_narrow_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+	floating := scratch('wide_narrow_double.c')
+	image := compile([floating, '-o', scratch('wide_narrow_double')],
+		'int main(void) { __int128 v = 5; double d = v; return (int)d; }\n')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('does not convert to a floating type')
+	assert image.bytes.len == 0
+	os.rm(floating) or {}
 }
 
 // An operand whose type the reader never resolved is refused where typeof was
