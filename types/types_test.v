@@ -69,10 +69,14 @@ fn test_the_conversion_ranks_are_the_standards() {
 	assert Kind.long.rank() < Kind.long_long.rank()
 	// The 128-bit types are the GNU ones: they rank above every integer the
 	// standard has and below float, which is where gcc's own conversion rank
-	// puts `__int128` (measured, see the table in convert_test.v).
+	// puts `__int128`. Measured, the conversions follow that ordering at both
+	// ends of it: `__int128 + unsigned long long` is `__int128` and
+	// `__int128 + float` is `float` (the rows are asserted in convert_test.v).
 	assert Kind.int128.rank() == Kind.unsigned_int128.rank()
 	assert Kind.long_long.rank() < Kind.int128.rank()
+	assert Kind.unsigned_long_long.rank() < Kind.unsigned_int128.rank()
 	assert Kind.int128.rank() < Kind.float.rank()
+	assert Kind.unsigned_int128.rank() < Kind.float.rank()
 	assert Kind.long_long.rank() < Kind.float.rank()
 	assert Kind.float.rank() < Kind.double.rank()
 	assert Kind.double.rank() < Kind.long_double.rank()

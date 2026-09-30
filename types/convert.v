@@ -76,6 +76,23 @@ pub fn integer_promotion(t Type, rep Representation) !Type {
 // which case the signed one wins. That last question is a width question, so
 // `unsigned` and `long` are decided by the representation and refused without it.
 //
+// A 128-bit operand is an integer that ranks above every integer the standard
+// has and below float, so it takes every integer pairing and loses to a floating
+// operand; against an unsigned standard type the signed 128-bit type wins on the
+// width rule above, because its 16 bytes hold every value a 4-byte or 8-byte
+// type has. Measured with `_Generic` on gcc 16.2.1, one row at a time:
+// `__int128` added to any integer type the standard has is `__int128`,
+// `unsigned __int128` added to the same is `unsigned __int128`, the two 128-bit
+// kinds added either way round are `unsigned __int128`, `__int128 + float` is
+// `float` and `__int128 + long double` is `long double`. Every one of those rows
+// is asserted in the test beside this file.
+//
+// A pointer operand never reaches the rules above, because a pointer is not
+// arithmetic. Measured, gcc types `int * + __int128` and `__int128 + int *` as
+// `int *`: that expression is pointer arithmetic and its type comes from the
+// pointer rather than from a conversion, which the reader answers where it reads
+// the operator.
+//
 // The complex types are the back end milestone's, so a conversion that needs one
 // is refused by name rather than approximated with the real type underneath it.
 pub fn usual_arithmetic_conversions(a Type, b Type, rep Representation) !Type {

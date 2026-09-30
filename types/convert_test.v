@@ -27,18 +27,22 @@ import measured
 //   _Bool + _Bool -> int
 //   _Bool + int -> int
 //
-// The 128-bit types are gcc's rather than the standard's, and the pairs below
-// are measured the same way, with `__int128` in place of the standard types:
+// The 128-bit types are gcc's rather than the standard's, and every pairing of
+// one of them is measured the same way, with one program holding all of the rows
+// (the probe and its output are .omh/lanes/w128-types/w128_conversions.c and
+// w128_conversions.out, one line per case asserted below):
 //
-//   __int128 + __int128 -> __int128
-//   __int128 + unsigned __int128 -> unsigned __int128
-//   unsigned __int128 + __int128 -> unsigned __int128
-//   __int128 + long long -> __int128
-//   __int128 + unsigned long long -> __int128
-//   __int128 + int -> __int128
-//   __int128 + float -> float
-//   __int128 + double -> double
-//   __int128 + long double -> long double
+//   __int128 alone -> __int128   unsigned __int128 alone -> unsigned __int128
+//   __int128 added to any integer type the standard has -> __int128: _Bool,
+//     char, signed char, unsigned char, short, unsigned short, int, unsigned
+//     int, long, unsigned long, long long, unsigned long long, an enum, and
+//     __int128 itself
+//   unsigned __int128 added to the same list, and to itself -> unsigned __int128
+//   __int128 + unsigned __int128 -> unsigned __int128, and the other order
+//   __int128 + float -> float, + double -> double, + long double -> long double,
+//     and the same three rows with unsigned __int128
+//   int * + __int128 -> int *, and __int128 + int * -> int *: pointer
+//     arithmetic, whose type comes from the pointer and not from a conversion
 
 fn promote(t Type) string {
 	return integer_promotion(t, measured.representation()) or { return 'refused: ${err.msg()}' }.describe()
@@ -246,6 +250,27 @@ fn test_the_constraint_on_assignment_between_pointer_types() {
 	assert only_reason(void_type(), int_type(), false, 'void')
 }
 
+// The description the compiler itself gets, types.from_target, carries the width
+// of a pointer, a char, an int, an unsigned int, a double and the two 128-bit
+// types, and nothing else. A 128-bit operand against a `long` is answered anyway,
+// because two types of the same signedness are decided by rank and ask for no
+// width; the mixed-signedness rows are the ones that ask, so `__int128` against
+// an `unsigned long` is refused for the width the description does not carry.
+// Measured, gcc answers `__int128` for both rows, and the refusal here is a
+// change to the target description rather than a guess this function may make.
+fn test_a_row_whose_width_the_description_lacks_is_refused() {
+	assert sum(int128_type(), long_type()) == '__int128'
+	refused := usual_arithmetic_conversions(int128_type(), unsigned_long_type(), measured.partial()) or {
+		assert err.msg().contains('width of unsigned long')
+		return
+	}
+	assert refused.kind == .unknown
+	// The same row against a type whose width the description does carry needs
+	// both widths, and there the 16 bytes of the signed 128-bit type hold every
+	// value of the 4-byte unsigned one.
+	assert sum(int128_type(), unsigned_int_type()) == '__int128'
+}
+
 // 6.3.1.3: a conversion between two integer types either preserves every value or
 // it does not, and the difference is the widths.
 fn test_a_narrowing_integer_conversion_is_not_value_preserving() {
@@ -287,24 +312,83 @@ fn test_a_narrowing_integer_conversion_is_not_value_preserving() {
 }
 
 fn test_the_128_bit_types_in_the_conversions() {
-	// Both of them are at least int rank, so a promotion keeps the type it was
-	// written with.
+	// The operand on its own: both 128-bit types are above int rank, so a
+	// promotion keeps the type it was written with.
 	assert promote(int128_type()) == '__int128'
 	assert promote(unsigned_int128_type()) == 'unsigned __int128'
-	// Two of the same type stay where they are, and the 128-bit rank wins over
-	// every integer the standard has.
+	// One signed 128-bit operand against every integer type the standard has.
+	// The character and short types promote first, and the unsigned ones are
+	// then decided by the width rule, which is the row that asks whether 16
+	// bytes hold every value of 4 or 8: measured, `__int128 + unsigned long
+	// long` is `__int128`.
 	assert sum(int128_type(), int128_type()) == '__int128'
+	assert sum(int128_type(), bool_type()) == '__int128'
+	assert sum(int128_type(), char_type()) == '__int128'
+	assert sum(int128_type(), signed_char_type()) == '__int128'
+	assert sum(int128_type(), unsigned_char_type()) == '__int128'
+	assert sum(int128_type(), short_type()) == '__int128'
+	assert sum(int128_type(), unsigned_short_type()) == '__int128'
+	assert sum(int128_type(), int_type()) == '__int128'
+	assert sum(int128_type(), unsigned_int_type()) == '__int128'
+	assert sum(int128_type(), long_type()) == '__int128'
+	assert sum(int128_type(), unsigned_long_type()) == '__int128'
 	assert sum(int128_type(), long_long_type()) == '__int128'
 	assert sum(int128_type(), unsigned_long_long_type()) == '__int128'
-	assert sum(int128_type(), int_type()) == '__int128'
+	// An enum is int in this model and unsigned int under gcc, which is a
+	// divergence recorded in integer_promotion; the row is __int128 either way,
+	// because a 16-byte type holds every value of a 4-byte one.
+	assert sum(int128_type(), enum_type('E')) == '__int128'
+	// The same list with the unsigned 128-bit operand, which wins every integer
+	// pairing the same way.
+	assert sum(unsigned_int128_type(), unsigned_int128_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), bool_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), char_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), unsigned_char_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), short_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), unsigned_short_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), int_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), unsigned_int_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), long_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), unsigned_long_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), long_long_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), unsigned_long_long_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), enum_type('E')) == 'unsigned __int128'
 	// Between the two of them the unsigned type wins the way unsigned int wins
 	// over int: neither can hold the other's values and one of them is unsigned.
 	assert sum(int128_type(), unsigned_int128_type()) == 'unsigned __int128'
 	assert sum(unsigned_int128_type(), int128_type()) == 'unsigned __int128'
+	// The order of the operands does not change the answer.
+	assert sum(int_type(), int128_type()) == '__int128'
+	assert sum(char_type(), int128_type()) == '__int128'
+	assert sum(unsigned_int_type(), int128_type()) == '__int128'
+	assert sum(long_long_type(), int128_type()) == '__int128'
+	assert sum(int_type(), unsigned_int128_type()) == 'unsigned __int128'
+	assert sum(char_type(), unsigned_int128_type()) == 'unsigned __int128'
+	assert sum(unsigned_int_type(), unsigned_int128_type()) == 'unsigned __int128'
 	// The floating types outrank every integer, the 128-bit ones included.
 	assert sum(int128_type(), float_type()) == 'float'
+	assert sum(unsigned_int128_type(), float_type()) == 'float'
 	assert sum(int128_type(), double_type()) == 'double'
+	assert sum(unsigned_int128_type(), double_type()) == 'double'
 	assert sum(int128_type(), long_double_type()) == 'long double'
+	assert sum(unsigned_int128_type(), long_double_type()) == 'long double'
+	assert sum(float_type(), int128_type()) == 'float'
+	assert sum(double_type(), int128_type()) == 'double'
+	// A pointer operand is not arithmetic, so there is no conversion to ask
+	// this function for. Measured, gcc types `int * + __int128` and
+	// `__int128 + int *` as `int *`, which is pointer arithmetic: the type
+	// comes from the pointer, and the reader answers it where it reads the
+	// operator.
+	pointer_sum := usual_arithmetic_conversions(int128_type(), pointer_to(int_type()), measured.representation()) or {
+		assert err.msg().contains('arithmetic')
+		return
+	}
+	assert pointer_sum.kind == .unknown
+	unsigned_pointer_sum := usual_arithmetic_conversions(unsigned_int128_type(), pointer_to(int_type()), measured.representation()) or {
+		assert err.msg().contains('arithmetic')
+		return
+	}
+	assert unsigned_pointer_sum.kind == .unknown
 	// The unsigned counterpart of the signed type is the other 128-bit type.
 	counterpart := unsigned_counterpart(int128_type()) or {
 		assert false

@@ -210,8 +210,10 @@ pub fn (k Kind) is_unsigned_integer() bool {
 // types rank below short, and the floating types rank above the integers, in the
 // order 6.3.1.8 applies them. The 128-bit integers are the GNU types and rank
 // above every type the standard has, which is where gcc's own conversion rank
-// puts `__int128`. A kind with no rank in that order answers -1: nothing
-// arithmetic may be asked of it.
+// puts `__int128`. Measured with `_Generic` on gcc 16.2.1, that ordering is what
+// the conversions follow at both ends of it: `__int128` added to any integer type
+// the standard has is `__int128`, and added to `float` it is `float`. A kind with
+// no rank in that order answers -1: nothing arithmetic may be asked of it.
 pub fn (k Kind) rank() int {
 	return match k {
 		.bool_ { 0 }
