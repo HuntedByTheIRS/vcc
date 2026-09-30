@@ -20,7 +20,11 @@ the floating-point registers and in the SysV sequence for arguments and returns,
 and a typedef is followed to the type it names wherever a type can be written. A
 `typeof` specifier is read the same way: the operand is a type name or an
 expression, its value is never evaluated, and the declaration that follows
-declares what that operand's type says.
+declares what that operand's type says. `__int128` is read where a type can be
+written, and the model sizes it and lays it out, which is what makes
+`sizeof(__int128)` 16 and puts a member of one on a 16-byte boundary; a value of
+that width is not something the back end has, so a definition of an object of one
+is refused by name.
 `-l` links the library it names, so `-lm` puts `libm.so.6` in the image's
 `DT_NEEDED` and `sqrt` resolves. An object of a struct or union type inside a
 function is a block of the frame with its members at the offsets the layout gives
