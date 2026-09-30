@@ -192,6 +192,12 @@ mut:
 	// as a value, so a call has to know which parameters those are, and zero
 	// bytes means the parameter is a value.
 	aggregate_params map[string][]ast.Class
+	// wide_params says, for the same functions, which parameters are one of the
+	// 128-bit integers. Such a parameter is passed as a pair of words in two
+	// registers at once rather than as one value, so a call has to know which
+	// parameters those are, and the width cannot answer it: a pair is sixteen
+	// bytes and is not handed over at that width.
+	wide_params map[string][]bool
 	// return_classes says, for the same functions, which of them hand an object
 	// of an aggregate type back, and how many bytes of one. The value comes back
 	// in the register its class names rather than converted.
@@ -241,7 +247,14 @@ mut:
 	wide_left    []Slot
 	wide_right   []Slot
 	wide_scratch []Slot
-	wide_working []WideWorking
+	// wide_arguments is where a call parks a 128-bit argument whose expression
+	// is finished. A pair is two words and the slots the other arguments wait in
+	// hold one each, so a pair needs a slot of its own; it is keyed the way the
+	// values are, one per level of nesting, because the argument of a call inside
+	// the argument of another call has to land somewhere the outer call is not
+	// using.
+	wide_arguments []Slot
+	wide_working   []WideWorking
 	// loops is the loops being emitted, innermost last, for break and continue.
 	loops []LoopLabels
 	// next_label numbers the jump labels. It runs across the whole file rather
@@ -401,8 +414,14 @@ fn (mut e Emitter) build() ![]u8 {
 			mut widths := []int{}
 			mut classes := []bool{}
 			mut aggregates := []ast.Class{}
+			mut wides := []bool{}
 			mut sized := true
 			for param in decl.params {
+				// Which parameters are 128-bit values is read here rather than
+				// from the width below, because the width of such a parameter is
+				// not the width it is handed over at: it travels as a pair of
+				// words in two registers at once.
+				wides << e.writes_a_128(param.typ)
 				// A parameter that is an object of an aggregate type is handed
 				// over as its bytes in one register: how many bytes it is and
 				// which file the register belongs to are the two facts the call
@@ -417,10 +436,17 @@ fn (mut e Emitter) build() ![]u8 {
 				if width := e.type_width(param.typ) {
 					widths << width
 					classes << e.writes_a_double(param.typ)
+				} else if e.writes_a_128(param.typ) {
+					// The object is sixteen bytes; the value is a pair. The
+					// width goes in the table so that the parameters beside
+					// this one keep their own positions and widths.
+					widths << wide_bytes
+					classes << false
 				} else {
 					sized = false
 				}
 			}
+			e.wide_params[decl.name] = wides
 			if sized {
 				e.signatures[decl.name] = widths
 				e.float_params[decl.name] = classes
@@ -619,13 +645,30 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	mut stacked := 0
 	for _, param in decl.params {
 		if e.writes_a_128(param.typ) {
-			// A parameter of a 128-bit type is a value the caller would hand over as
-			// two words, and this back end passes ints, chars, doubles and pointers.
-			// The declaration of it is storage now, so the refusal happens here by
-			// name: reaching the frame move with sixteen bytes fails the whole image
-			// with an internal diagnostic that names nothing and points at line one.
-			e.diagnostics << problem(param.line, param.col, 'unsupported: the parameter ${param.name} is declared ${param.typ}, and this back end passes ints, chars, doubles and pointers only')
-			return error('unsupported parameter type')
+			// A 128-bit parameter is a pair: its two words arrive in two
+			// consecutive argument registers of the general file, low word
+			// first, and the parameter is the object of sixteen bytes they are
+			// stored into. Measured on gcc 16.2.1, which passes one such
+			// parameter in rdi:rsi and a second in rdx:rcx, and passes
+			// `(int x, __int128 a)` with x in edi and the pair in rsi:rdx.
+			//
+			// The pair takes both registers at once rather than one after the
+			// other, so a pair with fewer than two of them left is the case the
+			// convention passes in memory. That is not implemented here, and it
+			// is refused by name: a caller that reached one answer and a callee
+			// that reached the other would read words from somewhere the caller
+			// never wrote.
+			registers := e.pair_argument_registers(integers) or {
+				e.diagnostics << problem(param.line, param.col, 'unsupported: the parameter ${param.name} is declared ${param.typ}, and the pair it is passed in takes two argument registers at once, which this machine has not got at position ${integers}: the convention passes such a pair in memory, which this back end does not do')
+				return error('128-bit parameter in memory')
+			}
+			object := e.declare(param.name, param.typ, 0, 0, param.line, param.col)!
+			base := e.frame_pointer(param.line, param.col)!
+			word := e.target.word_size
+			e.append(e.target.store_slot(base, object.offset, registers[0], word)!)
+			e.append(e.target.store_slot(base, object.offset + word, registers[1], word)!)
+			integers += 2
+			continue
 		}
 		// An object of an aggregate type arrives as its bytes in one register of
 		// the class its members make, and the parameter is storage of exactly
@@ -4152,6 +4195,23 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				continue
 			}
 		}
+		if e.wide_argument(call, i, arg) {
+			// A pair of words takes two consecutive argument registers of the
+			// general file at once rather than one after the other, so both of
+			// them have to be there. A pair with fewer than two left is the case
+			// the convention passes in memory, and this back end does not do
+			// that: the refusal names the argument and its place in the file.
+			if e.pair_argument_registers(integers) == none {
+				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${i + 1} of the call to ${call.name} is a 128-bit value, and the pair it is passed in takes two argument registers at once, which this machine has not got at position ${integers}: the convention passes such a pair in memory, which this back end does not do')
+				return error('128-bit argument in memory')
+			}
+			places << ArgPlace{
+				wide:     true
+				position: integers
+			}
+			integers += 2
+			continue
+		}
 		mut floating := e.argument_is_double(call, i, arg)
 		if c := class {
 			floating = c.first_floating
@@ -4198,6 +4258,22 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// An object is not read into a slot at all: its own bytes are read
 			// after the stack this call takes has been made, either into the
 			// registers it goes in or onto the stack itself.
+			continue
+		}
+		if place.wide {
+			// A pair is finished into a slot of its own, which is what keeps an
+			// argument that calls another function from landing on this one. A
+			// value of the type is already the pair; a narrower one is widened
+			// into both words, the way a return of a narrower expression from
+			// such a function is.
+			pair := e.wide_pair_slot(mut e.wide_arguments, depth + i)
+			e.emit_value(arg, depth + i + 1)!
+			if e.wide_value(arg) {
+				e.store_pair(pair, line, col)!
+			} else {
+				e.widen_into_pair(pair, arg.typ.kind.is_unsigned(), e.narrow_width(arg.typ), line,
+					col)!
+			}
 			continue
 		}
 		if class := e.aggregate_argument(call, i) {
@@ -4331,6 +4407,22 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				place.second_floating, place.second_position, line, col)!
 			continue
 		}
+		if place.wide {
+			// The two words into the two registers the pair starts at, the low
+			// one first. The placement above has already asked whether both are
+			// there, so neither of these can fail; falling short here would be
+			// this emitter disagreeing with itself.
+			pair := e.wide_pair_slot(mut e.wide_arguments, depth + i)
+			base := e.frame_pointer(line, col)!
+			registers := e.pair_argument_registers(place.position) or {
+				e.diagnostics << problem(call.line, call.col, 'internal: ${e.target.name} has not got the two argument registers a 128-bit argument at position ${place.position} was placed in')
+				return error('no argument register')
+			}
+			word := e.target.word_size
+			e.append(e.target.load_slot(base, pair.offset, registers[0], word)!)
+			e.append(e.target.load_slot(base, pair.offset + word, registers[1], word)!)
+			continue
+		}
 		slot := e.value_slot(depth + i)
 		if place.stack {
 			continue
@@ -4400,6 +4492,11 @@ struct ArgPlace {
 	words           int
 	second_floating bool
 	second_position int
+	// wide says the argument is a 128-bit value, which is two words rather than
+	// one and takes two consecutive registers of the general file at once. Its
+	// pair waits in a slot of its own until the registers are loaded, so nothing
+	// of it is read from the slot a value argument waits in.
+	wide bool
 }
 
 // PairPlaces is where the two eightbytes of an object of two of them go, and it is
@@ -4590,6 +4687,36 @@ fn (e Emitter) argument_is_double(call ast.Call, position int, arg ast.Expr) boo
 		}
 	}
 	return e.floating_of(arg)
+}
+
+// pair_argument_registers are the two consecutive general registers that carry a
+// pair of words at argument position `position`, and none when this machine has
+// not got two of them there. A pair takes both registers at once rather than one
+// after the other, so a position with one register left is the case the
+// convention passes in memory and this back end does not do. One function
+// answers it for both sides of a call, because a caller that reached a different
+// answer from the callee would hand over words the callee reads from somewhere
+// else.
+fn (e Emitter) pair_argument_registers(position int) ?[]backend.Register {
+	low := e.target.arg_reg(position) or { return none }
+	high := e.target.arg_reg(position + 1) or { return none }
+	return [low, high]
+}
+
+// wide_argument says whether an argument is handed over as a pair of words. A
+// function this file defines says so itself, parameter by parameter; a library
+// function has no prototype here, so an argument of one of the 128-bit types is
+// the answer, which is the same fallback argument_is_double makes. The width of
+// the argument is not the question: a pair is sixteen bytes as an object and is
+// handed over as two words, and a parameter of an int with a 128-bit argument
+// written for it is a call the type model refuses before this sees it.
+fn (e Emitter) wide_argument(call ast.Call, position int, arg ast.Expr) bool {
+	if wides := e.wide_params[call.name] {
+		if position < wides.len {
+			return wides[position]
+		}
+	}
+	return e.wide_value(arg)
 }
 
 // passed_width is the width one argument is handed over at. A function this file
