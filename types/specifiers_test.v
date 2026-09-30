@@ -182,3 +182,45 @@ fn test_combinations_the_standard_does_not_have_are_refused() {
 	// a word that names no type at all
 	assert from_specifiers(['size_t']) == none
 }
+
+// kind_of is the kind a run of words names, and it asserts when the table
+// refuses the run, so a combination that stops being accepted fails here rather
+// than being read as a zero value.
+fn kind_of(words []string) Kind {
+	return from_specifiers(words) or {
+		assert false
+		Kind.unknown
+	}
+}
+
+// The 128-bit type is gcc's and takes the integer words the other widths take,
+// minus the ones that name a width of their own. The refusals were measured with
+// `gcc -std=gnu99 -fsyntax-only`, which says `long __int128` is "both '__int128'
+// and 'long' in declaration specifiers", `__int128 short` is "both 'short' and
+// '__int128'", and `float __int128` is "two or more data types in declaration
+// specifiers".
+fn test_the_128_bit_type_and_the_words_that_combine_with_it() {
+	// `__int128` is the signed type and `unsigned __int128` the other one.
+	assert kind_of(['__int128']) == .int128
+	assert kind_of(['unsigned', '__int128']) == .unsigned_int128
+	assert kind_of(['signed', '__int128']) == .int128
+	// The words may be written in either order: measured, gcc accepts
+	// `__int128 unsigned` and `__int128 signed` as well.
+	assert kind_of(['__int128', 'unsigned']) == .unsigned_int128
+	assert kind_of(['__int128', 'signed']) == .int128
+	// A word that names a width of its own contradicts the 128-bit type.
+	assert from_specifiers(['long', '__int128']) == none
+	assert from_specifiers(['__int128', 'long']) == none
+	assert from_specifiers(['long', 'long', '__int128']) == none
+	assert from_specifiers(['__int128', 'short']) == none
+	assert from_specifiers(['__int128', 'int']) == none
+	assert from_specifiers(['float', '__int128']) == none
+	assert from_specifiers(['__int128', 'double']) == none
+	// Both signednesses at once is the refusal the other widths make too.
+	assert from_specifiers(['signed', 'unsigned', '__int128']) == none
+	// A qualifier never reaches this table: the parser keeps it beside the type
+	// words rather than among them, so `const __int128 v;` arrives as the run
+	// `['__int128']` with the qualifier carried separately. A run that carries
+	// one anyway is not a run of type words, and is refused.
+	assert from_specifiers(['const', '__int128']) == none
+}

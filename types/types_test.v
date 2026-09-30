@@ -8,6 +8,22 @@ fn test_the_scalar_types_are_complete_and_spelled_the_way_c_writes_them() {
 	assert unsigned_int_type().describe() == 'unsigned int'
 	assert long_long_type().describe() == 'long long'
 	assert unsigned_long_long_type().describe() == 'unsigned long long'
+	// The 128-bit types are spelled the way gcc spells them, which is the only
+	// way they are written: no standard has them.
+	assert int128_type().describe() == '__int128'
+	assert unsigned_int128_type().describe() == 'unsigned __int128'
+	// The kind names the type as well, which is the path the model takes when
+	// it is working from a kind rather than from a run of words.
+	unwrapped_int128 := scalar(Kind.int128) or {
+		assert false
+		int128_type()
+	}
+	assert unwrapped_int128.describe() == '__int128'
+	unwrapped_unsigned := scalar(Kind.unsigned_int128) or {
+		assert false
+		unsigned_int128_type()
+	}
+	assert unwrapped_unsigned.describe() == 'unsigned __int128'
 	assert bool_type().describe() == '_Bool'
 	assert long_double_type().describe() == 'long double'
 	assert complex_double_type().describe() == 'double _Complex'
@@ -27,6 +43,10 @@ fn test_the_integer_kinds_know_their_signedness() {
 	assert Kind.complex_double.is_complex()
 	assert !Kind.complex_double.is_floating()
 	assert Kind.float.is_arithmetic() && Kind.unsigned_long.is_arithmetic()
+	assert Kind.int128.is_integer() && Kind.int128.is_signed_integer()
+	assert Kind.unsigned_int128.is_integer() && Kind.unsigned_int128.is_unsigned_integer()
+	assert !Kind.unsigned_int128.is_signed_integer()
+	assert !Kind.int128.is_floating()
 	assert !Kind.pointer.is_arithmetic()
 	assert Kind.pointer.is_scalar() && Kind.int_.is_scalar()
 	assert !Kind.struct_.is_scalar()
@@ -47,6 +67,12 @@ fn test_the_conversion_ranks_are_the_standards() {
 	assert Kind.short.rank() < Kind.int_.rank()
 	assert Kind.int_.rank() < Kind.long.rank()
 	assert Kind.long.rank() < Kind.long_long.rank()
+	// The 128-bit types are the GNU ones: they rank above every integer the
+	// standard has and below float, which is where gcc's own conversion rank
+	// puts `__int128` (measured, see the table in convert_test.v).
+	assert Kind.int128.rank() == Kind.unsigned_int128.rank()
+	assert Kind.long_long.rank() < Kind.int128.rank()
+	assert Kind.int128.rank() < Kind.float.rank()
 	assert Kind.long_long.rank() < Kind.float.rank()
 	assert Kind.float.rank() < Kind.double.rank()
 	assert Kind.double.rank() < Kind.long_double.rank()

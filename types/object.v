@@ -292,6 +292,18 @@ pub fn from_target(target backend.Target) Description {
 	aligns[Kind.unsigned_int] = 4
 	sizes[Kind.double] = 8
 	aligns[Kind.double] = 8
+	// The 128-bit integers are carried for the questions that are about the
+	// size of a type rather than about a value of one: `sizeof(__int128)` is
+	// 16, a member of that type starts on a 16-byte boundary, and a struct
+	// holding one is laid out around those two numbers. Measured on gcc 16.2.1
+	// on this target. The back end has no value of that width, and a
+	// declaration of an object of one is refused by its spelling rather than by
+	// a width this table gave out: the width here decides a layout, which is a
+	// question the model answers, and never a value, which is the emitter's.
+	sizes[Kind.int128] = 16
+	aligns[Kind.int128] = 16
+	sizes[Kind.unsigned_int128] = 16
+	aligns[Kind.unsigned_int128] = 16
 	mut missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in sizes {

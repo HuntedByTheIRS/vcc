@@ -297,6 +297,7 @@ fn unsigned_counterpart(t Type) ?Type {
 		.int_, .enum_ { unsigned_int_type() }
 		.long { unsigned_long_type() }
 		.long_long { unsigned_long_long_type() }
+		.int128 { unsigned_int128_type() }
 		else { none }
 	}
 }

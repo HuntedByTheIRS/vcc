@@ -26,6 +26,19 @@ import measured
 //   double + long double -> long double
 //   _Bool + _Bool -> int
 //   _Bool + int -> int
+//
+// The 128-bit types are gcc's rather than the standard's, and the pairs below
+// are measured the same way, with `__int128` in place of the standard types:
+//
+//   __int128 + __int128 -> __int128
+//   __int128 + unsigned __int128 -> unsigned __int128
+//   unsigned __int128 + __int128 -> unsigned __int128
+//   __int128 + long long -> __int128
+//   __int128 + unsigned long long -> __int128
+//   __int128 + int -> __int128
+//   __int128 + float -> float
+//   __int128 + double -> double
+//   __int128 + long double -> long double
 
 fn promote(t Type) string {
 	return integer_promotion(t, measured.representation()) or { return 'refused: ${err.msg()}' }.describe()
@@ -271,4 +284,40 @@ fn test_a_narrowing_integer_conversion_is_not_value_preserving() {
 		return
 	}
 	assert !not_integer
+}
+
+fn test_the_128_bit_types_in_the_conversions() {
+	// Both of them are at least int rank, so a promotion keeps the type it was
+	// written with.
+	assert promote(int128_type()) == '__int128'
+	assert promote(unsigned_int128_type()) == 'unsigned __int128'
+	// Two of the same type stay where they are, and the 128-bit rank wins over
+	// every integer the standard has.
+	assert sum(int128_type(), int128_type()) == '__int128'
+	assert sum(int128_type(), long_long_type()) == '__int128'
+	assert sum(int128_type(), unsigned_long_long_type()) == '__int128'
+	assert sum(int128_type(), int_type()) == '__int128'
+	// Between the two of them the unsigned type wins the way unsigned int wins
+	// over int: neither can hold the other's values and one of them is unsigned.
+	assert sum(int128_type(), unsigned_int128_type()) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), int128_type()) == 'unsigned __int128'
+	// The floating types outrank every integer, the 128-bit ones included.
+	assert sum(int128_type(), float_type()) == 'float'
+	assert sum(int128_type(), double_type()) == 'double'
+	assert sum(int128_type(), long_double_type()) == 'long double'
+	// The unsigned counterpart of the signed type is the other 128-bit type.
+	counterpart := unsigned_counterpart(int128_type()) or {
+		assert false
+		unsigned_int128_type()
+	}
+	assert counterpart.same(unsigned_int128_type())
+	// An int assigned to one of them keeps its value, which is the narrow to
+	// wide answer of 6.3.1.3, and the width it is compared against is the 16
+	// bytes the description carries for the wide one.
+	assert reason(int128_type(), int_type(), false) == ''
+	assert reason(unsigned_int128_type(), int_type(), false) == ''
+	assert value_preserving(int128_type(), int_type(), measured.representation()) or {
+		assert false
+		return
+	}
 }

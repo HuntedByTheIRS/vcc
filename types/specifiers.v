@@ -116,6 +116,28 @@ pub fn from_specifiers(words []string) ?Kind {
 		}
 		return none
 	}
+	if seen['__int128'] {
+		// The 128-bit type is gcc's, and the combinations it takes are the
+		// ones the other integer words take: `signed` adds nothing to it and
+		// `unsigned` is the other type. Measured on gcc 16.2.1: `signed
+		// __int128` is `__int128`, `unsigned __int128` is a different type of
+		// the same width, `long __int128` and `__int128 short` are refused, and
+		// the words may be written in either order, so `__int128 unsigned` is
+		// the unsigned type.
+		if longs != 0 || ints != 0 || seen['short'] || seen['float'] || seen['double'] {
+			return none
+		}
+		if seen['signed'] && seen['unsigned'] {
+			return none
+		}
+		if seen['unsigned'] {
+			return Kind.unsigned_int128
+		}
+		if seen.len == 1 || (seen.len == 2 && seen['signed']) {
+			return Kind.int128
+		}
+		return none
+	}
 	if seen['short'] {
 		if longs != 0 {
 			return none

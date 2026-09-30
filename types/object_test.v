@@ -68,6 +68,8 @@ fn test_the_size_and_alignment_of_every_scalar() {
 	assert size_of(unsigned_long_type()) == 8 && align_of(unsigned_long_type()) == 8
 	assert size_of(long_long_type()) == 8 && align_of(long_long_type()) == 8
 	assert size_of(unsigned_long_long_type()) == 8 && align_of(unsigned_long_long_type()) == 8
+	assert size_of(int128_type()) == 16 && align_of(int128_type()) == 16
+	assert size_of(unsigned_int128_type()) == 16 && align_of(unsigned_int128_type()) == 16
 	assert size_of(float_type()) == 4 && align_of(float_type()) == 4
 	assert size_of(double_type()) == 8 && align_of(double_type()) == 8
 	assert size_of(long_double_type()) == 16 && align_of(long_double_type()) == 16
@@ -150,6 +152,46 @@ fn test_a_struct_is_laid_out_with_its_padding() {
 	// and alignment 1.
 	empty := struct_type('p_empty', [])
 	assert size_of(empty) == 0 && align_of(empty) == 1
+}
+
+// A 128-bit member is laid out around its own alignment the way any other type
+// of that width is: measured on gcc 16.2.1, `struct { char c; __int128 v; }` is
+// 32 bytes with v at 16, and `struct { __int128 v; char c; }` is 32 bytes with c
+// at 16. `long double` has the same width and alignment on this target, so the
+// two layouts are the same shape.
+fn test_a_128_bit_member_is_laid_out_at_its_alignment() {
+	cv := struct_type('q_char_i128', [member('c', char_type()), member('v', int128_type())])
+	cv_layout := layout_of(cv)
+	assert cv_layout.size == 32 && cv_layout.align == 16
+	assert cv_layout.offsets == [0, 16]
+	assert cv_layout.padding == 15
+	vc := struct_type('q_i128_char', [member('v', int128_type()), member('c', char_type())])
+	vc_layout := layout_of(vc)
+	assert vc_layout.size == 32 && vc_layout.align == 16
+	assert vc_layout.offsets == [0, 16]
+	// A union takes the largest member at the beginning, and its alignment is
+	// the strictest one at 16.
+	u := union_type('q_i128_union', [member('c', char_type()), member('v', int128_type())])
+	u_layout := layout_of(u)
+	assert u_layout.size == 16 && u_layout.align == 16
+	// An array of three of them is 48 bytes, which is what gcc gives
+	// `sizeof(__int128[3])`.
+	assert size_of(array_of(int128_type(), 3)) == 48
+}
+
+// The description the compiler builds is what the emitter's questions are
+// answered from, so the 128-bit width has to be in it and not only in the
+// measured table the tests read.
+fn test_the_compiler_carries_the_128_bit_width() {
+	target := backend.host() or {
+		assert false
+		return
+	}
+	rep := from_target(target).representation
+	assert rep.size_of(int128_type()) or { -1 } == 16
+	assert rep.align_of(int128_type()) or { -1 } == 16
+	assert rep.size_of(unsigned_int128_type()) or { -1 } == 16
+	assert rep.align_of(unsigned_int128_type()) or { -1 } == 16
 }
 
 // gcc -std=c99 -o layout layout.c && ./layout (the first line)

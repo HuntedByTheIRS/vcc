@@ -32,6 +32,14 @@ pub enum Kind {
 	unsigned_long
 	long_long
 	unsigned_long_long
+	// int128 and unsigned_int128 are the two 128-bit integer types, which the
+	// GNU compilers have and no standard does: gcc's `__int128`, and the
+	// unsigned type its `unsigned __int128` names. Measured on gcc 16.2.1 on
+	// this machine, each of them occupies 16 bytes and starts on a 16-byte
+	// boundary, `signed __int128` is the signed type under another spelling,
+	// and `long __int128` is refused.
+	int128
+	unsigned_int128
 	float
 	double
 	long_double
@@ -159,7 +167,8 @@ pub:
 // enumerated types included.
 pub fn (k Kind) is_integer() bool {
 	return k in [Kind.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short, .int_,
-		.unsigned_int, .long, .unsigned_long, .long_long, .unsigned_long_long, .enum_]
+		.unsigned_int, .long, .unsigned_long, .long_long, .unsigned_long_long, .int128,
+		.unsigned_int128, .enum_]
 }
 
 // is_floating says whether the kind is a real floating type. The complex types
@@ -187,20 +196,22 @@ pub fn (k Kind) is_aggregate() bool {
 }
 
 pub fn (k Kind) is_signed_integer() bool {
-	return k in [Kind.char_, .signed_char, .short, .int_, .long, .long_long, .enum_]
+	return k in [Kind.char_, .signed_char, .short, .int_, .long, .long_long, .int128, .enum_]
 }
 
 pub fn (k Kind) is_unsigned_integer() bool {
 	return k in [Kind.bool_, .unsigned_char, .unsigned_short, .unsigned_int, .unsigned_long,
-		.unsigned_long_long]
+		.unsigned_long_long, .unsigned_int128]
 }
 
 // rank is the conversion rank of 6.3.1.1. Every signed type has the same rank as
 // its unsigned counterpart, which is what makes `unsigned int + int` convert to
 // unsigned int rather than to int. `_Bool` is below everything, the character
 // types rank below short, and the floating types rank above the integers, in the
-// order 6.3.1.8 applies them. A kind with no rank in that order answers -1:
-// nothing arithmetic may be asked of it.
+// order 6.3.1.8 applies them. The 128-bit integers are the GNU types and rank
+// above every type the standard has, which is where gcc's own conversion rank
+// puts `__int128`. A kind with no rank in that order answers -1: nothing
+// arithmetic may be asked of it.
 pub fn (k Kind) rank() int {
 	return match k {
 		.bool_ { 0 }
@@ -209,12 +220,13 @@ pub fn (k Kind) rank() int {
 		.int_, .unsigned_int, .enum_ { 3 }
 		.long, .unsigned_long { 4 }
 		.long_long, .unsigned_long_long { 5 }
-		.float { 6 }
-		.double { 7 }
-		.long_double { 8 }
-		.complex_float { 9 }
-		.complex_double { 10 }
-		.complex_long_double { 11 }
+		.int128, .unsigned_int128 { 6 }
+		.float { 7 }
+		.double { 8 }
+		.long_double { 9 }
+		.complex_float { 10 }
+		.complex_double { 11 }
+		.complex_long_double { 12 }
 		else { -1 }
 	}
 }
@@ -426,6 +438,8 @@ fn (t Type) describe_unqualified() string {
 		.unsigned_long { return 'unsigned long' }
 		.long_long { return 'long long' }
 		.unsigned_long_long { return 'unsigned long long' }
+		.int128 { return '__int128' }
+		.unsigned_int128 { return 'unsigned __int128' }
 		.float { return 'float' }
 		.double { return 'double' }
 		.long_double { return 'long double' }
@@ -577,6 +591,20 @@ pub fn unsigned_long_long_type() Type {
 	}
 }
 
+pub fn int128_type() Type {
+	return Type{
+		kind:     .int128
+		complete: true
+	}
+}
+
+pub fn unsigned_int128_type() Type {
+	return Type{
+		kind:     .unsigned_int128
+		complete: true
+	}
+}
+
 pub fn float_type() Type {
 	return Type{
 		kind:     .float
@@ -636,6 +664,8 @@ pub fn scalar(kind Kind) ?Type {
 		.unsigned_long { unsigned_long_type() }
 		.long_long { long_long_type() }
 		.unsigned_long_long { unsigned_long_long_type() }
+		.int128 { int128_type() }
+		.unsigned_int128 { unsigned_int128_type() }
 		.float { float_type() }
 		.double { double_type() }
 		.long_double { long_double_type() }
