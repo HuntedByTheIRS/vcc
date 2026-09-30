@@ -578,17 +578,6 @@ fn test_a_compound_assignment_is_the_assignment_it_means() {
 	assert binary.right is ast.IntLit
 }
 
-// A compound spelling this reader does not expand, here `*=`, is reported
-// rather than turned into `x = x * 2`: only `+=` and `-=` are expanded, and the
-// rest are the emitter's decision.
-fn test_a_compound_assignment_with_no_form_is_reported() {
-	result := parsed('int main() { int x = 1; x *= 2; return x; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('compound assignment')
-	assert result.unit.decls[0].body.len == 2
-	assert result.unit.decls[0].body[1].kind == .return_stmt
-}
-
 // A condition is written with the operators C compares with, and they bind the
 // way C binds them: the arithmetic first, then the comparisons, then the two
 // that join conditions.
@@ -756,6 +745,73 @@ fn test_the_bitwise_operators_bind_in_c_order() {
 // `~` is a prefix operator and not a binary one, and the reader already has the
 // prefix mechanism for it: the operand is promoted and the node keeps the
 // spelling, which is what the emitter matches on.
+// Every compound spelling is read as the assignment to the same name, whose value
+// is the binary operator the spelling names: `x <<= 3` means `x = x << 3`, and the
+// operator in the tree is the one the emitter has an arm for rather than the one
+// the source wrote. The operator's own precedence never applies here: what the
+// compound spelling governs is the whole expression on its right, so `x &= 1 | 2`
+// groups the `|` under the `&`.
+fn test_a_compound_assignment_is_the_binary_operator_it_names() {
+	spellings := [
+		'+',
+		'-',
+		'*',
+		'/',
+		'%',
+		'<<',
+		'>>',
+		'&',
+		'|',
+		'^',
+	]
+	for spelling in spellings {
+		source := 'int main(void) { int x = 6;\n\tx ${spelling}= 3;\n\treturn x;\n}\n'
+		result := parsed(source)
+		assert result.diagnostics.len == 0
+		body := result.unit.decls[0].body
+		assert body.len == 3
+		statement := body[1]
+		assert statement.kind == .assign
+		assert statement.target == 'x'
+		expr := statement.expr or {
+			assert false
+			return
+		}
+		assert expr is ast.Binary
+		binary := expr as ast.Binary
+		assert binary.op == spelling
+		assert binary.left is ast.Ident
+		assert (binary.left as ast.Ident).name == 'x'
+		assert binary.right is ast.IntLit
+		assert (binary.right as ast.IntLit).value == 3
+		// The node carries the type of the operator, which is the type the rest of
+		// the compiler reads rather than the spelling. A node of the zero type is
+		// what made `v *= 7` on an object of 128 bits refuse a store the object was
+		// wide enough for.
+		assert binary.typ.describe() == 'int'
+	}
+	// The same spelling on a target of 128 bits answers with the pair.
+	wide := parsed('int main(void) { __int128 v = 1;\n\tv *= 7;\n\treturn 0; }')
+	assert wide.diagnostics.len == 0
+	compound := wide.unit.decls[0].body[1]
+	value := (compound.expr or {
+		assert false
+		return
+	}) as ast.Binary
+	assert value.op == '*'
+	assert value.typ.kind == .int128
+	// The compound spelling governs the whole expression on its right.
+	grouped := parsed('int main(void) { int x = 6;\n\tx &= 1 | 2;\n\treturn x;\n}\n')
+	assert grouped.diagnostics.len == 0
+	statement := grouped.unit.decls[0].body[1]
+	outer := (statement.expr or {
+		assert false
+		return
+	}) as ast.Binary
+	assert outer.op == '&'
+	assert (outer.right as ast.Binary).op == '|'
+}
+
 fn test_a_complement_is_a_unary_operator() {
 	result := parsed('int main(void) { return ~1; }')
 	assert result.diagnostics.len == 0

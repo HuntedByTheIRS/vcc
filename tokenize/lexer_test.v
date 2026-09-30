@@ -32,6 +32,10 @@ fn test_numbers_of_every_base() {
 
 fn test_punctuation_is_matched_longest_first() {
 	assert texts('<<= << <') == ['<<=', '<<', '<', '']
+	// The compound spellings of the assignment, which is a spelling the operator
+	// table has to carry in one piece: `/=` was missing from it while `*=` and `%=`
+	// were there, so `x /= 2` lexed as two tokens and the reader reported the `=`.
+	assert texts('/= %= &= |= ^=') == ['/=', '%=', '&=', '|=', '^=', '']
 	assert texts('-> ++ == != ...') == ['->', '++', '==', '!=', '...', '']
 	assert texts('[a] . b ? c') == ['[', 'a', ']', '.', 'b', '?', 'c', '']
 }

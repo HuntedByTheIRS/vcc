@@ -293,16 +293,21 @@ fn (mut p Parser) check_initializer(to types.Type, init ast.Expr) {
 	p.error_span(init.line, init.col, problem)
 }
 
-// parse_compound_assignment reads `name += expr`, and `name -= expr` because it
-// is the same thing with the other operator. `x += 1` reads and writes the same
-// name, so with a name for its target it means exactly `x = x + 1`, and that is
-// the shape the tree is written in. The other compound spellings are reported
-// instead: which of them this tree expands is a decision about the arithmetic it
-// emits, and expanding `x &= 1` here would settle that on the reader's side
-// before the emitter has an operator to write it with.
+// parse_compound_assignment reads `name += expr` and every other compound
+// spelling, because they are all the same thing with the other operator: `x += 1`
+// reads and writes the same name, so with a name for its target it means exactly
+// `x = x + 1`, and that is the shape the tree is written in.
+//
+// Every spelling the lexer carries is expanded here now that the emitter writes
+// every operator they name, so the list below is every one of them and the guard
+// after it is left for a spelling a later change might add. The narrower list this
+// replaced expanded only `+=` and `-=`, which was a decision about the arithmetic
+// the emitter had: expanding `x &= 1` while nothing could emit a `&` would have
+// moved the refusal from the first stage that can describe the construct to one
+// that can only complain about it.
 fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.Token, index ?ast.Expr) !ast.Stmt {
 	arithmetic := op.text[..op.text.len - 1]
-	if arithmetic !in ['+', '-'] {
+	if arithmetic !in ['+', '-', '*', '/', '%', '<<', '>>', '&', '|', '^'] {
 		p.error_at(op, 'unsupported: the compound assignment ${op.text} is not implemented')
 		return error('compound assignment')
 	}
@@ -310,8 +315,23 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 	// What the assignment reads is the target itself, and for an element that is
 	// the element rather than the array: the subscript is written into the tree
 	// again, so that `a[i] += 1` means `a[i] = a[i] + 1`.
+	//
+	// The nodes built here carry the types the expression reader would have given
+	// them, because everything after the reader reads those types rather than the
+	// spelling: a binary whose type is the zero type is a value the emitter cannot
+	// size, and `v *= 7` on an object of 128 bits was refused by name for being a
+	// value this back end could not widen, which was true of the empty type and was
+	// not true of the value. The operator the type is worked out from is the one the
+	// spelling names, not the spelling itself, and it is the same token with that
+	// text.
+	operator := tokenize.Token{
+		...op
+		text: arithmetic
+	}
+	target_type := p.assignment_target_type(target.text, index, none)
 	mut left := ast.Expr(ast.Ident{
 		name: target.text
+		typ:  target_type
 		line: target.line
 		col:  target.col
 	})
@@ -319,6 +339,7 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 		left = ast.Expr(ast.Index{
 			name:  target.text
 			index: subscript
+			typ:   target_type
 			line:  target.line
 			col:   target.col
 		})
@@ -327,6 +348,7 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 		op:    arithmetic
 		left:  left
 		right: right
+		typ:   p.binary_type(operator, left, right)
 		line:  op.line
 		col:   op.col
 	})

@@ -1809,6 +1809,33 @@ fn test_a_shift_of_a_pair_moves_the_other_word() {
 // shifted, because the language calls that undefined and any answer would be
 // invented: the instruction would shift by the count modulo the width, which is a
 // number nobody wrote.
+// A compound assignment on an object of 128 bits, which is the shape `v <<= 1`
+// has: the reader writes it as the assignment of the binary operator to the same
+// name, and the value the emitter is handed is the result of that operator rather
+// than storage. It was refused by name for a while, because the reader built the
+// node by hand and left its type empty, and an empty type is a value this back end
+// cannot size.
+fn test_a_compound_assignment_on_a_pair_runs() {
+	powers := doubling('t64', 64) + doubling('t72', 72)
+	cases := [
+		'\t__int128 v = 6;\n\tv *= 7;\n\treturn v == 42;',
+		'\t__int128 v = 100;\n\tv /= 3;\n\treturn v == 33;',
+		'\t__int128 v = 100;\n\tv %= 7;\n\treturn v == 2;',
+		'\t__int128 v = -8;\n\tv >>= 1;\n\treturn v == -4;',
+		'\tunsigned __int128 v = 84;\n\tv >>= 1;\n\treturn v == 42;',
+		'\t__int128 v = 0xf0;\n\tv |= 0x0f;\n\tv ^= 0x80;\n\treturn v == 0x7f;',
+		'\t__int128 v = 8; int n = 2;\n\tv <<= n;\n\treturn v == 32;',
+		'${powers}\t__int128 v = 1;\n\tv <<= 70;\n\treturn (v >> 70) == 1;',
+		'${powers}\t__int128 v = t64 + 0xff;\n\tv &= 0x0f;\n\treturn v == 0x0f;',
+		'${powers}\t__int128 v = 1;\n\tv <<= 64;\n\tv += 5;\n\tv <<= 1;\n\treturn (v >> 65) == 1;',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main(void) {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
 fn test_a_shift_by_a_count_as_wide_as_the_value_is_refused() {
 	cases := [
 		'int main() { int a = 1;\n\treturn a << 32; }',
