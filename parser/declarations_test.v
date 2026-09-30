@@ -158,6 +158,36 @@ fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
 
 // A pointer at the top level is a relocation this compiler does not write yet,
 // so the definition is reported instead of laid out as a wrong number.
+// An initializer that is an expression is a shape this reads no part of. Reading
+// its first number and stopping was silent, and the value defined was that first
+// number: `int g = 2 + 3;` defined g as 2, `int g = 1 << 3;` as 1, `char g = 2 + 3;`
+// as 2, `double g = 1.5 + 1.5;` as 1, and `__int128 g = 0 - 100;` as 0, each with a
+// working image behind it and no diagnostic. The whole expression now reads as
+// nothing, which is the case the definition reports by name.
+fn test_a_file_scope_initializer_that_is_an_expression_is_reported() {
+	expressions := [
+		'int g = 2 + 3;',
+		'int g = 1 << 3;',
+		'char g = 2 + 3;',
+		'double g = 1.5 + 1.5;',
+		'__int128 g = 0 - 100;',
+		'__int128 g = -100 + 0;',
+	]
+	for source in expressions {
+		result := declarations_of(source)
+		assert result.diagnostics.len == 1
+		assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
+		assert result.unit.globals.len == 0
+	}
+	// A single number is still read, and its sign with it, which is the shape the
+	// language puts in the image.
+	kept := declarations_of('int g = -7;')
+	assert kept.diagnostics.len == 0
+	assert kept.unit.globals.len == 1
+	zero := declarations_of('__int128 g = 0;')
+	assert zero.diagnostics.len == 0
+}
+
 fn test_a_pointer_defined_at_the_top_level_is_reported() {
 	result := declarations_of('char *message = 0;')
 	assert result.diagnostics.len == 1

@@ -713,7 +713,7 @@ struct FileConstant {
 }
 
 // file_scope_constant reads the initializer a file-scope definition may have: a
-// number, signed, which is the only shape the language allows there anyway.
+// number, signed, which is the only shape this folds.
 // Anything else - a string, a brace list, an expression - reads as none, and the
 // caller reports it: what is written into the image is a constant, and a
 // constant is what can be written.
@@ -739,6 +739,16 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 	}
 	t := p.peek()
 	p.next()
+	// The number is the initializer or the initializer is not one this reads. An
+	// expression is a shape this does not fold, and reading its first term and
+	// stopping was silent: `int g = 2 + 3;` defined g as 2, `int g = 1 << 3;` as
+	// 1, `char g = 2 + 3;` as 2, `double g = 1.5 + 1.5;` as 1, and
+	// `__int128 g = 0 - 100;` as 0, each with no diagnostic and an image written.
+	// Answering none here is what the comment above promises: the caller reports
+	// what it cannot write, so an expression refuses by name at the definition.
+	if !p.at_punct(',') && !p.at_punct(';') {
+		return FileConstant{}
+	}
 	if is_floating_constant(t.text) {
 		value := parse_floating_literal(t.text) or {
 			p.error_at(t, err.msg())
