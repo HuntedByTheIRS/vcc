@@ -79,7 +79,9 @@ jobs:
           git clone --quiet --depth 1 https://github.com/vlang/v "$V_DIR"
           make -C "$V_DIR"
           echo "$V_DIR" >> "$GITHUB_PATH"
-          v version
+          # $GITHUB_PATH reaches the steps after this one, not this one, so the
+          # binary built here is named by its path and the next step gets `v`.
+          "$V_DIR/v" version
 
       - name: build and test
         run: |
