@@ -266,6 +266,27 @@ fn test_the_address_instructions_are_the_bytes_the_machine_reads() {
 // is held to the bytes the machine's own assembler produces for it, the way the
 // instructions above are.
 
+// The pair's multiplication needs one instruction the arithmetic beside it does
+// not: a two-operand imul, which multiplies one word by another and keeps the low
+// word of the answer. It is what the two cross products are made of, and the part
+// of each above its low word cannot reach a 128-bit answer.
+fn test_the_pairs_multiplication_is_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic(err) }
+	rax := target.reg('rax') or { panic(err) }
+	rcx := target.reg('rcx') or { panic(err) }
+	rdx := target.reg('rdx') or { panic(err) }
+	// imul rax, rcx and imul rdx, rax, as the machine's own assembler writes
+	// them: the first register is the one multiplied into, and it is the one in
+	// the ModRM reg field.
+	assert arch.imul_word64(rax, rcx) or { panic(err) } == [u8(0x48), 0x0f, 0xaf, 0xc1]
+	assert arch.imul_word64(rdx, rax) or { panic(err) } == [u8(0x48), 0x0f, 0xaf, 0xd0]
+	r8 := target.reg('r8') or { panic(err) }
+	r9 := target.reg('r9') or { panic(err) }
+	assert arch.imul_word64(r8, r9) or { panic(err) } == [u8(0x4d), 0x0f, 0xaf, 0xc1]
+	assert target.multiply_word(rax, rcx) or { panic(err) } == [u8(0x48), 0x0f, 0xaf, 0xc1]
+	assert target.multiply_word(rdx, rax) or { panic(err) } == [u8(0x48), 0x0f, 0xaf, 0xd0]
+}
+
 fn test_the_wide_arithmetic_is_the_bytes_the_machine_reads() {
 	target := lookup('x86_64-linux') or { panic(err) }
 	rax := target.reg('rax') or { panic(err) }

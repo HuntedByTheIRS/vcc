@@ -227,8 +227,9 @@ mut:
 	// right side is still allowed to call a function, so both operands wait in
 	// the frame. They are kept the way values are, one per level, so a function
 	// ends up with as many as its deepest expression used.
-	wide_left  []Slot
-	wide_right []Slot
+	wide_left    []Slot
+	wide_right   []Slot
+	wide_scratch []Slot
 	// loops is the loops being emitted, innermost last, for break and continue.
 	loops []LoopLabels
 	// next_label numbers the jump labels. It runs across the whole file rather
@@ -2887,14 +2888,15 @@ fn (e Emitter) word_operation(op string, dst backend.Register, src backend.Regis
 // as a pair and a value of a narrower type as a word — the right side is computed,
 // and the operation then reads both operands out of their slots.
 fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
-	// The rest of the operators are gaps of their own rather than shortcuts not
-	// taken, and they are refused by name and place before anything is emitted:
-	// the backend has the instructions for a shift, a multiplication and a
-	// division of a pair, and no caller for them yet. The three bitwise operators
-	// have a form here and no caller from source at all, because the grammar has
-	// no bitwise operator: they are the same three lines as the arithmetic ones
-	// and they wait for the grammar rather than for this back end.
-	if step.op !in ['+', '-', '&', '|', '^', '==', '!=', '<', '>', '<=', '>='] {
+	// What is left is a gap of its own rather than a shortcut not taken, and it is
+	// refused by name and place before anything is emitted: this back end links no
+	// library and has no runtime of its own, so a division of one pair by another
+	// would have to be emitted as a routine of its own rather than a sequence.
+	// The three bitwise operators have a form here and no caller from source at
+	// all, because the grammar has no bitwise operator: they are the same three
+	// lines as the arithmetic ones and they wait for the grammar rather than for
+	// this back end.
+	if step.op !in ['+', '-', '*', '&', '|', '^', '==', '!=', '<', '>', '<=', '>='] {
 		e.diagnostics << problem(step.line, step.col, 'unsupported: ${step.op} on a 128-bit value is not implemented, and this back end computes no value of that width with it')
 		return error('wide operator not implemented')
 	}
@@ -2912,7 +2914,7 @@ fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
 		e.widen_into_pair(right, step.right.typ.kind.is_unsigned(), step.line, step.col)!
 	}
 	e.load_pair(left, step.line, step.col)!
-	return e.apply_wide_binary(step, right)
+	return e.apply_wide_binary(step, left, right, depth)
 }
 
 // apply_wide_binary does the operation with the left pair in the registers and the
@@ -2921,7 +2923,7 @@ fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
 // flags, which is what makes reading the second operand in between possible at
 // all. Every sequence here is gcc 16.2.1's at -O0, which is where the order of the
 // two subtractions and the sign of each answer were read off.
-fn (mut e Emitter) apply_wide_binary(step ast.Binary, right Slot) !void {
+fn (mut e Emitter) apply_wide_binary(step ast.Binary, left Slot, right Slot, depth int) !void {
 	frame := e.frame_pointer(step.line, step.col)!
 	low := e.accumulator(step.line, step.col)!
 	high := e.remainder(step.line, step.col)!
@@ -2933,6 +2935,29 @@ fn (mut e Emitter) apply_wide_binary(step ast.Binary, right Slot) !void {
 			e.append(e.word_operation(step.op, low, other, false)!)
 			e.append(e.target.load_slot(frame, right.offset + word, other, word)!)
 			e.append(e.word_operation(step.op, high, other, true)!)
+		}
+		'*' {
+			// A pair multiplied by a pair, which gcc emits the same way for both
+			// signed types at -O0: the low words are multiplied exactly into the
+			// pair, and the two cross products are added into the high word of
+			// that product. What a cross product carries above its own low word
+			// cannot reach the answer, because it is a multiple of 2^128, so gcc
+			// adds the two with a lea, which does not set the flags; a plain add
+			// is the same instruction here.
+			crossed := e.wide_pair_slot(mut e.wide_scratch, depth)
+			e.append(e.target.load_slot(frame, left.offset + word, low, word)!)
+			e.append(e.target.load_slot(frame, right.offset, other, word)!)
+			e.append(e.target.multiply_word(low, other)!)
+			e.append(e.target.load_slot(frame, right.offset + word, other, word)!)
+			e.append(e.target.load_slot(frame, left.offset, high, word)!)
+			e.append(e.target.multiply_word(high, other)!)
+			e.append(e.target.add_reg64(low, high))
+			e.append(e.target.store_slot(frame, crossed.offset, low, word)!)
+			e.append(e.target.load_slot(frame, left.offset, low, word)!)
+			e.append(e.target.load_slot(frame, right.offset, other, word)!)
+			e.append(e.target.multiply_pair(other)!)
+			e.append(e.target.load_slot(frame, crossed.offset, other, word)!)
+			e.append(e.target.add_reg64(high, other))
 		}
 		'==', '!=' {
 			// Two pairs are equal when neither word differs, and a difference in

@@ -263,9 +263,11 @@ fn test_an_array_of_128_bit_objects_is_written_at_an_element_address() {
 // A 128-bit operation this back end has no form for still writes nothing: the
 // operators a pair has no instruction for are what the emitter refuses, and the
 // message names the operator and its place rather than the width of a store that
-// then happened.
+// then happened. Division is the one left, and it is a routine of its own rather
+// than a sequence: this back end links no library and has no runtime, so a
+// division of one pair by another cannot be a call.
 fn test_a_128_bit_operation_with_no_two_word_form_writes_nothing() {
-	for expression in ['a * 2', 'a / 2', 'a % 2'] {
+	for expression in ['a / 2', 'a % 2'] {
 		source := scratch('wide_bad.c')
 		binary := scratch('wide_bad')
 		os.write_file(source, 'int main(void) { __int128 a = 5; return (int)(${expression}); }\n') or {
@@ -310,6 +312,33 @@ fn test_a_128_bit_value_is_computed_and_runs() {
 // measured on gcc 16.2.1, an int declared from a stored 300 is 300 and a char from
 // the same object is 44. A floating slot is the case the low word is wrong for, and
 // it is refused rather than stored.
+// A pair multiplied by a pair, run: the answer is the program's exit status, and
+// gcc 16.2.1 gives the same one for each of these. The expected 128-bit value is
+// written as a power of two doubled the number of times it needs, because the
+// language has no literal that wide and no shift.
+fn test_two_128_bit_values_are_multiplied_and_run() {
+	mut powers := '\tunsigned __int128 t64 = 1;\n'
+	for _ in 0 .. 64 {
+		powers += '\tt64 = t64 + t64;\n'
+	}
+	powers += '\tunsigned __int128 t32 = 1;\n'
+	for _ in 0 .. 32 {
+		powers += '\tt32 = t32 + t32;\n'
+	}
+	source := scratch('wide_mul.c')
+	binary := scratch('wide_mul')
+	// The low product's high word is what reaches the answer in the first of
+	// these, and the two cross products carry a sign in the second.
+	first := 'int main(void) {\n${powers}\tunsigned __int128 a = t32 + 1;\n\tunsigned __int128 p = a * a;\n\treturn p == t64 + t32 + t32 + 1;\n}\n'
+	second := 'int main(void) {\n${powers}\t__int128 a = 0 - t64 - 1;\n\t__int128 b = t64 + 5;\n\t__int128 p = a * b;\n\t__int128 e = 0;\n\te = e - t64;\n\te = e - t64;\n\te = e - t64;\n\te = e - t64;\n\te = e - t64;\n\te = e - t64;\n\te = e - 5;\n\treturn p == e;\n}\n'
+	mut exit_status := compile_and_run([source, '-o', binary], first)
+	assert exit_status == 1
+	exit_status = compile_and_run([source, '-o', binary], second)
+	assert exit_status == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_a_128_bit_object_is_stored_into_a_narrower_slot() {
 	cases := ['int main(void) { __int128 v = 300; int n = v; return n; }',
 		'int main(void) { __int128 v = 300; char c = v; return c; }',

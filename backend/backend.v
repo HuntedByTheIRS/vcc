@@ -648,6 +648,13 @@ pub fn (t Target) shift_wide_right(dst arch.Register, src arch.Register, bits u8
 
 // multiply_pair and multiply_pair_signed multiply the result register by the
 // source and leave the two-word product in the pair.
+// multiply_word multiplies one word by another and keeps the low word of the
+// answer. A pair's multiplication uses it for the two cross products, whose upper
+// halves cannot reach the answer.
+pub fn (t Target) multiply_word(dst arch.Register, src arch.Register) ![]u8 {
+	return arch.imul_word64(dst, src)
+}
+
 pub fn (t Target) multiply_pair(src arch.Register) ![]u8 {
 	return arch.mul_reg64(src)
 }

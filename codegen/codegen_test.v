@@ -1700,6 +1700,48 @@ fn copy_bytes(from string, to string) {
 // through the carry the low negation leaves. Measured on gcc 16.2.1, the programs
 // below and ten more return exactly these numbers, which are the low bytes of the
 // two-word answers.
+// doubling is the source for a power of two, which is how the tests below write a
+// 128-bit expected value: the type has no literal that wide, and a shift would be
+// another feature.
+fn doubling(name string, times int) string {
+	mut text := '\tunsigned __int128 ${name} = 1;\n'
+	for _ in 0 .. times {
+		text += '\t${name} = ${name} + ${name};\n'
+	}
+	return text
+}
+
+// A pair multiplied by a pair. Every case here is a program whose answer gcc
+// 16.2.1 gives as 1 and whose answer this compiler gives as 1 too: the low word's
+// product reaching the high word, the two cross products, a sign on one operand
+// and on both, a narrow operand on either side, and a chain.
+fn test_two_128_bit_values_are_multiplied() {
+	powers := doubling('t64', 64) + doubling('t33', 33) + doubling('t32', 32) + doubling('t65', 65) + doubling('t97', 97)
+	cases := [
+		// (2^32 + 1)^2 = 2^64 + 2^33 + 1: the cross products are zero and the low
+		// product is the part that overflows.
+		'${powers}\tunsigned __int128 a = t32 + 1;\n\tunsigned __int128 p = a * a;\n\tunsigned __int128 e = t64 + t33 + 1;\n\treturn p == e;',
+		// (2^64 + 2^32 + 1)^2 = 2^97 + 2^65 + 2^64 + 2^33 + 1: every part of the
+		// sequence matters at once.
+		'${powers}\tunsigned __int128 a = t64 + t32 + 1;\n\tunsigned __int128 p = a * a;\n\tunsigned __int128 e = t97 + t65 + t64 + t33 + 1;\n\treturn p == e;',
+		// -(2^64 + 1) * (2^64 + 5) = -(6 * 2^64 + 5), where both cross products
+		// carry a sign.
+		'${powers}\t__int128 a = 0 - t64 - 1;\n\t__int128 b = t64 + 5;\n\t__int128 p = a * b;\n\t__int128 e = 0;\n\te = e - t64;\n\te = e - t64;\n\te = e - t64;\n\te = e - t64;\n\te = e - t64;\n\te = e - t64;\n\te = e - 5;\n\treturn p == e;',
+		// A narrow operand on either side, which is widened into a pair first.
+		'\tunsigned __int128 a = 6;\n\treturn (a * 7) == 42;',
+		'\tunsigned __int128 b = 6;\n\treturn (7 * b) == 42;',
+		// A negative narrow operand, and a chain of three.
+		'\t__int128 a = -3;\n\treturn (int)(a * 5) == -15;',
+		'\tunsigned __int128 a = 3;\n\treturn (int)(a * 2 * 7) == 42;',
+		'\tunsigned __int128 a = 0;\n\treturn (a * 12345) == 0;',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
 fn test_a_128_bit_value_is_computed_as_a_pair() {
 	cases := [
 		WideValueCase{'int main() { __int128 a = 40; __int128 b = 2; return (int)(a + b); }', 42},
@@ -1743,7 +1785,7 @@ fn test_the_high_word_of_a_sum_takes_the_carry_of_the_low_one() {
 // computed wrongly or left to an internal error: a multiplication, a division and
 // a remainder of a 128-bit value each need a routine this back end does not have.
 fn test_a_128_bit_operator_with_no_two_word_form_is_refused_by_name() {
-	for expression in ['a * b', 'a / b', 'a % b'] {
+	for expression in ['a / b', 'a % b'] {
 		source := 'int main() { __int128 a = 40; __int128 b = 2; return (int)(${expression}); }'
 		emitted := emit(translation_unit(source), Options{})
 		assert emitted.diagnostics.len == 1

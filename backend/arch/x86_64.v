@@ -1331,6 +1331,31 @@ pub fn imul_reg64(src Register) ![]u8 {
 	return one_operand64(src, 0x05)
 }
 
+// imul_word64 multiplies the second register into the first and keeps the low
+// word of the answer, which is all of it that a pair's multiplication wants: the
+// cross products of two pairs are added into a high word, and the part of each
+// product above its low word is beyond the 128 bits of the answer and is dropped.
+// Measured on gcc 16.2.1, whose multiply of two __int128 values is two of these,
+// an lea that drops its own carry, and a mul.
+pub fn imul_word64(dst Register, src Register) ![]u8 {
+	if dst.width != 4 || src.width != 4 {
+		return error('${name}: a two-operand imul takes two registers named four bytes wide, and ${dst.name} and ${src.name} are not both that')
+	}
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x48) // REX.W: the values are words
+	if dst.code >= 8 {
+		rex |= 0x04
+	}
+	if src.code >= 8 {
+		rex |= 0x01
+	}
+	out << rex
+	out << u8(0x0f)
+	out << u8(0xaf)
+	out << u8(0xc0 | ((dst.code & 0x07) << 3) | (src.code & 0x07))
+	return out
+}
+
 // div_reg64 and idiv_reg64 divide the pair by the source: the dividend is the low
 // word in the result register and the high word above it, and the quotient comes
 // back to the result register with the remainder above it. The first reads the
