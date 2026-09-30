@@ -1348,14 +1348,22 @@ fn library_dir(name string) string {
 }
 
 // `libm.so` on this machine is a GNU ld script rather than an object file, and
-// what the script names is the library it stands for.
+// what the script names is the library it stands for. The path inside the script
+// is the one this machine keeps the library in, found the way the search finds
+// libraries: written out as `/usr/lib/libm.so.6` the fixture would assert the
+// layout of the machine it was written on, and the same library lives in
+// `/usr/lib/x86_64-linux-gnu` on a Debian-derived system.
 fn test_a_library_script_names_the_library_behind_it() {
 	dir := library_dir('script')
 	defer {
 		os.rmdir_all(dir) or {}
 	}
+	system_dirs := backend.host() or { panic('this test needs the host target') }.library_dirs
+	target := find_system_library(system_dirs, 'libm.so.6') or {
+		panic('this test needs a libm.so.6 on the machine it runs on')
+	}
 	os.write_file(os.join_path(dir, 'libprobe.so'),
-		'/* GNU ld script\nOUTPUT_FORMAT(elf64-x86-64)\nGROUP ( /usr/lib/libm.so.6 ) */\n') or {
+		'/* GNU ld script\nOUTPUT_FORMAT(elf64-x86-64)\nGROUP ( ${target} ) */\n') or {
 		panic(err)
 	}
 	resolved := resolve_libraries(['probe'], [dir]) or { panic(err) }
