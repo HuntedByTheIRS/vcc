@@ -578,8 +578,9 @@ fn test_a_compound_assignment_is_the_assignment_it_means() {
 	assert binary.right is ast.IntLit
 }
 
-// A compound operator the expression grammar has no binary spelling for is
-// reported rather than expanded into something the file did not say.
+// A compound spelling this reader does not expand, here `*=`, is reported
+// rather than turned into `x = x * 2`: only `+=` and `-=` are expanded, and the
+// rest are the emitter's decision.
 fn test_a_compound_assignment_with_no_form_is_reported() {
 	result := parsed('int main() { int x = 1; x *= 2; return x; }')
 	assert result.diagnostics.len == 1
@@ -633,6 +634,163 @@ fn test_the_operators_that_join_conditions_bind_loosest() {
 	assert (binary.left as ast.Binary).op == '&&'
 	assert binary.right is ast.Binary
 	assert (binary.right as ast.Binary).op == '!='
+}
+
+// A shift is an operator between two values, and the tree holds it as one with
+// the spelling it was written with. C's 6.5.7 gives it the promoted type of its
+// left operand, which for two ints is an int.
+fn test_a_shift_is_a_binary_operator() {
+	left := parsed('int main(void) { return 1 << 2; }')
+	assert left.diagnostics.len == 0
+	expr := left.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	shift := expr as ast.Binary
+	assert shift.op == '<<'
+	assert (shift.left as ast.IntLit).value == 1
+	assert (shift.right as ast.IntLit).value == 2
+	assert shift.typ.describe() == 'int'
+	right := parsed('int main(void) { return 4 >> 1; }')
+	assert right.diagnostics.len == 0
+	other := right.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert other is ast.Binary
+	shifted := other as ast.Binary
+	assert shifted.op == '>>'
+	assert (shifted.left as ast.IntLit).value == 4
+	assert (shifted.right as ast.IntLit).value == 1
+}
+
+// The three bitwise operators are binary operators with the same shape, and each
+// one keeps its own spelling: the emitter matches on that string, so `|`, `^`
+// and `&` have to come back as themselves rather than as one another.
+fn test_the_bitwise_operators_keep_their_own_spellings() {
+	for pair in [['|', '1 | 2'], ['^', '1 ^ 2'], ['&', '1 & 2']] {
+		result := parsed('int main(void) { return ${pair[1]}; }')
+		assert result.diagnostics.len == 0
+		expr := result.unit.decls[0].body[0].expr or {
+			assert false
+			return
+		}
+		assert expr is ast.Binary
+		binary := expr as ast.Binary
+		assert binary.op == pair[0]
+		assert (binary.left as ast.IntLit).value == 1
+		assert (binary.right as ast.IntLit).value == 2
+	}
+}
+
+// A shift binds tighter than a comparison and looser than `+`, which is where C
+// puts it: `1 + 2 << 3` is `(1 + 2) << 3` and `1 << 2 < 3` is `(1 << 2) < 3`.
+fn test_a_shift_binds_between_addition_and_a_comparison() {
+	added := parsed('int main(void) { return 1 + 2 << 3; }')
+	assert added.diagnostics.len == 0
+	expr := added.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	shift := expr as ast.Binary
+	assert shift.op == '<<'
+	assert shift.left is ast.Binary
+	assert (shift.left as ast.Binary).op == '+'
+	assert (shift.right as ast.IntLit).value == 3
+	compared := parsed('int main(void) { return 1 << 2 < 3; }')
+	assert compared.diagnostics.len == 0
+	other := compared.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert other is ast.Binary
+	less := other as ast.Binary
+	assert less.op == '<'
+	assert less.left is ast.Binary
+	assert (less.left as ast.Binary).op == '<<'
+}
+
+// `&` binds looser than `==`, so `1 & 2 == 3` is `1 & (2 == 3)`: the and is the
+// node at the top and the comparison is its right operand.
+fn test_a_bitwise_and_binds_looser_than_equality() {
+	result := parsed('int main(void) { return 1 & 2 == 3; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	binary := expr as ast.Binary
+	assert binary.op == '&'
+	assert (binary.left as ast.IntLit).value == 1
+	assert binary.right is ast.Binary
+	assert (binary.right as ast.Binary).op == '=='
+}
+
+// The three bitwise operators bind in C's order, `&` tightest of them and `|`
+// loosest: `1 | 2 ^ 3 & 4` is `1 | (2 ^ (3 & 4))`.
+fn test_the_bitwise_operators_bind_in_c_order() {
+	result := parsed('int main(void) { return 1 | 2 ^ 3 & 4; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+	pipe := expr as ast.Binary
+	assert pipe.op == '|'
+	assert (pipe.left as ast.IntLit).value == 1
+	assert pipe.right is ast.Binary
+	xor := pipe.right as ast.Binary
+	assert xor.op == '^'
+	assert (xor.left as ast.IntLit).value == 2
+	assert xor.right is ast.Binary
+	amp := xor.right as ast.Binary
+	assert amp.op == '&'
+	assert (amp.left as ast.IntLit).value == 3
+	assert (amp.right as ast.IntLit).value == 4
+}
+
+// `~` is a prefix operator and not a binary one, and the reader already has the
+// prefix mechanism for it: the operand is promoted and the node keeps the
+// spelling, which is what the emitter matches on.
+fn test_a_complement_is_a_unary_operator() {
+	result := parsed('int main(void) { return ~1; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Unary
+	complement := expr as ast.Unary
+	assert complement.op == '~'
+	assert complement.typ.describe() == 'int'
+	// Where `~` is a prefix operator, `&` is both: the position decides. The
+	// initializer of a declarator goes through the same expression reader, so
+	// `int *p = &x;` still reads as the address of x with the type of a
+	// pointer, and `x & 1` reads as the bitwise and.
+	address := parsed('int main(void) { int x = 1; int *p = &x; return p != 0; }')
+	assert address.diagnostics.len == 0
+	init := address.unit.decls[0].body[1].init or {
+		assert false
+		return
+	}
+	assert init is ast.Unary
+	unary := init as ast.Unary
+	assert unary.op == '&'
+	assert unary.expr is ast.Ident
+	assert (unary.expr as ast.Ident).name == 'x'
+	assert unary.typ.describe() == 'int *'
+	bitwise := parsed('int main(void) { int x = 1; x = x & 1; return x; }')
+	assert bitwise.diagnostics.len == 0
+	assignment := bitwise.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert assignment is ast.Binary
+	assert (assignment as ast.Binary).op == '&'
 }
 
 fn test_a_negation_is_a_unary_node() {

@@ -297,9 +297,9 @@ fn (mut p Parser) check_initializer(to types.Type, init ast.Expr) {
 // is the same thing with the other operator. `x += 1` reads and writes the same
 // name, so with a name for its target it means exactly `x = x + 1`, and that is
 // the shape the tree is written in. The other compound spellings are reported
-// instead: a compound operator stands for one the expression grammar does not
-// read as a binary operator either, so expanding it would be inventing a form
-// nobody has agreed on.
+// instead: which of them this tree expands is a decision about the arithmetic it
+// emits, and expanding `x &= 1` here would settle that on the reader's side
+// before the emitter has an operator to write it with.
 fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.Token, index ?ast.Expr) !ast.Stmt {
 	arithmetic := op.text[..op.text.len - 1]
 	if arithmetic !in ['+', '-'] {

@@ -385,10 +385,11 @@ fn (mut p Parser) parse_binary(min_precedence int) !ast.Expr {
 }
 
 // binary_type is the type an expression with two operands has: int for a
-// comparison or a logical operator, and for the arithmetic ones the type the two
-// operands convert to, which is what 6.3.2.1 calls the usual arithmetic
-// conversions. An operand that is an array is read as a pointer to its first
-// element first.
+// comparison or a logical operator, and for the arithmetic and bitwise ones the
+// type the two operands convert to, which is what 6.3.2.1 calls the usual
+// arithmetic conversions. A shift is the one operator that is not symmetric in
+// its operands, and 6.5.7 gives it the promoted type of its left one. An operand
+// that is an array is read as a pointer to its first element first.
 //
 // Where the model refuses - two arithmetic operands whose conversion needs a
 // width the target description does not carry - the refusal is reported at the
@@ -409,6 +410,23 @@ fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) 
 	if op.text in ['&&', '||', '==', '!=', '<', '>', '<=', '>='] {
 		// The answer is a truth value whatever the operands were.
 		return types.int_type()
+	}
+	if op.text in ['<<', '>>'] {
+		// 6.5.7: a shift answers with the type of its left operand after the
+		// integer promotions. The count on the right is a value of its own
+		// type and is not converted to the left operand's, which is why this
+		// is not the conversion the two arithmetic operators go through.
+		if p.is_unresolved(left) || p.is_unresolved(right) {
+			return types.Type{}
+		}
+		if !a.is_integer() {
+			p.error_at(op, 'unsupported: the type of ${describe_operand(left)} ${op.text} ${describe_operand(right)} is not one this compiler resolves')
+			return types.Type{}
+		}
+		return types.integer_promotion(a, p.representation) or {
+			p.error_at(op, err.msg())
+			return types.Type{}
+		}
 	}
 	if a.is_arithmetic() && b.is_arithmetic() {
 		return types.usual_arithmetic_conversions(a, b, p.representation) or {
@@ -1064,8 +1082,8 @@ fn is_null_constant(expr ast.Expr) bool {
 
 // constant_value is the value of an integer constant expression this reader
 // evaluates while it reads: a literal, a literal with a sign in front of it, and
-// the arithmetic of two values. The five operators are the ones the tree has a
-// precedence for, which is the arithmetic this compiler reads at all.
+// the arithmetic of two values. The five arithmetic operators are the ones it
+// folds, which is the arithmetic this compiler reads at all.
 //
 // An expression that is not one of those answers none, which says that this is not
 // a constant expression the compiler can evaluate - not that it has no value. A
@@ -1119,18 +1137,28 @@ fn constant_value(expr ast.Expr) ?i64 {
 }
 
 // binary_precedence is the binding strength of an operator the tree has a node
-// for. The order is C's: `*` binds tighter than `+`, `+` tighter than the four
-// comparisons, those tighter than `==`, and `&&` tighter than `||`. An
-// operator that is not in the table stops the expression, and the caller
-// diagnoses whatever it stopped on.
+// for. The order is C's: `*` binds tighter than `+`, `+` tighter than a shift, a
+// shift tighter than the four comparisons, those tighter than `==`, `==` tighter
+// than `&`, `&` tighter than `^`, `^` tighter than `|`, and `&&` tighter than
+// `||`. An operator that is not in the table stops the expression, and the
+// caller diagnoses whatever it stopped on.
+//
+// The numbers are a relative order rather than C's own levels, so inserting an
+// operator renumbers the arms it is inserted between: the three bitwise
+// operators and the two shifts belong between `==` and `&&`, which a gap of one
+// has no room for.
 fn binary_precedence(op string) int {
 	return match op {
 		'||' { 3 }
 		'&&' { 4 }
-		'==', '!=' { 5 }
-		'<', '>', '<=', '>=' { 6 }
-		'+', '-' { 7 }
-		'*', '/', '%' { 8 }
+		'|' { 5 }
+		'^' { 6 }
+		'&' { 7 }
+		'==', '!=' { 8 }
+		'<', '>', '<=', '>=' { 9 }
+		'<<', '>>' { 10 }
+		'+', '-' { 11 }
+		'*', '/', '%' { 12 }
 		else { 0 }
 	}
 }
