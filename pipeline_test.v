@@ -1306,3 +1306,19 @@ fn test_a_128_bit_parameter_that_will_not_fit_the_registers_is_refused() {
 	assert image.bytes.len == 0
 	os.rm(source) or {}
 }
+
+// A 128-bit temporary belongs to the frame it was claimed in, and a program that
+// hands two calls to a function of two pairs is where a temporary kept from the
+// function before shows up: the first operand is parked on the slot the second
+// parameter holds, and the sum comes back as the first value twice. Measured on gcc
+// 16.2.1, this program exits 15.
+fn test_a_pair_from_a_call_keeps_its_value_across_the_call() {
+	source := scratch('wide_frames.c')
+	binary := scratch('wide_frames')
+	program := '__int128 g(__int128 x) { return x + 1; }\n' + '__int128 f(__int128 a, __int128 b) { return a + b; }\n' +
+		'int main(void) { return (int)f(g(9), g(4)); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 15
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

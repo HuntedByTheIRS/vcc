@@ -2362,6 +2362,56 @@ fn test_a_128_bit_argument_that_will_not_fit_the_registers_is_reported() {
 	assert emitted.bytes.len == 0
 }
 
+// A 128-bit temporary is a place in the frame, and the places are worked out again
+// for every function. A temporary kept from the function before would put this
+// function's arithmetic on top of one of its own parameters or locals: in the first
+// program the slot holding the first operand of `a + b` is the slot `b` lives in, so
+// b is overwritten before it is read and the sum comes back as the first value
+// twice. Measured on gcc 16.2.1, the three programs exit 15, 25 and 25. The third
+// has no 128-bit parameter and no 128-bit return type, so the fault was there
+// before either of them; this test keeps it fixed. The places a half-finished value
+// waits in are not the only ones: the block a pair division works in is another, and
+// a division that kept its block puts the next function's quotient, remainder,
+// counter and flags on that function's own parameters and locals. Measured on gcc
+// 16.2.1, the five programs exit 15, 25, 25, 11 and 149.
+fn test_a_128_bit_temporary_does_not_outlive_the_function_that_needed_it() {
+	cases := [
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return a + b; } int main() { return (int)f(g(9), g(4)); }', 15},
+		WideValueCase{'__int128 f(void) { __int128 a = 1; return a + a; } __int128 g(void) { __int128 a = 2; __int128 b = 3; return a + b; } int main() { return (int)f() * 10 + (int)g(); }', 25},
+		WideValueCase{'int f(void) { __int128 a = 1; return (int)(a + a); } int g(void) { __int128 a = 1; __int128 b = 2; __int128 c = 3; return (int)(b + c); } int main() { return f() * 10 + g(); }', 25},
+		WideValueCase{'__int128 first(__int128 p0, __int128 p1) { return p0 / p1; } __int128 second(__int128 p0) { __int128 v0 = 1; return p0 / 1; } int main(void) { return (int)first(1, 1) * 10 + (int)second(1); }', 11},
+		WideValueCase{'__int128 first(__int128 p0, __int128 p1) { return p0 / p1; } __int128 second(__int128 p0, __int128 p1) { __int128 v0 = 7; return (p0 % p1) + v0; } int main(void) { return (int)first(100, 7) * 10 + (int)second(100, 7); }', 149},
+	]
+	for case in cases {
+		emitted := emit(translation_unit(case.source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == case.status
+	}
+}
+
+// An argument whose value comes from a call keeps its own value: it is parked in a
+// slot of the call being made, and the call that produced it is free to use the
+// registers and to make calls of its own on the way. Every program below answers 1
+// in both compilers, and each puts the call in a different position relative to a
+// literal, an object and another call: the first, the second, the third, one of two,
+// both of two, inside an arithmetic operand, and three of them at once.
+fn test_an_argument_that_is_a_call_keeps_its_own_value() {
+	cases := [
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(int a, __int128 b) { return b * 10 + a; } int main(void) { return (int)f(4, g(3)) == 44; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return a - b; } int main(void) { __int128 p = 10; return (int)f(p, g(4)) == 5; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return a - b; } int main(void) { __int128 q = 5; return (int)f(g(9), q) == 5; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b, __int128 c) { return a + b * 2 + c * 4; } int main(void) { return (int)f(g(1), g(2), g(3)) == 24; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return a + b; } int main(void) { __int128 v = 3; return (int)f(v + 1, g(2)) == 7; }', 1},
+		WideValueCase{'__int128 f(__int128 a, __int128 b) { return a + b; } int main(void) { __int128 x = 2; return (int)f(f(x, x), f(x, x)) == 8; }', 1},
+		WideValueCase{'__int128 sum(int n, __int128 acc) { if (n == 0) return acc; return sum(n - 1, acc + n); } int main(void) { return (int)sum(6, 0) == 21; }', 1},
+	]
+	for case in cases {
+		emitted := emit(translation_unit(case.source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == case.status
+	}
+}
+
 fn test_a_double_returning_function_with_no_return_statement_answers_zero() {
 	// Running off the end of a function that returns a double answers zero in the
 	// register the caller reads. The language leaves this undefined, so what this

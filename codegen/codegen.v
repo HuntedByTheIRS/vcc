@@ -804,6 +804,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	e.wide_right = []Slot{}
 	e.wide_scratch = []Slot{}
 	e.wide_arguments = []Slot{}
+	e.wide_working = []WideWorking{}
 }
 
 // emit_statements writes a list of statements in order and answers whether any
