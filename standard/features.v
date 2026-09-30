@@ -1,6 +1,7 @@
 module standard
 
 import tokenize
+import diagnostics
 
 // Status says what this compiler does with a construct today.
 pub enum Status {
@@ -43,6 +44,16 @@ pub:
 	// mode and is never reported, and it carries no phrase to report: no mode
 	// forbids the construct. Rows that are not reserved leave it out.
 	reserved bool
+	// invalid says a mode without the construct does not merely need warning
+	// about it: the mode does not have the construct at all, and gcc refuses
+	// the spelling under it whatever is written on the command line. Measured
+	// on gcc 16.2.1, plain `typeof` under `-std=c99` and `typeof_unqual` under
+	// `-std=gnu99` exit 1 with and without -pedantic, `-w` does not silence
+	// either, and no `-std` spelling makes gcc take them. A row with this set
+	// is reported as a diagnostic the compiler raises on its own account,
+	// which no flag silences; a row without it is a pedantic message, which
+	// is silent until something asks for it.
+	invalid bool
 	// extension is the name of the -fvcc-exts= extension that brings the
 	// construct down to a mode before `since`, when there is one. Nothing is
 	// brought down yet: the flag parses the names and honors none of them, so
@@ -125,6 +136,7 @@ pub const features = [
 		since:     .c23
 		gnu:       true
 		extension: ''
+		invalid:   true
 		pedantic:  'the typeof specifier'
 		status:    .implemented
 	},
@@ -158,6 +170,7 @@ pub const features = [
 		since:     .c23
 		gnu:       false
 		extension: ''
+		invalid:   true
 		pedantic:  'the typeof_unqual specifier'
 		status:    .implemented
 	},
@@ -415,13 +428,21 @@ fn uses(tokens []tokenize.Token, table []Feature, question Question) []tokenize.
 			if question.system_files[token.file] {
 				continue
 			}
+			// A construct the mode does not have is reported as a diagnostic the
+			// compiler raises on its own account, which no flag silences, and one
+			// the mode merely does not allow is a pedantic message the flags
+			// decide the fate of. Both name the mode and the construct.
 			out << tokenize.Diagnostic{
 				line:    token.line
 				col:     token.col
 				msg:     '${question.mode.standard_name()} forbids ${feature.pedantic}'
 				file:    token.file
-				warning: true
-				class:   .pedantic
+				warning: !feature.invalid
+				class:   if feature.invalid {
+					diagnostics.Class.cpp
+				} else {
+					diagnostics.Class.pedantic
+				}
 			}
 		}
 	}

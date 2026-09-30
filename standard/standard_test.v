@@ -219,6 +219,26 @@ fn test_the_typeof_unqual_row_is_c23_and_not_a_gnu_extension() {
 	assert pedantic_messages(tokens, asking(.none)).len == 0
 }
 
+// A mode that does not have the construct is a different thing from one that
+// does not allow it, and the diagnostic says which. The bare spellings are
+// reported as diagnostics the compiler raises on its own account, which no flag
+// silences; a construct a mode merely does not allow stays a pedantic message.
+// Measured on gcc 16.2.1: plain `typeof` under -std=c99 exits 1 with -w written
+// on the command line, so the refusal is not the flags' to take back.
+fn test_a_mode_without_the_construct_reports_it_and_not_as_a_warning() {
+	bare := pedantic_messages([token('typeof')], asking(.c99))[0]
+	assert !bare.warning
+	assert bare.class == .cpp
+	unqual := pedantic_messages([token('typeof_unqual')], asking(.gnu99))[0]
+	assert !unqual.warning
+	assert unqual.class == .cpp
+	// The rows that are a question about the dialect keep the pedantic class: the
+	// flags decide whether the reader is told, and a compile is not stopped.
+	question := pedantic_messages([token('__int128')], asking(.c99))[0]
+	assert question.warning
+	assert question.class == .pedantic
+}
+
 // A double underscore on both sides of a name puts it in the reserved
 // namespace, which no mode has to grant and none may refuse. Measured on gcc
 // 16.2.1, `__typeof__(x) y = 2;`, `__typeof(x) y = 2;` and

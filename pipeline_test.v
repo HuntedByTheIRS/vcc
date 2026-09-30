@@ -45,6 +45,51 @@ fn scratch(name string) string {
 	return os.join_path(os.temp_dir(), 'vcc_pipeline_test_${os.getpid()}_${name}')
 }
 
+// Whether a dialect verdict survives the flags is the command line's question,
+// and the answer is the one the class machinery gives: a construct the mode does
+// not have is an error whatever is written, and a pedantic message is silent
+// until something asks. The policy here is built by the same parse main() calls,
+// so this checks the wiring and not only the class. Measured on gcc 16.2.1,
+// which exits 1 on plain `typeof` under -std=c99 with -w on the command line.
+fn test_the_dialect_verdict_survives_the_flags() {
+	source := scratch('dialect_absent.c')
+	os.write_file(source, 'int x = 1;\ntypeof(x) y = 2;\nint main(void) { return y; }\n') or {
+		panic(err)
+	}
+	absent := tokenize.Diagnostic{
+		line:    2
+		col:     1
+		msg:     'ISO C99 forbids the typeof specifier'
+		file:    source
+		warning: false
+		class:   .cpp
+	}
+	for flags in [['-std=c99'], ['-std=c99', '-w'], ['-std=c99', '-Wno-pedantic'],
+		['-std=c99', '-pedantic-errors']] {
+		mut args := flags.clone()
+		args << source
+		opts := cli.parse(args) or { panic(err) }
+		assert severity_of(absent, opts.warnings) == .error
+	}
+	question := tokenize.Diagnostic{
+		line:    2
+		col:     1
+		msg:     'ISO C99 forbids the __int128 type'
+		file:    source
+		warning: true
+		class:   .pedantic
+	}
+	for flags in [['-std=c99', '-w'], ['-std=c99', '-Wno-pedantic']] {
+		mut args := flags.clone()
+		args << source
+		opts := cli.parse(args) or { panic(err) }
+		assert severity_of(question, opts.warnings) == .silent
+	}
+	asked := cli.parse(['-std=c99', '-pedantic-errors', source]) or { panic(err) }
+	assert severity_of(question, asked.warnings) == .error
+	os.rm(source) or {}
+}
+
 fn test_a_source_file_becomes_a_runnable_binary() {
 	source := scratch('seven.c')
 	binary := scratch('seven')
