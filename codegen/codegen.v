@@ -563,6 +563,13 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
 			return error('aggregate floating class width')
 		}
+	} else if e.writes_a_128(decl.ret) {
+		// A 128-bit type is the third shape a value leaves in, and the only one
+		// that needs nothing worked out here: the pair goes back in two fixed
+		// registers, which are the two a 128-bit operation already leaves its
+		// answer in. Measured on gcc 16.2.1, which returns one in rax and the
+		// word above it in rdx, and which clears rdx when the returned
+		// expression is narrower than the type.
 	} else if decl.ret != 'int' && decl.ret != 'void' && decl.ret != 'double' {
 		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, double and void are implemented')
 		return error('unsupported return type')
@@ -849,6 +856,23 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 		base := e.accumulator(stmt.line, stmt.col)!
 		e.load_return_eightbyte(base, 0, e.target.word_size, e.return_class.first_floating,
 			stmt.line, stmt.col)!
+		e.append(e.target.frame_epilogue())
+		return
+	}
+	if e.writes_a_128(e.returning) {
+		// A function of a 128-bit type answers with the pair, so the expression
+		// is left in the two registers a pair lives in rather than converted to
+		// one value. An expression of the type is already the pair; a narrower
+		// one is widened into it, which is where the high word of `return 5`
+		// comes from rather than whatever the body happened to leave in the
+		// register above the low word. Measured on gcc 16.2.1, which answers
+		// that program with eax = 5 and edx = 0, and `return -1` with rax = -1
+		// and rdx = -1.
+		e.emit_value(expr, 0)!
+		if !e.wide_value(expr) {
+			e.widen_word_pair(expr.typ.kind.is_unsigned(), e.narrow_width(expr.typ), stmt.line,
+				stmt.col)!
+		}
 		e.append(e.target.frame_epilogue())
 		return
 	}
@@ -2874,15 +2898,6 @@ fn (mut e Emitter) load_pair(slot Slot, line int, col int) !void {
 	e.append(e.target.load_slot(frame, slot.offset + word, high, word)!)
 }
 
-// widen_into_pair widens a value narrower than sixteen bytes into a slot, which
-// is what the language asks for when an operand of a narrower type meets a
-// 128-bit one: the value becomes a word with its own width's arithmetic, and the
-// word above it is that word's sign if the value was signed and zero if it was
-// not. Measured on gcc 16.2.1, which widens a signed int with cltq and cqto and an
-// unsigned one with a 32-bit move.
-//
-// The word above is written even when it is zero, because the operation that reads
-// it adds it: leaving whatever the register held there would add that instead.
 // narrow_width is how wide the value a pair is widened from is. It decides which
 // of the extensions applies: a value of a word or more is extended from its own top
 // bit, and a narrower one from the top bit of a word after the extension the type
@@ -2893,8 +2908,16 @@ fn (mut e Emitter) narrow_width(typ types.Type) int {
 	return width
 }
 
-fn (mut e Emitter) widen_into_pair(slot Slot, unsigned bool, width int, line int, col int) !void {
-	frame := e.frame_pointer(line, col)!
+// widen_word_pair widens a value narrower than sixteen bytes into a pair, which is
+// what the language asks for when an operand of a narrower type meets a 128-bit
+// one, or when a function of a 128-bit type returns one: the value becomes a word
+// with its own width's arithmetic, and the word above it is that word's sign if
+// the value was signed and zero if it was not. Measured on gcc 16.2.1, which
+// widens a signed int with cltq and cqto and an unsigned one with a 32-bit move.
+//
+// The word above is written even when it is zero, because the operation that reads
+// it adds it: leaving whatever the register held there would add that instead.
+fn (mut e Emitter) widen_word_pair(unsigned bool, width int, line int, col int) !void {
 	low := e.accumulator(line, col)!
 	high := e.remainder(line, col)!
 	word := e.target.word_size
@@ -2914,6 +2937,17 @@ fn (mut e Emitter) widen_into_pair(slot Slot, unsigned bool, width int, line int
 		e.append(e.target.move_register64(high, low)!)
 		e.append(e.target.shift_right_arithmetic(high, 63)!)
 	}
+}
+
+// widen_into_pair is the widening with the pair stored into a slot, the low word at
+// the slot's own offset and the high word eight bytes above it, which is the order
+// the bytes of a 128-bit object are in.
+fn (mut e Emitter) widen_into_pair(slot Slot, unsigned bool, width int, line int, col int) !void {
+	e.widen_word_pair(unsigned, width, line, col)!
+	frame := e.frame_pointer(line, col)!
+	low := e.accumulator(line, col)!
+	high := e.remainder(line, col)!
+	word := e.target.word_size
 	e.append(e.target.store_slot(frame, slot.offset, low, word)!)
 	e.append(e.target.store_slot(frame, slot.offset + word, high, word)!)
 }
