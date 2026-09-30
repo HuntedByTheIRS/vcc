@@ -138,6 +138,11 @@ struct Slot {
 	// The name of such a slot is the address of the object, which is what a
 	// member is read and written through.
 	bytes int
+	// wide is set for a slot holding a 128-bit integer, which is an object of
+	// sixteen bytes rather than a value: it is stored, copied and addressed, and
+	// it has no value of that width to be read as. A narrower value is stored in
+	// one by widening it into the two words of the object.
+	wide bool
 }
 
 // LoopLabels are the two places a loop's body can leave by: where the loop ends,
@@ -234,6 +239,12 @@ const frame_alignment = 16
 // Parentheses are the only way to get deeper in the grammar, and a tree past
 // this is a tree that would take the stack out rather than one a program writes.
 const max_emit_depth = 200
+
+// wide_bytes is the size of a 128-bit integer as an object. It is the number the
+// type model carries for both of the 128-bit kinds, and the number the machine's
+// sixteen bytes are cut into when one is copied, so it is written once here and
+// the emitter asks this name for it.
+const wide_bytes = 16
 
 // emit turns a parsed translation unit into an executable image. Every function
 // with a body is emitted and the entry function is the one the image starts in.
@@ -859,6 +870,12 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.line, stmt.col)!
 	init := stmt.init or { return }
+	if slot.wide && !e.wide_value(init) {
+		// A 128-bit object declared with a value narrower than it: the value is
+		// widened into the two words, which is the one thing this back end does
+		// with an object of that width that is not a copy of another one.
+		return e.store_wide(slot, init, stmt.line, stmt.col)
+	}
 	if slot.bytes > 0 {
 		// An object of an aggregate type declared with an initializer takes the
 		// value of another object of its type, or the value a call hands back:
@@ -909,6 +926,9 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 		}
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
+	}
+	if target.wide && !e.wide_value(expr) {
+		return e.store_wide(target, expr, stmt.line, stmt.col)
 	}
 	if target.bytes > 0 {
 		return e.assign_object_local(stmt, target)
@@ -1465,11 +1485,17 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, li
 			return error('redeclared')
 		}
 	}
+	// A 128-bit integer is the second kind of storage here that is sized by
+	// something other than the width of a value: an object of one is sixteen
+	// bytes, which is the whole object and not a value it is read at.
+	wide := bytes == 0 && e.writes_a_128(written)
 	// An object of an aggregate type is sized by the layout the reader worked
 	// out rather than by its spelling: `struct S` is a name the back end has no
 	// width for, and the members are what say how many bytes the object is.
 	width := if bytes > 0 {
 		bytes
+	} else if wide {
+		wide_bytes
 	} else {
 		e.type_width(written) or {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints, chars, doubles and pointers only')
@@ -1482,7 +1508,8 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, li
 		width:    width
 		count:    count
 		floating: bytes == 0 && e.writes_a_double(written)
-		bytes:    bytes
+		bytes:    if wide { wide_bytes } else { bytes }
+		wide:     wide
 	}
 	e.scopes[e.scopes.len - 1][name] = block
 	return block
@@ -1517,6 +1544,14 @@ fn (e Emitter) type_width(written string) ?int {
 // which file its storage is read and written through.
 fn (e Emitter) writes_a_double(written string) bool {
 	return written == 'double'
+}
+
+// writes_a_128 says whether a type as it was written names one of the 128-bit
+// integers. A declaration carries the spelling and not the kind, and the spelling
+// is what decides whether a slot is an object of sixteen bytes or a value: the two
+// 128-bit kinds are the only types this back end stores without a value.
+fn (e Emitter) writes_a_128(written string) bool {
+	return written.contains('__int128')
 }
 
 // reserve claims a place in the frame for one value. Offsets count down from the
@@ -1894,6 +1929,60 @@ fn (e Emitter) is_a_pointer(expr ast.Expr) bool {
 	return false
 }
 
+// wide_value says whether an expression is an object of one of the 128-bit types
+// rather than a value of a narrower one: an object of the same type is a copy of
+// its bytes, and anything else stored in one is a value to widen first.
+fn (e Emitter) wide_value(expr ast.Expr) bool {
+	return expr.typ.kind in [types.Kind.int128, .unsigned_int128]
+}
+
+// store_wide widens a value narrower than sixteen bytes into a 128-bit object. The
+// low word of the object is the value and the high word is its sign, which is what
+// the language says a value of a narrower type converts to: `-1` stored in one of
+// them is every bit of both words, and `5` is five in the low word and zero above
+// it. One rule covers both 128-bit types, because a negative value converted to
+// the unsigned one wraps to exactly that pattern.
+//
+// The value is widened to a whole word first: the arithmetic of this back end
+// works at the width of the type, so the bits above an int are whatever the
+// register held and not its sign. The high word is then the low one shifted right
+// by sixty-three bits, which spreads the sign over the word.
+//
+// The two words are stored one at a time, because the machine has no instruction
+// that moves sixteen bytes. The high word is stored first: a store reads the
+// accumulator, so the low word waits in the third register until the accumulator
+// is free for it.
+fn (mut e Emitter) store_wide(slot Slot, expr ast.Expr, line int, col int) !void {
+	if e.floating_of(expr) {
+		e.diagnostics << problem(line, col, 'unsupported: a double is stored in an object of 128 bits, and this compiler has no conversion from a double to that')
+		return error('double into a 128-bit object')
+	}
+	if e.is_a_pointer(expr) {
+		e.diagnostics << problem(line, col, 'unsupported: a pointer is stored in an object of 128 bits, and this compiler has no conversion from a pointer to that')
+		return error('pointer into a 128-bit object')
+	}
+	if e.constant(expr) == none && (e.width_of(expr) or { 0 }) != 4 {
+		e.diagnostics << problem(line, col, 'unsupported: the value is one this back end cannot widen into an object of 128 bits')
+		return error('value into a 128-bit object')
+	}
+	accumulator := e.accumulator(line, col)!
+	waiting := e.remainder(line, col)!
+	e.emit_expr(expr)!
+	e.append(e.target.sign_extend_word(accumulator, accumulator)!)
+	e.append(e.target.move_register64(waiting, accumulator)!)
+	e.append(e.target.shift_right_arithmetic(accumulator, 63)!)
+	e.store_register(Slot{
+		...slot
+		offset: slot.offset + e.target.word_size
+		width:  e.target.word_size
+	}, accumulator, line, col)!
+	e.append(e.target.move_register64(accumulator, waiting)!)
+	e.store_register(Slot{
+		...slot
+		width: e.target.word_size
+	}, accumulator, line, col)!
+}
+
 // store_value writes the accumulator into a slot, after checking that the value
 // is one the slot can hold. A constant is written at the width of the slot,
 // because a constant is the one value that says nothing about its own width
@@ -2011,6 +2100,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a constant and is not a local of this function')
 				return error('unknown name')
 			}
+			if slot.wide {
+				// A 128-bit object is stored, copied and addressed, and it is
+				// not a value this back end has: reading the name would have to
+				// answer with a value of that width, so the refusal names what
+				// the object is good for instead.
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
+				return error('128-bit value')
+			}
 			if slot.bytes > 0 {
 				// The name of an object of an aggregate type is the object, and
 				// a value of a struct type is not a value this back end moves:
@@ -2041,6 +2138,13 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			// read at the width of the member's type. A double member is read
 			// with the instruction that moves one rather than with the integer
 			// load of the same width.
+			if e.writes_a_128(expr.spelling) {
+				// The object holds a member of that width, and the read is the
+				// value question, which is the one this back end has no answer
+				// for: the member's own address is the part that works.
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores an object of that width but has no value of it to read')
+				return error('unsupported member type')
+			}
 			width := e.type_width(expr.spelling) or {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores ints, chars, doubles and pointers only')
 				return error('unsupported member type')

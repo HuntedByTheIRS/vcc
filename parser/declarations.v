@@ -879,6 +879,13 @@ fn (p Parser) unsupported_type_word(spec DeclSpec) ?string {
 		}
 		return none
 	}
+	// A 128-bit integer is storage this back end has: an object of one is the
+	// sixteen bytes it writes at two words, so a declaration of one is a
+	// declaration and not a refusal. The questions about a value of that width
+	// are the emitter's, and it answers them by name.
+	if spec.clause.kind in [types.Kind.int128, .unsigned_int128] {
+		return none
+	}
 	if spec.type_words.len == 0 {
 		return none
 	}

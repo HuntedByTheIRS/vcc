@@ -135,9 +135,11 @@ member of one starts at the offset its alignment puts it at. Measured on gcc
 __int128 v; }` is 32 bytes with `v` at 16, and `long __int128` and `float
 __int128` are refused. A strict mode reports the spelling and a GNU one does not,
 which is the row the dialect table carries; a prototype naming the type is read
-and kept, since its parameter list is a promise. A definition is storage, and this
-back end has no value of that width, so `__int128 v;` is refused by name rather
-than compiled into something narrower.
+and kept, since its parameter list is a promise. An object of one is storage: the
+declaration is sixteen bytes, a value narrower than that is widened into its two
+words, and one object is copied into another. A value of that width is what this
+back end does not have, so reading one is refused by name rather than compiled
+into something narrower.
 
 The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
 `_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
@@ -192,9 +194,9 @@ eight doubles being what the registers carry.
 
 Not implemented, in rough order of how much of the tree depends on it: an element of
 an array passed by value, and a call's result passed by value; `enum`; the shift
-and bitwise operators (`<<`, `>>`, `&`, `|`, `^`); unsigned integer types; a value
-of a 128-bit integer type, which the type model resolves and the back end has no
-form for; `switch`; an array
+and bitwise operators (`<<`, `>>`, `&`, `|`, `^`); unsigned integer types; a value of a
+128-bit integer type, whose objects are stored and copied and which cannot be read
+back; `switch`; an array
 with an initializer or more than one size; a pointer defined at the top level;
 object files and relocatable output; and V's own generated C. `ROADMAP.md` maps the
 order.

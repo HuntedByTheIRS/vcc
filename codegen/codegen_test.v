@@ -1090,6 +1090,47 @@ fn test_break_outside_a_loop_is_one_located_diagnostic_and_no_bytes() {
 	assert emitted.bytes.len == 0
 }
 
+// A 128-bit object is storage this back end has: sixteen bytes, a value narrower
+// than that widened into its two words, and one object copied into another. The
+// value cannot be read back yet, because this back end has no value of that width,
+// so what a test can assert about the store is what it emits: the high word is the
+// low one's sign, and the arithmetic shift that computes it is written here and
+// nowhere else in the tree, which is what makes the bytes below this store's.
+fn test_a_128_bit_object_is_stored_as_two_words() {
+	emitted := emit(translation_unit('int main() { __int128 a = 5; __int128 b = a; a = -1; return (int)(&a != &b); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	// Two objects, each of sixteen bytes, at two addresses: what the program can
+	// still observe is that they are storage of their own.
+	assert run_image(emitted.bytes) == 1
+	// `sar rax, 63`: the sign of the low word spread over the high one.
+	assert holds(emitted.bytes, [u8(0x48), 0xc1, 0xf8, 0x3f])
+}
+
+// A double and a pointer are not widened into a 128-bit object, and saying so is
+// better than writing the bits of one as the low word of the other.
+fn test_a_value_that_cannot_widen_into_a_128_bit_object_is_reported() {
+	wrong_class := emit(translation_unit('int main() { __int128 a = 2.5; return 0; }'), Options{})
+	assert wrong_class.diagnostics.len == 1
+	assert wrong_class.diagnostics[0].msg.contains('128 bits')
+	assert wrong_class.bytes.len == 0
+}
+
+// The value question about a 128-bit object is the one this back end has no answer
+// for, and the refusal says which question it is rather than reading the first
+// four bytes of the object as an int.
+fn test_reading_a_128_bit_object_as_a_value_is_reported() {
+	emitted := emit(translation_unit('int main() { __int128 a = 5; return (int)a; }'), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('has no value of that width to read')
+	assert emitted.bytes.len == 0
+	member := emit(translation_unit('struct S { __int128 v; }; int main() { struct S s; return (int)s.v; }'),
+		Options{})
+	assert member.diagnostics.len == 1
+	assert member.diagnostics[0].msg.contains('has no value of it to read')
+	assert member.bytes.len == 0
+}
+
 fn test_a_local_of_a_type_with_no_instruction_is_reported() {
 	// `float` is the type here rather than `double`, which this back end now has
 	// instructions for: what this checks is the refusal, so it names a type the
@@ -1193,6 +1234,27 @@ fn dynamic_value(bytes []u8, tag u64) ?u64 {
 		}
 	}
 	return none
+}
+
+// holds says whether a run of bytes is somewhere in the image, which is how a test
+// checks for an instruction the way the push test checks for 0x50.
+fn holds(bytes []u8, needle []u8) bool {
+	if needle.len == 0 || bytes.len < needle.len {
+		return false
+	}
+	for start in 0 .. bytes.len - needle.len + 1 {
+		mut found := true
+		for i in 0 .. needle.len {
+			if bytes[start + i] != needle[i] {
+				found = false
+				break
+			}
+		}
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 fn read_string(bytes []u8, offset int) string {

@@ -63,16 +63,27 @@ fn test_the_128_bit_type_is_read_by_name() {
 	assert (alone as ast.IntLit).value == 16
 }
 
-// An object of the 128-bit type is refused by name rather than compiled into
-// something of another width. The message names the spelling the declaration
-// wrote, which is the same shape the refusal for `long` has.
-fn test_an_object_of_the_128_bit_type_is_refused_by_name() {
-	signed_up := parsed('int main(void) { __int128 v; return 0; }')
-	assert signed_up.diagnostics.len == 1
-	assert signed_up.diagnostics[0].msg == 'unsupported type __int128'
-	unsigned_one := parsed('int main(void) { unsigned __int128 v; return 0; }')
-	assert unsigned_one.diagnostics.len == 1
-	assert unsigned_one.diagnostics[0].msg == 'unsupported type unsigned'
+// An object of the 128-bit type is storage: a declaration of one is read, and the
+// questions about a value of that width are the emitter's rather than the reader's.
+// Reading one as a value is refused there by name, which is where the emitter
+// tests check it.
+fn test_an_object_of_the_128_bit_type_is_read_as_storage() {
+	signed_up := parsed('int main(void) { __int128 v = 5; return 0; }')
+	assert signed_up.diagnostics.len == 0
+	body := signed_up.unit.decls[0].body
+	assert body[0].decl_type == '__int128'
+	unsigned_one := parsed('int main(void) { unsigned __int128 w = 5; return 0; }')
+	assert unsigned_one.diagnostics.len == 0
+	assert unsigned_one.unit.decls[0].body[0].decl_type == 'unsigned __int128'
+	// A parameter of that type is the value question and not the storage one: a
+	// definition whose parameter is one would have to pass a value of that width,
+	// so it is refused by the spelling the parameter wrote, and a prototype that
+	// names one is a promise and is kept.
+	defined := parsed('int f(__int128 v) { return 0; }')
+	assert defined.diagnostics.len == 1
+	assert defined.diagnostics[0].msg.contains('__int128')
+	prototype := parsed('__int128 f(unsigned __int128 v);')
+	assert prototype.diagnostics.len == 0
 }
 
 fn test_a_function_that_returns_a_constant() {

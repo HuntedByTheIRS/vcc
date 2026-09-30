@@ -199,13 +199,16 @@ pub const features = [
 	// '__int128' types`, `-std=c99 -pedantic-errors` makes that warning an
 	// error, `-std=c23 -pedantic-errors` says the same thing because C23 does
 	// not have the type either, and `-std=gnu99` says nothing at all. The tree
-	// reads the type wherever a type can be written, so a prototype naming one
-	// is read and kept, and the model sizes it and lays it out, which is what
-	// makes `sizeof(__int128)` 16. A definition is storage, and this back end
-	// has no value of that width, so a definition is refused by the spelling the
-	// declaration wrote: measured, `__int128 v;` reports `unsupported type
-	// __int128` and `unsigned __int128 v;` reports `unsupported type unsigned`,
-	// which is the same first-word shape the C99 rows above record.
+	// reads the type wherever a type can be written, the model sizes it and lays
+	// it out, which is what makes `sizeof(__int128)` 16, and an object of one is
+	// storage this back end has: sixteen bytes that are declared, given a value
+	// narrower than them, copied and addressed. A value of that width is the part
+	// it does not have, so reading one is refused by name rather than compiled
+	// into something narrower, and a parameter of the type is the same question:
+	// measured, `int f(__int128 v) { return 0; }` reports `unsupported type
+	// __int128` and `__int128 v; return (int)v;` reports that the object has no
+	// value of that width to read, while a prototype naming one is a promise and
+	// is kept.
 	Feature{
 		spellings: ['__int128']
 		since:     .none

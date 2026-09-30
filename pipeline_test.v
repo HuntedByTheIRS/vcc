@@ -122,6 +122,35 @@ fn test_typeof_declares_an_object_of_the_type_behind_it() {
 	os.rm(binary) or {}
 }
 
+// A 128-bit object is declared, given a value narrower than it, copied into
+// another object, and assigned to, and the image runs: the two objects are storage
+// of their own, which is what the program's exit status says. The value itself is
+// not readable yet, and a program that reads one is refused by name rather than
+// compiled.
+fn test_a_128_bit_object_is_storage_that_runs() {
+	source := scratch('wide.c')
+	binary := scratch('wide')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { __int128 a = 5; __int128 b = a; a = -1; return (int)(&a != &b); }\n')
+	assert exit_status == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_reading_a_128_bit_object_writes_nothing() {
+	source := scratch('wide_bad.c')
+	binary := scratch('wide_bad')
+	os.write_file(source, 'int main(void) { __int128 a = 5; return (int)a; }\n') or { panic(err) }
+	lexed := tokenize.lex(os.read_file(source) or { '' })
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 0
+	emitted := codegen.emit(parsed.unit, codegen.Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('has no value of that width to read')
+	assert !os.exists(binary)
+	os.rm(source) or {}
+}
+
 // An operand whose type the reader never resolved is refused where typeof was
 // written, and nothing is written out: a declaration built from a type nothing
 // answered for would be a declaration nothing can size.
