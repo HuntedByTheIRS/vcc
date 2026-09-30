@@ -2197,6 +2197,37 @@ fn test_a_128_bit_parameter_arrives_in_two_argument_registers() {
 	}
 }
 
+// A wide argument whose value comes from a call is the case where the caller has
+// to keep a finished pair somewhere while it works out the next argument, and
+// somewhere that the next argument's own call does not write over. The slots a
+// step keeps a pair in are cut from the frame of the function being emitted, so a
+// list of them that outlived its function handed the next one an offset its frame
+// did not have and the pair landed on a parameter: f(g(9), g(4)) answered 20,
+// which is a + a, where gcc answers 15. The object cases here are the ones that
+// passed throughout, and they are in the list so that a fix for the others cannot
+// quietly cost them.
+fn test_a_128_bit_argument_that_is_itself_a_call() {
+	cases := [
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return a + b; } int main() { return (int)f(g(9), g(4)) == 15; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return b; } int main() { return (int)f(g(9), g(4)) == 5; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, int b) { return a * 10 + b; } int main() { return f(g(3), 4) == 44; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(int a, int b, __int128 c) { return c * 10 + a * 2 + b; } int main() { return f(1, 2, g(3)) == 44; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return a - b; } int main() { __int128 q = 5; return f(g(9), q) == 5; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return a - b; } int main() { __int128 p = 10; return f(p, g(4)) == 5; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b, __int128 c) { return a + b * 2 + c * 4; } int main() { return f(g(1), g(2), g(3)) == 24; }', 1},
+		WideValueCase{'__int128 f(__int128 a, __int128 b) { return a + b; } int main() { __int128 x = 2; return f(f(x, x), f(x, x)) == 8; }', 1},
+		WideValueCase{'__int128 sum(int n, __int128 acc) { if (n == 0) { return acc; } return sum(n - 1, acc + n); } int main() { return sum(6, 0) == 21; }', 1},
+		WideValueCase{'__int128 f(__int128 a, __int128 b) { return a + b; } int main() { __int128 p = 10; __int128 q = 5; return (int)f(p, q) == 15; }', 1},
+		WideValueCase{'__int128 f(__int128 a, __int128 b) { return b; } int main() { __int128 p = 10; __int128 q = 5; return (int)f(p, q) == 5; }', 1},
+		WideValueCase{'__int128 g(__int128 x) { return x + 1; } __int128 f(__int128 a, __int128 b) { return a + b; } int main() { __int128 v = 3; return f(v + 1, g(2)) == 7; }', 1},
+	]
+	for case in cases {
+		emitted := emit(translation_unit(case.source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == case.status
+	}
+}
+
 // A pair takes its two registers out of the general file and leaves the floating
 // one alone, so a double beside it is numbered from the beginning of its own
 // sequence and a pointer beside it is one more general argument. Measured on gcc

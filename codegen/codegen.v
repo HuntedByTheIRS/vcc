@@ -789,8 +789,21 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// The next function starts with a frame and a scratch area of its own. The
 	// labels are the one thing that carries over: they are numbered across the
 	// whole file, because jumps of every function share one table.
+	//
+	// The slots an expression keeps half-finished values in go with the frame, and
+	// that is every one of these lists rather than the one below alone. A slot is an
+	// offset into the frame of the function being emitted, so a list that outlives
+	// its function hands the next one an offset that the next frame does not have:
+	// a 128-bit temporary landed on a parameter of the function after it, and the
+	// parameter was overwritten before the expression that read it ran. The depths
+	// are what make these lists reusable within one function, and a function is what
+	// they are sized to.
 	e.frame_used = 0
 	e.values = []Slot{}
+	e.wide_left = []Slot{}
+	e.wide_right = []Slot{}
+	e.wide_scratch = []Slot{}
+	e.wide_arguments = []Slot{}
 }
 
 // emit_statements writes a list of statements in order and answers whether any
