@@ -4932,9 +4932,21 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 	}
 	if value := object.init {
 		// The initializer is a constant, written the way the machine holds a
-		// value of that width: little-endian, two's complement.
+		// value of that width: little-endian, two's complement. A type wider than
+		// the eight bytes a constant is held in takes its remaining bytes from the
+		// sign, because the shift that would reach them shifts by the width of the
+		// value itself: V leaves that undefined and it answered zero here, so a
+		// top-level `__int128 g = -100` came out with a zero second word and every
+		// program that read the word got the wrong answer to a constant the
+		// language spells out. The low bytes stay the value's own.
+		low := u64(value)
+		fill := if value < 0 { u8(0xff) } else { u8(0) }
 		for i in 0 .. element {
-			e.program.globals_blob[offset + i] = u8((u64(value) >> (8 * i)) & 0xff)
+			e.program.globals_blob[offset + i] = if i < 8 {
+				u8((low >> (8 * i)) & 0xff)
+			} else {
+				fill
+			}
 		}
 	}
 	slot := GlobalSlot{

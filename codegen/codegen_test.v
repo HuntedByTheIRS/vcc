@@ -1220,6 +1220,41 @@ fn test_a_top_level_object_of_128_bits_is_written_and_read_at_its_address() {
 	assert value.bytes.len == 0
 }
 
+// The initializer of a top-level object of the type is a constant written into the
+// image, and the image is where the sign has to reach: a width wider than the eight
+// bytes a constant is held in fills its remaining bytes from the sign, because the
+// shift that would read them is a shift by the width of the value itself. V leaves
+// that undefined and it answered zero, so `__int128 g = -100` came out with a zero
+// second word and every later read of that word was wrong: the shift that takes the
+// word answered 0 where gcc answers 255, `g < 0` answered 0 where gcc answers 1, and
+// a division and a remainder on a negative object used the pair as if it were
+// positive. The assignment case above was always right, which is what makes this the
+// initializer alone. Measured on gcc 16.2.1, the programs below return 255, 1, 0,
+// 255, 242 and 254.
+fn test_a_top_level_object_of_128_bits_keeps_the_sign_of_its_initializer() {
+	shifted := emit(translation_unit('__int128 g = -100; int main() { return (int)(g >> 64); }'), Options{})
+	assert shifted.diagnostics.len == 0
+	assert run_image(shifted.bytes) == 255
+	compared := emit(translation_unit('__int128 g = -100; int main() { return g < 0; }'), Options{})
+	assert compared.diagnostics.len == 0
+	assert run_image(compared.bytes) == 1
+	positive := emit(translation_unit('__int128 g = 300; int main() { return (int)(g >> 64); }'), Options{})
+	assert positive.diagnostics.len == 0
+	assert run_image(positive.bytes) == 0
+	unsigned_negative := emit(translation_unit('unsigned __int128 g = -1; int main() { return (int)(g >> 64); }'),
+		Options{})
+	assert unsigned_negative.diagnostics.len == 0
+	assert run_image(unsigned_negative.bytes) == 255
+	divided := emit(translation_unit('__int128 g = -100; int main() { __int128 h = 7; return (int)(g / h); }'),
+		Options{})
+	assert divided.diagnostics.len == 0
+	assert run_image(divided.bytes) == 242
+	remainder := emit(translation_unit('__int128 g = -100; int main() { __int128 h = 7; return (int)(g % h); }'),
+		Options{})
+	assert remainder.diagnostics.len == 0
+	assert run_image(remainder.bytes) == 254
+}
+
 // An array of 128-bit objects is storage whose elements are written and read the way
 // the object of the type is, at the element's own address: the store is the two words
 // an object takes, the conversion is the low word at the element's address, and an
