@@ -192,6 +192,28 @@ pub const features = [
 		pedantic:  'the double type'
 		status:    .implemented
 	},
+	// The 128-bit integer is gcc's and no standard has it: `__int128` and the
+	// unsigned type `unsigned __int128` names, written with one token the check
+	// can find the row by. A GNU dialect takes it, and a strict mode reports it.
+	// Measured on gcc 16.2.1: `-std=c99 -pedantic` warns `ISO C does not support
+	// '__int128' types`, `-std=c99 -pedantic-errors` makes that warning an
+	// error, `-std=c23 -pedantic-errors` says the same thing because C23 does
+	// not have the type either, and `-std=gnu99` says nothing at all. The tree
+	// reads the type wherever a type can be written, so a prototype naming one
+	// is read and kept, and the model sizes it and lays it out, which is what
+	// makes `sizeof(__int128)` 16. A definition is storage, and this back end
+	// has no value of that width, so a definition is refused by the spelling the
+	// declaration wrote: measured, `__int128 v;` reports `unsupported type
+	// __int128` and `unsigned __int128 v;` reports `unsupported type unsigned`,
+	// which is the same first-word shape the C99 rows above record.
+	Feature{
+		spellings: ['__int128']
+		since:     .none
+		gnu:       true
+		extension: ''
+		pedantic:  'the __int128 type'
+		status:    .implemented
+	},
 	Feature{
 		spellings: ['_Complex']
 		since:     .c99

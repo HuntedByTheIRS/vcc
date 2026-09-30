@@ -180,6 +180,25 @@ fn test_the_typeof_row_is_a_message_once_the_parser_reads_it() {
 	assert pedantic_messages(tokens, asking(.gnu99)).len == 0
 }
 
+// The 128-bit integer is a GNU extension and no ISO mode has it, so the row
+// reports in every strict mode and is silent in a GNU one. Measured on gcc
+// 16.2.1, which warns `ISO C does not support '__int128' types` under
+// `-std=c99 -pedantic`, makes it an error under `-pedantic-errors`, says the
+// same under `-std=c23 -pedantic-errors`, and says nothing under `-std=gnu99`.
+fn test_the_128_bit_row_reports_in_a_strict_mode_only() {
+	tokens := [token('__int128')]
+	strict := pedantic_messages(tokens, asking(.c99))
+	assert strict.len == 1
+	assert strict[0].msg == 'ISO C99 forbids the __int128 type'
+	assert pedantic_messages(tokens, asking(.c23)).len == 1
+	assert pedantic_messages(tokens, asking(.gnu99)).len == 0
+	assert pedantic_messages(tokens, asking(.gnu11)).len == 0
+	// `unsigned __int128` is found by the same token, so a strict mode reports
+	// it for the run of words the unsigned type is written with as well.
+	unsigned_run := [token('unsigned'), token('__int128')]
+	assert pedantic_messages(unsigned_run, asking(.c99)).len == 1
+}
+
 fn test_a_system_header_is_not_the_program() {
 	tokens := [tokenize.Token{
 		kind: .identifier
