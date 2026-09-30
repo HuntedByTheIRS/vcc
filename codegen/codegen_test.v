@@ -1802,6 +1802,83 @@ fn test_a_128_bit_division_by_zero_faults() {
 	}
 }
 
+// The order of two 128-bit values, every operator against every shape of pair.
+// The cases that matter most are the ones whose high words are equal and whose low
+// words differ: the second subtraction of a comparison is then zero, and its zero
+// flag says nothing about the 128-bit difference, so a condition that reads that
+// flag answers "not greater" for a value that is greater. Every program here is one
+// gcc 16.2.1 answers with the same status this compiler answers with.
+fn test_two_128_bit_values_are_ordered() {
+	doubled := doubling('t64', 64) + doubling('t65', 65)
+	shapes := [
+		'\t__int128 a;\n\t__int128 b;\n\ta = 1;\n\tb = 0;',
+		'\t__int128 a;\n\t__int128 b;\n\ta = 0;\n\tb = 1;',
+		'\t__int128 a;\n\t__int128 b;\n\ta = 5;\n\tb = 5;',
+		'\t__int128 a;\n\t__int128 b;\n\ta = -1;\n\tb = 0;',
+		'\t__int128 a;\n\t__int128 b;\n\ta = -2;\n\tb = 1;',
+		'${doubled}\t__int128 a = t64 + 5;\n\t__int128 b = t64 + 3;',
+		'${doubled}\t__int128 a = t64 + 3;\n\t__int128 b = t64 + 5;',
+		'${doubled}\t__int128 a = t65;\n\t__int128 b = t64;',
+		'${doubled}\t__int128 a = t64;\n\t__int128 b = t65;',
+		'\tunsigned __int128 a;\n\tunsigned __int128 b;\n\ta = 1;\n\tb = 0;',
+		'\tunsigned __int128 a;\n\tunsigned __int128 b;\n\ta = 0;\n\tb = 1;',
+		'\tunsigned __int128 a;\n\tunsigned __int128 b;\n\ta = -1;\n\tb = 0;',
+		'\tunsigned __int128 a;\n\tunsigned __int128 b;\n\ta = 5;\n\tb = 5;',
+		'${doubled}\tunsigned __int128 a = t64 + 5;\n\tunsigned __int128 b = t64 + 3;',
+		'${doubled}\tunsigned __int128 a = t64;\n\tunsigned __int128 b = t65;',
+	]
+	// The status gcc gives each of these, taken from the same programs.
+	answers := {
+		'==': ['0', '0', '1', '0', '0', '0', '0', '0', '0', '0', '0', '0', '1', '0', '0']
+		'!=': ['1', '1', '0', '1', '1', '1', '1', '1', '1', '1', '1', '1', '0', '1', '1']
+		'<':  ['0', '1', '0', '1', '1', '0', '1', '0', '1', '0', '1', '0', '0', '0', '1']
+		'>':  ['1', '0', '0', '0', '0', '1', '0', '1', '0', '1', '0', '1', '0', '1', '0']
+		'<=': ['0', '1', '1', '1', '1', '0', '1', '0', '1', '0', '1', '0', '1', '0', '1']
+		'>=': ['1', '0', '1', '0', '0', '1', '0', '1', '0', '1', '0', '1', '1', '1', '0']
+	}
+	for op in ['==', '!=', '<', '>', '<=', '>='] {
+		expected := answers[op]
+		for i, shape in shapes {
+			source := 'int main() {\n${shape}\n\treturn a ${op} b;\n}'
+			emitted := emit(translation_unit(source), Options{})
+			assert emitted.diagnostics.len == 0
+			assert run_image(emitted.bytes) == expected[i].int()
+		}
+	}
+}
+
+// A conversion to a 128-bit type widens the value it converts, and what the word
+// above holds is what that value's own width asks for: the sign of a signed value,
+// zero for an unsigned one, and for a value as wide as a word the sign of the whole
+// value whichever type it is converted to. Every program here is one gcc 16.2.1
+// answers with the status this compiler answers with.
+fn test_a_narrow_value_converts_to_a_128_bit_type() {
+	doubled := doubling('t64', 64)
+	cases := [
+		'\t__int128 a = (__int128)-1;\n\treturn a == -1;',
+		'\tunsigned __int128 a = (unsigned __int128)-1;\n\treturn (a + 1) == 0;',
+		'\t__int128 a = (__int128)(char)200;\n\treturn a == -56;',
+		'\t__int128 a = (__int128)300;\n\treturn a == 300;',
+		'\tunsigned __int128 u = 5;\n\t__int128 a = (__int128)u;\n\treturn a == 5;',
+		'\tunsigned __int128 a = (unsigned __int128)-1;\n\treturn a > 0;',
+		'\t__int128 a = (__int128)-1;\n\treturn (int)a == -1;',
+		'\t__int128 a = (__int128)3 + (__int128)4;\n\treturn (int)a == 7;',
+		'\tint n = (__int128)300;\n\treturn n == 300;',
+		'\t__int128 a = (__int128)(int)(__int128)7;\n\treturn (int)a == 7;',
+		// A pointer is as wide as a word, so its conversion keeps every bit of it
+		// and the word above is its sign rather than the sign of its low half.
+		'\tchar *p = (char *)-1;\n\tunsigned __int128 u = (unsigned __int128)p;\n\treturn (u + 1) == 0;',
+		'\tint x = 1;\n\t__int128 p = (__int128)&x;\n\treturn p > 0;',
+		'\tint x = 1;\n\tunsigned __int128 p = (unsigned __int128)&x;\n\treturn p != 0;',
+		'${doubled}\tunsigned __int128 t = t64;\n\t__int128 a = (__int128)(int)(t64 / t64);\n\treturn (int)a == 1;',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
 fn test_a_128_bit_value_is_computed_as_a_pair() {
 	cases := [
 		WideValueCase{'int main() { __int128 a = 40; __int128 b = 2; return (int)(a + b); }', 42},

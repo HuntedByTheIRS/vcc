@@ -2638,6 +2638,32 @@ fn (mut e Emitter) low_word_of_object(expr ast.Expr, width int, line int, col in
 
 fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 	target := cast.typ
+	if target.kind in [.int128, .unsigned_int128] {
+		// A conversion *to* a 128-bit type is the value widened into the pair, the
+		// same widening a 128-bit operation does to a narrower operand: the word
+		// above holds the sign of the narrower value when that value was signed and
+		// zero when it was not. A value that is already a pair converts to nothing,
+		// because those two words are the value. Measured on gcc 16.2.1:
+		// `(__int128)(char)200` is -56 and `(unsigned __int128)(int)-1` is the
+		// 128-bit value of all ones.
+		if cast.expr.typ.kind == .double {
+			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and no instruction here converts a double to a 128-bit value')
+			return error('double to 128 bits')
+		}
+		if e.wide_value(cast.expr) {
+			return e.emit_value(cast.expr, depth)
+		}
+		e.emit_value(cast.expr, depth + 1)!
+		width := e.storage_width(cast.expr.typ) or {
+			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and the narrower type has no width here to widen from')
+			return error('no width to widen from')
+		}
+		// The slot holds the pair the widening writes, which is two words whatever
+		// the narrower type's width was: widen_into_pair stores both of them.
+		slot := e.reserve(wide_bytes)
+		e.widen_into_pair(slot, cast.expr.typ.kind.is_unsigned(), width, cast.line, cast.col)!
+		return e.load_pair(slot, cast.line, cast.col)
+	}
 	if target.kind !in [.int_, .char_, .signed_char, .double, .pointer] {
 		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion to ${cast.spelling} is not one this back end makes, and it converts between int, char, double and a pointer')
 		return error('unsupported conversion')
@@ -2857,12 +2883,30 @@ fn (mut e Emitter) load_pair(slot Slot, line int, col int) !void {
 //
 // The word above is written even when it is zero, because the operation that reads
 // it adds it: leaving whatever the register held there would add that instead.
-fn (mut e Emitter) widen_into_pair(slot Slot, unsigned bool, line int, col int) !void {
+// narrow_width is how wide the value a pair is widened from is. It decides which
+// of the extensions applies: a value of a word or more is extended from its own top
+// bit, and a narrower one from the top bit of a word after the extension the type
+// asks for. A type with no width here is one the value cannot come from, and the
+// word is the answer that keeps a pair from being built out of nothing.
+fn (mut e Emitter) narrow_width(typ types.Type) int {
+	width := e.storage_width(typ) or { return e.target.word_size }
+	return width
+}
+
+fn (mut e Emitter) widen_into_pair(slot Slot, unsigned bool, width int, line int, col int) !void {
 	frame := e.frame_pointer(line, col)!
 	low := e.accumulator(line, col)!
 	high := e.remainder(line, col)!
 	word := e.target.word_size
-	if unsigned {
+	if width >= word {
+		// A value as wide as a word is extended from its own top bit whichever type
+		// it is converted to, because a value that wide is already a word and the
+		// conversion of a pointer or a long to a 128-bit type is the value rather
+		// than its unsigned reading. Measured on gcc 16.2.1, which answers
+		// `(unsigned __int128)(long)-1` with 2^128 - 1 and not with 2^64 - 1.
+		e.append(e.target.move_register64(high, low)!)
+		e.append(e.target.shift_right_arithmetic(high, 63)!)
+	} else if unsigned {
 		e.append(e.target.move_register32(low, low)!)
 		e.append(e.target.xor_word(high, high)!)
 	} else {
@@ -2967,14 +3011,14 @@ fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
 	if e.wide_value(step.left) {
 		e.store_pair(left, step.line, step.col)!
 	} else {
-		e.widen_into_pair(left, step.left.typ.kind.is_unsigned(), step.line, step.col)!
+		e.widen_into_pair(left, step.left.typ.kind.is_unsigned(), e.narrow_width(step.left.typ), step.line, step.col)!
 	}
 	right := e.wide_pair_slot(mut e.wide_right, depth)
 	e.emit_value(step.right, depth + 1)!
 	if e.wide_value(step.right) {
 		e.store_pair(right, step.line, step.col)!
 	} else {
-		e.widen_into_pair(right, step.right.typ.kind.is_unsigned(), step.line, step.col)!
+		e.widen_into_pair(right, step.right.typ.kind.is_unsigned(), e.narrow_width(step.right.typ), step.line, step.col)!
 	}
 	e.load_pair(left, step.line, step.col)!
 	return e.apply_wide_binary(step, left, right, depth)
@@ -3194,12 +3238,33 @@ fn (mut e Emitter) apply_wide_binary(step ast.Binary, left Slot, right Slot, dep
 			// their low words carried into the subtraction of their high ones,
 			// and the condition that reads the result is the unsigned one unless
 			// both operands are signed.
+			//
+			// A strict comparison is written the other way round, because the
+			// zero flag of the second subtraction is the zero flag of its own
+			// result and not of the 128-bit difference: for two values whose low
+			// words differ and whose high words are equal, that subtraction is
+			// zero, and a condition that reads the zero flag would answer "not
+			// greater" for a value that is greater. `less` and `greater_or_equal`
+			// read the sign and overflow flags, which the second subtraction does
+			// carry correctly. gcc 16.2.1 emits exactly this at -O0: for `a > b` it
+			// subtracts b from a with the sign flag read, and for `a <= b` it does
+			// the same and reads `greater_or_equal`.
+			swapped := step.op in ['>', '<=']
 			unsigned := e.wide_unsigned(step.left) || e.wide_unsigned(step.right)
-			e.append(e.target.load_slot(frame, right.offset, other, word)!)
+			from := if swapped { right } else { left }
+			against := if swapped { left } else { right }
+			e.append(e.target.load_slot(frame, from.offset, low, word)!)
+			e.append(e.target.load_slot(frame, from.offset + word, high, word)!)
+			e.append(e.target.load_slot(frame, against.offset, other, word)!)
 			e.append(e.target.subtract_word(low, other)!)
-			e.append(e.target.load_slot(frame, right.offset + word, other, word)!)
+			e.append(e.target.load_slot(frame, against.offset + word, other, word)!)
 			e.append(e.target.subtract_with_borrow(high, other)!)
-			condition := backend.condition_for(e.target.name, step.op, unsigned)!
+			compared := if swapped {
+				if step.op == '>' { '<' } else { '>=' }
+			} else {
+				step.op
+			}
+			condition := backend.condition_for(e.target.name, compared, unsigned)!
 			e.append(e.target.set_condition(condition, low)!)
 			e.append(e.target.widen_byte(low)!)
 		}
