@@ -440,6 +440,31 @@ pub fn (t Target) move_register64(dst arch.Register, src arch.Register) ![]u8 {
 // one place the two translations between an operator and an instruction's test
 // meet: a comparison and a branch both ask it.
 fn condition_of(target string, op string) !arch.Condition {
+	return condition_for(target, op, false)
+}
+
+// condition_for is the condition one operator asks for, with the signedness of
+// the comparison named. Four of the six exist in both forms, and which form a
+// comparison wants is the type of its operands; the equalities are the same
+// condition either way. A value two words wide is compared with the borrow out of
+// the subtraction of its low words, which lands in the carry flag, so the orders
+// that a pair is ordered by are the unsigned ones: measured on gcc 16.2.1, the
+// code for `a < b` on two unsigned 128-bit values and on two signed ones differs
+// in the setcc alone.
+pub fn condition_for(target string, op string, unsigned bool) !arch.Condition {
+	if unsigned {
+		return match op {
+			'==' { arch.Condition.equal }
+			'!=' { arch.Condition.not_equal }
+			'<' { arch.Condition.below }
+			'>' { arch.Condition.above }
+			'<=' { arch.Condition.below_or_equal }
+			'>=' { arch.Condition.above_or_equal }
+			else {
+				return error('${target}: ${op} is not an order this machine has a condition for')
+			}
+		}
+	}
 	return match op {
 		'==' { arch.Condition.equal }
 		'!=' { arch.Condition.not_equal }

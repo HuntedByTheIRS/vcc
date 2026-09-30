@@ -221,6 +221,14 @@ mut:
 	// values is the scratch area, one slot per level of expression nesting,
 	// where a half-finished value waits while the other half is computed.
 	values []Slot
+	// wide_left and wide_right are the slots a 128-bit step keeps its two
+	// operands in, one slot per level of nesting and one for each side: a pair is
+	// two words, and two pairs do not fit in the registers a step has while the
+	// right side is still allowed to call a function, so both operands wait in
+	// the frame. They are kept the way values are, one per level, so a function
+	// ends up with as many as its deepest expression used.
+	wide_left  []Slot
+	wide_right []Slot
 	// loops is the loops being emitted, innermost last, for break and continue.
 	loops []LoopLabels
 	// next_label numbers the jump labels. It runs across the whole file rather
@@ -858,10 +866,12 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.line, stmt.col)!
 	init := stmt.init or { return }
-	if slot.wide && !e.wide_value(init) {
-		// A 128-bit object declared with a value narrower than it: the value is
-		// widened into the two words, which is the one thing this back end does
-		// with an object of that width that is not a copy of another one.
+	if slot.wide {
+		// A 128-bit object declared with a value takes one of three things: a copy
+		// of another object of the type, the pair a computation left in the
+		// registers, or a narrower value widened into the two words. The store asks
+		// the value which of the three it is, so a declaration and an assignment
+		// share one path.
 		return e.store_wide(slot, init, stmt.line, stmt.col)
 	}
 	if slot.bytes > 0 {
@@ -932,7 +942,12 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
 	}
-	if target.wide && !e.wide_value(expr) {
+	if target.wide {
+		// A wide target is sixteen bytes of storage, and what is written into it is
+		// one of three things: a copy of another object of the type, a pair a
+		// computation left in the registers, or a narrower value widened. The store
+		// asks the value which of the three it is, so every wide assignment and
+		// every wide declaration shares one path.
 		return e.store_wide(target, expr, stmt.line, stmt.col)
 	}
 	if target.bytes > 0 {
@@ -2011,6 +2026,16 @@ fn (e Emitter) is_a_pointer(expr ast.Expr) bool {
 // wide_value says whether an expression is an object of one of the 128-bit types
 // rather than a value of a narrower one: an object of the same type is a copy of
 // its bytes, and anything else stored in one is a value to widen first.
+// names_an_object says whether an expression is a name, a member or an element:
+// the three shapes that are storage with an address, and so the three a value has
+// to be read out of rather than computed into a register.
+fn (e Emitter) names_an_object(expr ast.Expr) bool {
+	return match expr {
+		ast.Ident, ast.Field, ast.Index { true }
+		else { false }
+	}
+}
+
 fn (e Emitter) wide_value(expr ast.Expr) bool {
 	return expr.typ.kind in [types.Kind.int128, .unsigned_int128]
 }
@@ -2056,8 +2081,21 @@ fn (mut e Emitter) store_wide(slot Slot, expr ast.Expr, line int, col int) !void
 fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int) !void {
 	if e.wide_value(expr) {
 		// An object of the type is a copy of its bytes rather than a value to
-		// widen, which is the shape an assignment between two of them has.
-		return e.assign_object(address, wide_bytes, expr, line, col)
+		// widen, which is the shape an assignment between two of them has; a value
+		// of the type that is not an object — the result of an addition, say — is
+		// already the pair, and it is written at the address as two words.
+		match expr {
+			ast.Ident, ast.Field, ast.Index {
+				return e.assign_object(address, wide_bytes, expr, line, col)
+			}
+			else {
+				// The value is an expression rather than storage: it is computed
+				// here, below the slot the address is parked in, and what it leaves
+				// in the registers is the pair the store writes.
+				e.emit_value(expr, 1)!
+				return e.store_pair_at(address, line, col)
+			}
+		}
 	}
 	if e.floating_of(expr) {
 		e.diagnostics << problem(line, col, 'unsupported: a double is stored in an object of 128 bits, and this compiler has no conversion from a double to that')
@@ -2429,6 +2467,11 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// the address and the value is at it.
 		return e.emit_deref(unary, depth)
 	}
+	if e.wide_value(unary.expr) {
+		// A 128-bit operand is a pair rather than a value in the accumulator, so
+		// the operators it has a meaning for are computed on the pair.
+		return e.emit_wide_unary(unary, depth)
+	}
 	floating := e.floating_of(unary.expr)
 	if floating {
 		// Three operators have a meaning for a double: the sign change, the
@@ -2563,9 +2606,18 @@ fn (mut e Emitter) low_word_of_object(expr ast.Expr, width int, line int, col in
 		}
 		else {}
 	}
-	e.address_of_object(expr, depth)!
 	register := e.accumulator(line, col)!
-	e.append(e.target.load_indirect(register, register, width)!)
+	if !e.names_an_object(expr) {
+		// A value of the type that is not an object — the result of an addition,
+		// say — is an expression rather than storage: it is emitted here, and what
+		// it leaves in the accumulator is the low word, which is what every
+		// conversion out of the type reads. Only a name, a member and an element
+		// have bytes at an address to read the word out of.
+		e.emit_value(expr, depth)!
+	} else {
+		e.address_of_object(expr, depth)!
+		e.append(e.target.load_indirect(register, register, width)!)
+	}
 	if width == 1 {
 		e.append(e.target.sign_extend_byte(register)!)
 	}
@@ -2684,6 +2736,287 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 // spine is in is tracked as the chain is folded, because a step that converts
 // changes it: `1 + 2.5` widens the int on the way, and `d + 1 + 2` has a double
 // under it rather than an int.
+// The 128-bit value model. A value of the type lives in the pair the result
+// register and the one above it form, the low word low: that is the pair a
+// multiplication and a division already leave their two-word answer in, and the
+// pair a call hands one back in, so a value and a machine result are one shape.
+// Nothing here decides which word an instruction works on; that is the backend's.
+//
+// Two pairs do not fit in the registers a step has while the right side is still
+// allowed to call a function, so a step keeps both of its operands in the frame:
+// the left pair waits in a slot while the right side is computed, and the right
+// pair is read out of its slot one word at a time, because the two words of the
+// left value are in the two registers a pair lives in.
+
+// wide_pair_slot is the frame slot one level of nesting keeps one operand of a
+// 128-bit step in: sixteen bytes, because the value is two words, one level per
+// nesting so an outer step's operand survives the step inside it, and one slot
+// per side so the two operands do not overwrite each other.
+fn (mut e Emitter) wide_pair_slot(mut pairs []Slot, depth int) Slot {
+	for pairs.len <= depth {
+		pairs << e.reserve(wide_bytes)
+	}
+	return pairs[depth]
+}
+
+// store_pair writes the pair into a slot, the low word at the slot's own offset
+// and the high word eight bytes above it, which is the order the bytes of a
+// 128-bit object are in.
+fn (mut e Emitter) store_pair(slot Slot, line int, col int) !void {
+	frame := e.frame_pointer(line, col)!
+	low := e.accumulator(line, col)!
+	high := e.remainder(line, col)!
+	word := e.target.word_size
+	e.append(e.target.store_slot(frame, slot.offset, low, word)!)
+	e.append(e.target.store_slot(frame, slot.offset + word, high, word)!)
+}
+
+// load_pair reads a pair back out of a slot, and is the other half of store_pair.
+fn (mut e Emitter) load_pair(slot Slot, line int, col int) !void {
+	frame := e.frame_pointer(line, col)!
+	low := e.accumulator(line, col)!
+	high := e.remainder(line, col)!
+	word := e.target.word_size
+	e.append(e.target.load_slot(frame, slot.offset, low, word)!)
+	e.append(e.target.load_slot(frame, slot.offset + word, high, word)!)
+}
+
+// widen_into_pair widens a value narrower than sixteen bytes into a slot, which
+// is what the language asks for when an operand of a narrower type meets a
+// 128-bit one: the value becomes a word with its own width's arithmetic, and the
+// word above it is that word's sign if the value was signed and zero if it was
+// not. Measured on gcc 16.2.1, which widens a signed int with cltq and cqto and an
+// unsigned one with a 32-bit move.
+//
+// The word above is written even when it is zero, because the operation that reads
+// it adds it: leaving whatever the register held there would add that instead.
+fn (mut e Emitter) widen_into_pair(slot Slot, unsigned bool, line int, col int) !void {
+	frame := e.frame_pointer(line, col)!
+	low := e.accumulator(line, col)!
+	high := e.remainder(line, col)!
+	word := e.target.word_size
+	if unsigned {
+		e.append(e.target.move_register32(low, low)!)
+		e.append(e.target.xor_word(high, high)!)
+	} else {
+		e.append(e.target.sign_extend_word(low, low)!)
+		e.append(e.target.move_register64(high, low)!)
+		e.append(e.target.shift_right_arithmetic(high, 63)!)
+	}
+	e.append(e.target.store_slot(frame, slot.offset, low, word)!)
+	e.append(e.target.store_slot(frame, slot.offset + word, high, word)!)
+}
+
+// load_wide_object leaves the two words of an object of the type in the pair. The
+// object is read through its own address, which is the path a member, an element
+// and a top-level object already share, so nothing here knows which of them it was
+// handed. The address arrives in the accumulator and the pair is going to live
+// there, so it moves aside first: a load of the low word into the accumulator
+// would otherwise be a load through the low word.
+fn (mut e Emitter) load_wide_object(expr ast.Expr, depth int) !void {
+	line := expr_line(expr)
+	col := expr_col(expr)
+	e.address_of_object(expr, depth)!
+	pointer := e.scratch(line, col)!
+	low := e.accumulator(line, col)!
+	high := e.remainder(line, col)!
+	word := e.target.word_size
+	e.append(e.target.move_register64(pointer, low)!)
+	e.append(e.target.load_indirect(pointer, low, word)!)
+	e.append(e.target.add_immediate(pointer, word))
+	e.append(e.target.load_indirect(pointer, high, word)!)
+}
+
+// emit_value leaves an operand where the operation that asked for it looks for it.
+// An operand of the 128-bit type is a pair: an object of the type is read out of
+// its sixteen bytes, and anything else of the type is an expression whose own
+// emission left the pair standing. A narrower operand is a value in the
+// accumulator, which is where the widening and the comparison both read it.
+fn (mut e Emitter) emit_value(expr ast.Expr, depth int) !void {
+	if !e.wide_value(expr) {
+		return e.emit_expr_at(expr, depth)
+	}
+	match expr {
+		ast.Ident, ast.Field, ast.Index {
+			return e.load_wide_object(expr, depth)
+		}
+		else {
+			return e.emit_expr_at(expr, depth)
+		}
+	}
+}
+
+// wide_unsigned says whether a 128-bit expression is the unsigned type, which is
+// the question a comparison of two pairs asks to pick between the signed and the
+// unsigned order. Only the two 128-bit types answer it: measured on gcc 16.2.1, a
+// narrower unsigned operand meeting a signed 128-bit one converts to the signed
+// type, so the narrow operand's own signedness does not make the comparison an
+// unsigned one.
+fn (e Emitter) wide_unsigned(expr ast.Expr) bool {
+	return expr.typ.kind == .unsigned_int128
+}
+
+// word_operation is one word's part of a two-word operation. The low word takes
+// the plain form, which is where the carry or the borrow of the two-word value
+// comes from, and the high word takes the form that reads that flag as well. The
+// bit operations take the same form on both words.
+fn (e Emitter) word_operation(op string, dst backend.Register, src backend.Register, carry_in bool) ![]u8 {
+	if op == '+' {
+		if carry_in {
+			return e.target.add_with_carry(dst, src)
+		}
+		return e.target.add_reg64(dst, src)
+	}
+	if op == '-' {
+		if carry_in {
+			return e.target.subtract_with_borrow(dst, src)
+		}
+		return e.target.subtract_word(dst, src)
+	}
+	if op == '&' {
+		return e.target.and_word(dst, src)
+	}
+	if op == '|' {
+		return e.target.or_word(dst, src)
+	}
+	return e.target.xor_word(dst, src)
+}
+
+// emit_wide_step folds one step of a 128-bit chain: the left value is parked in
+// its slot — widened first if it was narrower, since a value of the type arrives
+// as a pair and a value of a narrower type as a word — the right side is computed,
+// and the operation then reads both operands out of their slots.
+fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
+	// The rest of the operators are gaps of their own rather than shortcuts not
+	// taken, and they are refused by name and place before anything is emitted:
+	// the backend has the instructions for a shift, a multiplication and a
+	// division of a pair, and no caller for them yet. The three bitwise operators
+	// have a form here and no caller from source at all, because the grammar has
+	// no bitwise operator: they are the same three lines as the arithmetic ones
+	// and they wait for the grammar rather than for this back end.
+	if step.op !in ['+', '-', '&', '|', '^', '==', '!=', '<', '>', '<=', '>='] {
+		e.diagnostics << problem(step.line, step.col, 'unsupported: ${step.op} on a 128-bit value is not implemented, and this back end computes no value of that width with it')
+		return error('wide operator not implemented')
+	}
+	left := e.wide_pair_slot(mut e.wide_left, depth)
+	if e.wide_value(step.left) {
+		e.store_pair(left, step.line, step.col)!
+	} else {
+		e.widen_into_pair(left, step.left.typ.kind.is_unsigned(), step.line, step.col)!
+	}
+	right := e.wide_pair_slot(mut e.wide_right, depth)
+	e.emit_value(step.right, depth + 1)!
+	if e.wide_value(step.right) {
+		e.store_pair(right, step.line, step.col)!
+	} else {
+		e.widen_into_pair(right, step.right.typ.kind.is_unsigned(), step.line, step.col)!
+	}
+	e.load_pair(left, step.line, step.col)!
+	return e.apply_wide_binary(step, right)
+}
+
+// apply_wide_binary does the operation with the left pair in the registers and the
+// right pair in a slot, one word of it at a time in the scratch register. A load
+// between an instruction and the one that carries into it does not disturb the
+// flags, which is what makes reading the second operand in between possible at
+// all. Every sequence here is gcc 16.2.1's at -O0, which is where the order of the
+// two subtractions and the sign of each answer were read off.
+fn (mut e Emitter) apply_wide_binary(step ast.Binary, right Slot) !void {
+	frame := e.frame_pointer(step.line, step.col)!
+	low := e.accumulator(step.line, step.col)!
+	high := e.remainder(step.line, step.col)!
+	other := e.scratch(step.line, step.col)!
+	word := e.target.word_size
+	match step.op {
+		'+', '-', '&', '|', '^' {
+			e.append(e.target.load_slot(frame, right.offset, other, word)!)
+			e.append(e.word_operation(step.op, low, other, false)!)
+			e.append(e.target.load_slot(frame, right.offset + word, other, word)!)
+			e.append(e.word_operation(step.op, high, other, true)!)
+		}
+		'==', '!=' {
+			// Two pairs are equal when neither word differs, and a difference in
+			// either of them has to survive to the condition: the words are xored
+			// against the other pair's and ored together, which is gcc's shape.
+			e.append(e.target.load_slot(frame, right.offset, other, word)!)
+			e.append(e.target.xor_word(low, other)!)
+			e.append(e.target.load_slot(frame, right.offset + word, other, word)!)
+			e.append(e.target.xor_word(high, other)!)
+			e.append(e.target.or_word(low, high)!)
+			condition := backend.condition_for(e.target.name, step.op, false)!
+			e.append(e.target.set_condition(condition, low)!)
+			e.append(e.target.widen_byte(low)!)
+		}
+		else {
+			// The order of two pairs is the borrow out of the subtraction of
+			// their low words carried into the subtraction of their high ones,
+			// and the condition that reads the result is the unsigned one unless
+			// both operands are signed.
+			unsigned := e.wide_unsigned(step.left) || e.wide_unsigned(step.right)
+			e.append(e.target.load_slot(frame, right.offset, other, word)!)
+			e.append(e.target.subtract_word(low, other)!)
+			e.append(e.target.load_slot(frame, right.offset + word, other, word)!)
+			e.append(e.target.subtract_with_borrow(high, other)!)
+			condition := backend.condition_for(e.target.name, step.op, unsigned)!
+			e.append(e.target.set_condition(condition, low)!)
+			e.append(e.target.widen_byte(low)!)
+		}
+	}
+}
+
+// store_pair_at writes the pair in the registers at an address the caller parked
+// in a slot. It is the same two stores the widening into an object ends with, in
+// the same order, because a value of the type computed in the registers is already
+// the two words an object of it holds.
+fn (mut e Emitter) store_pair_at(address Slot, line int, col int) !void {
+	pointer := e.scratch(line, col)!
+	low := e.accumulator(line, col)!
+	high := e.remainder(line, col)!
+	word := e.target.word_size
+	e.load_argument(address, pointer, word, line, col)!
+	e.append(e.target.store_indirect(pointer, low, word)!)
+	e.append(e.target.add_immediate(pointer, word))
+	e.append(e.target.store_indirect(pointer, high, word)!)
+}
+
+// emit_wide_unary applies a unary operator to a 128-bit value. The sign change is
+// the pair's own: the low word is negated, which leaves a borrow behind when it
+// was not zero, that borrow is added to the high word, and the high word is
+// negated. Measured on gcc 16.2.1, which emits exactly that (negq, adcq $0, negq).
+// The complement is the same instruction on both words, and the logical not asks
+// whether either word is anything but zero.
+fn (mut e Emitter) emit_wide_unary(unary ast.Unary, depth int) !void {
+	e.emit_value(unary.expr, depth + 1)!
+	low := e.accumulator(unary.line, unary.col)!
+	high := e.remainder(unary.line, unary.col)!
+	match unary.op {
+		'+' {
+			return
+		}
+		'-' {
+			e.append(e.target.negate_word(low)!)
+			e.append(e.target.add_with_carry_immediate(high, 0)!)
+			e.append(e.target.negate_word(high)!)
+		}
+		'~' {
+			e.append(e.target.complement_word(low)!)
+			e.append(e.target.complement_word(high)!)
+		}
+		'!' {
+			// A pair is zero when neither of its words is anything but zero, and
+			// the answer is a value of the language's int width rather than a byte.
+			e.append(e.target.or_word(low, high)!)
+			e.append(e.target.test_word(low)!)
+			e.append(e.target.set_condition(.equal, low)!)
+			e.append(e.target.widen_byte(low)!)
+		}
+		else {
+			e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} on a 128-bit value is not implemented')
+			return error('unsupported unary operator')
+		}
+	}
+}
+
 fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 	if binary.op == '&&' || binary.op == '||' {
 		return e.emit_short_circuit(binary, depth)
@@ -2699,9 +3032,13 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		spine << step
 		node = step.left
 	}
-	e.emit_expr_at(node, depth + 1)!
+	e.emit_value(node, depth + 1)!
 	for i := spine.len - 1; i >= 0; i-- {
 		step := spine[i]
+		if e.wide_value(step.left) || e.wide_value(step.right) {
+			e.emit_wide_step(step, depth)!
+			continue
+		}
 		if step.op == '/' || step.op == '%' {
 			if divisor := e.constant(step.right) {
 				if divisor == 0 {
@@ -2855,6 +3192,11 @@ fn (mut e Emitter) check_int_operands(binary ast.Binary) !void {
 		return
 	}
 	for operand in [binary.left, binary.right] {
+		if e.wide_value(operand) {
+			// A 128-bit operand is sixteen bytes and is compared as a pair by
+			// its own path, which is where the width of the target is checked.
+			continue
+		}
 		if e.floating_of(operand) {
 			continue
 		}

@@ -171,6 +171,17 @@ pub fn (k Kind) is_integer() bool {
 		.unsigned_int128, .enum_]
 }
 
+// is_unsigned says whether the kind is an unsigned integer type. It is asked
+// where a value narrower than a 128-bit one is widened into one, and where a
+// comparison of two 128-bit values picks between the signed and the unsigned
+// order: gcc -O0 fills the word above a widened value with its sign or with zero
+// depending on this, and compares a pair with a different condition depending on
+// it too, measured on gcc 16.2.1.
+pub fn (k Kind) is_unsigned() bool {
+	return k in [Kind.bool_, .unsigned_char, .unsigned_short, .unsigned_int, .unsigned_long,
+		.unsigned_long_long, .unsigned_int128]
+}
+
 // is_floating says whether the kind is a real floating type. The complex types
 // are not here: they are a pair of floating values, not a floating value.
 pub fn (k Kind) is_floating() bool {

@@ -9,6 +9,14 @@ import parser
 import time
 import tokenize
 
+// WideValueCase is one 128-bit program beside the status it exits with. The two
+// fields are declared rather than written as a two-element literal, because a
+// literal mixing a string and an int is not an array this V infers.
+struct WideValueCase {
+	source string
+	status int
+}
+
 // The end-to-end path: a command line goes in, a runnable file comes out. These
 // tests drive the same functions main() drives, so they check the wiring and not
 // only the stages.
@@ -252,21 +260,49 @@ fn test_an_array_of_128_bit_objects_is_written_at_an_element_address() {
 	os.rm(element) or {}
 }
 
-// A 128-bit object handed to a place this back end has no value for still writes
-// nothing: a parameter of the type is the example the emitter refuses, and the
-// message names the construct rather than the width of a store that then happened.
-fn test_a_128_bit_object_where_the_back_end_has_no_value_writes_nothing() {
-	source := scratch('wide_bad.c')
-	binary := scratch('wide_bad')
-	os.write_file(source, 'int main(void) { __int128 a = 5; return a + 1; }\n') or { panic(err) }
-	lexed := tokenize.lex(os.read_file(source) or { '' })
-	parsed := parser.parse(lexed.tokens)
-	assert parsed.diagnostics.len == 0
-	emitted := codegen.emit(parsed.unit, codegen.Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.bytes.len == 0
-	assert !os.exists(binary)
-	os.rm(source) or {}
+// A 128-bit operation this back end has no form for still writes nothing: the
+// operators a pair has no instruction for are what the emitter refuses, and the
+// message names the operator and its place rather than the width of a store that
+// then happened.
+fn test_a_128_bit_operation_with_no_two_word_form_writes_nothing() {
+	for expression in ['a * 2', 'a / 2', 'a % 2'] {
+		source := scratch('wide_bad.c')
+		binary := scratch('wide_bad')
+		os.write_file(source, 'int main(void) { __int128 a = 5; return (int)(${expression}); }\n') or {
+			panic(err)
+		}
+		lexed := tokenize.lex(os.read_file(source) or { '' })
+		parsed := parser.parse(lexed.tokens)
+		assert parsed.diagnostics.len == 0
+		emitted := codegen.emit(parsed.unit, codegen.Options{})
+		assert emitted.diagnostics.len == 1
+		assert emitted.diagnostics[0].msg.contains('is not implemented')
+		assert emitted.bytes.len == 0
+		assert !os.exists(binary)
+		os.rm(source) or {}
+	}
+}
+
+// A 128-bit value computed in the program and run: the pair the two words travel
+// in reaches the program's own answer, through a declaration, an assignment, a
+// member, an element and a function call. Measured on gcc 16.2.1, each program
+// below returns the status written beside it.
+fn test_a_128_bit_value_is_computed_and_runs() {
+	cases := [
+		WideValueCase{'int main(void) { __int128 a = 40; int n = a + 2; return n; }', 42},
+		WideValueCase{'struct S { __int128 v; }; int main(void) { struct S s; s.v = 40; __int128 b = 2; return (int)(s.v + b); }', 42},
+		WideValueCase{'int main(void) { __int128 a[2]; a[0] = 40; a[1] = 2; return (int)(a[0] + a[1]); }', 42},
+		WideValueCase{'int two(void) { return 2; } int main(void) { __int128 a = 40; return (int)(a + two()); }', 42},
+		WideValueCase{'int main(void) { __int128 a = 40; __int128 w; w = a + 1; return (int)w; }', 41},
+	]
+	for case in cases {
+		source := scratch('wide_value.c')
+		binary := scratch('wide_value')
+		exit_status := compile_and_run([source, '-o', binary], case.source + '\n')
+		assert exit_status == case.status
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
 }
 
 // The low word of a 128-bit object is what a narrower slot takes, and the round

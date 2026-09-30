@@ -7,6 +7,14 @@ import parser
 import time
 import tokenize
 
+// WideValueCase is one 128-bit program beside the status it exits with. The two
+// fields are declared rather than written as a two-element literal, because a
+// literal mixing a string and an int is not an array this V infers.
+struct WideValueCase {
+	source string
+	status int
+}
+
 // The tests below run as part of module codegen, and reach into the parser to
 // build input, which is the shortest path from C source to an AST that the
 // compiler has. String literals, call statements, variables, branches and loops
@@ -1685,6 +1693,65 @@ fn copy_bytes(from string, to string) {
 // run, and its exit status is the value truncated to an int where the language
 // converts it. The number each one asserts is what the arithmetic gives, so a
 // wrong instruction in the register file shows up as a wrong answer.
+// A 128-bit value is a pair and the operations on it are the two-word forms of
+// the machine's instructions: the low words are added and the carry goes into the
+// high ones, the subtraction borrows, the order of two pairs is the borrow out of
+// the low subtraction carried into the high one, and the sign of a pair changes
+// through the carry the low negation leaves. Measured on gcc 16.2.1, the programs
+// below and ten more return exactly these numbers, which are the low bytes of the
+// two-word answers.
+fn test_a_128_bit_value_is_computed_as_a_pair() {
+	cases := [
+		WideValueCase{'int main() { __int128 a = 40; __int128 b = 2; return (int)(a + b); }', 42},
+		WideValueCase{'int main() { __int128 a = 40; __int128 b = 2; return (int)(a - b); }', 38},
+		WideValueCase{'int main() { __int128 a = 2; __int128 b = 40; return (int)(a - b); }', 218},
+		WideValueCase{'int main() { __int128 a = 40; return (int)(-a); }', 216},
+		WideValueCase{'int main() { __int128 a = 0; return (int)(-a); }', 0},
+		WideValueCase{'int main() { __int128 a = 0; return (int)(~a); }', 255},
+		WideValueCase{'int main() { __int128 a = -1; __int128 b = 0; return a < b; }', 1},
+		WideValueCase{'int main() { unsigned __int128 a = -1; unsigned __int128 b = 0; return a < b; }', 0},
+		WideValueCase{'int main() { __int128 a = 5; __int128 b = 40; return a > b; }', 0},
+		WideValueCase{'int main() { __int128 a = 40; __int128 b = 40; return a <= b; }', 1},
+		WideValueCase{'int main() { __int128 a = 40; __int128 b = 40; return a == b; }', 1},
+		WideValueCase{'int main() { __int128 a = 40; __int128 b = 41; return a != b; }', 1},
+		WideValueCase{'int main() { __int128 a = 40; int n = a + 2; return n; }', 42},
+		WideValueCase{'int main() { __int128 a = 40; __int128 w; w = a + 2; return (int)w; }', 42},
+		WideValueCase{'int main() { __int128 a = 40; __int128 w; w = -a; return (int)w; }', 216},
+		WideValueCase{'int main() { __int128 a = 40; __int128 b = 1; __int128 c = 1; return (int)(a + b + c); }', 42},
+		WideValueCase{'int main() { __int128 a = 40; return (int)(1 + a); }', 41},
+	]
+	for case in cases {
+		emitted := emit(translation_unit(case.source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == case.status
+	}
+}
+
+// The second word of an addition is an add-with-carry and not an add: `adc rdx,
+// rcx` is in the image of a two-word sum, and the instruction is what makes the
+// carry out of the low word part of the high one. The same test the sign word
+// gets: the instruction is asserted rather than inferred from an answer that a
+// small pair would give either way.
+fn test_the_high_word_of_a_sum_takes_the_carry_of_the_low_one() {
+	emitted := emit(translation_unit('int main() { __int128 a = 40; __int128 b = 2; return (int)(a + b); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert holds(emitted.bytes, [u8(0x48), 0x11, 0xca])
+}
+
+// The operators with no two-word form are refused by name and by place rather than
+// computed wrongly or left to an internal error: a multiplication, a division and
+// a remainder of a 128-bit value each need a routine this back end does not have.
+fn test_a_128_bit_operator_with_no_two_word_form_is_refused_by_name() {
+	for expression in ['a * b', 'a / b', 'a % b'] {
+		source := 'int main() { __int128 a = 40; __int128 b = 2; return (int)(${expression}); }'
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 1
+		assert emitted.diagnostics[0].msg.contains('is not implemented')
+		assert emitted.bytes.len == 0
+	}
+}
+
 fn test_a_double_is_computed_in_the_floating_register_file() {
 	emitted := emit(translation_unit('int main() { double x = 1.5; double y = 2.5; double z = x * y; int n = z * 10; return n; }'),
 		Options{})
