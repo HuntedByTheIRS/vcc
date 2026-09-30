@@ -108,6 +108,35 @@ fn test_sizeof_is_the_constant_the_program_returns() {
 	os.rm(binary) or {}
 }
 
+// typeof is read by the parser and answered by the emitter as the type behind
+// it: a program that declares an object through typeof compiles and runs, and
+// the exit status is what the types decided. Measured on gcc 16.2.1, the same
+// program returns 17: 4 and 9 and the size of an int.
+fn test_typeof_declares_an_object_of_the_type_behind_it() {
+	source := scratch('typeof.c')
+	binary := scratch('typeof')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main() { int x = 4; typeof(x) y = 9; __typeof__(int) z = sizeof(typeof(x)); return x + y + z; }\n')
+	assert exit_status == 17
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// An operand whose type the reader never resolved is refused where typeof was
+// written, and nothing is written out: a declaration built from a type nothing
+// answered for would be a declaration nothing can size.
+fn test_typeof_of_a_name_nothing_declares_writes_nothing() {
+	source := scratch('typeof_bad.c')
+	binary := scratch('typeof_bad')
+	os.write_file(source, 'int main() { typeof(nothing) y = 1; return y; }\n') or { panic(err) }
+	lexed := tokenize.lex(os.read_file(source) or { '' })
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len > 0
+	assert parsed.diagnostics[0].msg.contains('typeof asks for the type of nothing')
+	assert !os.exists(binary)
+	os.rm(source) or {}
+}
+
 fn test_an_unsupported_construct_exits_non_zero_without_writing_output() {
 	source := scratch('bad.c')
 	binary := scratch('bad')

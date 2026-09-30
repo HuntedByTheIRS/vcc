@@ -41,6 +41,21 @@ const builtin_types = ['void', 'char', 'short', 'int', 'long', 'signed', 'unsign
 // tag_keywords open the specifier that names a struct, a union or an enum.
 const tag_keywords = ['struct', 'union', 'enum']
 
+// typeof_words are the spellings that open a typeof specifier. `typeof` is the
+// spelling C23 added and a GNU one besides: measured on gcc 16.2.1, `typeof` is
+// read in every GNU dialect and in C23, and is not a word at all in a strict
+// mode, where `typeof(x) y;` is read as a call to a function named typeof. The
+// two spellings with the underscores around them are in the namespace every
+// implementation reserves for itself, so gcc 16.2.1 reads them in every mode
+// including c89 and draws no pedantic message from any of them.
+const typeof_words = ['typeof', '__typeof', '__typeof__']
+
+// typeof_unqual_words are the same specifier with the qualifiers taken off the
+// type it names, which is the one difference between the two: `typeof` keeps
+// them and `typeof_unqual` does not. C23 spells it `typeof_unqual`, and the
+// underscored form is GNU's, the same way it is for typeof.
+const typeof_unqual_words = ['typeof_unqual', '__typeof_unqual__']
+
 // keywords are the words the language reserves for itself. A keyword can never
 // name a declarator and can never be a use of a name either, and the lexer does
 // not tell one from an identifier: that table lives in `tokenize/`, which is
@@ -51,10 +66,10 @@ const tag_keywords = ['struct', 'union', 'enum']
 const keywords = ['_Atomic', '_Bool', '_Complex', '_Imaginary', '_Thread_local', 'auto', 'break',
 	'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float',
 	'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed',
-	'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile',
-	'while', '__asm', '__asm__', '__attribute__', '__const', '__const__', '__extension__', '__inline',
-	'__inline__', '__restrict', '__restrict__', '__signed', '__signed__', '__thread', '__volatile',
-	'__volatile__']
+	'sizeof', 'static', 'struct', 'switch', 'typedef', 'typeof', 'typeof_unqual', 'union', 'unsigned',
+	'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
+	'__extension__', '__inline', '__inline__', '__restrict', '__restrict__', '__signed', '__signed__',
+	'__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile', '__volatile__']
 
 // is_keyword says whether a spelling is one of the reserved words. Nothing in the
 // language may use one as an identifier, so the question is asked by the declarator
@@ -83,7 +98,7 @@ fn (p Parser) starts_declaration(t tokenize.Token) bool {
 
 fn is_specifier_word(text string) bool {
 	return text in storage_classes || text in type_qualifiers || text in builtin_types
-		|| text in tag_keywords
+		|| text in tag_keywords || text in typeof_words || text in typeof_unqual_words
 }
 
 // storage_of is the storage class a word names. `inline` and `__extension__` say
@@ -810,6 +825,15 @@ fn (p Parser) word_problem(word string) ?string {
 	if word in supported_types {
 		return none
 	}
+	if word.contains('*') {
+		// A spelling that carries its own stars is a pointer, and a pointer is
+		// one word on this machine whatever it points at: the back end sizes it
+		// from the star and never asks what is under it. A declaration written
+		// with a star keeps the star in its declarator and the word here is the
+		// base, so a word with a star in it is a type the reader resolved rather
+		// than one the file wrote, which is what `typeof(&x) p` is.
+		return none
+	}
 	if spelling := p.alias_spelling(word) {
 		words := spelling.split(' ')
 		if words.len > 0 && words[0] in supported_types {
@@ -920,6 +944,26 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			tag_clause = tag.clause
 			continue
 		}
+		if (t.text in typeof_words || t.text in typeof_unqual_words) && !spec.has_type {
+			// `typeof (...)` is a type specifier: the operand between the
+			// parentheses is a type name or an expression, and the specifier
+			// names the type of that operand. The type this compiler resolved
+			// is written into the words of the declaration, because the words
+			// are what a declaration carries from here on and no later stage
+			// has an operand left to look at.
+			//
+			// Only before the declaration has a type: a specifier cannot
+			// follow one, so `int typeof = 1;` is a declaration whose
+			// declarator is named by a keyword, which is refused there and
+			// where gcc 16.2.1 refuses it too.
+			p.next()
+			spec.note(t)
+			named := p.parse_typeof_specifier(t, depth, t.text in typeof_unqual_words)!
+			tag_clause = named
+			spec.type_words << types.unqualified(named).describe()
+			spec.has_type = true
+			continue
+		}
 		if p.is_type_name(t.text) && !spec.has_type {
 			// A name this file has declared as a type. Only one can sit among
 			// the specifiers, so once a type has been read the name is the
@@ -952,6 +996,62 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 	p.pending_base = spec.clause
 	p.pending_storage = spec.storage
 	return spec
+}
+
+// parse_typeof_specifier reads the operand of a typeof specifier and answers the
+// type it names. The operand is a type name if a type name is written there and
+// an expression otherwise, which is the shape a cast and the operand of sizeof
+// share: `typeof(int)` and `typeof(x)` are one construct asked of two different
+// things.
+//
+// The operand's value is neither read nor evaluated, which is what makes
+// `typeof(f())` a type rather than a call, and what is taken is the type the
+// model resolved: `typeof(x)` written where x is a typedef is the type behind
+// the name, and the declaration that follows is built from that type.
+//
+// `typeof_unqual` is the same specifier with the qualifiers taken off the type
+// it names, which is the whole of the difference between the two spellings.
+//
+// Two operands are refused here rather than left to a later stage: one whose
+// type the model did not resolve, because a declaration built from a type
+// nothing answered for is a declaration nothing can size, and one of an array
+// type, which would make the declaration an array the declarator never wrote.
+fn (mut p Parser) parse_typeof_specifier(at tokenize.Token, depth int, unqual bool) !types.Type {
+	if !p.at_punct('(') {
+		p.error_at(p.peek(), 'unsupported: expected ( after ${at.text}, found ${describe(p.peek())}')
+		return error('expected ( after ${at.text}')
+	}
+	p.next()
+	mut answered := types.Type{}
+	mut written := ''
+	if p.starts_declaration(p.peek()) {
+		name := p.parse_type_name(depth)!
+		answered = name.typ
+		written = name.spelling
+	} else {
+		operand := p.parse_expression()!
+		written = describe_operand(operand)
+		if p.is_unresolved(operand) {
+			p.error_at(at, 'unsupported: ${at.text} asks for the type of ${written}, and this compiler did not resolve its type')
+			return error('no type for the operand')
+		}
+		answered = operand.typ
+	}
+	if !p.expect_punct(')') {
+		return error('unclosed ${at.text}')
+	}
+	if answered.kind == .unknown {
+		p.error_at(at, 'unsupported: ${at.text} asks for the type of ${written}, and this compiler did not resolve it')
+		return error('no type for the operand')
+	}
+	if answered.is_array() {
+		p.error_at(at, 'unsupported: ${at.text} of an array type is not implemented; write the element type and how many elements')
+		return error('typeof of an array')
+	}
+	if unqual {
+		return types.unqualified(answered)
+	}
+	return answered
 }
 
 // TagType is a tag specifier: the keyword and the tag as written, which is how a
@@ -1501,6 +1601,11 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 // parameter_type_is_known says whether a parameter's type is one this reader can
 // name: a word of the language, or a single name this file declared as a type,
 // which answers as the type it names.
+//
+// The question is asked of the spelling, which for a declaration written through
+// `typeof` is the type the reader resolved rather than the words the file wrote:
+// `int f(typeof(x) v)` is a parameter of the type x has, and asking about the
+// word `typeof` would refuse a parameter whose type this compiler knows.
 fn (p Parser) parameter_type_is_known(spec DeclSpec) bool {
 	// An object of an aggregate type is one a definition can be handed by value:
 	// the layout says how many bytes it is and what class its first eightbyte
@@ -1509,10 +1614,7 @@ fn (p Parser) parameter_type_is_known(spec DeclSpec) bool {
 	if spec.clause.kind in [types.Kind.struct_, .union_] {
 		return spec.clause.is_complete() && p.representation.layout(spec.clause) != none
 	}
-	if spec.words.len != 1 {
-		return false
-	}
-	return p.word_problem(spec.words[0]) == none
+	return p.word_problem(p.parameter_spelling(spec)) == none
 }
 
 // class_of is how an object of an aggregate type is handed over by value on this

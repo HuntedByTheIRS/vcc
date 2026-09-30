@@ -2,6 +2,7 @@ module parser
 
 import ast
 import tokenize
+import types
 
 fn parsed(source string) Result {
 	return parse(tokenize.lex(source).tokens)
@@ -180,6 +181,96 @@ fn test_sizeof_of_a_parenthesised_name_is_the_size_of_the_variable() {
 		return
 	}
 	assert (expr as ast.IntLit).value == 1
+}
+
+// typeof is a specifier whose operand is a type name or an expression, and what
+// it names is the type of that operand: a declaration written through it is a
+// declaration of the type behind the name, which is why the reading is checked
+// by the type the declaration carries and not by the spelling it wrote. Measured
+// on gcc 16.2.1, `typeof(x) y = 4;` for `int x` is an int object and
+// `sizeof(typeof(x))` is 4.
+fn test_typeof_names_the_type_of_a_value_and_of_a_type() {
+	result := parsed('int main(void) { int x = 3; typeof(x) y = 4; __typeof__(int) z = 5; return x + y + z; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].decl_type == 'int'
+	assert body[1].resolved.same(types.int_type())
+	assert body[2].decl_type == 'int'
+	assert body[2].resolved.same(types.int_type())
+}
+
+// typeof of an expression is the type of the value the expression has, and the
+// value itself is not read: `typeof(-x)` is an int, and `typeof(*p)` is the type
+// p points at, which is the difference between asking for the type of a name and
+// asking for the type of what it points at.
+fn test_typeof_of_a_derived_expression_is_the_type_of_that_expression() {
+	result := parsed('struct S { int a; char b; }; int main(void) { struct S s; int *p = &s.a; typeof(*p) v = 1; typeof(s.b) c = 2; return v + c; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[2].decl_type == 'int'
+	assert body[3].decl_type == 'char'
+}
+
+// A pointer written through typeof carries its stars in the type and not in the
+// declarator, and the type the declaration has is a pointer either way.
+fn test_typeof_carries_the_pointer_the_operand_had() {
+	result := parsed('int main(void) { int x = 3; typeof(&x) p = &x; return *p; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].decl_type == 'int *'
+	assert body[1].resolved.kind == .pointer
+}
+
+// The operand is a type name when a type name is written there, and a typedef is
+// a type name: `typeof(m)` written where `Money` is one is the type behind it.
+fn test_typeof_over_a_type_name_resolves_through_a_typedef() {
+	result := parsed('typedef int Money; int main(void) { __typeof__(Money) w = 2; return w; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[0].decl_type == 'int'
+	assert body[0].resolved.same(types.int_type())
+}
+
+// typeof_unqual is the same specifier with the qualifiers taken off the type it
+// names, which is what C23 added it for. Measured on gcc 16.2.1: `typeof(x)`
+// written where x is a `const int` is a const int and `typeof_unqual(x)` is an
+// int, so an assignment to the second is an assignment to an object that is not
+// const.
+fn test_typeof_unqual_drops_the_qualifiers_the_operand_had() {
+	result := parsed('int main(void) { const int x = 3; typeof_unqual(x) y = x; y = 4; return y; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].decl_type == 'int'
+	assert !body[1].resolved.is_const()
+}
+
+// An operand whose type this compiler never resolved has no type to give a
+// declaration, and the refusal names the operand and where typeof was written.
+fn test_typeof_of_an_unresolved_operand_is_refused() {
+	result := parsed('int main(void) { typeof(nothing) y = 1; return y; }')
+	assert result.diagnostics.len >= 1
+	first := result.diagnostics[0]
+	assert first.msg.contains('typeof asks for the type of nothing')
+	assert first.line == 1
+}
+
+// An array type written through typeof would make the declaration an array the
+// declarator never wrote, and the reader refuses that rather than reading it as
+// one element of the array.
+fn test_typeof_of_an_array_type_is_refused() {
+	result := parsed('int main(void) { int a[4]; typeof(a) b; return 0; }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('typeof of an array type is not implemented')
+}
+
+// A word the language reserves for itself cannot name a declaration, and typeof
+// is one: measured on gcc 16.2.1, `int typeof = 1;` is refused under -std=gnu99
+// with "expected identifier or '(' before 'typeof'" and under -std=c23 with the
+// same message, because typeof is a keyword in both.
+fn test_an_object_may_not_be_named_typeof() {
+	result := parsed('int main(void) { int typeof = 1; return typeof; }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('typeof is a keyword')
 }
 
 // A definition of an object at the top level is storage the image holds: the
