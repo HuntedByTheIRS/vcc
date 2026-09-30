@@ -590,6 +590,15 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	mut doubles := 0
 	mut stacked := 0
 	for _, param in decl.params {
+		if e.writes_a_128(param.typ) {
+			// A parameter of a 128-bit type is a value the caller would hand over as
+			// two words, and this back end passes ints, chars, doubles and pointers.
+			// The declaration of it is storage now, so the refusal happens here by
+			// name: reaching the frame move with sixteen bytes fails the whole image
+			// with an internal diagnostic that names nothing and points at line one.
+			e.diagnostics << problem(param.line, param.col, 'unsupported: the parameter ${param.name} is declared ${param.typ}, and this back end passes ints, chars, doubles and pointers only')
+			return error('unsupported parameter type')
+		}
 		// An object of an aggregate type arrives as its bytes in one register of
 		// the class its members make, and the parameter is storage of exactly
 		// that many bytes: the value is copied into the slot rather than

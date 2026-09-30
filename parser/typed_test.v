@@ -840,3 +840,75 @@ fn test_a_mixed_operation_is_a_double_on_both_sides() {
 	assert (sum.left as ast.Ident).typ.same(types.int_type())
 	assert (sum.right as ast.FloatLit).typ.same(types.double_type())
 }
+
+// The 128-bit type written in a parameter list and as a return type: the node
+// carries the spelling the source wrote and the type the model resolved, the way
+// another scalar type's does. Measured on gcc 16.2.1 under `-std=c99`, which
+// accepts all four shapes below; whether sixteen bytes can travel through the
+// frame is the emitter's question and not this reader's.
+fn test_the_128_bit_type_is_a_parameter_and_a_return_carrying_both_its_spellings() {
+	// A prototype that names it in both positions.
+	prototype := first('__int128 pick(unsigned __int128 v);')
+	assert prototype.ret == '__int128'
+	assert prototype.ret_type.same(types.int128_type())
+	assert prototype.params.len == 1
+	assert prototype.params[0].name == 'v'
+	assert prototype.params[0].typ == 'unsigned __int128'
+	assert prototype.params[0].resolved.same(types.unsigned_int128_type())
+	assert prototype.resolved.describe() == '__int128 (unsigned __int128)'
+	assert prototype.body.len == 0
+	// A definition whose parameters are both spellings of the type.
+	definition := first('int take(__int128 a, unsigned __int128 b) { return 0; }')
+	assert definition.ret == 'int'
+	assert definition.ret_type.same(types.int_type())
+	assert definition.params.len == 2
+	assert definition.params[0].typ == '__int128'
+	assert definition.params[0].resolved.same(types.int128_type())
+	assert definition.params[1].typ == 'unsigned __int128'
+	assert definition.params[1].resolved.same(types.unsigned_int128_type())
+	assert definition.resolved.describe() == 'int (__int128, unsigned __int128)'
+}
+
+fn test_a_parameter_and_a_local_of_the_128_bit_type_are_typed_as_the_declaration_wrote_them() {
+	// The parameter is a name in the body's scope with the type the declaration
+	// gave it, so a use of it is a value of that type.
+	decl := first('__int128 same(__int128 v) { return v; }')
+	assert decl.ret_type.same(types.int128_type())
+	returned := decl.body[0].expr or {
+		assert false
+		return
+	}
+	assert (returned as ast.Ident).typ.same(types.int128_type())
+	// A local of the type is storage of sixteen bytes, which is the width the
+	// model gives it rather than a width the spelling carries.
+	local := checked('__int128 make(void) { __int128 r = 1; return r; }')
+	body := local.unit.decls[0].body
+	assert body.len == 2
+	assert body[0].kind == .var_decl
+	assert body[0].decl_name == 'r'
+	assert body[0].decl_type == '__int128'
+	assert body[0].resolved.same(types.int128_type())
+}
+
+fn test_a_call_to_a_function_the_128_bit_type_is_written_on_is_read_against_its_declaration() {
+	result := checked('int take(__int128 v);\nint main(void) { __int128 x = 3; return take(x); }')
+	statement := result.unit.decls[1].body[1]
+	assert statement.kind == .return_stmt
+	returned := statement.expr or {
+		assert false
+		return
+	}
+	call := returned as ast.Call
+	assert call.name == 'take'
+	assert call.typ.same(types.int_type())
+	assert call.args.len == 1
+	assert (call.args[0] as ast.Ident).typ.same(types.int128_type())
+	// The other direction: a call to a function that returns the type is a value
+	// of that type, which is what a declaration initialized from it reads.
+	wide := checked('__int128 give(void);\nint main(void) { __int128 y = give(); return 0; }')
+	initializer := wide.unit.decls[1].body[0].init or {
+		assert false
+		return
+	}
+	assert (initializer as ast.Call).typ.same(types.int128_type())
+}

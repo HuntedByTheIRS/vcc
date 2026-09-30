@@ -1614,6 +1614,11 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 // `typeof` is the type the reader resolved rather than the words the file wrote:
 // `int f(typeof(x) v)` is a parameter of the type x has, and asking about the
 // word `typeof` would refuse a parameter whose type this compiler knows.
+//
+// A parameter of the 128-bit type is asked about the type the model resolved
+// rather than about the word, because that type has a width and the model is
+// where the width is: the spelling joins two words, and `unsigned __int128` is
+// not a word this reader has.
 fn (p Parser) parameter_type_is_known(spec DeclSpec) bool {
 	// An object of an aggregate type is one a definition can be handed by value:
 	// the layout says how many bytes it is and what class its first eightbyte
@@ -1621,6 +1626,14 @@ fn (p Parser) parameter_type_is_known(spec DeclSpec) bool {
 	// with no body has neither, so it is not one.
 	if spec.clause.kind in [types.Kind.struct_, .union_] {
 		return spec.clause.is_complete() && p.representation.layout(spec.clause) != none
+	}
+	// A 128-bit integer is a type the model knows the width of, sixteen bytes,
+	// so a parameter declared with one is a parameter whose type this reader can
+	// name. The questions about handing a value of that width over are the
+	// emitter's, and it answers them by name, which is the same split a
+	// declaration of an object of the type already has.
+	if spec.clause.kind in [types.Kind.int128, .unsigned_int128] {
+		return true
 	}
 	return p.word_problem(p.parameter_spelling(spec)) == none
 }

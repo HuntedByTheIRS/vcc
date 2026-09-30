@@ -75,15 +75,36 @@ fn test_an_object_of_the_128_bit_type_is_read_as_storage() {
 	unsigned_one := parsed('int main(void) { unsigned __int128 w = 5; return 0; }')
 	assert unsigned_one.diagnostics.len == 0
 	assert unsigned_one.unit.decls[0].body[0].decl_type == 'unsigned __int128'
-	// A parameter of that type is the value question and not the storage one: a
-	// definition whose parameter is one would have to pass a value of that width,
-	// so it is refused by the spelling the parameter wrote, and a prototype that
-	// names one is a promise and is kept.
-	defined := parsed('int f(__int128 v) { return 0; }')
-	assert defined.diagnostics.len == 1
-	assert defined.diagnostics[0].msg.contains('__int128')
-	prototype := parsed('__int128 f(unsigned __int128 v);')
+}
+
+// The four shapes a function can write the type in: a prototype, a definition
+// whose parameter is one, a definition that returns one, and a call to it. The
+// reader takes all four, because a type whose width the model knows is a type it
+// can name wherever a type is written. Measured on gcc 16.2.1, which accepts all
+// four under `-std=c99`. Whether a value of sixteen bytes can be handed over is
+// the emitter's question, and it answers it by name rather than silently.
+fn test_the_128_bit_type_is_read_in_a_parameter_list_and_as_a_return() {
+	// A prototype naming the type, which is a promise and no code.
+	prototype := parsed('int f(__int128 v);')
 	assert prototype.diagnostics.len == 0
+	assert prototype.unit.decls.len == 1
+	assert prototype.unit.decls[0].body.len == 0
+	// A definition whose parameter is one.
+	defined := parsed('int f(__int128 v) { return 0; }')
+	assert defined.diagnostics.len == 0
+	assert defined.unit.decls.len == 1
+	// A definition that returns one, and the unsigned spelling in both
+	// positions, which is the other type the model has.
+	returning := parsed('__int128 f(void) { return 0; }')
+	assert returning.diagnostics.len == 0
+	unsigned_one := parsed('unsigned __int128 f(unsigned __int128 v);')
+	assert unsigned_one.diagnostics.len == 0
+	// A call to a function whose prototype names the type. The argument has the
+	// type the parameter was declared with, so the call is the call it looks
+	// like rather than a conversion.
+	call := parsed('int f(__int128 v);\nint main(void) { __int128 x = 3; return f(x); }')
+	assert call.diagnostics.len == 0
+	assert call.unit.decls.len == 2
 }
 
 fn test_a_function_that_returns_a_constant() {
