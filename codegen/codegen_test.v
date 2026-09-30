@@ -1805,24 +1805,56 @@ fn test_a_shift_of_a_pair_moves_the_other_word() {
 	}
 }
 
-// A shift by a count the program works out is refused by name and by place rather
-// than answered with the count of some other instruction, and a count as wide as
-// the shifted value is refused the same way, because the language calls it
-// undefined and any answer would be invented.
-fn test_a_shift_by_a_count_that_is_not_written_is_refused() {
+// A count the program writes down is refused when it is as wide as the value being
+// shifted, because the language calls that undefined and any answer would be
+// invented: the instruction would shift by the count modulo the width, which is a
+// number nobody wrote.
+fn test_a_shift_by_a_count_as_wide_as_the_value_is_refused() {
 	cases := [
-		'int main() { int a = 8;\n\tint n = 2;\n\treturn a << n; }',
-		'int main() { int a = 8;\n\tint n = 2;\n\treturn a >> n; }',
-		'int main() { __int128 a = 8;\n\tint n = 2;\n\treturn (int)(a << n); }',
-		'int main() { __int128 a = 8;\n\tint n = 2;\n\treturn (int)(a >> n); }',
 		'int main() { int a = 1;\n\treturn a << 32; }',
+		'int main() { int a = 1;\n\treturn a >> 32; }',
 		'int main() { __int128 a = 1;\n\treturn (int)(a << 128); }',
+		'int main() { __int128 a = 1;\n\treturn (int)(a >> 128); }',
+		'int main() { int a = 1;\n\treturn a << -1; }',
 	]
 	for source in cases {
 		emitted := emit(translation_unit(source), Options{})
 		assert emitted.diagnostics.len == 1
 		assert emitted.diagnostics[0].msg.contains('is not implemented')
 		assert emitted.bytes.len == 0
+	}
+}
+
+// A count the program works out is shifted by the register the machine reads a
+// count from, so it is a count the program decides at run time. The machine reads
+// the count modulo the register's width, which is what gcc answers too, and it is
+// why the two widths are shifted with different instructions: a narrow count is
+// read as five bits and a word's as six, so a shift of 33 of a narrow value is a
+// shift of one and a shift of 33 of a pair is a shift of thirty-three.
+fn test_a_shift_by_a_count_the_program_works_out_runs() {
+	powers := doubling('t64', 64) + doubling('t72', 72)
+	cases := [
+		'\tint a = 8; int n = 2;\n\treturn (a << n) == 32;',
+		'\tint a = 8; int n = 33;\n\treturn (a << n) == 16;',
+		'\tint a = 256; int n = 4;\n\treturn (a >> n) == 16;',
+		'\tint a = -8; int n = 1;\n\treturn (a >> n) == -4;',
+		'\tint a = -8; int n = 33;\n\treturn (a >> n) == -4;',
+		'\tint a = -8; int n = 31;\n\treturn (a >> n) == -1;',
+		'\tint a = 7; int n = 0;\n\treturn (a >> n) == 7 && (a << n) == 7;',
+		'\tint a = 0xf0; int m = 0x0f; int n = 4;\n\treturn ((a >> n) | m) == 0x0f;',
+		'${powers}\t__int128 a = t64 + 5; int n = 64;\n\treturn (a >> n) == 1;',
+		'${powers}\t__int128 a = t64 + 5; int n = 64;\n\t__int128 p = a << n;\n\treturn p == (t64 + 5) * t64;',
+		'${powers}\t__int128 a = t72 + 3; int n = 72;\n\treturn (a >> n) == 1;',
+		'\t__int128 a = 9; int n = 128;\n\treturn (a >> n) == 9;',
+		'${powers}\t__int128 a = t72; int n = 200;\n\treturn (a >> n) == 1;',
+		'\t__int128 a = -1; int n = 70;\n\treturn (a >> n) == -1;',
+		'\tunsigned __int128 a = -1; int n = 1;\n\tunsigned __int128 h = a >> n;\n\treturn (h >> 126) == 1;',
+		'\t__int128 a = 7; int n = 0;\n\treturn (a >> n) == 7;',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
 	}
 }
 

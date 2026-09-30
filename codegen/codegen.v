@@ -3019,9 +3019,19 @@ fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
 		// type: it is read as a count and never widened into a pair. The type the
 		// answer has is the left operand's, which is therefore the only signedness
 		// a shift asks about.
+		if value := e.constant(step.right) {
+			e.load_pair(left, step.line, step.col)!
+			return e.apply_wide_shift(step, e.shift_bits(step, value, 128)!, step.line, step.col)
+		}
+		// A count the program works out is one the emitter does not know, so the
+		// pair stays in its slot while the count is worked out into the register the
+		// machine reads one from, and then the pair is loaded over it.
+		e.emit_value(step.right, depth + 1)!
+		count := e.scratch(step.line, step.col)!
+		e.check_count_register(step, count)!
+		e.append(e.target.move_register64(count, e.accumulator(step.line, step.col)!)!)
 		e.load_pair(left, step.line, step.col)!
-		count := e.shift_count(step, 128)!
-		return e.apply_wide_shift(step, count, step.line, step.col)
+		return e.apply_wide_shift_register(step, count, step.line, step.col)
 	}
 	right := e.wide_pair_slot(mut e.wide_right, depth)
 	e.emit_value(step.right, depth + 1)!
@@ -3182,6 +3192,18 @@ fn (mut e Emitter) emit_wide_division(step ast.Binary, left Slot, right Slot, de
 	e.wide_load_word(answer, 1, high, step.line, step.col)!
 }
 
+// check_count_register holds the one register the machine reads a shift count from
+// to the count the emitter is about to shift by. The encodings of a computed shift
+// name no place for the count, because there is only one place they can name, and a
+// count that ended up anywhere else would shift by whatever that register held.
+fn (mut e Emitter) check_count_register(binary ast.Binary, reg backend.Register) !void {
+	if reg.code == 1 {
+		return
+	}
+	e.diagnostics << problem(binary.line, binary.col, 'internal: the count of ${binary.op} is in ${reg.name}, and the machine reads the count of a shift from cl')
+	return error('the count is not in cl')
+}
+
 // apply_wide_shift shifts a pair by a constant count, with the pair in the
 // registers. A shift of one word or more moves the other word across, which is a
 // different sequence from a shift of less than one, and gcc 16.2.1's own code at
@@ -3233,6 +3255,56 @@ fn (mut e Emitter) apply_wide_shift(step ast.Binary, count u8, line int, col int
 		e.append(e.target.shift_right_arithmetic(high, 63)!)
 		e.append(e.target.shift_right_arithmetic(low, moved)!)
 	}
+}
+
+// apply_wide_shift_register shifts a pair by a count in a register, with the pair in
+// the registers. The count decides which of two sequences runs, because the amount
+// the second word moves by is not a shift of a register as the first word's is: the
+// bit of the count that says the count is a word or more is tested first, and both
+// sequences shift by the machine's own reading of the count modulo the word, which
+// is the answer a language that calls the count undefined gets from gcc as well.
+fn (mut e Emitter) apply_wide_shift_register(step ast.Binary, count backend.Register, line int, col int) !void {
+	low := e.accumulator(line, col)!
+	high := e.remainder(line, col)!
+	unsigned := e.wide_unsigned(step.left)
+	over := e.label()
+	done := e.label()
+	e.append(e.target.test_byte_immediate(count, 64)!)
+	e.branch(.branch_zero, over, line, col)!
+	// A count of a word or more: the second word moves over the first, and what is
+	// left of the count is what the machine reads of it.
+	if step.op == '<<' {
+		e.append(e.target.move_register64(high, low)!)
+		e.append(e.target.move_immediate32(low, 0)!)
+		e.append(e.target.shift_left_word_register(high)!)
+	} else {
+		e.append(e.target.move_register64(low, high)!)
+		if unsigned {
+			e.append(e.target.move_immediate32(high, 0)!)
+			e.append(e.target.shift_right_word_register(low)!)
+		} else {
+			// The word that moved down is kept in the register above and spread over
+			// it, which is where the sign of the answer comes from.
+			e.append(e.target.move_register64(high, low)!)
+			e.append(e.target.shift_right_arithmetic(high, 63)!)
+			e.append(e.target.shift_right_arithmetic_word_register(low)!)
+		}
+	}
+	e.jump(done)!
+	e.place(over)
+	// A count below a word: the bits that leave one word arrive in the other.
+	if step.op == '<<' {
+		e.append(e.target.shift_wide_left_register(high, low)!)
+		e.append(e.target.shift_left_word_register(low)!)
+	} else {
+		e.append(e.target.shift_wide_right_register(low, high)!)
+		if unsigned {
+			e.append(e.target.shift_right_word_register(high)!)
+		} else {
+			e.append(e.target.shift_right_arithmetic_word_register(high)!)
+		}
+	}
+	e.place(done)
 }
 
 // apply_wide_binary does the operation with the left pair in the registers and the
@@ -3592,11 +3664,7 @@ fn (mut e Emitter) check_int_operands(binary ast.Binary) !void {
 // amount is not a wrong answer anyone can see. A count as wide as the type or
 // wider is refused the same way, because the language makes that undefined and
 // folding it to some answer would be inventing one.
-fn (mut e Emitter) shift_count(binary ast.Binary, limit int) !u8 {
-	value := e.constant(binary.right) or {
-		e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} by a count the program computes is not implemented, and this back end shifts by a constant only')
-		return error('no shift count')
-	}
+fn (mut e Emitter) shift_bits(binary ast.Binary, value i64, limit int) !u8 {
 	if value < 0 || value >= limit {
 		e.diagnostics << problem(binary.line, binary.col, 'unsupported: a shift of a ${limit}-bit value by ${value} is not implemented, and the language calls a count that wide undefined')
 		return error('shift count out of range')
@@ -3650,7 +3718,16 @@ fn (mut e Emitter) apply_binary(binary ast.Binary) !void {
 			e.append(e.target.xor_word(result, other)!)
 		}
 		'<<' {
-			e.append(e.target.shift_left_word(result, e.shift_count(binary, 32)!)!)
+			if value := e.constant(binary.right) {
+				e.append(e.target.shift_left_word(result, e.shift_bits(binary, value, 32)!)!)
+			} else {
+				// The count is one the program works out, so it is in the register
+				// the machine reads a count from. The four-byte form is the one whose
+				// count the machine reads as a narrow value's count is read, so a
+				// count of 33 shifts by the one bit the language leaves of it.
+				e.check_count_register(binary, other)!
+				e.append(e.target.shift_left_narrow_register(result)!)
+			}
 		}
 		'>>' {
 			// The shift that keeps the sign has to be told the sign, and the value
@@ -3658,13 +3735,26 @@ fn (mut e Emitter) apply_binary(binary ast.Binary) !void {
 			// reaches the top of the register: a signed value is spread over the
 			// register first and an unsigned one has its top cleared, and then the
 			// shift reads the sign the language means.
-			bits := e.shift_count(binary, 32)!
-			if binary.left.typ.kind.is_unsigned() {
+			unsigned := binary.left.typ.kind.is_unsigned()
+			if unsigned {
 				e.append(e.target.move_register32(result, result)!)
-				e.append(e.target.shift_right_word(result, bits)!)
 			} else {
 				e.append(e.target.sign_extend_word(result, result)!)
-				e.append(e.target.shift_right_arithmetic(result, bits)!)
+			}
+			if value := e.constant(binary.right) {
+				bits := e.shift_bits(binary, value, 32)!
+				if unsigned {
+					e.append(e.target.shift_right_word(result, bits)!)
+				} else {
+					e.append(e.target.shift_right_arithmetic(result, bits)!)
+				}
+			} else {
+				e.check_count_register(binary, other)!
+				if unsigned {
+					e.append(e.target.shift_right_narrow_register(result)!)
+				} else {
+					e.append(e.target.shift_right_arithmetic_narrow_register(result)!)
+				}
 			}
 		}
 		else {

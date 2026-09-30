@@ -279,6 +279,26 @@ fn test_a_128_bit_shift_runs() {
 	os.rm(binary) or {}
 }
 
+// A shift by a count the program works out, run through the command line, on both
+// widths. The count is in a variable, so the emitter cannot write it into the
+// instruction and has to use the encodings that read it from a register.
+fn test_a_shift_by_a_count_the_program_works_out_runs() {
+	source := scratch('wide_shift_count.c')
+	binary := scratch('wide_shift_count')
+	narrow := compile_and_run([source, '-o', binary], 'int main(void) {\n\tint a = 8; int n = 33;\n\treturn (a << n) == 16 && (a >> 3) == 1;\n}\n')
+	assert narrow == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	mut powers := '\tunsigned __int128 t64 = 1;\n'
+	for _ in 0 .. 64 {
+		powers += '\tt64 = t64 + t64;\n'
+	}
+	wide := compile_and_run([source, '-o', binary], 'int main(void) {\n${powers}\t__int128 a = t64 + 5; int n = 64;\n\t__int128 p = a << n;\n\treturn (a >> n) == 1 && p == (t64 + 5) * t64;\n}\n')
+	assert wide == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_a_128_bit_division_and_remainder_run() {
 	mut powers := '\tunsigned __int128 t64 = 1;\n'
 	for _ in 0 .. 64 {
