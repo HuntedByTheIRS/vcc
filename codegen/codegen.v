@@ -2179,6 +2179,13 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 						// element.
 						return
 					}
+					if object.count == 0 && object.width == wide_bytes {
+						// A top-level object of a 128-bit type read as a value gets the
+						// refusal a local of the type gets: of that width there is no
+						// value here, only storage, and the storage is real.
+						e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
+						return error('128-bit value')
+					}
 					if object.floating {
 						// A double is read through its address with the
 						// instruction that moves one, and the address is in
@@ -3781,6 +3788,20 @@ fn (e Emitter) global_shape(name string) ?GlobalSlot {
 					object: true
 				}
 			}
+			if e.writes_a_128(global.typ) {
+				// An object of a 128-bit type at the top level is sixteen bytes of
+				// storage and a value type rather than an aggregate: the width is
+				// what an element of an array of them scales by, and the count is
+				// how many there are. The value question is the one a local of the
+				// type has, and it is refused where a name is read as a value
+				// rather than here, because the storage is real and the layout and
+				// an element address both need this shape.
+				return GlobalSlot{
+					offset: 0
+					width:  wide_bytes
+					count:  global.count
+				}
+			}
 			element := e.type_width(global.typ) or { return none }
 			return GlobalSlot{
 				offset:   0
@@ -3904,6 +3925,12 @@ fn (mut e Emitter) assign_global(stmt ast.Stmt, object GlobalSlot, expr ast.Expr
 	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, register.name)
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
+	if object.width == wide_bytes {
+		// A top-level object of a 128-bit type takes the two words a local of it
+		// takes, through the address the image holds: the same widening store, and
+		// the same copy when the value is another object of the type.
+		return e.store_wide_at(address, expr, stmt.line, stmt.col)
+	}
 	e.emit_expr_at(expr, 1)!
 	e.convert_for_global(expr, object, stmt.line, stmt.col)!
 	address_register := e.scratch(stmt.line, stmt.col)!

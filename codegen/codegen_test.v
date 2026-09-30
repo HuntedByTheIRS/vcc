@@ -1179,6 +1179,39 @@ fn test_a_128_bit_member_is_written_and_read_at_its_address() {
 	assert run_image(neighbour.bytes) == 1
 }
 
+// A top-level object of the type is storage the image holds, reachable the way any
+// other top-level object is: written through its address, read by a conversion at that
+// address, and an element of an array of them the same. Before this, the shape of the
+// type had no case for a top-level object, so every one of these refused with a message
+// about a missing local. Measured on gcc 16.2.1, the programs below return 44, 144, 44,
+// 44 and 255.
+fn test_a_top_level_object_of_128_bits_is_written_and_read_at_its_address() {
+	scalar := emit(translation_unit('__int128 g; int main() { g = 300; int n = g; return n; }'), Options{})
+	assert scalar.diagnostics.len == 0
+	assert run_image(scalar.bytes) == 44
+	twice := emit(translation_unit('__int128 g; int main() { g = 300; g = 400; int n = g; return n; }'),
+		Options{})
+	assert twice.diagnostics.len == 0
+	assert run_image(twice.bytes) == 144
+	element := emit(translation_unit('__int128 g[2]; int main() { g[1] = 300; int n = g[1]; return n; }'),
+		Options{})
+	assert element.diagnostics.len == 0
+	assert run_image(element.bytes) == 44
+	copied := emit(translation_unit('__int128 g[2]; int main() { g[0] = 300; g[1] = g[0]; int n = g[1]; return n; }'),
+		Options{})
+	assert copied.diagnostics.len == 0
+	assert run_image(copied.bytes) == 44
+	negative := emit(translation_unit('__int128 g; int main() { g = -1; int n = g; return n; }'), Options{})
+	assert negative.diagnostics.len == 0
+	assert run_image(negative.bytes) == 255
+	// The name read as a *value* is refused by name, the way a local of the type is:
+	// the storage is real and the value of that width is not.
+	value := emit(translation_unit('__int128 g; int main() { g = 5; return g; }'), Options{})
+	assert value.diagnostics.len == 1
+	assert value.diagnostics[0].msg.contains('is an object of 128 bits')
+	assert value.bytes.len == 0
+}
+
 // An array of 128-bit objects is storage whose elements are written and read the way
 // the object of the type is, at the element's own address: the store is the two words
 // an object takes, the conversion is the low word at the element's address, and an
