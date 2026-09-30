@@ -157,11 +157,27 @@ fn test_no_std_and_an_unknown_spelling_ask_nothing() {
 }
 
 fn test_a_construct_the_compiler_refuses_is_not_a_pedantic_message() {
-	// typeof is not implemented, so a program writing it is refused by the
+	// _Generic is not implemented, so a program writing it is refused by the
 	// parser; a message from this table on top of that refusal would say the
 	// same thing twice and would be the wrong thing once the parser lands.
-	tokens := [token('typeof'), token('int')]
+	tokens := [token('_Generic'), token('int')]
 	assert pedantic_messages(tokens, asking(.c99)).len == 0
+}
+
+// typeof is read by the parser, so the table's row is a message and not a
+// duplicate of a refusal. Measured on gcc 16.2.1: bare `typeof` is a word in
+// C23 and in every GNU dialect and is not one in a strict mode, where
+// `typeof(x) y;` reads as a call to a function of that name; the spellings with
+// the underscores around them are read in every mode, c89 and c99 included, and
+// draw no pedantic message from gcc in any of them. The row carries all three
+// spellings because the check finds a row by token text, and a mode that forbids
+// the construct forbids it under each of its names.
+fn test_the_typeof_row_is_a_message_once_the_parser_reads_it() {
+	tokens := [token('typeof'), token('int')]
+	assert pedantic_messages(tokens, asking(.c99)).len == 1
+	assert pedantic_messages(tokens, asking(.c11))[0].msg == 'ISO C11 forbids the typeof specifier'
+	assert pedantic_messages(tokens, asking(.c23)).len == 0
+	assert pedantic_messages(tokens, asking(.gnu99)).len == 0
 }
 
 fn test_a_system_header_is_not_the_program() {

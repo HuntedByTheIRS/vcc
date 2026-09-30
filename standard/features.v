@@ -105,7 +105,7 @@ pub const features = [
 		gnu:       true
 		extension: ''
 		pedantic:  'the typeof specifier'
-		status:    .unimplemented
+		status:    .implemented
 	},
 	Feature{
 		spellings: []
