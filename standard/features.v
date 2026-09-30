@@ -35,6 +35,14 @@ pub:
 	// gnu says the spelling is a GNU extension, which is what keeps it out of
 	// a strict mode even where the standard's row includes it.
 	gnu bool
+	// reserved says the spelling is in the reserved namespace: a name with two
+	// underscores around it, which no mode has to grant and none may refuse.
+	// Measured on gcc 16.2.1, the reserved spellings of the typeof specifier
+	// are accepted under every -std tried, `-std=c99 -pedantic-errors`
+	// included, with empty stderr. So a row with this set is taken by every
+	// mode and is never reported, and it carries no phrase to report: no mode
+	// forbids the construct. Rows that are not reserved leave it out.
+	reserved bool
 	// extension is the name of the -fvcc-exts= extension that brings the
 	// construct down to a mode before `since`, when there is one. Nothing is
 	// brought down yet: the flag parses the names and honors none of them, so
@@ -99,12 +107,71 @@ pub const features = [
 		pedantic:  'braced-groups within expressions'
 		status:    .unimplemented
 	},
+	// typeof is C23's specifier, and the bare spelling is a keyword only where
+	// that standard or a GNU dialect is in effect. Measured on gcc 16.2.1,
+	// `typeof(x) y = 2;` is accepted under `-std=c23`, under `-std=gnu99` and
+	// with no `-std` at all, and the strict modes fail on it without
+	// -pedantic: `-std=c99`, `-std=c99 -pedantic` and
+	// `-std=c99 -pedantic-errors` all exit 1, reporting
+	// `implicit declaration of function 'typeof'` inside a function body and
+	// `return type defaults to 'int'` at file scope. The mode does not have
+	// the construct at all: no flag makes gcc take it. The table reports it
+	// in the modes that lack it, because reporting is what this check does
+	// with a construct a mode does not allow. Refusing it outright means
+	// asking the mode where the spelling is read, which is the parser's job
+	// and not this table's.
 	Feature{
-		spellings: ['typeof', '__typeof__', '__typeof']
+		spellings: ['typeof']
 		since:     .c23
 		gnu:       true
 		extension: ''
 		pedantic:  'the typeof specifier'
+		status:    .implemented
+	},
+	// The two underscore-wrapped spellings of the specifier have a row of their
+	// own, because a row is found by token text and the answer differs from the
+	// bare spelling's: measured on gcc 16.2.1, `__typeof__(x) y = 2;` and
+	// `__typeof(x) y = 2;` are accepted under every `-std` tried,
+	// `-std=c99 -pedantic-errors` included, with empty stderr. A name with two
+	// underscores around it is in the reserved namespace, so no mode has to
+	// grant it and none refuses it.
+	Feature{
+		spellings: ['__typeof__', '__typeof']
+		since:     .none
+		gnu:       false
+		reserved:  true
+		extension: ''
+		pedantic:  ''
+		status:    .implemented
+	},
+	// typeof_unqual is C23's other spelling of the specifier: the same type
+	// with the qualifiers taken off it. Measured on gcc 16.2.1 it is narrower
+	// than typeof, and the difference is that no GNU dialect has it as an
+	// extension of its own: `typeof_unqual(x) y = 2;` is accepted under
+	// `-std=c23` and with no `-std` at all, and refused under `-std=gnu99` as
+	// well as under `-std=c99`, `-std=c99 -pedantic` and
+	// `-std=c99 -pedantic-errors`, where the line reads as a call to a
+	// function of that name. So `since: .c23` with `gnu: false`: gnu23 takes it
+	// because gnu23 includes C23, and gnu99 does not.
+	Feature{
+		spellings: ['typeof_unqual']
+		since:     .c23
+		gnu:       false
+		extension: ''
+		pedantic:  'the typeof_unqual specifier'
+		status:    .implemented
+	},
+	// The reserved spelling of typeof_unqual, on the same footing as the two
+	// above it: gcc 16.2.1 measured accepts `__typeof_unqual__(x) y = 2;` in
+	// every mode, and tcc knows neither spelling, so nothing here depends on
+	// tcc's answer.
+	Feature{
+		spellings: ['__typeof_unqual__']
+		since:     .none
+		gnu:       false
+		reserved:  true
+		extension: ''
+		pedantic:  ''
 		status:    .implemented
 	},
 	Feature{
@@ -203,18 +270,15 @@ pub const features = [
 	// it out, which is what makes `sizeof(__int128)` 16, and an object of one is
 	// storage this back end has: sixteen bytes that are declared, given a value
 	// narrower than them, copied and addressed, at the top level, as a local and
-	// as a top-level object, as a member of an object and as an element of an array of
-	// them, where the element
-	// is written as the two words an object takes and read by a conversion at its own
-	// address, and an element taken as a *value* is refused by name. Reading one is written as a conversion to a
-	// narrower type or into a narrower slot, which is its low word: measured on gcc
-	// 16.2.1, `(int)` of a stored 300 is 300, `(char)` of one is 44, `(int)` of a
-	// stored -1 is -1, and an int declared from a stored 300 is 300.
+	// as a member of an object and as an element of an array of them, whose element
+	// access is refused by name (an element of sixteen bytes is not a value one
+	// instruction moves). Reading one is written as a conversion to a
+	// narrower type, which is its low word: measured on gcc 16.2.1, `(int)` of a
+	// stored 300 is 300, `(char)` of one is 44, and `(int)` of a stored -1 is -1.
 	// What is missing is a *value* of that width, so a parameter of the type and
 	// an implicit narrowing store are refused by name: `int f(__int128 v) { return
 	// 0; }` reports `unsupported type __int128`, and `__int128 v = 5; int n = v;`
-	// reports that the object has no value of that width to read (`int n = a;` is
-	// that same read, and takes the low word). A conversion of
+	// reports that the object has no value of that width to read. A conversion of
 	// an object to a double is refused too, since a double of that value is a
 	// rounding of the whole of it and not its low word, while a prototype naming
 	// the type is a promise and is kept.
@@ -368,7 +432,14 @@ fn uses(tokens []tokenize.Token, table []Feature, question Question) []tokenize.
 // the standard the mode names, or the mode is a GNU dialect and the construct is
 // one of GNU's own extensions, or an extension the command line turned on brings
 // it down to this mode.
+//
+// A reserved spelling is the first thing answered, and every mode takes it: the
+// name is in the implementation's namespace, so the mode is not a question
+// anybody asked about it and there is nothing to report.
 fn allowed(feature Feature, question Question) bool {
+	if feature.reserved {
+		return true
+	}
 	if feature.since != .none && question.mode.includes(feature.since) {
 		return true
 	}

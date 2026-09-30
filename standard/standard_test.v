@@ -85,6 +85,16 @@ fn test_a_message_names_the_standard_the_mode_asks_about() {
 fn test_the_table_carries_a_row_for_each_construct() {
 	assert features.len > 0
 	for feature in features {
+		if feature.reserved {
+			// A spelling every mode takes has no message to carry and no
+			// standard to have come from: the phrase below is the half of a
+			// message no mode can print, and a `since` would be a claim about
+			// a standard that never had it.
+			assert feature.pedantic == '', 'a reserved spelling is reported by no mode'
+			assert feature.since == .none
+			assert !feature.gnu
+			continue
+		}
 		assert feature.pedantic != ''
 		if feature.status == .implemented {
 			assert feature.spellings.len > 0, 'an implemented row is found by a spelling'
@@ -165,19 +175,107 @@ fn test_a_construct_the_compiler_refuses_is_not_a_pedantic_message() {
 }
 
 // typeof is read by the parser, so the table's row is a message and not a
-// duplicate of a refusal. Measured on gcc 16.2.1: bare `typeof` is a word in
-// C23 and in every GNU dialect and is not one in a strict mode, where
-// `typeof(x) y;` reads as a call to a function of that name; the spellings with
-// the underscores around them are read in every mode, c89 and c99 included, and
-// draw no pedantic message from gcc in any of them. The row carries all three
-// spellings because the check finds a row by token text, and a mode that forbids
-// the construct forbids it under each of its names.
-fn test_the_typeof_row_is_a_message_once_the_parser_reads_it() {
+// duplicate of a refusal. Re-measured on gcc 16.2.1, one mode at a time over
+// `typeof(x) y = 2;`: accepted under -std=c23, under -std=gnu99 and with no
+// -std at all, and a hard error under -std=c99, -std=c99 -pedantic and
+// -std=c99 -pedantic-errors, where the bare spelling is not a keyword and the
+// line is read as a call to a function named typeof. The tree reports it under
+// -pedantic where gcc fails outright; the modes that report are the modes that
+// do not have the construct, and the default mode is not one of them.
+fn test_the_typeof_row_reports_outside_c23_and_the_gnu_modes() {
 	tokens := [token('typeof'), token('int')]
 	assert pedantic_messages(tokens, asking(.c99)).len == 1
 	assert pedantic_messages(tokens, asking(.c11))[0].msg == 'ISO C11 forbids the typeof specifier'
+	assert pedantic_messages(tokens, asking(.c17)).len == 1
+	// C23 has the construct, a GNU dialect takes it as an extension, and no
+	// -std at all asks nothing.
 	assert pedantic_messages(tokens, asking(.c23)).len == 0
+	assert pedantic_messages(tokens, asking(.gnu89)).len == 0
 	assert pedantic_messages(tokens, asking(.gnu99)).len == 0
+	assert pedantic_messages(tokens, asking(.gnu23)).len == 0
+	assert pedantic_messages(tokens, asking(.none)).len == 0
+}
+
+// typeof_unqual is narrower than typeof, and the row says so: it became
+// standard in C23 and no GNU dialect has it as an extension of its own.
+// Measured on gcc 16.2.1, `typeof(x) y = 2;` is accepted under -std=gnu99 while
+// `typeof_unqual(x) y = 2;` is a hard error there, and the GNU mode is the mode
+// that separates the two rows.
+fn test_the_typeof_unqual_row_is_c23_and_not_a_gnu_extension() {
+	tokens := [token('typeof_unqual')]
+	strict := [Mode.c89, .c99, .c11, .c17]
+	for mode in strict {
+		assert pedantic_messages(tokens, asking(mode)).len == 1
+	}
+	assert pedantic_messages(tokens, asking(.c99))[0].msg == 'ISO C99 forbids the typeof_unqual specifier'
+	// Every GNU dialect before C23 reports it, which is what gcc does.
+	older := [Mode.gnu89, .gnu99, .gnu11, .gnu17]
+	for mode in older {
+		assert pedantic_messages(tokens, asking(mode)).len == 1
+	}
+	// C23 has it, and gnu23 includes C23 rather than taking it as an extension.
+	assert pedantic_messages(tokens, asking(.c23)).len == 0
+	assert pedantic_messages(tokens, asking(.gnu23)).len == 0
+	assert pedantic_messages(tokens, asking(.none)).len == 0
+}
+
+// A double underscore on both sides of a name puts it in the reserved
+// namespace, which no mode has to grant and none may refuse. Measured on gcc
+// 16.2.1, `__typeof__(x) y = 2;`, `__typeof(x) y = 2;` and
+// `__typeof_unqual__(x) y = 2;` are accepted under -std=c89 ... -std=c23 and
+// under -std=gnu99, `-std=c99 -pedantic-errors` included, with empty stderr.
+// The rows are in the table so a reader finds the spellings where the others
+// are, and the check reports none of them in any mode.
+fn test_the_underscored_spellings_are_reserved_and_never_reported() {
+	// One row carries the two spellings of the qualified specifier and one row
+	// the unqualified one, and both say the same thing: every mode takes it.
+	qualified := features.filter(it.spellings.contains('__typeof__'))
+	assert qualified.len == 1
+	assert qualified[0].spellings == ['__typeof__', '__typeof']
+	assert qualified[0].reserved
+	assert qualified[0].since == .none
+	assert !qualified[0].gnu
+	assert qualified[0].pedantic == ''
+	unqualified := features.filter(it.spellings.contains('__typeof_unqual__'))
+	assert unqualified.len == 1
+	assert unqualified[0].spellings == ['__typeof_unqual__']
+	assert unqualified[0].reserved
+	assert unqualified[0].since == .none
+	assert !unqualified[0].gnu
+	assert unqualified[0].pedantic == ''
+	// The reserved property is not on a row that also carries a bare spelling:
+	// the bare ones are the two the modes report.
+	for feature in features {
+		for spelling in ['typeof', 'typeof_unqual'] {
+			if feature.spellings.contains(spelling) {
+				assert !feature.reserved, spelling
+			}
+		}
+	}
+	// And no mode reports any of the three, `-pedantic-errors` included.
+	modes := [
+		Mode.c89,
+		.c99,
+		.c11,
+		.c17,
+		.c23,
+		.gnu89,
+		.gnu99,
+		.gnu11,
+		.gnu17,
+		.gnu23,
+		.none,
+		.other,
+	]
+	for mode in modes {
+		tokens := [token('__typeof__'), token('__typeof'), token('__typeof_unqual__')]
+		assert pedantic_messages(tokens, asking(mode)).len == 0, mode.spelling()
+	}
+	// A program that writes a reserved spelling beside a bare one hears about
+	// the bare one only, in the mode that lacks it.
+	pair := [token('typeof'), token('__typeof__')]
+	assert pedantic_messages(pair, asking(.c99)).len == 1
+	assert pedantic_messages(pair, asking(.c23)).len == 0
 }
 
 // The 128-bit integer is a GNU extension and no ISO mode has it, so the row
