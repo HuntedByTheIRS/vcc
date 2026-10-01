@@ -63,8 +63,9 @@ so the cap turns a frozen desktop into a clean OOM with the peak reported.
 | `parser/` | tokens in, `ast` out. Never writes files. |
 | `optimizer/` | `ast` in, `ast` out. `-O` levels and the builtin table. A pass is a row in a table with the level that turns it on, so adding an optimization is a function beside the table and not a branch in the emitter. `codegen/` never asks it anything. |
 | `printer/` | `ast` in, text out. `-print-ast` is its only caller. `ast/` stays node types only, so nothing that renders a tree belongs in it. |
-| `backend/` | target description in two dimensions. `arch/` is the machine: registers, encodings, argument positions. `os/` is the system: syscalls, their numbers, loader constants. `backend.v` composes one of each into a `Target`, which is all `codegen/` sees. A new machine or a new system is a module of its own, and `codegen/` never learns about it; `backend.v` is the one place a target is composed. |
-| `codegen/` | `ast` in, bytes out. Same input, same bytes, every run. Asks `backend/` for every machine fact. |
+| `backend/` | target description in two dimensions. `arch/` is the machine: registers, encodings, argument positions. `os/` is the system: syscalls, their numbers, loader constants, the executable container. `backend.v` composes one of each into a `Target`, which is all `codegen/` sees. A new machine or a new system is a module of its own, and `codegen/` never learns about it; `backend.v` is the one place a target is composed. |
+| `image/` | the emitted unit: machine code, the data it reads, and the references between them. `codegen/` builds one, and the system in `backend/os/` decides what wrapping it gets. |
+| `codegen/` | `ast` in, an emitted unit out. Same input, same bytes, every run. Asks `backend/` for every machine fact. |
 | `tools/` | gate and benchmark scripts. Not part of the compiler and not imported by it. |
 | `extensions/` | the vendor extensions the `-fvcc-exts=` family names. The names are read off the rows in `standard/features.v` rather than kept in a list here, and naming one turns the construct its row describes on for the selected mode: `-fvcc-exts=typeof` under `-std=c99` stops the mode forbidding `typeof`. |
 
