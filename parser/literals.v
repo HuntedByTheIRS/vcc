@@ -7,7 +7,16 @@ import strconv
 // exactly the kind of thing a compiler must not quietly turn into a number.
 
 // parse_integer_literal reads an integer constant in any of the bases C allows.
-// Suffixes are accepted and dropped, since the stub has one integer type.
+// Suffixes are accepted and dropped here, since which type the suffix names is
+// the type model's question and not this reader's.
+//
+// The value is accumulated as an unsigned 64-bit number so that the whole range
+// of an `unsigned long long` is reachable: 18446744073709551615 is 2^64 - 1, and
+// a program that writes it with a `ULL` suffix is a program this reader has to
+// hand on rather than refuse. The result is returned as the 64-bit pattern, so a
+// value whose top bit is set comes back as a negative i64 and the type model
+// reads it as the unsigned value it was written as. Measured on gcc 16.2.1:
+// `18446744073709551615ULL` is accepted and is `unsigned long long`.
 fn parse_integer_literal(text string) !i64 {
 	mut body := text
 	for body.len > 0 && body[body.len - 1] in [`u`, `U`, `l`, `L`] {
@@ -53,18 +62,24 @@ fn parse_integer_literal(text string) !i64 {
 		// `0x` with nothing after it, which is a base marker and no number.
 		return error('${text}: not an integer constant')
 	}
-	mut value := i64(0)
+	mut value := u64(0)
 	for ch in digits {
 		digit := digit_value(ch, base) or {
 			return error('${text}: ${ch.ascii_str()} is not a digit in base ${base}')
 		}
-		if value > (i64(9223372036854775807) - i64(digit)) / i64(base) {
+		step := u64(digit)
+		if value > (max_u64 - step) / u64(base) {
 			return error('${text}: integer constant does not fit in 64 bits')
 		}
-		value = value * i64(base) + i64(digit)
+		value = value * u64(base) + step
 	}
-	return value
+	return i64(value)
 }
+
+// max_u64 is the largest number 64 bits hold, which is the largest an integer
+// constant may be. Past it the constant is not one this compiler can carry, and
+// that is said rather than wrapped around to a smaller value.
+const max_u64 = u64(18446744073709551615)
 
 // is_floating_constant says whether a numeric token names a floating constant
 // rather than an integer one. 6.4.4.2 makes that a question about the spelling

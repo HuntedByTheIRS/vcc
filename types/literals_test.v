@@ -83,13 +83,41 @@ fn test_a_width_the_description_does_not_carry_is_refused_rather_than_guessed() 
 	assert integer_constant_type('4294967295u', 4294967295, measured.partial()) or {
 		Type{}
 	}.same(unsigned_int_type())
-	// 4294967296 needs a long, and the description carries no width for one, so
-	// the refusal names the fact that is missing instead of guessing a type.
+	// A value that needs a width the description does not carry is refused by
+	// naming what is missing rather than guessed at with the nearest type. The
+	// description the compiler itself gets carries the 64-bit integer kinds
+	// now, so this asks a description that carries nothing at all: every
+	// candidate type is then one whose width is unknown.
 	mut named := false
-	refused := integer_constant_type('4294967296', 4294967296, measured.partial()) or {
+	refused := integer_constant_type('4294967296', 4294967296, Representation{}) or {
 		named = err.msg().contains('widths') && err.msg().contains('long')
 		Type{}
 	}
 	assert named
 	assert refused.kind == .unknown
+	// The compiler's own description answers that value, and the answer is a
+	// long: `sizeof(long)` is 8 on this target, measured, and 4294967296 is the
+	// first value a four-byte int cannot hold.
+	assert constant_type('4294967296', 4294967296) == 'long'
+	assert constant_type('9223372036854775807LL', 9223372036854775807) == 'long long'
+}
+
+fn test_a_constant_the_top_bit_set_of_which_is_a_value_of_an_unsigned_64_bit_type() {
+	// 18446744073709551615 is 2^64 - 1, which is not a value any signed 64-bit
+	// type holds. The literal reader hands it on as the 64-bit pattern, which is
+	// -1 read as a signed value, and the unsigned reading is what makes it a
+	// value of `unsigned long long`. Measured on gcc 16.2.1: the constant with a
+	// `ULL` suffix is `unsigned long long`, and `0xffffffffffffffff` is
+	// `unsigned long`.
+	assert constant_type('18446744073709551615ULL', -1) == 'unsigned long long'
+	assert constant_type('0xffffffffffffffff', -1) == 'unsigned long'
+	// A decimal constant with no suffix may not take an unsigned type, so the
+	// same 64-bit pattern has no type at all when it is written that way.
+	// Measured on gcc 16.2.1: `18446744073709551615` is refused as `integer
+	// constant is so large that it is unsigned`.
+	nameless := integer_constant_type('18446744073709551615', -1, measured.representation()) or {
+		assert err.msg().contains('too large')
+		return
+	}
+	assert nameless.kind == .unknown
 }

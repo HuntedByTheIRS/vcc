@@ -134,21 +134,25 @@ fn test_a_parameter_resolves_to_the_type_it_was_declared_with() {
 }
 
 fn test_a_node_the_model_has_no_answer_for_is_refused_rather_than_written() {
-	// A constant whose type needs a width the target description does not carry
-	// is refused by the parser where it is written, so a tree that reaches the
-	// emitter carries no clause the model did not answer for. The dump of the
-	// same file says `unresolved` for that node and for the name beside it,
-	// which is the printer naming what the model did not answer rather than
-	// inventing a type for it.
-	lexed := tokenize.lex('int main(void) { return missing + 4294967296; }\nint missing;')
+	// A constant whose type the model has no answer for is refused by the parser
+	// where it is written, so a tree that reaches the emitter carries no clause
+	// the model did not answer for. The constants past the width the back end
+	// writes are typed now that the 64-bit integer kinds have widths; what is
+	// left past every candidate is a decimal constant too large for a signed
+	// 64-bit type, which is refused. The dump of the same file says `unresolved`
+	// for that node and for the name beside it, which is the printer naming what
+	// the model did not answer rather than inventing a type for it.
+	lexed := tokenize.lex('int main(void) { return missing + 18446744073709551615; }\nint missing;')
 	refused := parser.parse(lexed.tokens)
 	assert refused.diagnostics.len == 1
-	assert refused.diagnostics[0].msg.contains('4294967296')
+	assert refused.diagnostics[0].msg.contains('18446744073709551615')
 	assert refused.diagnostics[0].line == 1
 	assert refused.diagnostics[0].col == 35
 	printed := printed_lines(refused.unit)
 	assert clause_of_declaration(printed, 'ident missing') == 'unresolved'
-	assert clause_of_declaration(printed, 'int 4294967296') == 'unresolved'
+	// The dump prints the constant's value rather than its spelling, and
+	// 18446744073709551615 is the 64-bit pattern -1 read as a signed value.
+	assert clause_of_declaration(printed, 'int -1') == 'unresolved'
 	assert clause_of_declaration(printed, 'binary +') == 'unresolved'
 	// The other side of the same boundary: the two constants the description
 	// carries a width for are answered, and the printer shows the clause the

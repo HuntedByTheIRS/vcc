@@ -280,9 +280,17 @@ pub fn (t Target) address_of(reg Register, disp i32) []u8 {
 	return x86_64.lea_rip(t.describe(reg), disp)
 }
 
-// move_immediate32 loads a constant into a register.
+// move_immediate32 is how a constant reaches the result register. move_immediate64
+// is the same move for a value that needs all eight bytes of the register, which
+// is what a constant of a 64-bit integer type is written with: the four-byte move
+// clears the bits above the value, so a value whose top bit is set would arrive
+// zero-extended rather than as itself.
 pub fn (t Target) move_immediate32(reg Register, value u32) ![]u8 {
 	return x86_64.mov_imm32(t.describe(reg), value)
+}
+
+pub fn (t Target) move_immediate64(reg Register, value u64) ![]u8 {
+	return x86_64.mov_imm64(t.describe(reg), value)
 }
 
 // move_register32 copies one register into another, which is how a value a
@@ -496,6 +504,42 @@ pub fn (t Target) divide(src Register) ![]u8 {
 	return out
 }
 
+// divide_unsigned is the same division with the pair read as unsigned: the
+// register above is cleared rather than filled with the sign, and the machine
+// divides the pair as a value twice as wide. Measured on gcc 16.2.1 at -O0, whose
+// `unsigned int g(unsigned int a, unsigned int b) { return a / b; }` clears the
+// register above with a four-byte move of zero and then divides with a divl. The
+// register is cleared here by xoring it with itself, which writes the same zero in
+// fewer bytes.
+pub fn (t Target) divide_unsigned(src Register) ![]u8 {
+	high := t.remainder() or {
+		return error('${t.name}: the division needs the register above the result one to clear, and the table has none')
+	}
+	mut out := x86_64.xor_reg64(t.describe(high), t.describe(high))!
+	out << x86_64.div_reg32(t.describe(src))!
+	return out
+}
+
+// divide_word divides at the width of a word, signed: the accumulator's sign is
+// spread over the register above it first, which is the pair the machine divides.
+pub fn (t Target) divide_word(src Register) ![]u8 {
+	mut out := x86_64.cqo()
+	out << x86_64.idiv_reg64(t.describe(src))!
+	return out
+}
+
+// divide_word_unsigned is that division with the pair read as unsigned, which is
+// what `18446744073709551615 / 3` asks for: the register above is cleared, so the
+// dividend is the value itself and not a value with a sign above it.
+pub fn (t Target) divide_word_unsigned(src Register) ![]u8 {
+	high := t.remainder() or {
+		return error('${t.name}: the division needs the register above the result one to clear, and the table has none')
+	}
+	mut out := x86_64.xor_reg64(t.describe(high), t.describe(high))!
+	out << x86_64.div_reg64(t.describe(src))!
+	return out
+}
+
 pub fn (t Target) negate(reg Register) ![]u8 {
 	return x86_64.neg_reg32(t.describe(reg))
 }
@@ -522,6 +566,16 @@ pub fn (t Target) logical_not(reg Register) ![]u8 {
 	return out
 }
 
+// logical_not_word is the same question asked of a value eight bytes wide, which
+// is what `!x` on a 64-bit integer is: testing the low four bytes would call
+// 4294967296 zero.
+pub fn (t Target) logical_not_word(reg Register) ![]u8 {
+	mut out := x86_64.test_reg64(t.describe(reg))!
+	out << x86_64.set_condition(x86_64.Condition.equal, t.describe(reg))!
+	out << x86_64.movzx_byte(t.describe(reg))!
+	return out
+}
+
 pub fn (t Target) compare(op string, left Register, right Register) ![]u8 {
 	condition := condition_of(t.name, op)!
 	mut out := x86_64.cmp_reg32(t.describe(left), t.describe(right))!
@@ -535,6 +589,28 @@ pub fn (t Target) compare(op string, left Register, right Register) ![]u8 {
 // two different ones equal.
 pub fn (t Target) compare_word(op string, left Register, right Register) ![]u8 {
 	condition := condition_of(t.name, op)!
+	mut out := x86_64.cmp_reg64(t.describe(left), t.describe(right))!
+	out << x86_64.set_condition(condition, t.describe(left))!
+	out << x86_64.movzx_byte(t.describe(left))!
+	return out
+}
+
+// compare_unsigned and compare_word_unsigned are the same two comparisons with the
+// orders read as unsigned, which is what the comparison of two `unsigned int` or
+// two `unsigned long` values asks for: measured on gcc 16.2.1 at -O0,
+// `unsigned int h(unsigned int a, unsigned int b) { return a < b; }` ends in a
+// setb and not in the setl a signed comparison of the same values ends in, and
+// `-1 < 0u` is false where `-1 < 0` is true.
+pub fn (t Target) compare_unsigned(op string, left Register, right Register) ![]u8 {
+	condition := condition_for(t.name, op, true)!
+	mut out := x86_64.cmp_reg32(t.describe(left), t.describe(right))!
+	out << x86_64.set_condition(condition, t.describe(left))!
+	out << x86_64.movzx_byte(t.describe(left))!
+	return out
+}
+
+pub fn (t Target) compare_word_unsigned(op string, left Register, right Register) ![]u8 {
+	condition := condition_for(t.name, op, true)!
 	mut out := x86_64.cmp_reg64(t.describe(left), t.describe(right))!
 	out << x86_64.set_condition(condition, t.describe(left))!
 	out << x86_64.movzx_byte(t.describe(left))!

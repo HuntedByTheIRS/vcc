@@ -267,10 +267,10 @@ fn test_a_cast_converts_between_the_classes_the_back_end_carries() {
 fn test_a_cast_with_no_conversion_behind_it_is_reported() {
 	// A conversion to a type this back end has no register for is refused by
 	// name rather than written as a value of the wrong width.
-	unsupported := emit(translation_unit('int main() { int x = 3; return (long)x; }'),
+	unsupported := emit(translation_unit('int main() { int x = 3; return (short)x; }'),
 		Options{})
 	assert unsupported.diagnostics.len == 1
-	assert unsupported.diagnostics[0].msg.contains('long')
+	assert unsupported.diagnostics[0].msg.contains('short')
 	assert unsupported.bytes.len == 0
 	// A floating type and an address are not converted into one another, and
 	// that is said rather than emitted as a pointer whose bits are a double.
@@ -2329,24 +2329,21 @@ fn test_an_argument_that_is_a_call_keeps_its_own_value() {
 	}
 }
 
-// A constant wider than the four-byte immediate this back end writes a constant with
-// is refused rather than halved. `1234567890123456789LL` is a long long, and the type
-// model answers a long long from the guarantee that it holds sixty-four bits rather
-// than from a width this target carries, so the constant reaches the emitter where an
-// int that did not fit was refused a stage earlier. Written as its low four bytes the
-// program would have had 2112454933, with no diagnostic, which is the one outcome
-// this compiler treats as a bug.
-fn test_a_constant_wider_than_the_immediate_is_refused_rather_than_halved() {
-	emitted := emit(translation_unit('int main() { __int128 v = 1234567890123456789LL; return 0; }'),
+// A constant wider than the four-byte immediate this back end writes a constant
+// with is written whole rather than halved. `1234567890123456789LL` is a long long,
+// so it is written with the ten-byte immediate and arrives at whatever width it is
+// stored into; written as its low four bytes the program below would have had a
+// value whose low byte was not 21, and it had one that was.
+fn test_a_constant_wider_than_the_immediate_is_written_whole() {
+	emitted := emit(translation_unit('int main() { __int128 v = 1234567890123456789LL; return (int)(v % 256); }'),
 		Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('1234567890123456789')
-	assert emitted.diagnostics[0].msg.contains('four bytes')
-	assert emitted.bytes.len == 0
-	// The same line with a constant the instruction holds is not refused, which is
-	// what makes the diagnostic about the value rather than about the line.
-	control := emit(translation_unit('int main() { __int128 v = 42; return 0; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 21
+	// The same line with a constant the instruction holds answers the same way,
+	// which is what makes the value the subject rather than the line.
+	control := emit(translation_unit('int main() { __int128 v = 42; return (int)(v % 256); }'), Options{})
 	assert control.diagnostics.len == 0
+	assert run_image(control.bytes) == 42
 }
 
 fn test_a_double_returning_function_with_no_return_statement_answers_zero() {
@@ -2357,4 +2354,137 @@ fn test_a_double_returning_function_with_no_return_statement_answers_zero() {
 		Options{})
 	assert emitted.diagnostics.len == 0
 	assert run_image(emitted.bytes) == 1
+}
+
+// The 64-bit integer types are eight bytes on this target, measured on gcc
+// 16.2.1 with `sizeof`, and `unsigned` is the four-byte integer it always was.
+fn test_the_64_bit_integer_types_are_eight_bytes_wide() {
+	emitted := emit(translation_unit('int main() { return sizeof(long) == 8 && sizeof(unsigned long) == 8 && sizeof(long long) == 8 && sizeof(unsigned long long) == 8 && sizeof(unsigned) == 4; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+}
+
+// A comparison of two 64-bit integers was read as a comparison of two addresses,
+// which is a signed order over the same bits: `18446744073709551615UL > 1UL`
+// answered false where ISO C and gcc answer true. Measured on gcc 16.2.1, which
+// answers 1 for the unsigned pair and 1 for `-1L < 0L`.
+fn test_a_wide_integer_comparison_reads_the_order_of_its_type() {
+	unsigned_case := emit(translation_unit('int main() { unsigned long a = 18446744073709551615UL; unsigned long b = 1UL; return a > b; }'),
+		Options{})
+	assert unsigned_case.diagnostics.len == 0
+	assert run_image(unsigned_case.bytes) == 1
+	// The signed type over the same bits is the signed order.
+	signed := emit(translation_unit('int main() { long a = -1L; long b = 0L; return a < b; }'), Options{})
+	assert signed.diagnostics.len == 0
+	assert run_image(signed.bytes) == 1
+	// A four-byte unsigned value is the unsigned order too: the int converts to
+	// the unsigned int, so -1 is the largest value of that type.
+	mixed := emit(translation_unit('int main() { int a = -1; unsigned int b = 0u; return a < b; }'), Options{})
+	assert mixed.diagnostics.len == 0
+	assert run_image(mixed.bytes) == 0
+}
+
+// An unsigned 64-bit division clears the register above the pair, and a signed
+// one fills it with the sign. Measured on gcc 16.2.1: `18446744073709551615UL / 3`
+// is 6148914691236517205, where the signed reading of the same bits divided by 3
+// is 0.
+fn test_an_unsigned_wide_division_reads_the_pair_as_unsigned() {
+	unsigned_case := emit(translation_unit('int main() { unsigned long a = 18446744073709551615UL; return (a / 3) == 6148914691236517205UL && (a % 3) == 0; }'),
+		Options{})
+	assert unsigned_case.diagnostics.len == 0
+	assert run_image(unsigned_case.bytes) == 1
+	// The signed division truncates toward zero, and its remainder takes the
+	// sign of the dividend.
+	signed := emit(translation_unit('int main() { long a = -9L; return (a / 2) == -4 && (a % 2) == -1; }'),
+		Options{})
+	assert signed.diagnostics.len == 0
+	assert run_image(signed.bytes) == 1
+}
+
+// A right shift of an unsigned value is the logical one, so the sign bit is not
+// spread over the vacated bits.
+fn test_a_wide_shift_of_an_unsigned_value_keeps_no_sign() {
+	unsigned_case := emit(translation_unit('int main() { unsigned long a = 18446744073709551615UL; return (a >> 1) == 9223372036854775807UL; }'),
+		Options{})
+	assert unsigned_case.diagnostics.len == 0
+	assert run_image(unsigned_case.bytes) == 1
+	// The signed shift spreads the sign.
+	signed := emit(translation_unit('int main() { long a = -8L; return (a >> 1) == -4; }'), Options{})
+	assert signed.diagnostics.len == 0
+	assert run_image(signed.bytes) == 1
+	// A count the program works out is read from the register the machine takes
+	// a count from, at the width of the shift.
+	counted := emit(translation_unit('int main() { unsigned long a = 18446744073709551615UL; int n = 1; return (a >> n) == 9223372036854775807UL; }'),
+		Options{})
+	assert counted.diagnostics.len == 0
+	assert run_image(counted.bytes) == 1
+}
+
+// `unsigned` answers unsigned in the three places a signed answer is a different
+// number: a comparison, a division and a shift.
+fn test_unsigned_int_answers_unsigned() {
+	comparison := emit(translation_unit('int main() { unsigned a = 0u; unsigned b = 1u; return (a - b) > 0u; }'),
+		Options{})
+	assert comparison.diagnostics.len == 0
+	assert run_image(comparison.bytes) == 1
+	division := emit(translation_unit('int main() { unsigned a = 4294967295u; return (a / 3) == 1431655765u && (a % 7u) == 3u; }'),
+		Options{})
+	assert division.diagnostics.len == 0
+	assert run_image(division.bytes) == 1
+	shift := emit(translation_unit('int main() { unsigned a = 4294967295u; return (a >> 1) == 2147483647u; }'),
+		Options{})
+	assert shift.diagnostics.len == 0
+	assert run_image(shift.bytes) == 1
+}
+
+// A constant wider than a signed 64-bit value is written whole: the ten-byte
+// immediate carries all eight bytes, so what arrives is the value and not its
+// low four bytes with the rest cleared.
+fn test_a_constant_wider_than_a_signed_64_bit_value_is_written_whole() {
+	emitted := emit(translation_unit('int main() { unsigned long long m = 18446744073709551615ULL; return (m >> 32) == 4294967295ULL; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+}
+
+// The two constants the corpus declares at the top of a file reach the program
+// that reads them, and comparing them takes the unsigned order.
+fn test_a_static_const_wide_integer_reaches_the_program() {
+	emitted := emit(translation_unit('static const long long c99_ll_max = 9223372036854775807LL; static const unsigned long long c99_ull_max = 18446744073709551615ULL; int main(void) { return c99_ll_max == 9223372036854775807LL && c99_ull_max > c99_ll_max; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+}
+
+// A 64-bit value survives a call in both directions: the argument register is
+// loaded at eight bytes, so a narrow signed argument is widened into it rather
+// than arriving as its unsigned reading, and the return carries all eight.
+fn test_a_wide_integer_return_and_argument_keep_all_eight_bytes() {
+	widened := emit(translation_unit('long id(long x) { return x; } int main(void) { int i = -1; return id(i) == -1L; }'),
+		Options{})
+	assert widened.diagnostics.len == 0
+	assert run_image(widened.bytes) == 1
+	returned := emit(translation_unit('unsigned long long twice(unsigned long long x) { return x * 2ULL; } int main(void) { unsigned long long m = 9223372036854775807ULL; return twice(m) == 18446744073709551614ULL; }'),
+		Options{})
+	assert returned.diagnostics.len == 0
+	assert run_image(returned.bytes) == 1
+	// A narrow initializer into a wide slot is widened into the whole register,
+	// so `long a = -9;` holds -9 and not its unsigned reading.
+	stored := emit(translation_unit('int main(void) { long a = -9; return a == -9L; }'), Options{})
+	assert stored.diagnostics.len == 0
+	assert run_image(stored.bytes) == 1
+}
+
+// A condition of a wide type is tested at eight bytes: 4294967296 has its low
+// four bytes clear and is not zero.
+fn test_a_wide_condition_is_tested_at_the_width_of_the_value() {
+	emitted := emit(translation_unit('int main(void) { long a = 4294967296L; if (a) return 1; return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+	// The same test on the value the four-byte read would see, which is zero.
+	zero := emit(translation_unit('int main(void) { long a = 0L; if (a) return 1; return 0; }'), Options{})
+	assert zero.diagnostics.len == 0
+	assert run_image(zero.bytes) == 0
 }

@@ -504,6 +504,29 @@ pub fn mov_imm32(reg Register, imm u32) ![]u8 {
 	return out
 }
 
+// mov_imm64 encodes `mov <reg>, <imm>` at the width of a word, where the
+// immediate is eight bytes in the instruction. It is what a constant too wide for
+// the four-byte immediate is written with, and measured on gcc 16.2.1 at -O0,
+// `long f(void) { return 9223372036854775807; }` is a movabs of that ten-byte
+// form. An initializer at the top level is the same eight bytes in the image
+// rather than an instruction, so this is the path an expression takes.
+pub fn mov_imm64(reg Register, imm u64) ![]u8 {
+	if reg.width != 4 {
+		return error('${name}: mov r64, imm64 cannot name ${reg.name}, which is ${reg.width} bytes wide')
+	}
+	mut out := []u8{cap: 10}
+	mut rex := u8(0x48) // REX.W: the destination is the whole register
+	if reg.code >= 8 {
+		rex |= 0x01 // REX.B reaches register numbers that do not fit in three bits
+	}
+	out << rex
+	out << u8(0xb8 + (reg.code & 0x07))
+	for i in 0 .. 8 {
+		out << u8((imm >> (8 * i)) & 0xff)
+	}
+	return out
+}
+
 // trap encodes the instruction that enters the kernel, which on this machine is
 // `syscall`. The instruction is the machine's; what the kernel does with it is
 // the system's.
@@ -985,12 +1008,30 @@ pub fn cdq() []u8 {
 	return [u8(0x99)]
 }
 
+// cqo is cdq at the width of a word: it fills the register above the result one
+// with the sign of the whole eight bytes there, which is the pair a signed
+// division of eight-byte values divides. Measured on gcc 16.2.1 at -O0, where
+// `long f(long a, long b) { return a / b; }` is a cqto and then an idivq of a
+// word, and `unsigned long g(unsigned long a, unsigned long b) { return a % b; }`
+// clears the register above with a four-byte move instead.
+pub fn cqo() []u8 {
+	return [u8(0x48), u8(0x99)]
+}
+
 // idiv_reg32 divides the pair formed by the result register and the one above it
 // by a register. The quotient lands in the result register and the remainder in
 // the register above it, which is where the language's two division operators
 // read their answers from.
 pub fn idiv_reg32(src Register) ![]u8 {
 	return one_operand(src, 0x07)
+}
+
+// div_reg32 is the same division with the pair read as unsigned. Measured on gcc
+// 16.2.1 at -O0, whose `unsigned int g(unsigned int a, unsigned int b) { return
+// a / b; }` clears the register above and divides with a divl where the signed
+// division of the same shape is an idivl.
+pub fn div_reg32(src Register) ![]u8 {
+	return one_operand(src, 0x06)
 }
 
 // neg_reg32 and not_reg32 are the two operations on one value the language

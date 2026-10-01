@@ -1110,11 +1110,11 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 // the word names a type it does.
 //
 // A name this file declared as a type is asked about the type it names rather
-// than about itself: `typedef long Big; Big x;` is a `long x`, and this compiler
-// has no form for one either way, so the refusal names `long`. Answering none for
-// the name would move the question to the back end, which only asks it for an
-// object something uses, and an unused object of a type with no form would then
-// be dropped without a word.
+// than about itself: `typedef long Big; Big x;` is a `long x`, and the answer is
+// that the back end has a form for a long. Answering none for the name would move
+// the question to the back end, which only asks it for an object something uses,
+// and an unused object of a type with no form would then be dropped without a
+// word.
 fn (p Parser) word_problem(word string) ?string {
 	if word in supported_types {
 		return none
@@ -1129,12 +1129,35 @@ fn (p Parser) word_problem(word string) ?string {
 		return none
 	}
 	if spelling := p.alias_spelling(word) {
-		words := spelling.split(' ')
-		if words.len > 0 && words[0] in supported_types {
+		// A type the alias names with a star is a pointer, and a pointer is one
+		// word on this machine whatever it points at: the back end sizes it from
+		// the star and never asks what is under it. `typedef char *String` is the
+		// case that reaches here, and the answer is that the emitter has a form
+		// for it.
+		if spelling.contains('*') {
 			return none
 		}
+		words := spelling.split(' ')
 		if words.len > 0 {
+			// The type the words name, not the first word of them: `unsigned`,
+			// `unsigned int` and `unsigned long` are three spellings and two
+			// kinds, and asking about the kind is what keeps the third from
+			// being read as the answer to the first.
+			kind := types.from_specifiers(words) or { return words[0] }
+			if kind in emitted_kinds {
+				return none
+			}
 			return words[0]
+		}
+	}
+	// A spelling of more than one word that is not a name this file declared: the
+	// words the file wrote, joined by the caller, and the type they name decides.
+	// `unsigned long int` and `long unsigned` are spellings of a type the emitter
+	// has a form for, and neither is a name a lookup would find.
+	words := word.split(' ')
+	if words.len > 1 {
+		if kind := types.from_specifiers(words) {
+			return if kind in emitted_kinds { none } else { words[0] }
 		}
 	}
 	return word
@@ -1148,12 +1171,15 @@ fn (p Parser) word_problem(word string) ?string {
 // asked.
 //
 // It answers with the first word and not with the type as it was written, which
-// is what the emitter stopped at: the diagnostic for `long long x` reads
-// `unsupported type long`, and that wording is the compiler's published
-// behavior, so it is not this lane's to move. A type written as two words is
-// named in full where the answer is about the construct rather than about the
-// word: the parameter list names what a parameter was declared with, and a
-// complex type is refused by name below.
+// is what the emitter stopped at: a type written as two words that the emitter has
+// no form for is named by its first word, so `long double x` reads `unsupported
+// type long`, which is the wording this compiler published. The 64-bit integer
+// spellings are not that case any more: they name kinds in emitted_kinds and are
+// answered none. The question is about the kind the words name rather than about
+// the words, because `long int`, `signed long` and `long` are one type and three
+// spellings. A type written as two words is named in full where the answer is
+// about the construct rather than about the word: the parameter list names what a
+// parameter was declared with, and a complex type is refused by name below.
 fn (p Parser) unsupported_type_word(spec DeclSpec) ?string {
 	// The words a type is made of, not the storage class in front of them: an
 	// `extern` or a `static` is not a type, and reporting one as an unsupported
@@ -1185,8 +1211,22 @@ fn (p Parser) unsupported_type_word(spec DeclSpec) ?string {
 	if spec.type_words.len == 1 {
 		return p.word_problem(spec.type_words[0])
 	}
-	if spec.type_words[0] in supported_types {
-		return spec.type_words[1]
+	// More than one word: the type they name decides, and the answer is the first
+	// word when that type is not one the emitter has a form for. A run of words
+	// the table does not have at all names no type, and its first word is named
+	// the same way.
+	kind := types.from_specifiers(spec.type_words) or { return spec.type_words[0] }
+	if kind in emitted_kinds {
+		return none
+	}
+	// A complex type written with its floating word in front is named by the
+	// word that makes it complex: `double _Complex` is refused for the
+	// `_Complex`, which is what the message said before the 64-bit spellings
+	// were read, and `double` on its own is a type this compiler reads.
+	for word in spec.type_words {
+		if word in ['_Complex', '_Imaginary'] {
+			return word
+		}
 	}
 	return spec.type_words[0]
 }

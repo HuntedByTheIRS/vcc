@@ -566,8 +566,9 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// answer in. Measured on gcc 16.2.1, which returns one in rax and the
 		// word above it in rdx, and which clears rdx when the returned
 		// expression is narrower than the type.
-	} else if decl.ret != 'int' && decl.ret != 'void' && decl.ret != 'double' {
-		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, double and void are implemented')
+	} else if decl.ret != 'int' && decl.ret != 'void' && decl.ret != 'double'
+		&& !e.eight_byte_integer(types.from_words(decl.ret.split(' ')) or { types.Type{} }) {
+		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, the four 64-bit integers, double and void are implemented')
 		return error('unsupported return type')
 	}
 	e.returning = decl.ret
@@ -927,7 +928,22 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 	if e.floating_of(expr) {
 		return e.convert_to_int(expr, line, col)
 	}
+	if e.returns_eight_byte_integer() {
+		// A function whose return type is a 64-bit integer leaves the whole
+		// register as its value, so a narrower expression is widened into it the
+		// same way an operand of a 64-bit step is: `return -1;` in a function
+		// returning a long answers -1.
+		return e.extend_operand_to_word(expr, line, col)
+	}
 	return
+}
+
+// returns_eight_byte_integer says whether the function being emitted returns one
+// of the four 64-bit integer types, which is asked of the type rather than of the
+// width because a pointer is eight bytes too and is not widened like one.
+fn (e Emitter) returns_eight_byte_integer() bool {
+	typ := types.from_words(e.returning.split(' ')) or { return false }
+	return e.eight_byte_integer(typ)
 }
 
 // emit_var_decl gives a declaration its slot in the frame and, when it has one,
@@ -1557,7 +1573,7 @@ fn (mut e Emitter) emit_if(stmt ast.Stmt) !bool {
 		return error('if without a condition')
 	}
 	e.emit_expr(cond)!
-	e.emit_test(e.floating_of(cond), stmt.line, stmt.col)!
+	e.emit_test(e.floating_of(cond), e.eight_byte_integer(cond.typ), stmt.line, stmt.col)!
 	else_label := e.label()
 	e.branch(.branch_zero, else_label, stmt.line, stmt.col)!
 	then_returned := e.emit_branch_body(stmt.then_body)!
@@ -1596,7 +1612,7 @@ fn (mut e Emitter) emit_while(stmt ast.Stmt) !void {
 	continue_to := if stmt.step.len > 0 { step } else { top }
 	e.place(top)
 	e.emit_expr(cond)!
-	e.emit_test(e.floating_of(cond), stmt.line, stmt.col)!
+	e.emit_test(e.floating_of(cond), e.eight_byte_integer(cond.typ), stmt.line, stmt.col)!
 	e.branch(.branch_zero, end, stmt.line, stmt.col)!
 	// The body can leave by jumping to either end of the loop, so both labels
 	// are known while it is emitted.
@@ -1639,7 +1655,7 @@ fn (mut e Emitter) emit_do_while(stmt ast.Stmt) !void {
 	e.loops.pop()
 	e.place(test)
 	e.emit_expr(cond)!
-	e.emit_test(e.floating_of(cond), stmt.line, stmt.col)!
+	e.emit_test(e.floating_of(cond), e.eight_byte_integer(cond.typ), stmt.line, stmt.col)!
 	// Round again while the condition holds, which is the branch opposite the one a
 	// while takes to leave: a while leaves when the test is zero, and this one goes
 	// back when the test is not.
@@ -1721,17 +1737,29 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, li
 // four bytes; a char is one, which is the width of its slot and of the byte the
 // machine stores into it, while every read of it widens to an int (see
 // width_of); a pointer is the machine's word, which is what makes `char *` and
-// `char **` read and write the same way; and a double is eight bytes, which is
-// what the machine moves with one instruction. Everything else is a type this
-// back end has no instruction for.
+// `char **` read and write the same way; a double is eight bytes, which is
+// what the machine moves with one instruction; and the 64-bit integers are eight
+// bytes, measured on this target with gcc 16.2.1 where `sizeof(long)`,
+// `sizeof(long long)`, `sizeof(unsigned long)` and `sizeof(unsigned long long)`
+// are each 8 and `sizeof(unsigned int)` is 4. Everything else is a type this back
+// end has no instruction for.
 fn (e Emitter) type_width(written string) ?int {
-	if written == 'int' {
+	if written == 'int' || written == 'unsigned' || written == 'unsigned int' {
 		return 4
 	}
 	if written == 'char' {
 		return 1
 	}
 	if written == 'double' {
+		return 8
+	}
+	// The spellings `long`, `long int`, `long long`, `long long int`,
+	// `unsigned long`, `unsigned long int`, `unsigned long long` and
+	// `unsigned long long int` are the eight ways a file writes one of the four
+	// 64-bit integer types, and all four are eight bytes.
+	if written == 'long' || written == 'long int' || written == 'long long' || written == 'long long int'
+		|| written == 'unsigned long' || written == 'unsigned long int'
+		|| written == 'unsigned long long' || written == 'unsigned long long int' {
 		return 8
 	}
 	if written.contains('*') {
@@ -1860,7 +1888,7 @@ fn (mut e Emitter) branch(kind image.FixupKind, name string, line int, col int) 
 // only the pair of flags `not equal or unordered` reads that. The register is
 // cleared by exclusive-or with itself rather than read from memory, so this costs
 // no constant.
-fn (mut e Emitter) emit_test(floating bool, line int, col int) !void {
+fn (mut e Emitter) emit_test(floating bool, wide bool, line int, col int) !void {
 	register := e.accumulator(line, col)!
 	if floating {
 		zero := e.float_scratch(line, col)!
@@ -1869,7 +1897,11 @@ fn (mut e Emitter) emit_test(floating bool, line int, col int) !void {
 		e.append(e.target.zero_double(zero)!)
 		e.append(e.target.double_comparison('!=', value, zero, register, other)!)
 	}
-	e.append(e.target.test(register)!)
+	if wide {
+		e.append(e.target.test_word(register)!)
+	} else {
+		e.append(e.target.test(register)!)
+	}
 }
 
 // frame_pointer is the register the frame is at. Every access to a local goes
@@ -2287,6 +2319,13 @@ fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !voi
 			return error('width mismatch')
 		}
 	}
+	if slot.width == 8 {
+		// A value narrower than the slot is widened into the whole register
+		// before it is written: the store moves eight bytes, so a negative int
+		// whose upper half the load cleared would be written as its unsigned
+		// reading. Measured on gcc 16.2.1: `long a = -9;` holds -9.
+		e.extend_operand_to_word(expr, line, col)!
+	}
 	e.store_accumulator(slot, line, col)!
 }
 
@@ -2324,6 +2363,15 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		return error('expression nested too deeply')
 	}
 	if value := e.constant(expr) {
+		// A constant of a 64-bit integer type is written at that width, which is
+		// the ten-byte move: the four-byte one below takes four bytes and clears
+		// the rest of the register, so a value whose top bit is set would arrive
+		// zero-extended rather than as itself.
+		if e.eight_byte_integer(expr.typ) {
+			register := e.accumulator(expr_line(expr), expr_col(expr))!
+			e.append(e.target.move_immediate64(register, u64(value))!)
+			return
+		}
 		// The move below takes four bytes, and a constant that does not fit four
 		// bytes cannot be written by it. Such a constant arrives here only when
 		// its spelling gave it a type wider than int - `1234567890123456789LL`
@@ -2345,11 +2393,15 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			// answered for it; this is the same answer for a reader who wonders.
 			// It is checked the same way, because the answer and the instruction
 			// are one thing.
+			register := e.accumulator(expr.line, expr.col)!
+			if e.eight_byte_integer(expr.typ) {
+				e.append(e.target.move_immediate64(register, u64(expr.value))!)
+				return
+			}
 			if !fits_immediate32(expr.value) {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the constant ${expr.value} needs more than the four bytes this back end writes a constant with')
 				return error('constant does not fit the immediate')
 			}
-			register := e.accumulator(expr.line, expr.col)!
 			e.append(e.target.move_immediate32(register, u32(expr.value))!)
 		}
 		ast.FloatLit {
@@ -2638,12 +2690,18 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		}
 	} else if width := e.width_of(unary.expr) {
 		if width != 4 && unary.op != '+' {
-			e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes an int, and this one is a pointer')
-			return error('non-int operand')
+			if !e.eight_byte_integer(unary.expr.typ) {
+				// Eight bytes that are not an integer is the width of a pointer
+				// and the only other width this back end has, so the diagnostic
+				// can say what it is.
+				e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes an int, and this one is a pointer')
+				return error('non-int operand')
+			}
 		}
 	}
 	e.emit_expr_at(unary.expr, depth + 1)!
 	register := e.accumulator(unary.line, unary.col)!
+	wide := e.eight_byte_integer(unary.expr.typ)
 	match unary.op {
 		'+' {}
 		'-' {
@@ -2654,12 +2712,18 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 				// signalling NaN into a quiet one and turn -0.0 into 0.0,
 				// neither of which is the value the operator asks for.
 				e.append(e.target.negate_double(e.float_accumulator(unary.line, unary.col)!, register)!)
+			} else if wide {
+				e.append(e.target.negate_word(register)!)
 			} else {
 				e.append(e.target.negate(register)!)
 			}
 		}
 		'~' {
-			e.append(e.target.complement(register)!)
+			if wide {
+				e.append(e.target.complement_word(register)!)
+			} else {
+				e.append(e.target.complement(register)!)
+			}
 		}
 		'!' {
 			if floating {
@@ -2672,6 +2736,8 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 				other := e.scratch(unary.line, unary.col)!
 				e.append(e.target.zero_double(zero)!)
 				e.append(e.target.double_comparison('==', value, zero, register, other)!)
+			} else if wide {
+				e.append(e.target.logical_not_word(register)!)
 			} else {
 				e.append(e.target.logical_not(register)!)
 			}
@@ -2871,8 +2937,9 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		e.widen_into_pair(slot, cast.expr.typ.kind.is_unsigned(), width, cast.line, cast.col)!
 		return e.load_pair(slot, cast.line, cast.col)
 	}
-	if target.kind !in [.int_, .char_, .signed_char, .double, .pointer] {
-		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion to ${cast.spelling} is not one this back end makes, and it converts between int, char, double and a pointer')
+	if target.kind !in [.int_, .unsigned_int, .char_, .signed_char, .double, .pointer, .long,
+		.unsigned_long, .long_long, .unsigned_long_long] {
+		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion to ${cast.spelling} is not one this back end makes, and it converts between int, the four 64-bit integers, char, double and a pointer')
 		return error('unsupported conversion')
 	}
 	if e.wide_value(cast.expr) {
@@ -2914,9 +2981,37 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from a double to ${cast.spelling}, and a floating type is not a value an address is made of')
 			return error('double to a pointer')
 		}
+		if e.eight_byte_integer(target) {
+			// The one instruction here that converts a double to an integer
+			// leaves a value of four bytes, so a conversion to a 64-bit type is
+			// a different conversion and is refused by name rather than answered
+			// with four bytes of a value eight bytes wide.
+			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and the conversion this back end has writes a value of four bytes')
+			return error('double to a 64-bit integer')
+		}
 		e.convert_to_int(cast.expr, cast.line, cast.col)!
 	}
 	register := e.accumulator(cast.line, cast.col)!
+	// The width of the value in the register now, which decides whether a
+	// conversion writes anything: a value already as wide as the target is the
+	// one the target asks for, and a char is the int its load widened it to.
+	source := e.converted_width(cast.expr.typ) or { 0 }
+	if e.eight_byte_integer(target) {
+		// A conversion to a 64-bit integer widens a narrower value to the whole
+		// register. Which extension applies is the signedness of the *source*
+		// and not of the target: `(long)(unsigned int)-1` is 4294967295, and
+		// sign-extending it would answer -1. Measured on gcc 16.2.1, which
+		// widens an int to a long with cltq and an unsigned int with a 32-bit
+		// move.
+		if source == 4 {
+			if cast.expr.typ.kind.is_unsigned() {
+				e.append(e.target.move_register32(register, register)!)
+			} else {
+				e.append(e.target.sign_extend_word(register, register)!)
+			}
+		}
+		return
+	}
 	if target.kind == .pointer {
 		if !e.is_a_pointer(cast.expr) {
 			// An int is four bytes and an address is eight: the value is
@@ -2930,6 +3025,21 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		// that byte's sign, which is what this target's char is.
 		e.append(e.target.sign_extend_byte(register)!)
 	}
+	if e.eight_byte_integer(cast.expr.typ) && target.kind in [.int_, .unsigned_int] {
+		// A narrowing from eight bytes to four: the low half is the value taken
+		// modulo 2^32, and what sits above it is that half's sign when the target
+		// is signed and zero when it is not, because every later read of the
+		// value is of the width the conversion named. The source is asked about
+		// its kind and not about its width, because a double and a pointer are
+		// eight bytes in the register too and neither is an integer this
+		// narrowing is written for: `(int)d` is the one instruction that
+		// converts a double, and it already leaves a four-byte value.
+		if target.kind == .unsigned_int {
+			e.append(e.target.move_register32(register, register)!)
+		} else {
+			e.append(e.target.sign_extend_word(register, register)!)
+		}
+	}
 }
 
 // storage_width is the width of the value at an address of this type: a char is
@@ -2939,10 +3049,47 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 fn (e Emitter) storage_width(t types.Type) ?int {
 	return match t.kind {
 		.char_, .signed_char { 1 }
-		.int_ { 4 }
+		.int_, .unsigned_int { 4 }
+		.long, .unsigned_long, .long_long, .unsigned_long_long { 8 }
 		.pointer, .array { e.target.word_size }
 		else { none }
 	}
+}
+
+// eight_byte_integer says whether a type is one of the four 64-bit integer types,
+// which is the question a value of eight bytes has to be asked before it is
+// treated as a pointer: a pointer is eight bytes too, and the machine's word is
+// what an address moves in.
+fn (e Emitter) eight_byte_integer(t types.Type) bool {
+	return t.kind in [types.Kind.long, .unsigned_long, .long_long, .unsigned_long_long]
+}
+
+// step_is_wide says whether an operation computes at the width of a word, which is
+// when either operand is a 64-bit integer: the usual arithmetic conversions make
+// the step's type the wider of the two, so one operand is enough to decide. A
+// shift is the one operator whose operands are not converted to a common type, and
+// 6.5.7 gives its answer the promoted type of its left operand, so only that side
+// decides. The comparison is asked of the operands and not of the step's own type,
+// because a comparison of two 64-bit integers is a value of int width.
+fn (e Emitter) step_is_wide(step ast.Binary) bool {
+	if step.op in ['<<', '>>'] {
+		return e.eight_byte_integer(step.left.typ)
+	}
+	return e.eight_byte_integer(step.left.typ) || e.eight_byte_integer(step.right.typ)
+}
+
+// comparison_is_unsigned says whether the order a comparison asks for is the
+// unsigned one, which is the signedness of the type the two operands convert to
+// and not of either one of them: `-1 < 0u` is false because the int converts to
+// an unsigned int, and `-1L < 0u` is true because the unsigned int converts to a
+// long. The model answers which type that is; a comparison it has no answer for is
+// answered signed, which is the pairing a comparison of two addresses has. Measured
+// on gcc 16.2.1: `-1 < 0u` is 0 and `-1 < 0` is 1.
+fn (e Emitter) comparison_is_unsigned(step ast.Binary) bool {
+	common := types.usual_arithmetic_conversions(step.left.typ, step.right.typ, e.representation) or {
+		return false
+	}
+	return common.kind.is_unsigned()
 }
 
 // emit_deref reads through an address: the operand is computed into the register,
@@ -3728,11 +3875,46 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 			e.apply_double(step)!
 			continue
 		}
+		// A step at the width of a word widens an operand narrower than one
+		// before the operation reads it, because the load that produced it left
+		// four bytes with the rest of the register cleared. The right operand of
+		// a shift is a count and not a value of the step's type, so it is left
+		// as it is: the machine reads its low byte.
+		wide := e.step_is_wide(step)
+		if wide {
+			e.extend_operand_to_word(step.left, step.line, step.col)!
+		}
 		e.store_accumulator(slot, step.line, step.col)!
 		e.emit_expr_at(step.right, depth + 1)!
-		e.move_operand_to_scratch(step)!
+		if wide && step.op !in ['<<', '>>'] {
+			e.extend_operand_to_word(step.right, step.line, step.col)!
+		}
+		e.move_operand_to_scratch(step, wide)!
 		e.load_accumulator(slot, step.line, step.col)!
-		e.apply_binary(step)!
+		e.apply_binary(step, wide)!
+	}
+}
+
+// extend_operand_to_word widens an operand narrower than a word into the whole
+// register, which is what a step at the width of a word needs: a value read at
+// four bytes arrives with the bits above it cleared, so an int operand of a 64-bit
+// step would be its unsigned reading rather than its value. The extension is the
+// operand's own signedness and not the step's, because what is being converted is
+// the value: `-1 + 0L` is -1, and 0xffffffff + 0UL is 4294967295. Measured on gcc
+// 16.2.1, which widens an int operand of a long addition with cltq and an unsigned
+// int with a 32-bit move.
+fn (mut e Emitter) extend_operand_to_word(operand ast.Expr, line int, col int) !void {
+	if e.floating_of(operand) || e.is_a_pointer(operand) {
+		return
+	}
+	if (e.converted_width(operand.typ) or { 8 }) == 8 {
+		return
+	}
+	register := e.accumulator(line, col)!
+	if operand.typ.kind.is_unsigned() {
+		e.append(e.target.move_register32(register, register)!)
+	} else {
+		e.append(e.target.sign_extend_word(register, register)!)
 	}
 }
 
@@ -3792,8 +3974,17 @@ fn (mut e Emitter) move_double_to_scratch(line int, col int) !void {
 // because the four-byte move beside it would keep the low half of the address and
 // zero the rest of the register, and the two addresses would then be compared as
 // halves.
-fn (mut e Emitter) move_operand_to_scratch(step ast.Binary) !void {
+fn (mut e Emitter) move_operand_to_scratch(step ast.Binary, wide bool) !void {
 	if e.comparison_of_an_address(step) {
+		result := e.accumulator(step.line, step.col)!
+		other := e.scratch(step.line, step.col)!
+		e.append(e.target.move_register64(other, result)!)
+		return
+	}
+	if wide {
+		// A step at the width of a word moves the whole register: the four-byte
+		// move would keep the low half of the right operand and clear the rest,
+		// so a right-hand value whose top bit is set would arrive zero-extended.
 		result := e.accumulator(step.line, step.col)!
 		other := e.scratch(step.line, step.col)!
 		e.append(e.target.move_register64(other, result)!)
@@ -3815,6 +4006,12 @@ fn (e Emitter) comparison_of_an_address(binary ast.Binary) bool {
 		return false
 	}
 	if e.floating_of(binary.left) || e.floating_of(binary.right) {
+		return false
+	}
+	// Two 64-bit integers are eight bytes each and are not addresses: the width
+	// is what this function used to tell an address by, because a pointer was the
+	// only eight-byte value that reached it.
+	if e.eight_byte_integer(binary.left.typ) || e.eight_byte_integer(binary.right.typ) {
 		return false
 	}
 	left := e.width_of(binary.left) or { return false }
@@ -3860,10 +4057,10 @@ fn (mut e Emitter) check_int_operands(binary ast.Binary) !void {
 			continue
 		}
 		if width := e.width_of(operand) {
-			if width != 4 {
-				// Eight bytes that are not a double is the width of a pointer
-				// and the only other width this back end has, so the diagnostic
-				// can say what it is.
+			if width != 4 && !e.eight_byte_integer(operand.typ) {
+				// Eight bytes that is not a 64-bit integer is the width of a
+				// pointer and the only other width this back end has, so the
+				// diagnostic can say what it is.
 				e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} takes int operands, and this one is a pointer')
 				return error('non-int operand')
 			}
@@ -3889,38 +4086,70 @@ fn (mut e Emitter) shift_bits(binary ast.Binary, value i64, limit int) !u8 {
 	return u8(value)
 }
 
-fn (mut e Emitter) apply_binary(binary ast.Binary) !void {
+fn (mut e Emitter) apply_binary(binary ast.Binary, wide bool) !void {
 	result := e.accumulator(binary.line, binary.col)!
 	other := e.scratch(binary.line, binary.col)!
+	// A 64-bit step computes with the machine's word instructions, which is the
+	// width the values already have; a four-byte step keeps the instructions it
+	// had. The signedness is the type the operands convert to, because that is the
+	// type the operation is defined on: `0xffffffffu / 1` is 4294967295 and not -1,
+	// and `18446744073709551615UL / 3` is 6148914691236517205.
+	unsigned := binary.typ.kind.is_unsigned()
 	match binary.op {
 		'+' {
-			e.append(e.target.add(result, other)!)
+			if wide {
+				e.append(e.target.add_reg64(result, other))
+			} else {
+				e.append(e.target.add(result, other)!)
+			}
 		}
 		'-' {
-			e.append(e.target.subtract(result, other)!)
+			if wide {
+				e.append(e.target.subtract_word(result, other)!)
+			} else {
+				e.append(e.target.subtract(result, other)!)
+			}
 		}
 		'*' {
-			e.append(e.target.multiply(result, other)!)
+			if wide {
+				e.append(e.target.multiply_word(result, other)!)
+			} else {
+				e.append(e.target.multiply(result, other)!)
+			}
 		}
 		'/' {
 			// A division leaves the quotient in the accumulator and what it did
 			// not divide in the register above, which is where the two operators
 			// read their answers from.
-			e.append(e.target.divide(other)!)
+			e.divide_operands(other, wide, unsigned)!
 		}
 		'%' {
 			remainder := e.target.remainder() or {
 				e.diagnostics << problem(binary.line, binary.col, "${e.target.name}: the machine's table has no register for a remainder to land in")
 				return error('no remainder register')
 			}
-			e.append(e.target.divide(other)!)
-			e.append(e.target.move_register32(result, remainder)!)
+			e.divide_operands(other, wide, unsigned)!
+			if wide {
+				e.append(e.target.move_register64(result, remainder)!)
+			} else {
+				e.append(e.target.move_register32(result, remainder)!)
+			}
 		}
 		'==', '!=', '<', '>', '<=', '>=' {
 			// Two addresses are compared at the width of a word: their low
-			// halves being equal is not the addresses being equal.
+			// halves being equal is not the addresses being equal. Two 64-bit
+			// integers are compared at that width too, and the order an unsigned
+			// one asks for is the unsigned order.
 			if e.comparison_of_an_address(binary) {
 				e.append(e.target.compare_word(binary.op, result, other)!)
+			} else if wide {
+				if e.comparison_is_unsigned(binary) {
+					e.append(e.target.compare_word_unsigned(binary.op, result, other)!)
+				} else {
+					e.append(e.target.compare_word(binary.op, result, other)!)
+				}
+			} else if e.comparison_is_unsigned(binary) {
+				e.append(e.target.compare_unsigned(binary.op, result, other)!)
 			} else {
 				e.append(e.target.compare(binary.op, result, other)!)
 			}
@@ -3935,42 +4164,60 @@ fn (mut e Emitter) apply_binary(binary ast.Binary) !void {
 			e.append(e.target.xor_word(result, other)!)
 		}
 		'<<' {
+			limit := if wide { 64 } else { 32 }
 			if value := e.constant(binary.right) {
-				e.append(e.target.shift_left_word(result, e.shift_bits(binary, value, 32)!)!)
+				e.append(e.target.shift_left_word(result, e.shift_bits(binary, value, limit)!)!)
 			} else {
 				// The count is one the program works out, so it is in the register
 				// the machine reads a count from. The four-byte form is the one whose
 				// count the machine reads as a narrow value's count is read, so a
 				// count of 33 shifts by the one bit the language leaves of it.
 				e.check_count_register(binary, other)!
-				e.append(e.target.shift_left_narrow_register(result)!)
+				if wide {
+					e.append(e.target.shift_left_word_register(result)!)
+				} else {
+					e.append(e.target.shift_left_narrow_register(result)!)
+				}
 			}
 		}
 		'>>' {
-			// The shift that keeps the sign has to be told the sign, and the value
-			// in the register carries its low four bytes rather than a sign that
-			// reaches the top of the register: a signed value is spread over the
-			// register first and an unsigned one has its top cleared, and then the
-			// shift reads the sign the language means.
-			unsigned := binary.left.typ.kind.is_unsigned()
-			if unsigned {
-				e.append(e.target.move_register32(result, result)!)
-			} else {
-				e.append(e.target.sign_extend_word(result, result)!)
+			// The shift that keeps the sign has to be told the sign, and a
+			// four-byte value in the register carries its low four bytes rather
+			// than a sign that reaches the top of the register: a signed one is
+			// spread over the register first and an unsigned one has its top
+			// cleared, and then the shift reads the sign the language means. A
+			// value eight bytes wide is the whole register already and needs
+			// neither instruction.
+			unsigned_shift := binary.left.typ.kind.is_unsigned()
+			if !wide {
+				if unsigned_shift {
+					e.append(e.target.move_register32(result, result)!)
+				} else {
+					e.append(e.target.sign_extend_word(result, result)!)
+				}
 			}
+			limit := if wide { 64 } else { 32 }
 			if value := e.constant(binary.right) {
-				bits := e.shift_bits(binary, value, 32)!
-				if unsigned {
+				bits := e.shift_bits(binary, value, limit)!
+				if unsigned_shift {
 					e.append(e.target.shift_right_word(result, bits)!)
 				} else {
 					e.append(e.target.shift_right_arithmetic(result, bits)!)
 				}
 			} else {
 				e.check_count_register(binary, other)!
-				if unsigned {
-					e.append(e.target.shift_right_narrow_register(result)!)
+				if unsigned_shift {
+					if wide {
+						e.append(e.target.shift_right_word_register(result)!)
+					} else {
+						e.append(e.target.shift_right_narrow_register(result)!)
+					}
 				} else {
-					e.append(e.target.shift_right_arithmetic_narrow_register(result)!)
+					if wide {
+						e.append(e.target.shift_right_arithmetic_word_register(result)!)
+					} else {
+						e.append(e.target.shift_right_arithmetic_narrow_register(result)!)
+					}
 				}
 			}
 		}
@@ -3978,6 +4225,29 @@ fn (mut e Emitter) apply_binary(binary ast.Binary) !void {
 			e.diagnostics << problem(binary.line, binary.col, 'unsupported binary operator ${binary.op}')
 			return error('unsupported binary operator')
 		}
+	}
+}
+
+// divide_operands divides the pair the accumulator and the register above it form
+// by the value in the scratch register, reading that pair as the type the
+// operands convert to. An unsigned division clears the register above the pair
+// first, so the dividend is the value itself and not a value with a sign above it;
+// a signed division fills it with the sign. Measured on gcc 16.2.1, whose
+// `unsigned int a / b` clears that register and divides with a divl where the
+// signed division of the same shape is an idivl after a cdq.
+fn (mut e Emitter) divide_operands(other backend.Register, wide bool, unsigned bool) !void {
+	if wide {
+		if unsigned {
+			e.append(e.target.divide_word_unsigned(other)!)
+		} else {
+			e.append(e.target.divide_word(other)!)
+		}
+		return
+	}
+	if unsigned {
+		e.append(e.target.divide_unsigned(other)!)
+	} else {
+		e.append(e.target.divide(other)!)
 	}
 }
 
@@ -3994,7 +4264,7 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 	// The jump the left side takes when it has already settled the answer: out
 	// of an and when it is false, out of an or when it is true.
 	e.emit_expr_at(binary.left, depth + 1)!
-	e.emit_test(e.floating_of(binary.left), binary.line, binary.col)!
+	e.emit_test(e.floating_of(binary.left), e.eight_byte_integer(binary.left.typ), binary.line, binary.col)!
 	if is_and {
 		e.branch(.branch_zero, settles, binary.line, binary.col)!
 	} else {
@@ -4002,7 +4272,7 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 	}
 	// The left side did not settle it, so the right side is the answer.
 	e.emit_expr_at(binary.right, depth + 1)!
-	e.emit_test(e.floating_of(binary.right), binary.line, binary.col)!
+	e.emit_test(e.floating_of(binary.right), e.eight_byte_integer(binary.right.typ), binary.line, binary.col)!
 	if is_and {
 		e.branch(.branch_zero, settles, binary.line, binary.col)!
 	} else {
@@ -4030,7 +4300,8 @@ fn (mut e Emitter) move_to_scratch(line int, col int) !void {
 // a type the back end has no register for answers none.
 fn (e Emitter) converted_width(t types.Type) ?int {
 	return match t.kind {
-		.int_, .char_, .signed_char { 4 }
+		.int_, .char_, .signed_char, .unsigned_int { 4 }
+		.long, .unsigned_long, .long_long, .unsigned_long_long { 8 }
 		.double { 8 }
 		.pointer, .array { e.target.word_size }
 		else { none }
@@ -4044,7 +4315,12 @@ fn (e Emitter) converted_width(t types.Type) ?int {
 fn (e Emitter) width_of(expr ast.Expr) ?int {
 	return match expr {
 		ast.IntLit {
-			4
+			// An integer constant is as wide as the type the model gave it: 42
+			// is an int, and a constant past what an int holds is a long now
+			// that the 64-bit widths are carried. A constant the model gave no
+			// type is one the parser refused, and the four bytes are the answer
+			// that keeps a refusal from being emitted at a second width.
+			e.storage_width(expr.typ) or { 4 }
 		}
 		ast.FloatLit {
 			// A floating constant is a double: the eight bytes of one live in
@@ -4091,14 +4367,11 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			}
 		}
 		ast.Call {
-			// A call's value has the width the language returns it with: a
-			// double is eight bytes, and everything else this back end emits is
-			// four.
-			if e.returns[expr.name] == 'double' {
-				8
-			} else {
-				4
-			}
+			// A call's value has the width the language returns it with, which
+			// is the type its declaration wrote: a double is eight bytes in the
+			// floating-point file, a long is eight in the general one, and
+			// anything else this back end emits is four.
+			e.type_width(e.returns[expr.name]) or { 4 }
 		}
 		ast.Index {
 			// An element is the width of an element of the array it belongs to,
@@ -4144,6 +4417,13 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 				// whichever class the other operand was: the two widths are not
 				// equal in the tree, and the value the step produces is one
 				// double either way.
+				8
+			} else if e.step_is_wide(expr) {
+				// A step with a 64-bit integer on either side is a value of
+				// eight bytes. The two operands need not be the same width: the
+				// usual arithmetic conversions make the step's type the wider
+				// of the two, the narrower operand is widened where the step is
+				// emitted, and the answer is the wider width.
 				8
 			} else {
 				left := e.width_of(expr.left) or { return none }
@@ -4398,6 +4678,10 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		stacked++
 	}
+	// The widths the callee's parameters were declared with, read once for the
+	// call: every argument asks the same table, and a lookup per argument is a
+	// string-keyed map probe in the middle of the emitter's hottest loop.
+	widths := e.signatures[call.name] or { []int{} }
 	for i, arg in call.args {
 		place := places[i]
 		line := expr_line(arg)
@@ -4452,6 +4736,15 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		// integer the parameter holds, which is the conversion the language
 		// defines between the two classes.
 		e.convert_to_int(arg, line, col)!
+		if e.parameter_wants_a_word(widths, i, arg) {
+			// The parameter is a 64-bit integer and the argument is narrower, so
+			// the value is widened into the whole register before it is parked:
+			// the argument register is loaded at eight bytes, so a negative int
+			// left with its upper half cleared would arrive as its unsigned
+			// reading. A parameter narrower than the argument needs nothing,
+			// because the load reads only the bytes of the parameter.
+			e.extend_operand_to_word(arg, line, col)!
+		}
 		e.store_accumulator(e.value_slot(depth + i), line, col)!
 	}
 	// The arguments past the registers go on the stack, and the convention puts
@@ -4514,7 +4807,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			pushed_width := if place.floating {
 				e.target.word_size
 			} else {
-				e.passed_width(call, i, arg, false)!
+				e.passed_width(call, widths, i, arg, false)!
 			}
 			register := e.accumulator(line, col)!
 			e.load_argument(slot, register, pushed_width, line, col)!
@@ -4587,7 +4880,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} has more arguments than the machine has registers for')
 			return error('too many arguments')
 		}
-		width := e.passed_width(call, i, arg, place.floating)!
+		width := e.passed_width(call, widths, i, arg, place.floating)!
 		e.load_argument(slot, register, width, line, col)!
 	}
 	if call.name in e.program.defined {
@@ -4837,8 +5130,11 @@ fn (e Emitter) wide_argument(call ast.Call, position int, arg ast.Expr) bool {
 // before the conversion is not the width it is handed over at. The one case that
 // is refused is a double where the parameter holds an address, because there is
 // no conversion between a floating type and a pointer and the bits would arrive
-// as an address the program can no longer follow.
-fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr, floating bool) !int {
+// as an address the program can no longer follow. A parameter of a 64-bit integer
+// given a narrower integer is the same kind of exception: the value is widened
+// where it is parked, and one narrower than the argument takes the low bytes of it,
+// which is the value taken modulo the parameter's width.
+fn (mut e Emitter) passed_width(call ast.Call, widths []int, position int, arg ast.Expr, floating bool) !int {
 	// An object of an aggregate type is the parameter's own type rather than a
 	// value of some width: the two are the same type or the type checker refused
 	// the call, and what travels is the object's bytes.
@@ -4854,30 +5150,50 @@ fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr, float
 	}
 	actual := e.width_of(arg)
 	if e.floating_of(arg) {
-		if widths := e.signatures[call.name] {
-			if position < widths.len && widths[position] == e.target.word_size {
-				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a double and the parameter holds an address, and there is no conversion between them')
-				return error('double into a pointer')
-			}
+		if position < widths.len && widths[position] == e.target.word_size {
+			e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a double and the parameter holds an address, and there is no conversion between them')
+			return error('double into a pointer')
 		}
 		return 4
 	}
-	if widths := e.signatures[call.name] {
-		if position < widths.len {
-			expected := widths[position]
-			if actual != none && actual != expected {
-				if e.constant(arg) == none {
-					e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a value of ${actual} bytes and the parameter is ${expected}')
-					return error('argument width')
-				}
+	if position < widths.len {
+		expected := widths[position]
+		if actual != none && actual != expected {
+			if e.constant(arg) == none && !e.widening_or_narrowing_integer(actual, expected, arg) {
+				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a value of ${actual} bytes and the parameter is ${expected}')
+				return error('argument width')
 			}
-			return expected
 		}
+		return expected
 	}
 	return actual or {
 		e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: the width of argument ${position + 1} of the call to ${call.name} is one this back end cannot size')
 		return error('unknown argument width')
 	}
+}
+
+// parameter_wants_a_word says whether the argument at a given position is handed
+// to a parameter eight bytes wide while the value itself is narrower, which is the
+// conversion the call makes and not the value's own width. The widths are the
+// callee's, read once by the caller rather than looked up again per argument.
+fn (e Emitter) parameter_wants_a_word(widths []int, position int, arg ast.Expr) bool {
+	if position >= widths.len || widths[position] != 8 {
+		return false
+	}
+	return (e.converted_width(arg.typ) or { 8 }) == 4
+}
+
+// widening_or_narrowing_integer says whether the two widths are a conversion
+// between two integer values rather than a mismatch: a four-byte value handed to an
+// eight-byte parameter is widened where it is parked, and an eight-byte value
+// handed to a four-byte parameter is read as its low bytes, which is the value
+// taken modulo the parameter's width. A pointer on either side is not either of
+// those, because the bits of an address are not an integer's value.
+fn (e Emitter) widening_or_narrowing_integer(actual int, expected int, arg ast.Expr) bool {
+	if e.floating_of(arg) || e.is_a_pointer(arg) {
+		return false
+	}
+	return (actual == 4 && expected == 8) || (actual == 8 && expected == 4)
 }
 
 // import_symbol records a library symbol the image needs, once. The order the

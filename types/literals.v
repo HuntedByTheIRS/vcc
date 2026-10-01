@@ -140,16 +140,30 @@ fn fits_with(kind Kind, value i64, rep Representation) !bool {
 
 // within says whether a value is one of the values a type of this signedness and
 // this many bits holds.
+//
+// The value arrives as the 64-bit pattern the literal reader built, which is why
+// the top bit being set is a case of its own. `18446744073709551615` is 2^64 - 1,
+// and no signed type holds it; the pattern of it read as a signed 64-bit value is
+// -1. The only types that hold the pattern are the 64-bit unsigned ones, so a
+// value with its top bit set fits an unsigned 64-bit type and nothing else.
+// A narrower type holds neither reading: 2^64 - 1 is past every one of them, and
+// so is the 64-bit pattern of any value that reaches 2^63. Measured on gcc 16.2.1:
+// `18446744073709551615` with no suffix is refused as `integer constant is so
+// large that it is unsigned`, the same value with `ULL` is `unsigned long long`,
+// and `0xffffffffffffffff` is `unsigned long`.
 fn within(kind Kind, value i64, bits int) bool {
 	if bits >= 64 {
 		if kind.is_unsigned_integer() {
-			return value >= 0
+			return true
 		}
-		return true
+		return value >= 0
+	}
+	if value < 0 {
+		return false
 	}
 	limit := i64(1) << (bits - 1)
 	if kind.is_unsigned_integer() {
-		return value >= 0 && value < limit * 2
+		return value < limit * 2
 	}
-	return value >= -limit && value < limit
+	return value < limit
 }
