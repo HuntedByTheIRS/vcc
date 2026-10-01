@@ -2,6 +2,7 @@ module codegen
 
 import ast
 import backend
+import backend.os.elf
 import image
 import math
 import tokenize
@@ -377,7 +378,7 @@ fn (mut e Emitter) build() ![]u8 {
 		}
 		e.emit_function(decl)!
 	}
-	image_bytes := executable(e.program, e.target) or {
+	image_bytes := elf.executable(e.program, e.target) or {
 		e.diagnostics << problem(1, 1, 'internal: the image could not be laid out: ${err.msg()}')
 		return error('cannot lay out the image')
 	}
@@ -1664,6 +1665,14 @@ fn (e Emitter) writes_a_128(written string) bool {
 	// object of 128 bits`. Every caller wants the type itself and not a pointer to
 	// it: parameters, returns, members, top-level objects and casts all read this.
 	return written.contains('__int128') && !written.contains('*')
+}
+
+// align rounds a size up to the next multiple of the alignment, which is what
+// puts every frame slot on the machine's word. The container rounds file
+// offsets with its own copy, since neither module has another use for the
+// other's.
+fn align(value int, to int) int {
+	return (value + to - 1) / to * to
 }
 
 // reserve claims a place in the frame for one value. Offsets count down from the

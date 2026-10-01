@@ -1,5 +1,6 @@
 module codegen
 
+import backend.os.elf
 import os
 
 // What a `-l` argument comes to: the file behind a library name, and the name
@@ -20,10 +21,11 @@ import os
 // reader that took that file for an object would read a text file as one.
 
 // The offsets this file reads out of an ELF64 header and the records below it.
-// They are written here rather than taken from `elf.v` because the two jobs are
-// opposite ones: that file writes one container of a fixed shape, this one
-// reads files other tools produced. The class byte and the data byte are the
-// one exception, and they are shared: they mean the same thing on both sides.
+// They are written here rather than taken from `backend/os/elf/elf.v` because
+// the two jobs are opposite ones: that module writes one container of a fixed
+// shape, this one reads files other tools produced. The class byte and the data
+// byte are the one exception, and they are shared: they mean the same thing on
+// both sides.
 const elf64_header_size = 64
 const elf64_phoff_at = 32
 const elf64_phentsize_at = 54
@@ -214,7 +216,7 @@ fn soname_in(bytes []u8) string {
 	if bytes.len < elf64_header_size {
 		return ''
 	}
-	if bytes[4] != elf_class_64 || bytes[5] != elf_data_little_endian {
+	if bytes[4] != elf.elf_class_64 || bytes[5] != elf.elf_data_little_endian {
 		return ''
 	}
 	phoff := int(read_u64(bytes, elf64_phoff_at))

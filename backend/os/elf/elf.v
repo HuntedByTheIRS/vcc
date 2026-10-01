@@ -1,4 +1,4 @@
-module codegen
+module elf
 
 import backend
 import image
@@ -23,8 +23,10 @@ import image
 
 const elf_magic = [u8(0x7f), `E`, `L`, `F`]
 
-const elf_class_64 = u8(2)
-const elf_data_little_endian = u8(1)
+// The class and data bytes are read by the library reader in `codegen/` as well
+// as written here, so they are the two constants this module makes public.
+pub const elf_class_64 = u8(2)
+pub const elf_data_little_endian = u8(1)
 const elf_version_current = u8(1)
 const elf_type_exec = u16(2)
 
@@ -106,7 +108,7 @@ struct Sections {
 
 // executable wraps a program in an ELF64 image that a Linux kernel can start and
 // a dynamic loader can finish.
-fn executable(program image.Program, target backend.Target) ![]u8 {
+pub fn executable(program image.Program, target backend.Target) ![]u8 {
 	base := target.load_base
 	// The loader's path, with the terminator the kernel expects.
 	mut interp := target.interpreter.bytes()
