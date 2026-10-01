@@ -870,6 +870,19 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 // `int x = 0x1p3;` used to exit with `x is initialized with something that is not
 // a number` instead of naming the construct.
 fn (mut p Parser) file_scope_constant() FileConstant {
+	// A parenthesized constant, `(7)`, is the number the one pair of parentheses
+	// holds, which is the shape a macro that wraps its argument in them writes:
+	// the corpus reaches `int c99_slot_7 = (7);` through `C99_DECLARE(7)`.
+	// Only exactly that shape is read. `(7) + 1` and `(7, 8)` are expressions
+	// this does not fold, and `is_parenthesized_constant` answers false for
+	// them, so they stay refused by the report below rather than taking the
+	// first number and stopping.
+	if p.is_parenthesized_constant() {
+		p.next()
+		constant := p.number_constant() or { return FileConstant{} }
+		p.next()
+		return constant.number
+	}
 	// The number is the initializer or the initializer is not one this reads. An
 	// expression is a shape this does not fold, and reading its first term and
 	// stopping was silent: `int g = 2 + 3;` defined g as 2, `int g = 1 << 3;` as
@@ -882,6 +895,33 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 		return FileConstant{}
 	}
 	return constant.number
+}
+
+// is_parenthesized_constant answers whether the next tokens are one pair of
+// parentheses around one number, signed or not, with nothing but the end of the
+// declaration after the pair. It reads no token, so a false answer leaves the
+// parser where it was and the initializer is refused by the path that already
+// names what it cannot write.
+fn (p Parser) is_parenthesized_constant() bool {
+	if !p.at_punct('(') {
+		return false
+	}
+	mut index := 1
+	sign := p.peek_at(index)
+	if sign.kind == .punct && (sign.text == '-' || sign.text == '+') {
+		index++
+	}
+	if p.peek_at(index).kind != .number {
+		return false
+	}
+	index++
+	close := p.peek_at(index)
+	if close.kind != .punct || close.text != ')' {
+		return false
+	}
+	index++
+	after := p.peek_at(index)
+	return after.kind == .punct && (after.text == ',' || after.text == ';')
 }
 
 // BraceList is a brace initializer as the reader read it: the constants in the

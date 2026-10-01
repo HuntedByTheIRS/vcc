@@ -338,6 +338,38 @@ fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
 	assert result.unit.globals.len == 0
 }
 
+// A file-scope initializer written as one parenthesized number is that number.
+// It is the shape a macro that wraps its argument in parentheses writes: the
+// corpus reaches `int c99_slot_7 = (7);` through `C99_DECLARE(7)`. Measured on
+// gcc 16.2.1, `int c99_slot_7 = (7); int g = (-3);` returns 4 for
+// `c99_slot_7 + g`, which is 7 + (-3). A parenthesized expression with anything
+// around it is not a shape this folds and is still refused by name: measured,
+// gcc accepts `int g = (7) + 1;` and this compiler refuses it.
+fn test_a_file_scope_parenthesized_constant_is_the_number_in_them() {
+	result := declarations_of('int c99_slot_7 = (7);')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	value := result.unit.globals[0].init or {
+		assert false
+		return
+	}
+	assert value == 7
+	signed := declarations_of('int g = (-3);')
+	assert signed.diagnostics.len == 0
+	signed_value := signed.unit.globals[0].init or {
+		assert false
+		return
+	}
+	assert signed_value == -3
+	// The pair has to end the declaration: an operator or a second operand after
+	// it is an expression this does not fold, and it stays refused.
+	for refused_source in ['int g = (7) + 1;', 'int g = (7, 8);'] {
+		refused := declarations_of(refused_source)
+		assert refused.diagnostics.len == 1
+		assert refused.diagnostics[0].msg.contains('is initialized with something that is not a number')
+	}
+}
+
 // A pointer at the top level is a relocation this compiler does not write yet,
 // so the definition is reported instead of laid out as a wrong number.
 // An initializer that is an expression is a shape this reads no part of. Reading
