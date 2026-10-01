@@ -256,8 +256,9 @@ the compiler disagrees with the tag.
 | `parser/` | recursive descent parser for the supported subset |
 | `optimizer/` | `ast` in, `ast` out: `-O` levels and the builtin table |
 | `printer/` | `ast` in, text out: what `-print-ast` prints |
-| `backend/` | target description: `arch/` is the machine, `os/` is the system, `backend.v` composes them |
-| `codegen/` | translation unit to bytes: constant folding and the ELF64 container |
+| `backend/` | target description: `arch/` is the machine, `os/` is the system (`os/elf/` writes the ELF64 container), `backend.v` composes them |
+| `codegen/` | translation unit to an emitted unit: constant folding and the emitter |
+| `image/` | the emitted unit: machine code, the data it reads, and the references between them |
 | `tools/` | gate and benchmark scripts; not part of the compiler |
 | `extensions/` | the vendor extensions `-fvcc-exts=` names. Nothing is honored yet, so the flag changes nothing about what compiles |
 
@@ -265,7 +266,9 @@ A target is data rather than a directory of hand-written emission, and it has
 two dimensions. `backend/arch/` describes a machine: its register file, how a
 register is numbered in an instruction, where a function's arguments arrive.
 `backend/os/` describes a system: the kernel entry points a program can call, the
-numbers they take, and the loader constants a container is built from. Neither
+numbers they take, and the loader constants a container is built from.
+`backend/os/elf/` writes that container: the ELF header, the four program
+headers, the dynamic table and the relocations the loader reads. Neither
 knows the other exists, and every arch-dependent answer the system gives is asked
 for by machine name, which is what lets a second system be written without
 touching the first one's module.
