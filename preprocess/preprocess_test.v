@@ -978,3 +978,20 @@ fn test_a_character_constant_may_name_its_encoding_in_an_if() {
 	chained := "${hash}if L'\\0' - 1 > 0\nint a;\n${hash}elif L'\\0' + 0 == 0\nint b;\n${hash}endif\n"
 	assert processed(chained) == ['int', 'b', ';']
 }
+
+fn test_a_diagnostic_about_an_if_names_where_the_construct_is() {
+	// The expression is the rest of the directive's line, so a construct in it is at the
+	// line and column it holds in the file, and not at line 1 column 1 of a copy of part
+	// of one line. gcc reports these same two numbers for the same file.
+	first := preprocess('int x;\n${hash}if "a" == 1\nint a;\n${hash}endif\n', 'test.c', Options{})
+	assert first.diagnostics.len == 1
+	assert first.diagnostics[0].line == 2
+	assert first.diagnostics[0].col == 5
+	// The column tracks the construct whatever the directive is indented by, because it
+	// is computed from where the expression starts in the line and not from the
+	// expression alone.
+	indented := preprocess('int x;\n    ${hash}if "a" == 1\nint a;\n${hash}endif\n', 'test.c', Options{})
+	assert indented.diagnostics.len == 1
+	assert indented.diagnostics[0].line == 2
+	assert indented.diagnostics[0].col == 9
+}

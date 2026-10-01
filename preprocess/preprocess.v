@@ -761,7 +761,12 @@ fn (mut p Processor) endif_directive(tok tokenize.Token) {
 // is the name of a macro and not a use of one, and every name left after the
 // expansion is a name that is not defined, which C says is zero.
 fn (mut p Processor) if_value(tok tokenize.Token, args string) ?i64 {
-	raw := tokenize.lex_fragment(args)
+	// The expression is the rest of the directive's line, and the fragment reader
+	// starts it at column 1 of its own text, so it is told where that text begins in
+	// the file: `#if` and what follows it are the same line, and a diagnostic about a
+	// construct in the expression names a place in the file's text, not in a copy of
+	// part of one line.
+	raw := tokenize.lex_fragment_at(args, tok.line, tok.col + (tok.text.len - args.len))
 	// `defined` is answered before anything is expanded, because what it takes
 	// is the name of a macro and not a use of one: it is rewritten to 1 or 0
 	// here, and the expansion that follows is the ordinary one — which is what

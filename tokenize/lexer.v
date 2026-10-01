@@ -198,10 +198,23 @@ pub fn lex_with(src string, opts Options) Result {
 // is gcc's answer for text that never was a file's bytes: measured,
 // `gcc -std=c99 -E -DX='??!'` prints `??!` and not `|`.
 pub fn lex_fragment(text string) []Token {
+	return lex_fragment_at(text, 1, 1)
+}
+
+// lex_fragment_at is lex_fragment for a caller that knows where in the file the text
+// came from. A directive's expression is read from the line the directive is on, and a
+// diagnostic about a construct in that expression belongs on that line and at that
+// column; a fragment read without either puts every token on line 1 starting at column
+// 1, which is where `#elif L'\0' - 1 > 0` on line 35 of glibc's <bits/wchar.h> was
+// reported from, and why a construct at column 5 of its line was reported at column 2.
+//
+// col is the column the fragment's first character sits at in the file, so a token the
+// fragment finds at column 1 is at col.
+pub fn lex_fragment_at(text string, line int, col int) []Token {
 	mut l := Lexer{
 		src:  text
-		line: 1
-		col:  1
+		line: line
+		col:  col
 	}
 	tokens := l.run()
 	if tokens.len > 0 && tokens[tokens.len - 1].kind == .eof {
