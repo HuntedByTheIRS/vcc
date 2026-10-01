@@ -2278,6 +2278,15 @@ fn (mut e Emitter) fill_frame(at int, size int) {
 	}
 }
 
+// fits_immediate32 says whether a constant can be written by the one instruction
+// this back end writes a constant with, which takes four bytes: a value up to
+// 2^32 - 1 written as unsigned, or one down to -2^31 written as signed. Anything
+// outside that has no encoding in the instruction, and writing its low four
+// bytes would be a wrong value rather than a shorter one.
+fn fits_immediate32(value i64) bool {
+	return (value >= 0 && value <= 4294967295) || (value >= -2147483648 && value < 0)
+}
+
 // emit_expr writes an expression and leaves its value in the accumulator.
 //
 // A constant expression is emitted as the one instruction it always was, which
@@ -2293,6 +2302,17 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		return error('expression nested too deeply')
 	}
 	if value := e.constant(expr) {
+		// The move below takes four bytes, and a constant that does not fit four
+		// bytes cannot be written by it. Such a constant arrives here only when
+		// its spelling gave it a type wider than int - `1234567890123456789LL`
+		// is a long long - because a narrower literal that did not fit had its
+		// type refused where the type was decided. Writing the low four bytes
+		// would be a wrong value with no diagnostic, which is the one outcome
+		// this compiler treats as a bug, so the constant is refused by name.
+		if !fits_immediate32(value) {
+			e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: the constant ${value} needs more than the four bytes this back end writes a constant with')
+			return error('constant does not fit the immediate')
+		}
 		register := e.accumulator(expr_line(expr), expr_col(expr))!
 		e.append(e.target.move_immediate32(register, u32(value))!)
 		return
@@ -2301,6 +2321,12 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		ast.IntLit {
 			// An integer literal is a constant, so the walk above has already
 			// answered for it; this is the same answer for a reader who wonders.
+			// It is checked the same way, because the answer and the instruction
+			// are one thing.
+			if !fits_immediate32(expr.value) {
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the constant ${expr.value} needs more than the four bytes this back end writes a constant with')
+				return error('constant does not fit the immediate')
+			}
 			register := e.accumulator(expr.line, expr.col)!
 			e.append(e.target.move_immediate32(register, u32(expr.value))!)
 		}

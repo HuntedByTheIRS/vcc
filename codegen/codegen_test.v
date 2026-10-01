@@ -2412,6 +2412,26 @@ fn test_an_argument_that_is_a_call_keeps_its_own_value() {
 	}
 }
 
+// A constant wider than the four-byte immediate this back end writes a constant with
+// is refused rather than halved. `1234567890123456789LL` is a long long, and the type
+// model answers a long long from the guarantee that it holds sixty-four bits rather
+// than from a width this target carries, so the constant reaches the emitter where an
+// int that did not fit was refused a stage earlier. Written as its low four bytes the
+// program would have had 2112454933, with no diagnostic, which is the one outcome
+// this compiler treats as a bug.
+fn test_a_constant_wider_than_the_immediate_is_refused_rather_than_halved() {
+	emitted := emit(translation_unit('int main() { __int128 v = 1234567890123456789LL; return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('1234567890123456789')
+	assert emitted.diagnostics[0].msg.contains('four bytes')
+	assert emitted.bytes.len == 0
+	// The same line with a constant the instruction holds is not refused, which is
+	// what makes the diagnostic about the value rather than about the line.
+	control := emit(translation_unit('int main() { __int128 v = 42; return 0; }'), Options{})
+	assert control.diagnostics.len == 0
+}
+
 fn test_a_double_returning_function_with_no_return_statement_answers_zero() {
 	// Running off the end of a function that returns a double answers zero in the
 	// register the caller reads. The language leaves this undefined, so what this
