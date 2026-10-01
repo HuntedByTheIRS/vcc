@@ -207,6 +207,10 @@ fn test_an_unsupported_type_names_the_type() {
 // Measured against gcc 16.2.1 on this machine, `sizeof(char)`, `sizeof(int)`,
 // `sizeof(double)` and `sizeof(char *) * 4` are 1, 4, 8 and 32, and `sizeof "vcc"`
 // is 4: the literal is an array of four chars and `sizeof` does not decay it.
+//
+// The constant has the type the target gives size_t, which is unsigned long, so
+// `sizeof(char) * 4` is an unsigned long and not an int. Measured, `sizeof(int)
+// - 5 > 0` is 1 on gcc 16.2.1 and was 0 while this was an int.
 fn test_sizeof_answers_the_size_of_a_type() {
 	result := parsed('int main(void) { return sizeof(char) * 4; }')
 	assert result.diagnostics.len == 0
@@ -217,10 +221,11 @@ fn test_sizeof_answers_the_size_of_a_type() {
 	assert expr is ast.Binary
 	binary := expr as ast.Binary
 	assert binary.op == '*'
-	assert binary.typ.describe() == 'int'
+	assert binary.typ.describe() == 'unsigned long'
 	left := binary.left as ast.IntLit
 	right := binary.right as ast.IntLit
 	assert left.value == 1
+	assert left.typ.describe() == 'unsigned long'
 	assert right.value == 4
 }
 

@@ -193,7 +193,8 @@ fn test_sizeof_answers_a_value_and_a_type_where_it_was_refused_by_name() {
 	// reference to a symbol nothing defines: `int main(void) { int a[4]; return
 	// sizeof(a); }` compiled into a binary that died at load with `undefined
 	// symbol: sizeof`. The operator is read now: both spellings answer sixteen,
-	// which is the four ints of the array, and the clause is int.
+	// which is the four ints of the array, and the clause is unsigned long,
+	// which is the size_t 6.5.3.4 gives the result.
 	for source in [
 		'int main() { int a[4]; return sizeof(a); }',
 		'int main() { int a[4]; return sizeof a; }',
@@ -206,7 +207,7 @@ fn test_sizeof_answers_a_value_and_a_type_where_it_was_refused_by_name() {
 		}
 		answer := expr as ast.IntLit
 		assert answer.value == 16
-		assert answer.typ.describe() == 'int'
+		assert answer.typ.describe() == 'unsigned long'
 		assert answer.line == 1
 	}
 	// The operand is read where it is written and not as an argument list, and
