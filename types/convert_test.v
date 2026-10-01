@@ -251,16 +251,25 @@ fn test_the_constraint_on_assignment_between_pointer_types() {
 }
 
 // The description the compiler itself gets, types.from_target, carries the width
-// of a pointer, a char, an int, an unsigned int, a double and the two 128-bit
-// types, and nothing else. A 128-bit operand against a `long` is answered anyway,
-// because two types of the same signedness are decided by rank and ask for no
-// width; the mixed-signedness rows are the ones that ask, so `__int128` against
-// an `unsigned long` is refused for the width the description does not carry.
+// of a pointer, a char, an int, an unsigned int, the four 64-bit integer kinds, a
+// double and the two 128-bit types, and nothing else. A 128-bit operand against a
+// `long` is answered anyway, because two types of the same signedness are decided
+// by rank and ask for no width; the mixed-signedness rows are the ones that ask,
+// so a description that carries the 128-bit width and not the 64-bit one refuses
+// `__int128` against an `unsigned long` for the width it does not carry.
 // Measured, gcc answers `__int128` for both rows, and the refusal here is a
 // change to the target description rather than a guess this function may make.
 fn test_a_row_whose_width_the_description_lacks_is_refused() {
 	assert sum(int128_type(), long_type()) == '__int128'
-	refused := usual_arithmetic_conversions(int128_type(), unsigned_long_type(), measured.partial()) or {
+	narrow := Representation{
+		sizes:  {
+			Kind.int128: 16
+		}
+		aligns: {
+			Kind.int128: 16
+		}
+	}
+	refused := usual_arithmetic_conversions(int128_type(), unsigned_long_type(), narrow) or {
 		assert err.msg().contains('width of unsigned long')
 		return
 	}
@@ -297,7 +306,9 @@ fn test_a_narrowing_integer_conversion_is_not_value_preserving() {
 		return
 	}
 	// A width the description does not carry is a refusal rather than a guess.
-	refused := value_preserving(long_type(), int_type(), measured.partial()) or {
+	// The 64-bit kinds are carried now, so the width that is missing here is a
+	// short's.
+	refused := value_preserving(unsigned_short_type(), int_type(), measured.partial()) or {
 		assert err.msg().contains('width')
 		return
 	}

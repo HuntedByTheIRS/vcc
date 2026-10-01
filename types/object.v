@@ -253,14 +253,16 @@ pub:
 // alignment of 4, and `codegen`'s own `type_width` answers the same four bytes
 // for `int`.
 //
-// Every other integer kind is left out, and the reason is the back end rather
-// than the machine: it has an instruction for a four-byte integer and no other,
-// so a constant whose value needs a wider type would be written as a different
-// number than the program asked for. Measured before this was true of the
-// description: `int main(void) { return 4294967295 > 2147483647; }` was read as
-// an int comparison and returned 0 where ISO C and gcc return 1. A question that
-// needs one of those widths is refused by name instead, which is the difference
-// between a compiler that does not know something and one that guesses. A
+// The four 64-bit integer kinds are carried because the back end computes at
+// eight bytes now, for the same reason the four-byte ones are: measured with
+// `printf("%zu", sizeof(long))` on gcc 16.2.1, `long`, `unsigned long`,
+// `long long` and `unsigned long long` are each 8 bytes with an alignment of 8
+// on this target, and the emitter's 64-bit instructions move exactly those eight
+// bytes. The types that are still left out are the ones the back end has no
+// instruction for. Measured before the 64-bit kinds were carried: `int main(void)
+// { return 4294967295 > 2147483647; }` was read as an int comparison and returned
+// 0 where ISO C and gcc return 1, which is why a width the description does not
+// carry is refused by name rather than guessed at with the nearest one. A
 // character constant is an int (6.4.4.4), so no rule here asks for a char's
 // width; the character types are added to the description with the kinds that
 // need them.
@@ -290,6 +292,18 @@ pub fn from_target(target backend.Target) Description {
 	aligns[Kind.int_] = 4
 	sizes[Kind.unsigned_int] = 4
 	aligns[Kind.unsigned_int] = 4
+	// The four 64-bit integer kinds. Measured on this target with gcc 16.2.1:
+	// each is 8 bytes with an alignment of 8, which is the width the emitter's
+	// 64-bit instructions move. `unsigned` and `unsigned int` are one kind, so
+	// `unsigned` is answered above.
+	sizes[Kind.long] = 8
+	aligns[Kind.long] = 8
+	sizes[Kind.unsigned_long] = 8
+	aligns[Kind.unsigned_long] = 8
+	sizes[Kind.long_long] = 8
+	aligns[Kind.long_long] = 8
+	sizes[Kind.unsigned_long_long] = 8
+	aligns[Kind.unsigned_long_long] = 8
 	sizes[Kind.double] = 8
 	aligns[Kind.double] = 8
 	// The 128-bit integers are carried for the questions that are about the

@@ -349,18 +349,26 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert described_int_align == 4
 	assert description.representation.size_of(unsigned_int_type()) or { -1 } == 4
 	// Every other scalar kind is named as missing: the description carries no
-	// width for a long, a float or an aggregate, and a question that needs one
+	// width for a short, a float or an aggregate, and a question that needs one
 	// is refused rather than answered with a number that would be a machine
 	// fact in the wrong module.
+	//
+	// The four 64-bit integer kinds are carried, and that is what the emitter
+	// moving eight bytes at a time made true: a `long` is 8 bytes with an
+	// alignment of 8 on this target, measured, and the 64-bit instructions
+	// compute with exactly those bytes. They left this list in the commit that
+	// gave the back end a value of that width.
 	//
 	// A char is carried, and the question that needs it is the layout of an
 	// aggregate: where the member after a char member starts is the char's width
 	// and nothing else's. The back end has a form for one already, since a char
 	// is a byte in its slot and an int when it is read, so the width is one the
 	// model can give out truthfully.
+	carried := [Kind.int_, .unsigned_int, .double, .char_, .long, .unsigned_long, .long_long,
+		.unsigned_long_long]
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
-		if kind != .int_ && kind != .unsigned_int && kind != .double && kind != .char_ {
+		if kind !in carried {
 			expected_missing << kind
 		}
 	}
@@ -368,10 +376,23 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert !description.missing.contains(Kind.int_)
 	assert !description.missing.contains(Kind.unsigned_int)
 	assert !description.missing.contains(Kind.pointer)
+	assert !description.missing.contains(Kind.long)
+	assert !description.missing.contains(Kind.long_long)
+	assert !description.missing.contains(Kind.unsigned_long)
+	assert !description.missing.contains(Kind.unsigned_long_long)
 	// Measured with gcc 16.2.1 on this target: `sizeof(char)` is 1 with an
 	// alignment of 1.
 	assert description.representation.size_of(char_type()) or { -1 } == 1
 	assert description.representation.align_of(char_type()) or { -1 } == 1
+	// `sizeof(long)` and `sizeof(long long)` are 8 with an alignment of 8, and
+	// case_00 prints the whole table: `long 8/8  unsigned long 8/8  long long
+	// 8/8  unsigned long long 8/8`.
+	for wide in [long_type(), long_long_type()] {
+		assert description.representation.size_of(wide) or { -1 } == 8
+		assert description.representation.align_of(wide) or { -1 } == 8
+	}
+	assert description.representation.size_of(unsigned_long_type()) or { -1 } == 8
+	assert description.representation.size_of(unsigned_long_long_type()) or { -1 } == 8
 	// The double is carried because the back end moves one, and the two numbers
 	// are the measured ones rather than a guess: `sizeof(double)` is 8 with an
 	// alignment of 8 on this target.
@@ -381,7 +402,6 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert measured.representation().size_of(double_type()) or { -1 } == 8
 	assert measured.representation().align_of(double_type()) or { -1 } == 8
 	assert description.representation.size_of(long_double_type()) == none
-	assert description.representation.size_of(long_type()) == none
 	assert description.representation.size_of(float_type()) == none
 	// The description and the measured table agree about every entry both of
 	// them carry, which is what keeps the two numbers in the description from
