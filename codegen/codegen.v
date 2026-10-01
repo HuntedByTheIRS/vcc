@@ -2466,6 +2466,9 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		ast.Binary {
 			e.emit_binary(expr, depth)!
 		}
+		ast.IncDec {
+			e.emit_inc_dec(expr, depth)!
+		}
 		ast.Call {
 			// A call's value arrives in the register the machine returns
 			// results in, which is the register a value is expected to be in,
@@ -2672,6 +2675,15 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 			return error('unsupported unary operator')
 		}
 	}
+}
+
+// emit_inc_dec writes `++x`, `--x`, `x++` or `x--` for the name the node holds.
+// The reading that builds the node lands beside it in the parser; until then no
+// tree this compiler reads carries one, and a hand-built tree is refused by name
+// rather than emitted as an operator that does nothing.
+fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
+	e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name} is not written yet')
+	return error('inc-dec not emitted')
 }
 
 // emit_cast writes a conversion. The operand is computed first and what the
@@ -4078,6 +4090,14 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 				left
 			}
 		}
+		ast.IncDec {
+			// The value is the one the operand holds, so it is sized the way
+			// the name is: a char is the int the load widens it to, which is
+			// the promotion the operator's value gets in an expression.
+			e.width_of(ast.Expr(ast.Ident{
+				name: expr.name
+			})) or { return none }
+		}
 	}
 }
 
@@ -5111,6 +5131,7 @@ fn expr_line(expr ast.Expr) int {
 		ast.Call { expr.line }
 		ast.Index { expr.line }
 		ast.Field { expr.line }
+		ast.IncDec { expr.line }
 	}
 }
 
@@ -5126,6 +5147,7 @@ fn expr_col(expr ast.Expr) int {
 		ast.Call { expr.col }
 		ast.Index { expr.col }
 		ast.Field { expr.col }
+		ast.IncDec { expr.col }
 	}
 }
 

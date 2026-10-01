@@ -323,6 +323,11 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_expression(expr.left, mut reported)
 			p.check_undeclared_expression(expr.right, mut reported)
 		}
+		ast.IncDec {
+			// The name the operator steps is a use of it: `++missing;` names
+			// a missing declaration just as reading the name does.
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+		}
 		ast.IntLit, ast.StrLit, ast.FloatLit {}
 	}
 }
@@ -596,6 +601,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Unary { 'a value with ${expr.op} applied to it' }
 		ast.Cast { 'a value converted to ${expr.spelling}' }
 		ast.Binary { 'a value of ${expr.op}' }
+		ast.IncDec { 'a value with ${expr.op} applied to ${expr.name}' }
 	}
 }
 

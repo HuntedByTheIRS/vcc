@@ -176,7 +176,17 @@ pub:
 // type of the constant, a name the type it was declared with, an operator the
 // type its operands convert to. Where the model has no answer the clause is
 // unresolved, and the printer says nothing about it.
-pub type Expr = Binary | Unary | Cast | IntLit | FloatLit | Ident | Call | StrLit | Index | Field
+pub type Expr = Binary
+	| Unary
+	| Cast
+	| IntLit
+	| FloatLit
+	| Ident
+	| Call
+	| StrLit
+	| Index
+	| Field
+	| IncDec
 
 // Cast is a conversion written as a type name in parentheses, `(char *)p`. The
 // type is what the operand is converted to and what the node is worth; spelling
@@ -311,4 +321,26 @@ pub:
 	typ  types.Type
 	line int
 	col  int
+}
+
+// IncDec is `++x`, `--x`, `x++` or `x--` written where a value is expected. The
+// operand is a name and not a nested expression: the object this reads, steps
+// and writes is a plain scalar, and a subscript, a member and a literal are
+// refused where the operator is read rather than desugared into a shape the tree
+// has no node for.
+//
+// C makes an assignment a statement here and gives the increment no statement of
+// its own, so this is an expression node: it is worth a value, unlike `x = 1`.
+//
+// `op` is the operator as written, `++` or `--`. `postfix` says which value the
+// node is worth: `x++` is what x held before the step and `++x` what it holds
+// after, and that is the only difference between the two spellings.
+pub struct IncDec {
+pub:
+	op      string
+	name    string
+	postfix bool
+	typ     types.Type
+	line    int
+	col     int
 }

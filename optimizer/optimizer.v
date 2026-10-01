@@ -424,6 +424,11 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			}
 			return fold_call(rewritten, opts) or { ast.Expr(rewritten) }
 		}
+		ast.IncDec {
+			// The operand is a name, and a name is not a call to a builtin, so
+			// there is nothing inside the node to rewrite.
+			return expr
+		}
 	}
 }
 
