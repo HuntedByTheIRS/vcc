@@ -256,7 +256,7 @@ the compiler disagrees with the tag.
 | `parser/` | recursive descent parser for the supported subset |
 | `optimizer/` | `ast` in, `ast` out: `-O` levels and the builtin table |
 | `printer/` | `ast` in, text out: what `-print-ast` prints |
-| `backend/` | target description: `arch/` is the machine, `os/` is the system (`os/elf/` writes the ELF64 container), `backend.v` composes them |
+| `backend/` | target description: `arch/` is the machine, `os/` is the system (`os/elf/` writes the ELF64 container), `abi/` is the calling convention, `backend.v` composes them |
 | `codegen/` | translation unit to an emitted unit: constant folding and the emitter |
 | `image/` | the emitted unit: machine code, the data it reads, and the references between them |
 | `tools/` | gate and benchmark scripts; not part of the compiler |
