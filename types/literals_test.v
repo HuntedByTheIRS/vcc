@@ -93,3 +93,23 @@ fn test_a_width_the_description_does_not_carry_is_refused_rather_than_guessed() 
 	assert named
 	assert refused.kind == .unknown
 }
+
+fn test_a_constant_the_top_bit_set_of_which_is_a_value_of_an_unsigned_64_bit_type() {
+	// 18446744073709551615 is 2^64 - 1, which is not a value any signed 64-bit
+	// type holds. The literal reader hands it on as the 64-bit pattern, which is
+	// -1 read as a signed value, and the unsigned reading is what makes it a
+	// value of `unsigned long long`. Measured on gcc 16.2.1: the constant with a
+	// `ULL` suffix is `unsigned long long`, and `0xffffffffffffffff` is
+	// `unsigned long`.
+	assert constant_type('18446744073709551615ULL', -1) == 'unsigned long long'
+	assert constant_type('0xffffffffffffffff', -1) == 'unsigned long'
+	// A decimal constant with no suffix may not take an unsigned type, so the
+	// same 64-bit pattern has no type at all when it is written that way.
+	// Measured on gcc 16.2.1: `18446744073709551615` is refused as `integer
+	// constant is so large that it is unsigned`.
+	nameless := integer_constant_type('18446744073709551615', -1, measured.representation()) or {
+		assert err.msg().contains('too large')
+		return
+	}
+	assert nameless.kind == .unknown
+}
