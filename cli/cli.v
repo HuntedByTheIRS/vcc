@@ -69,7 +69,7 @@ pub mut:
 	// -w silenced. The classes are diagnostics.Class.
 	warnings diagnostics.Policy
 	// vcc_extensions is the extension state the -fvcc-exts= flags built. Every
-	// extension is off unless it was named, and none is honored yet.
+	// extension is off unless it was named.
 	vcc_extensions extensions.Options
 	// preludes are the -include and -imacros files in the order they were
 	// given: read before the source is, as if their lines were the first lines
@@ -197,11 +197,11 @@ pub fn parse(args []string) !Options {
 			// acts on neither.
 			opts.inhibit_warnings = opts.warnings.suppress
 		} else if arg.starts_with('-fvcc-exts=') || arg.starts_with('-fno-vcc-exts=') {
-			// The family is read here and the registry is consulted in
-			// `extensions/`, because the spellings are a command-line fact and
-			// what a name means is not. A name this compiler does not have is an
-			// error, since naming an extension is a request; a name it has is
-			// recorded and changes nothing, because none is honored yet.
+			// The family is read here and the names are looked up in
+			// `extensions/`, which reads them from the standard table, because
+			// the spellings are a command-line fact and what a name means is
+			// not. A name this compiler does not have is an error, since naming
+			// an extension is a request; a name it has is recorded.
 			opts.vcc_extensions.accept(arg)!
 		} else if arg == '-g' {
 			opts.debug = true
@@ -397,8 +397,8 @@ pub fn usage(all bool) string {
 		out << '  -fvcc-exts=NAME[,NAME]  turn the vendor extensions on, per name'
 		out << '  -fvcc-exts=all          or every name the compiler has'
 		out << '  -fno-vcc-exts=NAME      turn one off again'
-		out << '  -fno-vcc-exts=all       or all of them; nothing is honored yet, so a'
-		out << '                        name is recorded and changes no compile'
+		out << '  -fno-vcc-exts=all       or all of them'
+		out << '  the names are ${extensions.names().join(', ')}'
 		out << '  -fwrapv -fPIC -g       accepted and ignored'
 		out << '  -Werror=name          accepted and ignored, except the classes above'
 		out << '  -Btcc -Idir          accepted; -I directories are searched for headers,'
