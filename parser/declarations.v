@@ -508,10 +508,26 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// object's type is not known until the declarator has been read, and which
 	// one is written into the image is a question about that type.
 	mut data_init_float := ?f64(none)
-	// literal_refused says the initializer was a number the literal reader
-	// refused and reported, which is a different answer from an initializer that
-	// is not a number at all: the first has its own diagnostic at its own
-	// location, and the second is what the report below is for.
+	// data_inits and data_init_floats are the brace initializer of an array, the
+	// same split as the scalar pair: which list is filled is a question about the
+	// element type, which is not known until the declarator has been read.
+	mut data_inits := []i64{}
+	mut data_init_floats := []f64{}
+	// data_array says the declarator wrote brackets, which is what makes the
+	// list an array's elements rather than one scalar in braces, and data_brace
+	// says the initializer was written as a list. The two are kept because the
+	// size of an array with empty brackets comes from the list.
+	mut data_array := false
+	mut data_brace := false
+	// data_problem says a brace initializer was read and refused for its size,
+	// which is a declaration the image does not lay out: the program is already
+	// refused, and storage for an object whose initializer is wrong is storage
+	// nothing should read.
+	mut data_problem := false
+	// literal_refused says the initializer was a shape the reader reported, which
+	// is a different answer from an initializer that is not a number at all: the
+	// first has its own diagnostic at its own location, and the second is what
+	// the report below is for.
 	mut literal_refused := false
 	for {
 		d := p.parse_declarator(0) or {
@@ -589,6 +605,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_type = p.spelling_of(spec, d.stars)
 				data_stars = d.stars
 				data_count = d.array_count
+				data_array = d.array_at.line > 0
 				data_clause = p.declared_type(spec.clause, d)
 			}
 			if p.at_punct('=') {
@@ -597,10 +614,57 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_defined = true
 				p.next()
 				before := p.diagnostics.len
-				constant := p.file_scope_constant()
-				data_init = constant.integer
-				data_init_float = constant.floating
-				literal_refused = p.diagnostics.len > before
+				if p.at_punct('{') && d.stars == 0 {
+					// A brace initializer, read here because a list is
+					// what gives an array with empty brackets its size.
+					// A pointer's initializer is not read this way: a
+					// pointer at the top level is refused below, and
+					// reading its list first would report the same
+					// declaration twice.
+					data_brace = true
+					if list := p.parse_brace_initializer() {
+						if !data_array {
+							// An object of an aggregate type is refused below
+							// by name, so the scalar question is not asked of
+							// it here: one declaration, one diagnostic.
+							if spec.clause.kind !in [types.Kind.struct_, .union_] {
+								// One scalar in braces; a list of more
+								// values has no room in one object
+								// (6.7.8p2, measured on gcc 16.2.1:
+								// `int x = {1, 2};` is `excess elements
+								// in scalar initializer`).
+								if list.values.len > 1 {
+									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.values.len}')
+									data_problem = true
+								}
+								element := list.values[0]
+								data_init, data_init_float = initializer_for(data_type, element.number.integer,
+									element.number.floating)
+							}
+						} else {
+							// A written size smaller than the list is
+							// the same violation (measured,
+							// `int a[2] = {1, 2, 3};` is `excess
+							// elements in array initializer`), and a
+							// list for an array with empty brackets
+							// is what its size is.
+							if data_count > 0 && list.values.len > data_count {
+								p.error_at(list.at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${list.values.len}')
+								data_problem = true
+							}
+							if data_count == 0 {
+								data_count = list.values.len
+							}
+							data_inits, data_init_floats = initializer_list_for(data_type, list.values)
+						}
+					}
+					literal_refused = true
+				} else {
+					constant := p.file_scope_constant()
+					data_init = constant.integer
+					data_init_float = constant.floating
+					literal_refused = p.diagnostics.len > before
+				}
 				p.skip_to_separator() or {
 					p.skip_declaration()
 					return decls
@@ -644,12 +708,22 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if spec.clause.kind in [types.Kind.struct_, .union_] {
+			if data_brace {
+				// A brace initializer for an object of an aggregate type is a
+				// list of lists: a member may itself be an aggregate, and the
+				// designators and the nesting are not shapes this reader has.
+				// Measured before this was refused, a file-scope
+				// `struct S s = {5, 6};` laid the object out as zeros and the
+				// program read 0 where gcc 16.2.1 reads 56.
+				p.error_at(data_at, 'unsupported: ${data_name} is an object of the type ${spec.clause.describe()}, and a brace initializer for one is not implemented')
+				return decls
+			}
 			// An object of an aggregate type at the top level is storage in the
 			// image, and how much of it is a fact about the layout: the model
 			// answers the size once, here, and the image writer reserves that
 			// many zeroed bytes. Nothing in it is initialized by the
-			// definition, because C has no brace list in this reader and the
-			// members are written one at a time.
+			// definition, because an object with no initializer is the zeros
+			// the storage starts as.
 			bytes := p.aggregate_bytes(spec.clause)
 			if bytes == 0 {
 				p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${spec.clause.describe()}, and its layout is not one this compiler knows')
@@ -671,14 +745,20 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			}
 			return decls
 		}
-		if data_defined && data_init == none && data_init_float == none {
+		if data_defined && data_init == none && data_init_float == none && data_inits.len == 0
+			&& data_init_floats.len == 0 {
 			// Either way the definition is refused. When the initializer was a
-			// number the literal reader refused, it has already been named at
-			// its own location and this report would be a second message about
-			// the same construct.
+			// shape the reader reported, it has already been named at its own
+			// location and this report would be a second message about the
+			// same construct.
 			if !literal_refused {
 				p.error_at(data_at, 'unsupported: ${data_name} is initialized with something that is not a number, and only a number can be written into the image so far')
 			}
+			return decls
+		}
+		if data_problem {
+			// The list was refused for its size and has already been named:
+			// there is nothing to lay out, and the program does not compile.
 			return decls
 		}
 		if data_name.len == 0 {
@@ -699,14 +779,16 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		init, init_float := initializer_for(data_type, data_init, data_init_float)
 		p.declare_name(data_name, data_clause, data_at, true)
 		p.globals << ast.Global{
-			name:       data_name
-			typ:        data_type
-			resolved:   data_clause
-			count:      data_count
-			init:       init
-			init_float: init_float
-			line:       data_at.line
-			col:        data_at.col
+			name:        data_name
+			typ:         data_type
+			resolved:    data_clause
+			count:       data_count
+			init:        init
+			init_float:  init_float
+			inits:       data_inits
+			init_floats: data_init_floats
+			line:        data_at.line
+			col:         data_at.col
 		}
 	}
 	return decls
@@ -722,19 +804,21 @@ struct FileConstant {
 	floating ?f64
 }
 
-// file_scope_constant reads the initializer a file-scope definition may have: a
-// number, signed, which is the only shape this folds.
-// Anything else - a string, a brace list, an expression - reads as none, and the
-// caller reports it: what is written into the image is a constant, and a
-// constant is what can be written.
-//
-// A number the literal reader refuses is reported here, at the literal as it was
-// written, which is where the expression path reports the same refusal. The
-// caller is told that it happened so that it does not follow it with the report
-// for an initializer that is not a number at all: measured, `int x = 0x1p3;`
-// used to exit with `x is initialized with something that is not a number`
-// instead of naming the construct.
-fn (mut p Parser) file_scope_constant() FileConstant {
+// NumberConstant is a written number with the sign that may stand in front of it,
+// and the token the number itself was written at. The token is kept because the
+// type of a constant is decided from its spelling - `1` and `1L` are not the
+// same type - and a list of them is read into nodes that need one.
+struct NumberConstant {
+	number FileConstant
+	at     tokenize.Token
+}
+
+// number_constant reads a written number with the sign in front of it. It is the
+// shape a constant initializer has wherever the compiler can write one: a scalar
+// or a list element. It answers none when what is written is not a number at all,
+// and reports a literal it cannot read at the literal itself, which is the same
+// refusal the expression path gives the same spelling.
+fn (mut p Parser) number_constant() ?NumberConstant {
 	sign := if p.at_punct('-') {
 		p.next()
 		-1
@@ -745,10 +829,47 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 		1
 	}
 	if p.peek().kind != .number {
-		return FileConstant{}
+		return none
 	}
-	t := p.peek()
-	p.next()
+	t := p.next()
+	if is_floating_constant(t.text) {
+		value := parse_floating_literal(t.text) or {
+			p.error_at(t, err.msg())
+			return none
+		}
+		return NumberConstant{
+			number: FileConstant{
+				floating: if sign < 0 { -value } else { value }
+			}
+			at:     t
+		}
+	}
+	value := parse_integer_literal(t.text) or {
+		p.error_at(t, err.msg())
+		return none
+	}
+	return NumberConstant{
+		number: FileConstant{
+			integer: sign * value
+		}
+		at:     t
+	}
+}
+
+// file_scope_constant reads the initializer a file-scope definition may have: a
+// number, signed, which is the only shape this folds.
+// Anything else - a string, an expression - reads as none, and the caller reports
+// it: what is written into the image is a constant, and a constant is what can be
+// written. A brace list is read by `parse_brace_initializer` before this is
+// reached, so it never arrives here.
+//
+// A number the literal reader refuses is reported by `number_constant`, at the
+// literal as it was written, which is where the expression path reports the same
+// refusal. The caller is told that it happened so that it does not follow it with
+// the report for an initializer that is not a number at all: measured,
+// `int x = 0x1p3;` used to exit with `x is initialized with something that is not
+// a number` instead of naming the construct.
+fn (mut p Parser) file_scope_constant() FileConstant {
 	// The number is the initializer or the initializer is not one this reads. An
 	// expression is a shape this does not fold, and reading its first term and
 	// stopping was silent: `int g = 2 + 3;` defined g as 2, `int g = 1 << 3;` as
@@ -756,25 +877,114 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 	// `__int128 g = 0 - 100;` as 0, each with no diagnostic and an image written.
 	// Answering none here is what the comment above promises: the caller reports
 	// what it cannot write, so an expression refuses by name at the definition.
+	constant := p.number_constant() or { return FileConstant{} }
 	if !p.at_punct(',') && !p.at_punct(';') {
 		return FileConstant{}
 	}
-	if is_floating_constant(t.text) {
-		value := parse_floating_literal(t.text) or {
-			p.error_at(t, err.msg())
-			return FileConstant{}
+	return constant.number
+}
+
+// BraceList is a brace initializer as the reader read it: the constants in the
+// order written, and the opening brace, which is what a diagnostic about the
+// list points at.
+struct BraceList {
+	values []NumberConstant
+	at     tokenize.Token
+}
+
+// parse_brace_initializer reads `{ v, v, ... }`, the list of constants that
+// initializes an object. One element is one written number with its sign.
+//
+// A shape this reader does not read is refused by name and at its own location
+// rather than read as a shorter list, because a list that wrote three values and
+// was read as one would write a wrong table, and a wrong value in a table is
+// worse than a refusal. Refused here: a nested list, `{{...}}`; a designator,
+// `{.x = 1}` or `{[2] = 1}`; an element that is not a written constant, which is
+// every expression, `{1 + 2}` included; and an empty pair of braces, which gives
+// an array no size to be.
+fn (mut p Parser) parse_brace_initializer() !BraceList {
+	open := p.next() // {
+	if p.at_punct('}') {
+		p.next()
+		p.error_at(open, 'unsupported: an empty brace initializer is not implemented')
+		return error('empty brace initializer')
+	}
+	// A shape that stops the reader is reported and the rest of the list is
+	// read past to its closing brace, so that the token after the list is where
+	// the declaration reader expects it: a failed read that left the cursor
+	// inside the braces would report the same declaration a second time at a
+	// token of the next one.
+	mut values := []NumberConstant{}
+	for {
+		t := p.peek()
+		if t.kind == .eof {
+			p.error_at(open, 'unsupported: unterminated { opened at ${open.line}:${open.col}')
+			return error('unterminated brace initializer')
 		}
-		return FileConstant{
-			floating: if sign < 0 { -value } else { value }
+		if t.kind == .punct && t.text == '{' {
+			p.error_at(t, 'unsupported: a nested brace initializer is not implemented')
+			p.skip_balanced(open) or {}
+			return error('nested brace initializer')
 		}
+		if t.kind == .punct && (t.text == '.' || t.text == '[') {
+			p.error_at(t, 'unsupported: a designator in a brace initializer is not implemented')
+			p.skip_balanced(open) or {}
+			return error('brace designator')
+		}
+		before := p.diagnostics.len
+		constant := p.number_constant() or {
+			// A literal the reader refused has already been named at the
+			// literal; this is the report for an element that is not a number
+			// at all, which is every character constant, every name and every
+			// expression.
+			if p.diagnostics.len == before {
+				p.error_at(t, 'unsupported: an element of a brace initializer is a written number, found ${describe(t)}')
+			}
+			p.skip_balanced(open) or {}
+			return error('brace element')
+		}
+		values << constant
+		if p.at_punct(',') {
+			p.next()
+			continue
+		}
+		if p.at_punct('}') {
+			p.next()
+			return BraceList{
+				values: values
+				at:     open
+			}
+		}
+		p.error_at(p.peek(), 'unsupported: expected , or } in a brace initializer, found ${describe(p.peek())}')
+		p.skip_balanced(open) or {}
+		return error('brace list')
 	}
-	value := parse_integer_literal(t.text) or {
-		p.error_at(t, err.msg())
-		return FileConstant{}
+}
+
+// constant_expr is one constant of a brace list as the expression the tree
+// carries: an integer constant becomes an int literal and a floating one a
+// double literal, which are the two nodes a written constant already is. The
+// type is the one the literal has from its spelling, not the type of the object
+// it initializes, so that the assignment the list becomes checks the constant
+// against the object the same way a written assignment does.
+fn (mut p Parser) constant_expr(constant NumberConstant) ast.Expr {
+	if value := constant.number.integer {
+		return ast.Expr(ast.IntLit{
+			value: value
+			text:  constant.at.text
+			typ:   p.constant_type(constant.at, value)
+			line:  constant.at.line
+			col:   constant.at.col
+		})
 	}
-	return FileConstant{
-		integer: sign * value
-	}
+	value := constant.number.floating or { f64(0) }
+	return ast.Expr(ast.FloatLit{
+		value: value
+		text:  constant.at.text
+		typ:   p.floating_type(constant.at, value)
+		line:  constant.at.line
+		col:   constant.at.col
+	})
 }
 
 // initializer_for makes a file-scope initializer the class the object was
@@ -801,6 +1011,29 @@ fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
 		return i64(fraction_value), none
 	}
 	return value, none
+}
+
+// initializer_list_for makes each constant of a brace list the class the object's
+// element type holds, which is the conversion an initialization makes: an integer
+// constant initializing a double is that integer as a double, and a floating
+// constant initializing an integer is truncated towards zero. At most one of the
+// two answers is non-empty, for the same reason the scalar pair is split: how the
+// element's bytes are written is a question about the class.
+fn initializer_list_for(written string, values []NumberConstant) ([]i64, []f64) {
+	if written == 'double' {
+		mut floats := []f64{cap: values.len}
+		for value in values {
+			_, fraction := initializer_for(written, value.number.integer, value.number.floating)
+			floats << (fraction or { f64(0) })
+		}
+		return []i64{}, floats
+	}
+	mut integers := []i64{cap: values.len}
+	for value in values {
+		integer, _ := initializer_for(written, value.number.integer, value.number.floating)
+		integers << (integer or { i64(0) })
+	}
+	return integers, []f64{}
 }
 
 // check_definition reports what keeps a definition from being emitted. A

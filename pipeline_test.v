@@ -1394,3 +1394,46 @@ fn test_a_break_in_a_do_while_leaves_the_loop() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// A brace initializer at the top level is written into the image, and the program
+// reads the values it wrote and the zeros it did not. Measured on gcc 16.2.1, this
+// exits 93: x[2] is 3, a[0]*10 is 90, and a[3] is 0 because the list wrote one
+// value of four.
+fn test_a_file_scope_brace_initializer_writes_the_values_into_the_image() {
+	source := scratch('brace_global.c')
+	binary := scratch('brace_global')
+	program := 'int a[4] = {9};\nint x[] = {1, 2, 3};\nint main(void) { return x[2] + a[0] * 10 + a[3]; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 93
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A brace initializer in a body is the stores the initialization makes, one per
+// value the list wrote and a zero for each it did not, because the frame slot
+// holds whatever was there. Measured on gcc 16.2.1, this exits 75: a[0]*10 is 70,
+// a[1] is 0, and b[1] is 5.
+fn test_a_body_brace_initializer_writes_the_values_into_the_frame() {
+	source := scratch('brace_local.c')
+	binary := scratch('brace_local')
+	program := 'int main(void) { int a[3] = {7}; int b[] = {4, 5}; return a[0] * 10 + a[1] + b[1]; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 75
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A scalar wrapped in braces is the value in them, at either scope, and an array
+// of doubles takes the constants in the class of its elements: an integer in a
+// double list is that integer as a double. Measured on gcc 16.2.1, these exit 8
+// and 35.
+fn test_a_scalar_in_braces_and_a_list_of_doubles_hold_what_they_wrote() {
+	source := scratch('brace_scalar.c')
+	binary := scratch('brace_scalar')
+	scalars := 'int x = {5};\nint main(void) { int y = {3}; return x + y; }\n'
+	assert compile_and_run([source, '-o', binary], scalars) == 8
+	doubles := 'static const double d[] = {1.5, 2};\nint main(void) { return (int)(d[0] * 10) + (int)(d[1] * 10); }\n'
+	assert compile_and_run([source, '-o', binary], doubles) == 35
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

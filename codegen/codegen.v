@@ -4881,6 +4881,31 @@ fn (e Emitter) global_element_is_double(name string) bool {
 	return false
 }
 
+// put_integer writes a constant into a blob as the machine holds a value of the
+// given width: little-endian, two's complement. A type wider than the eight bytes
+// a constant is held in takes its remaining bytes from the sign, because the
+// shift that would reach them shifts by the width of the value itself: V leaves
+// that undefined and it answered zero here, so a top-level `__int128 g = -100`
+// came out with a zero second word and every program that read the word got the
+// wrong answer to a constant the language spells out. The low bytes stay the
+// value's own.
+fn put_integer(mut blob []u8, at int, value i64, width int) {
+	low := u64(value)
+	fill := if value < 0 { u8(0xff) } else { u8(0) }
+	for i in 0 .. width {
+		blob[at + i] = if i < 8 { u8((low >> (8 * i)) & 0xff) } else { fill }
+	}
+}
+
+// put_double writes a double into a blob as the eight bytes of its value, which
+// is the same little-endian image the instruction that reads one expects.
+fn put_double(mut blob []u8, at int, value f64, width int) {
+	bits := math.f64_bits(value)
+	for i in 0 .. width {
+		blob[at + i] = u8((bits >> (8 * i)) & 0xff)
+	}
+}
+
 // global_of is the storage a top-level object has in the image, laid out the
 // first time the name is used: the bytes of its constant initializer, or zeros,
 // at the width of one element, with every object starting at a word boundary so
@@ -4932,31 +4957,26 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 	offset := e.program.globals_blob.len
 	e.program.globals_blob << []u8{len: count * element, init: u8(0)}
 	if value := object.init_float {
-		// The initializer of a double is the eight bytes of its value, which is
-		// the same little-endian image the instruction that reads one expects.
-		bits := math.f64_bits(value)
-		for i in 0 .. element {
-			e.program.globals_blob[offset + i] = u8((bits >> (8 * i)) & 0xff)
-		}
+		put_double(mut e.program.globals_blob, offset, value, element)
 	}
 	if value := object.init {
-		// The initializer is a constant, written the way the machine holds a
-		// value of that width: little-endian, two's complement. A type wider than
-		// the eight bytes a constant is held in takes its remaining bytes from the
-		// sign, because the shift that would reach them shifts by the width of the
-		// value itself: V leaves that undefined and it answered zero here, so a
-		// top-level `__int128 g = -100` came out with a zero second word and every
-		// program that read the word got the wrong answer to a constant the
-		// language spells out. The low bytes stay the value's own.
-		low := u64(value)
-		fill := if value < 0 { u8(0xff) } else { u8(0) }
-		for i in 0 .. element {
-			e.program.globals_blob[offset + i] = if i < 8 {
-				u8((low >> (8 * i)) & 0xff)
-			} else {
-				fill
-			}
+		put_integer(mut e.program.globals_blob, offset, value, element)
+	}
+	// A brace list writes one element at a time, at the width of one element, in
+	// the order the list wrote them. The elements the list did not reach stay
+	// zero, which is what the storage started as and what C says the rest of a
+	// partly initialized array holds.
+	for index, value in object.init_floats {
+		if index >= count {
+			break
 		}
+		put_double(mut e.program.globals_blob, offset + index * element, value, element)
+	}
+	for index, value in object.inits {
+		if index >= count {
+			break
+		}
+		put_integer(mut e.program.globals_blob, offset + index * element, value, element)
 	}
 	slot := image.GlobalSlot{
 		offset:   offset
