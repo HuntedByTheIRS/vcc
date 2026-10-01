@@ -3,6 +3,7 @@ module codegen
 import ast
 import backend
 import backend.os.elf
+import backend.os.linux
 import image
 import math
 import tokenize
@@ -318,11 +319,15 @@ fn (mut e Emitter) build() ![]u8 {
 	// stage's business, and resolving one here would fail a compile over a
 	// library the object never mentions.
 	if !e.compile_only {
-		for name in e.libraries {
-			soname := resolve_library(name, search_dirs(e.library_dirs, e.target.library_dirs)) or {
-				e.diagnostics << problem(1, 1, err.msg())
-				return error('cannot resolve -l${name}')
-			}
+		// The whole list goes over in one call: reading a library file is this
+		// system's business, and the emitter has nothing left to say about a name
+		// once the reader has answered. The error carries the file that could not
+		// be read, which says more than the flag that asked for it.
+		sonames := linux.resolve_libraries(e.libraries, linux.search_dirs(e.library_dirs, e.target.library_dirs)) or {
+			e.diagnostics << problem(1, 1, err.msg())
+			return error('cannot resolve the -l libraries')
+		}
+		for soname in sonames {
 			if soname !in e.program.libraries {
 				e.program.libraries << soname
 			}

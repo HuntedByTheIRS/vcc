@@ -1,6 +1,5 @@
-module codegen
+module linux
 
-import backend.os.elf
 import os
 
 // What a `-l` argument comes to: the file behind a library name, and the name
@@ -20,12 +19,17 @@ import os
 // A search that stopped at `libNAME.so` would find nothing for `-ldl`, and a
 // reader that took that file for an object would read a text file as one.
 
-// The offsets this file reads out of an ELF64 header and the records below it.
+// The bytes this file reads out of an ELF64 header and the records below it.
 // They are written here rather than taken from `backend/os/elf/elf.v` because
 // the two jobs are opposite ones: that module writes one container of a fixed
-// shape, this one reads files other tools produced. The class byte and the data
-// byte are the one exception, and they are shared: they mean the same thing on
-// both sides.
+// shape, this one reads files other tools produced. The class and data bytes
+// were the one exception and were shared, on the argument that they mean the
+// same thing on both sides, which they do. They stopped being shared when this
+// file moved under `backend/os/`: the container module asks the target for its
+// machine facts, the target reaches this module, and taking a number from the
+// container would have closed a loop between the two.
+const elf64_class = 2
+const elf64_data_little_endian = 1
 const elf64_header_size = 64
 const elf64_phoff_at = 32
 const elf64_phentsize_at = 54
@@ -53,8 +57,8 @@ struct LibrarySegment {
 // the image carries, in the order they were written and without repeating one.
 pub fn resolve_libraries(names []string, dirs []string) ![]string {
 	mut out := []string{}
-	for name in names {
-		soname := resolve_library(name, dirs)!
+	for given in names {
+		soname := resolve_library(given, dirs)!
 		if soname !in out {
 			out << soname
 		}
@@ -73,24 +77,29 @@ pub fn search_dirs(given []string, system []string) []string {
 
 // resolve_library finds the file one `-l` name stands for and answers the name
 // it should be recorded under.
-fn resolve_library(name string, dirs []string) !string {
-	if name == '' {
+//
+// The parameter is `given` rather than `name` because this module declares a
+// const `name` for the system it describes, and V will not let a function in the
+// module have a local of the same name. The name a caller passed is the one the
+// flag wrote; the name that comes back is the library's own.
+fn resolve_library(given string, dirs []string) !string {
+	if given == '' {
 		return error('-l with no library name')
 	}
 	// `-l:libfoo.so.1` names the file itself, which is how a link asks for one
 	// version of a library without the unversioned name to reach it by.
-	if name.starts_with(':') {
-		wanted := name[1..]
+	if given.starts_with(':') {
+		wanted := given[1..]
 		path := find_file(wanted, dirs) or {
 			return error('cannot find ${wanted}: searched ${describe_dirs(dirs)}')
 		}
 		return library_name_of(path)!
 	}
-	path := find_library(name, dirs) or {
-		return error('cannot find -l${name}: searched ${describe_dirs(dirs)}')
+	path := find_library(given, dirs) or {
+		return error('cannot find -l${given}: searched ${describe_dirs(dirs)}')
 	}
 	if path.ends_with('.a') {
-		return error('-l${name} is ${path}, an archive, and linking an archive is not implemented yet')
+		return error('-l${given} is ${path}, an archive, and linking an archive is not implemented yet')
 	}
 	return library_name_of(path)!
 }
@@ -108,8 +117,8 @@ fn describe_dirs(dirs []string) string {
 // the C library on this machine ships libraries that have no unversioned name:
 // `-ldl` and `-lpthread` are written on V's own command line and a compiler
 // that refused them could not build its host.
-fn find_library(name string, dirs []string) ?string {
-	stem := 'lib${name}.so'
+fn find_library(given string, dirs []string) ?string {
+	stem := 'lib${given}.so'
 	if path := find_file(stem, dirs) {
 		return path
 	}
@@ -129,12 +138,12 @@ fn find_library(name string, dirs []string) ?string {
 		versioned.sort_with_compare(newest_first)
 		return versioned[0]
 	}
-	return find_file('lib${name}.a', dirs)
+	return find_file('lib${given}.a', dirs)
 }
 
-fn find_file(name string, dirs []string) ?string {
+fn find_file(given string, dirs []string) ?string {
 	for dir in dirs {
-		path := os.join_path(dir, name)
+		path := os.join_path(dir, given)
 		if os.is_file(path) {
 			return path
 		}
@@ -190,10 +199,10 @@ fn library_name_of(path string) !string {
 	text := os.read_file(path) or { return error('cannot read ${path}: ${err.msg()}') }
 	bytes := text.bytes()
 	if is_elf(bytes) {
-		name := soname_in(bytes)
+		soname := soname_in(bytes)
 		// An object that carries no SONAME is recorded under its own file
 		// name, which is what a link does with one.
-		return if name == '' { os.base(path) } else { name }
+		return if soname == '' { os.base(path) } else { soname }
 	}
 	if bytes.len > 7 && bytes[0] == `!` && bytes[1] == `<` {
 		return error('${path} is an archive, and linking an archive is not implemented yet')
@@ -216,7 +225,7 @@ fn soname_in(bytes []u8) string {
 	if bytes.len < elf64_header_size {
 		return ''
 	}
-	if bytes[4] != elf.elf_class_64 || bytes[5] != elf.elf_data_little_endian {
+	if bytes[4] != elf64_class || bytes[5] != elf64_data_little_endian {
 		return ''
 	}
 	phoff := int(read_u64(bytes, elf64_phoff_at))
@@ -328,9 +337,9 @@ fn script_library_name(text string, path string) !string {
 		if !is_elf(bytes.bytes()) {
 			return error('${path} names ${word}, which is not an object file')
 		}
-		name := soname_in(bytes.bytes())
-		if name != '' {
-			return name
+		soname := soname_in(bytes.bytes())
+		if soname != '' {
+			return soname
 		}
 		return os.base(target)
 	}
