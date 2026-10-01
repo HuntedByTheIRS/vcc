@@ -279,18 +279,7 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 }
 
 fn resolve_target(name string) !backend.Target {
-	if name == '' {
-		return backend.host() or { error('this platform has no backend: vcc emits ${target_names()}') }
-	}
-	return backend.lookup(name) or { error('unknown target ${name}: vcc emits ${target_names()}') }
-}
-
-fn target_names() string {
-	mut names := []string{}
-	for target in backend.targets() {
-		names << target.name
-	}
-	return names.join(', ')
+	return backend.resolve(name)
 }
 
 // entry_definition finds the function the image starts in. The last definition

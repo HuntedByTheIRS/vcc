@@ -95,6 +95,45 @@ pub fn host() ?Target {
 	return none
 }
 
+// resolve answers the target the command line asks for. An empty name is the
+// machine this binary runs on, which is what a compile with no -target means;
+// anything else is looked up against the descriptions this module carries.
+//
+// The refusal lives here with the list it names rather than in a caller, because
+// two callers ask and they ask at different times: the driver has to know the
+// target before the front end reads anything, since the widths and the aggregate
+// layout the parser works out are the target's, and the emitter has to know it
+// before it writes a byte. One name that resolves to two answers would be a
+// compile whose front end and back end disagree about which machine they are
+// describing.
+pub fn resolve(name string) !Target {
+	if name == '' {
+		return host() or { error(no_target()) }
+	}
+	return lookup(name) or { error(unknown(name)) }
+}
+
+// names lists what this compiler emits for.
+pub fn names() []string {
+	mut out := []string{}
+	for target in targets() {
+		out << target.name
+	}
+	return out
+}
+
+// unknown is what a name this compiler does not describe is told: the name that
+// was asked for, and the ones that exist.
+pub fn unknown(name string) string {
+	return 'unknown target ${name}: vcc emits ${names().join(', ')}'
+}
+
+// no_target is the other refusal: a host this compiler carries no description of,
+// which is a build of vcc whose own platform it cannot emit for.
+pub fn no_target() string {
+	return 'this platform has no backend: vcc emits ${names().join(', ')}'
+}
+
 // reg finds a register by the name it is written with. Both spellings of the
 // same register answer, because callers name the width they mean.
 pub fn (t Target) reg(name string) ?x86_64.Register {
