@@ -3889,9 +3889,9 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		if wide && step.op !in ['<<', '>>'] {
 			e.extend_operand_to_word(step.right, step.line, step.col)!
 		}
-		e.move_operand_to_scratch(step)!
+		e.move_operand_to_scratch(step, wide)!
 		e.load_accumulator(slot, step.line, step.col)!
-		e.apply_binary(step)!
+		e.apply_binary(step, wide)!
 	}
 }
 
@@ -3974,14 +3974,14 @@ fn (mut e Emitter) move_double_to_scratch(line int, col int) !void {
 // because the four-byte move beside it would keep the low half of the address and
 // zero the rest of the register, and the two addresses would then be compared as
 // halves.
-fn (mut e Emitter) move_operand_to_scratch(step ast.Binary) !void {
+fn (mut e Emitter) move_operand_to_scratch(step ast.Binary, wide bool) !void {
 	if e.comparison_of_an_address(step) {
 		result := e.accumulator(step.line, step.col)!
 		other := e.scratch(step.line, step.col)!
 		e.append(e.target.move_register64(other, result)!)
 		return
 	}
-	if e.step_is_wide(step) {
+	if wide {
 		// A step at the width of a word moves the whole register: the four-byte
 		// move would keep the low half of the right operand and clear the rest,
 		// so a right-hand value whose top bit is set would arrive zero-extended.
@@ -4086,7 +4086,7 @@ fn (mut e Emitter) shift_bits(binary ast.Binary, value i64, limit int) !u8 {
 	return u8(value)
 }
 
-fn (mut e Emitter) apply_binary(binary ast.Binary) !void {
+fn (mut e Emitter) apply_binary(binary ast.Binary, wide bool) !void {
 	result := e.accumulator(binary.line, binary.col)!
 	other := e.scratch(binary.line, binary.col)!
 	// A 64-bit step computes with the machine's word instructions, which is the
@@ -4094,7 +4094,6 @@ fn (mut e Emitter) apply_binary(binary ast.Binary) !void {
 	// had. The signedness is the type the operands convert to, because that is the
 	// type the operation is defined on: `0xffffffffu / 1` is 4294967295 and not -1,
 	// and `18446744073709551615UL / 3` is 6148914691236517205.
-	wide := e.step_is_wide(binary)
 	unsigned := binary.typ.kind.is_unsigned()
 	match binary.op {
 		'+' {
@@ -4679,6 +4678,10 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		stacked++
 	}
+	// The widths the callee's parameters were declared with, read once for the
+	// call: every argument asks the same table, and a lookup per argument is a
+	// string-keyed map probe in the middle of the emitter's hottest loop.
+	widths := e.signatures[call.name] or { []int{} }
 	for i, arg in call.args {
 		place := places[i]
 		line := expr_line(arg)
@@ -4733,7 +4736,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		// integer the parameter holds, which is the conversion the language
 		// defines between the two classes.
 		e.convert_to_int(arg, line, col)!
-		if e.parameter_wants_a_word(call, i, arg) {
+		if e.parameter_wants_a_word(widths, i, arg) {
 			// The parameter is a 64-bit integer and the argument is narrower, so
 			// the value is widened into the whole register before it is parked:
 			// the argument register is loaded at eight bytes, so a negative int
@@ -4804,7 +4807,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			pushed_width := if place.floating {
 				e.target.word_size
 			} else {
-				e.passed_width(call, i, arg, false)!
+				e.passed_width(call, widths, i, arg, false)!
 			}
 			register := e.accumulator(line, col)!
 			e.load_argument(slot, register, pushed_width, line, col)!
@@ -4877,7 +4880,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} has more arguments than the machine has registers for')
 			return error('too many arguments')
 		}
-		width := e.passed_width(call, i, arg, place.floating)!
+		width := e.passed_width(call, widths, i, arg, place.floating)!
 		e.load_argument(slot, register, width, line, col)!
 	}
 	if call.name in e.program.defined {
@@ -5131,7 +5134,7 @@ fn (e Emitter) wide_argument(call ast.Call, position int, arg ast.Expr) bool {
 // given a narrower integer is the same kind of exception: the value is widened
 // where it is parked, and one narrower than the argument takes the low bytes of it,
 // which is the value taken modulo the parameter's width.
-fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr, floating bool) !int {
+fn (mut e Emitter) passed_width(call ast.Call, widths []int, position int, arg ast.Expr, floating bool) !int {
 	// An object of an aggregate type is the parameter's own type rather than a
 	// value of some width: the two are the same type or the type checker refused
 	// the call, and what travels is the object's bytes.
@@ -5147,25 +5150,21 @@ fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr, float
 	}
 	actual := e.width_of(arg)
 	if e.floating_of(arg) {
-		if widths := e.signatures[call.name] {
-			if position < widths.len && widths[position] == e.target.word_size {
-				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a double and the parameter holds an address, and there is no conversion between them')
-				return error('double into a pointer')
-			}
+		if position < widths.len && widths[position] == e.target.word_size {
+			e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a double and the parameter holds an address, and there is no conversion between them')
+			return error('double into a pointer')
 		}
 		return 4
 	}
-	if widths := e.signatures[call.name] {
-		if position < widths.len {
-			expected := widths[position]
-			if actual != none && actual != expected {
-				if e.constant(arg) == none && !e.widening_or_narrowing_integer(actual, expected, arg) {
-					e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a value of ${actual} bytes and the parameter is ${expected}')
-					return error('argument width')
-				}
+	if position < widths.len {
+		expected := widths[position]
+		if actual != none && actual != expected {
+			if e.constant(arg) == none && !e.widening_or_narrowing_integer(actual, expected, arg) {
+				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${position + 1} of the call to ${call.name} is a value of ${actual} bytes and the parameter is ${expected}')
+				return error('argument width')
 			}
-			return expected
 		}
+		return expected
 	}
 	return actual or {
 		e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: the width of argument ${position + 1} of the call to ${call.name} is one this back end cannot size')
@@ -5175,11 +5174,9 @@ fn (mut e Emitter) passed_width(call ast.Call, position int, arg ast.Expr, float
 
 // parameter_wants_a_word says whether the argument at a given position is handed
 // to a parameter eight bytes wide while the value itself is narrower, which is the
-// conversion the call makes and not the value's own width. It asks the call's
-// signature rather than passed_width because that function reports a mismatch, and
-// this one runs before the width it reports is expected to agree.
-fn (e Emitter) parameter_wants_a_word(call ast.Call, position int, arg ast.Expr) bool {
-	widths := e.signatures[call.name] or { return false }
+// conversion the call makes and not the value's own width. The widths are the
+// callee's, read once by the caller rather than looked up again per argument.
+fn (e Emitter) parameter_wants_a_word(widths []int, position int, arg ast.Expr) bool {
 	if position >= widths.len || widths[position] != 8 {
 		return false
 	}
