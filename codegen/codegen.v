@@ -2,6 +2,7 @@ module codegen
 
 import ast
 import backend
+import image
 import math
 import tokenize
 import types
@@ -27,91 +28,6 @@ pub:
 	bytes       []u8
 	target      backend.Target
 	diagnostics []tokenize.Diagnostic
-}
-
-// Fixup is a reference the code could not finish when it was written: a call to
-// a function in the same file, a call to a function that lives in a library, the
-// address of a string, or a jump to a place in the function being emitted. The
-// instruction is in the text with four zero bytes where its displacement goes,
-// and the layout fills them in. length is kept so that filling the reference in
-// cannot quietly change the size of the code it sits in, and register is the
-// register the instruction reads its answer into, for the references that have
-// one.
-struct Fixup {
-	start    int
-	length   int
-	kind     FixupKind
-	name     string
-	register string
-}
-
-enum FixupKind {
-	call_local     // a call to a function this translation unit defines
-	call_import    // a call to a symbol the loader resolves out of a library
-	take_address   // the address of a string in the image
-	jump_local     // a jump to a label inside the function being emitted
-	branch_zero    // the same jump, taken when the value last tested was zero
-	branch_nonzero // and when it was not
-	global_address // the address of an object defined at the top level
-	float_constant // a double the instruction reads out of the read-only data
-}
-
-// Program is what one translation unit became: machine code, the strings it
-// reads, and the references between them.
-struct Program {
-mut:
-	text []u8
-	// fixups are the references the layout has to fill in.
-	fixups []Fixup
-	// labels is where each function's code begins in text, and where every jump
-	// label inside one landed.
-	labels map[string]int
-	// defined is every function the file defines. A call is checked against it
-	// before the library, so a call to a function whose body comes later in the
-	// file binds to that function and not to a symbol of the same name.
-	defined map[string]bool
-	// imports are the library symbols the image needs, in the order they were
-	// first called, so that the same input produces the same bytes every run.
-	imports []string
-	// libraries are the shared libraries the image names as needed, in the
-	// order the -l flags named them: the loader maps these before the first
-	// instruction runs, and one that is not named is one whose symbols are not
-	// there. The C library is not in this list; the container adds it to every
-	// image it writes.
-	libraries []string
-	// string_blob is the read-only data: every distinct string literal with the
-	// terminator a library function reads to, and strings is where each one
-	// starts in it.
-	string_blob []u8
-	strings     map[string]int
-	// doubles is the same storage again for the eight bytes of a floating
-	// constant, keyed by the bit pattern rather than by the bytes, so that two
-	// constants that are the same double are one entry the way two identical
-	// strings are. A double is read out of the image and never written, which
-	// is what lets it live beside the strings.
-	doubles map[string]int
-	// globals_blob is the storage of the objects defined at the top level, and
-	// globals is where each one starts in it. It is a second blob rather than a
-	// part of the strings because a global is written as well as read, and
-	// because a string is interned for the bytes it holds while a global is
-	// interned for the name it was defined with.
-	globals_blob []u8
-	globals      map[string]GlobalSlot
-}
-
-// GlobalSlot is where a top-level object lives in the image and how wide it is:
-// the offset of its first element in globals_blob, the width of one element, and
-// the count of elements it was defined with. floating says the object holds
-// doubles, which is a different instruction for every read and write of it.
-struct GlobalSlot {
-	offset int
-	width  int
-	count  int
-	// object says the storage is an object of an aggregate type rather than a
-	// value: one object is as many bytes as the layout said and an array of them
-	// is that many per element, and nothing reads one as a value.
-	object   bool
-	floating bool
 }
 
 // Slot is where a local or a parameter lives: a displacement from the frame
@@ -176,7 +92,7 @@ struct Emitter {
 	libraries    []string
 	library_dirs []string
 mut:
-	program     Program
+	program     image.Program
 	diagnostics []tokenize.Diagnostic
 	// signatures is the width of each parameter of every function the file
 	// defines, so that a call in the file hands each argument over at the width
@@ -320,7 +236,7 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 			diagnostics: emitter.diagnostics
 		}
 	}
-	image := emitter.build() or {
+	image_bytes := emitter.build() or {
 		// A stage that failed without reporting why still owes a message: an
 		// empty output file that says nothing is the worst outcome available,
 		// and it is what an error raised past a diagnostic produces.
@@ -343,7 +259,7 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 		}
 	}
 	return Result{
-		bytes:  image
+		bytes:  image_bytes
 		target: target
 	}
 }
@@ -461,11 +377,11 @@ fn (mut e Emitter) build() ![]u8 {
 		}
 		e.emit_function(decl)!
 	}
-	image := executable(e.program, e.target) or {
+	image_bytes := executable(e.program, e.target) or {
 		e.diagnostics << problem(1, 1, 'internal: the image could not be laid out: ${err.msg()}')
 		return error('cannot lay out the image')
 	}
-	return image
+	return image_bytes
 }
 
 // refuse_unresolved refuses a tree that carries a value the model did not type.
@@ -1078,7 +994,7 @@ fn (mut e Emitter) assign_object_local(stmt ast.Stmt, target Slot) !void {
 // assign_object_global writes an object into a top-level object: the destination's
 // address is in the image, so it is a reference the layout fills in rather than an
 // offset from the frame.
-fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object GlobalSlot) !void {
+fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object image.GlobalSlot) !void {
 	expr_value := stmt.expr or { return error('assignment without a value') }
 	register := e.accumulator(stmt.line, stmt.col)!
 	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, register.name)
@@ -1817,7 +1733,7 @@ fn (mut e Emitter) jump(name string) !void {
 }
 
 // branch is the jump a condition takes when it comes out zero or not zero.
-fn (mut e Emitter) branch(kind FixupKind, name string, line int, col int) !void {
+fn (mut e Emitter) branch(kind image.FixupKind, name string, line int, col int) !void {
 	bytes := match kind {
 		.branch_zero { e.target.jump_if_zero(0) }
 		.branch_nonzero { e.target.jump_if_not_zero(0) }
@@ -4835,7 +4751,7 @@ fn (mut e Emitter) import_symbol(name string) {
 // the width of one element and how many there are. It asks the tree rather than
 // the image, so an expression can ask it while it is being sized, before anything
 // has needed the address of the object and laid the storage out.
-fn (e Emitter) global_shape(name string) ?GlobalSlot {
+fn (e Emitter) global_shape(name string) ?image.GlobalSlot {
 	if slot := e.program.globals[name] {
 		return slot
 	}
@@ -4847,7 +4763,7 @@ fn (e Emitter) global_shape(name string) ?GlobalSlot {
 				// use, which is why nothing may read the name as a value. An
 				// array of them keeps the count, because that is what says the
 				// name is an array and how far an index reaches.
-				return GlobalSlot{
+				return image.GlobalSlot{
 					offset: 0
 					width:  global.bytes
 					count:  global.count
@@ -4862,14 +4778,14 @@ fn (e Emitter) global_shape(name string) ?GlobalSlot {
 				// type has, and it is refused where a name is read as a value
 				// rather than here, because the storage is real and the layout and
 				// an element address both need this shape.
-				return GlobalSlot{
+				return image.GlobalSlot{
 					offset: 0
 					width:  wide_bytes
 					count:  global.count
 				}
 			}
 			element := e.type_width(global.typ) or { return none }
-			return GlobalSlot{
+			return image.GlobalSlot{
 				offset:   0
 				width:    element
 				count:    if global.count > 0 { global.count } else { 0 }
@@ -4914,7 +4830,7 @@ fn (e Emitter) global_element_is_double(name string) bool {
 // a global is not known while the code is emitted - the image is laid out
 // afterwards - so every use of it is a reference the layout fills in, which is
 // the same mechanism a string literal is addressed by.
-fn (mut e Emitter) global_of(name string) ?GlobalSlot {
+fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 	if slot := e.program.globals[name] {
 		return slot
 	}
@@ -4942,7 +4858,7 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 		offset := e.program.globals_blob.len
 		space := if object.count > 0 { object.count * object.bytes } else { object.bytes }
 		e.program.globals_blob << []u8{len: space, init: u8(0)}
-		slot := GlobalSlot{
+		slot := image.GlobalSlot{
 			offset: offset
 			width:  object.bytes
 			count:  object.count
@@ -4984,7 +4900,7 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 			}
 		}
 	}
-	slot := GlobalSlot{
+	slot := image.GlobalSlot{
 		offset:   offset
 		width:    element
 		count:    shape.count
@@ -4998,7 +4914,7 @@ fn (mut e Emitter) global_of(name string) ?GlobalSlot {
 // address of it is loaded out of the image, parked in a scratch slot while the
 // value is computed - the value can read the object again - and then the value is
 // written through the address.
-fn (mut e Emitter) assign_global(stmt ast.Stmt, object GlobalSlot, expr ast.Expr) !void {
+fn (mut e Emitter) assign_global(stmt ast.Stmt, object image.GlobalSlot, expr ast.Expr) !void {
 	register := e.accumulator(stmt.line, stmt.col)!
 	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, register.name)
 	address := e.value_slot(0)
@@ -5025,7 +4941,7 @@ fn (mut e Emitter) assign_global(stmt ast.Stmt, object GlobalSlot, expr ast.Expr
 // convert_for_global makes a value the class of a top-level object's storage and
 // checks that the two can be one another at all. It is the same question a store
 // into a local asks, with a different shape to the storage.
-fn (mut e Emitter) convert_for_global(expr ast.Expr, object GlobalSlot, line int, col int) !void {
+fn (mut e Emitter) convert_for_global(expr ast.Expr, object image.GlobalSlot, line int, col int) !void {
 	if object.floating {
 		if !e.floating_of(expr) && e.is_a_pointer(expr) {
 			e.diagnostics << problem(line, col, 'unsupported: a pointer is stored in a top-level object that holds a double, and there is no conversion between them')
@@ -5094,10 +5010,10 @@ fn (mut e Emitter) append(bytes []u8) {
 // records what it points at and how long it is. register is the register the
 // instruction computes into, for the references that have one: the address of a
 // string is loaded where the value is about to be used from.
-fn (mut e Emitter) reference(bytes []u8, kind FixupKind, name string, register string) {
+fn (mut e Emitter) reference(bytes []u8, kind image.FixupKind, name string, register string) {
 	start := e.program.text.len
 	e.program.text << bytes
-	e.program.fixups << Fixup{
+	e.program.fixups << image.Fixup{
 		start:    start
 		length:   bytes.len
 		kind:     kind

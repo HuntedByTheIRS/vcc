@@ -1,6 +1,7 @@
 module codegen
 
 import backend
+import image
 
 // The ELF64 container, in the shape Linux starts and its dynamic loader
 // finishes. A program that calls a shared library is not a header and a code
@@ -105,7 +106,7 @@ struct Sections {
 
 // executable wraps a program in an ELF64 image that a Linux kernel can start and
 // a dynamic loader can finish.
-fn executable(program Program, target backend.Target) ![]u8 {
+fn executable(program image.Program, target backend.Target) ![]u8 {
 	base := target.load_base
 	// The loader's path, with the terminator the kernel expects.
 	mut interp := target.interpreter.bytes()
@@ -140,25 +141,27 @@ fn executable(program Program, target backend.Target) ![]u8 {
 		dynstr << u8(0)
 	}
 	sections := layout(program, target, interp.len, dynstr.len, libraries.len)
-	mut image := []u8{len: sections.total, init: u8(0)}
-	put(mut image, sections.interp, interp)
-	put(mut image, sections.text, program.text)
-	put(mut image, sections.dynstr, dynstr)
-	put(mut image, sections.strings, program.string_blob)
-	put(mut image, sections.globals, program.globals_blob)
-	emit_symbols(mut image, program, sections, symbol_names)
-	emit_hash(mut image, program, sections)
-	emit_relocations(mut image, program, sections, base)
-	emit_dynamic(mut image, program, sections, dynstr.len, needed, base)
-	emit_header(mut image, target, base + u64(sections.text))
-	emit_program_headers(mut image, target, sections, interp.len, libraries.len)
-	patch(mut image, program, target, sections)!
-	return image
+	// The image a Linux kernel starts is built here. The name is not `image`,
+	// because that is the module whose Program this function was handed.
+	mut output := []u8{len: sections.total, init: u8(0)}
+	put(mut output, sections.interp, interp)
+	put(mut output, sections.text, program.text)
+	put(mut output, sections.dynstr, dynstr)
+	put(mut output, sections.strings, program.string_blob)
+	put(mut output, sections.globals, program.globals_blob)
+	emit_symbols(mut output, program, sections, symbol_names)
+	emit_hash(mut output, program, sections)
+	emit_relocations(mut output, program, sections, base)
+	emit_dynamic(mut output, program, sections, dynstr.len, needed, base)
+	emit_header(mut output, target, base + u64(sections.text))
+	emit_program_headers(mut output, target, sections, interp.len, libraries.len)
+	patch(mut output, program, target, sections)!
+	return output
 }
 
 // layout places every part of the image: one part after another, each at an
 // eight-byte boundary, with the whole image rounded up to a page.
-fn layout(program Program, target backend.Target, interp_len int, dynstr_len int, library_count int) Sections {
+fn layout(program image.Program, target backend.Target, interp_len int, dynstr_len int, library_count int) Sections {
 	mut offset := int(elf_header_size) + int(elf_program_header_count) * int(elf_program_header_size)
 	interp := offset
 	offset = align(offset + interp_len, 8)
@@ -206,30 +209,30 @@ fn hash_size(symbol_count int) int {
 // requires, then one entry per imported function. Each is a name in the string
 // table, marked global and of function type, with no value and no section,
 // because its definition is somewhere this image is not.
-fn emit_symbols(mut image []u8, program Program, sections Sections, symbol_names map[string]int) {
+fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbol_names map[string]int) {
 	for i, name in program.imports {
 		at := sections.dynsym + (i + 1) * elf_symbol_size
-		put_u32(mut image, at, u32(symbol_names[name]))
-		image[at + 4] = symbol_global_function
+		put_u32(mut output, at, u32(symbol_names[name]))
+		output[at + 4] = symbol_global_function
 	}
 }
 
 // emit_hash writes the SysV hash table. Nothing in this image is looked up by
 // name, so the buckets and the chains stay zero; the loader reads the header to
 // learn how many symbols the table holds.
-fn emit_hash(mut image []u8, program Program, sections Sections) {
-	put_u32(mut image, sections.hash, 1) // one bucket
-	put_u32(mut image, sections.hash + 4, u32(program.imports.len + 1))
+fn emit_hash(mut output []u8, program image.Program, sections Sections) {
+	put_u32(mut output, sections.hash, 1) // one bucket
+	put_u32(mut output, sections.hash + 4, u32(program.imports.len + 1))
 }
 
 // emit_relocations writes one relocation per import: the loader resolves the
 // symbol and writes its address into the slot named here, which is where every
 // call to that function reads it from.
-fn emit_relocations(mut image []u8, program Program, sections Sections, base u64) {
+fn emit_relocations(mut output []u8, program image.Program, sections Sections, base u64) {
 	for i, _ in program.imports {
 		at := sections.rela + i * elf_relocation_size
-		put_u64(mut image, at, base + u64(sections.got + i * 8))
-		put_u64(mut image, at + 8, (u64(i + 1) << 32) | relocation_glob_dat)
+		put_u64(mut output, at, base + u64(sections.got + i * 8))
+		put_u64(mut output, at + 8, (u64(i + 1) << 32) | relocation_glob_dat)
 		// The addend is zero, which says the address itself is the value.
 	}
 }
@@ -238,7 +241,7 @@ fn emit_relocations(mut image []u8, program Program, sections Sections, base u64
 // library it runs against, where the tables are, and how big each record in them
 // is. The DT_NEEDED entries come first and are the only part of the table whose
 // length depends on the command line.
-fn emit_dynamic(mut image []u8, program Program, sections Sections, dynstr_len int, needed []int, base u64) {
+fn emit_dynamic(mut output []u8, program image.Program, sections Sections, dynstr_len int, needed []int, base u64) {
 	mut entries := [][]u64{}
 	for offset in needed {
 		entries << [dt_needed, u64(offset)]
@@ -253,81 +256,81 @@ fn emit_dynamic(mut image []u8, program Program, sections Sections, dynstr_len i
 	entries << [dt_syment, u64(elf_symbol_size)]
 	entries << [dt_null, u64(0)]
 	for i, entry in entries {
-		put_u64(mut image, sections.dynamic + i * elf_dynamic_entry_size, entry[0])
-		put_u64(mut image, sections.dynamic + i * elf_dynamic_entry_size + 8, entry[1])
+		put_u64(mut output, sections.dynamic + i * elf_dynamic_entry_size, entry[0])
+		put_u64(mut output, sections.dynamic + i * elf_dynamic_entry_size + 8, entry[1])
 	}
 }
 
 // emit_header writes the ELF header: what the file is, which machine it runs
 // on, where execution starts, and where the program headers are.
-fn emit_header(mut image []u8, target backend.Target, entry u64) {
-	put(mut image, 0, elf_magic)
-	image[4] = elf_class_64
-	image[5] = elf_data_little_endian
-	image[6] = elf_version_current
+fn emit_header(mut output []u8, target backend.Target, entry u64) {
+	put(mut output, 0, elf_magic)
+	output[4] = elf_class_64
+	output[5] = elf_data_little_endian
+	output[6] = elf_version_current
 	// Byte 7 is the ABI, System V, and bytes 8 to 15 are its padding: the zeroes
 	// the image was made of are what belongs there, so nothing is written.
-	put_u16(mut image, 16, elf_type_exec)
-	put_u16(mut image, 18, target.elf_machine)
-	put_u32(mut image, 20, 1) // the container version, which is current
-	put_u64(mut image, 24, entry)
-	put_u64(mut image, 32, u64(elf_header_size)) // the program headers follow
-	put_u64(mut image, 40, 0) // no section header table
-	put_u32(mut image, 48, 0) // no architecture-specific flags
-	put_u16(mut image, 52, elf_header_size)
-	put_u16(mut image, 54, elf_program_header_size)
-	put_u16(mut image, 56, elf_program_header_count)
-	put_u16(mut image, 58, 0)
-	put_u16(mut image, 60, 0)
-	put_u16(mut image, 62, 0)
+	put_u16(mut output, 16, elf_type_exec)
+	put_u16(mut output, 18, target.elf_machine)
+	put_u32(mut output, 20, 1) // the container version, which is current
+	put_u64(mut output, 24, entry)
+	put_u64(mut output, 32, u64(elf_header_size)) // the program headers follow
+	put_u64(mut output, 40, 0) // no section header table
+	put_u32(mut output, 48, 0) // no architecture-specific flags
+	put_u16(mut output, 52, elf_header_size)
+	put_u16(mut output, 54, elf_program_header_size)
+	put_u16(mut output, 56, elf_program_header_count)
+	put_u16(mut output, 58, 0)
+	put_u16(mut output, 60, 0)
+	put_u16(mut output, 62, 0)
 }
 
 // emit_program_headers writes the four program headers the kernel and the loader
 // read before any of the code runs.
-fn emit_program_headers(mut image []u8, target backend.Target, sections Sections, interp_len int, library_count int) {
+fn emit_program_headers(mut output []u8, target backend.Target, sections Sections, interp_len int, library_count int) {
 	mut at := int(elf_header_size)
 	// PT_INTERP: the loader the kernel hands the process to.
-	put_u32(mut image, at, elf_ph_type_interp)
-	put_u32(mut image, at + 4, elf_ph_flags_read)
-	put_u64(mut image, at + 8, u64(sections.interp))
-	put_u64(mut image, at + 16, target.load_base + u64(sections.interp))
-	put_u64(mut image, at + 24, target.load_base + u64(sections.interp))
-	put_u64(mut image, at + 32, u64(interp_len))
-	put_u64(mut image, at + 40, u64(interp_len))
-	put_u64(mut image, at + 48, 1)
+	put_u32(mut output, at, elf_ph_type_interp)
+	put_u32(mut output, at + 4, elf_ph_flags_read)
+	put_u64(mut output, at + 8, u64(sections.interp))
+	put_u64(mut output, at + 16, target.load_base + u64(sections.interp))
+	put_u64(mut output, at + 24, target.load_base + u64(sections.interp))
+	put_u64(mut output, at + 32, u64(interp_len))
+	put_u64(mut output, at + 40, u64(interp_len))
+	put_u64(mut output, at + 48, 1)
 	at += int(elf_program_header_size)
 	// PT_LOAD: the whole image, at the load base. It is readable, writable and
 	// executable because the code, the strings and the slots the loader writes
 	// all live in it.
-	put_u32(mut image, at, elf_ph_type_load)
-	put_u32(mut image, at + 4, elf_ph_flags_read | elf_ph_flags_write | elf_ph_flags_execute)
-	put_u64(mut image, at + 8, 0)
-	put_u64(mut image, at + 16, target.load_base)
-	put_u64(mut image, at + 24, target.load_base)
-	put_u64(mut image, at + 32, u64(sections.total))
-	put_u64(mut image, at + 40, u64(sections.total))
-	put_u64(mut image, at + 48, target.page_size)
+	put_u32(mut output, at, elf_ph_type_load)
+	put_u32(mut output, at + 4, elf_ph_flags_read | elf_ph_flags_write | elf_ph_flags_execute)
+	put_u64(mut output, at + 8, 0)
+	put_u64(mut output, at + 16, target.load_base)
+	put_u64(mut output, at + 24, target.load_base)
+	put_u64(mut output, at + 32, u64(sections.total))
+	put_u64(mut output, at + 40, u64(sections.total))
+	put_u64(mut output, at + 48, target.page_size)
 	at += int(elf_program_header_size)
 	// PT_DYNAMIC: the table the loader reads.
-	put_u32(mut image, at, elf_ph_type_dynamic)
-	put_u32(mut image, at + 4, elf_ph_flags_read | elf_ph_flags_write)
-	put_u64(mut image, at + 8, u64(sections.dynamic))
-	put_u64(mut image, at + 16, target.load_base + u64(sections.dynamic))
-	put_u64(mut image, at + 24, target.load_base + u64(sections.dynamic))
-	put_u64(mut image, at + 32, u64(dynamic_entry_count(library_count) * elf_dynamic_entry_size))
-	put_u64(mut image, at + 40, u64(dynamic_entry_count(library_count) * elf_dynamic_entry_size))
-	put_u64(mut image, at + 48, 8)
+	put_u32(mut output, at, elf_ph_type_dynamic)
+	put_u32(mut output, at + 4, elf_ph_flags_read | elf_ph_flags_write)
+	put_u64(mut output, at + 8, u64(sections.dynamic))
+	put_u64(mut output, at + 16, target.load_base + u64(sections.dynamic))
+	put_u64(mut output, at + 24, target.load_base + u64(sections.dynamic))
+	put_u64(mut output, at + 32, u64(dynamic_entry_count(library_count) * elf_dynamic_entry_size))
+	put_u64(mut output, at + 40, u64(dynamic_entry_count(library_count) * elf_dynamic_entry_size))
+	put_u64(mut output, at + 48, 8)
 	at += int(elf_program_header_size)
 	// PT_GNU_STACK: the stack is readable and writable and not executable, which
 	// is what a program that never runs code from it should say.
-	put_u32(mut image, at, elf_ph_type_gnu_stack)
-	put_u32(mut image, at + 4, elf_ph_flags_read | elf_ph_flags_write)
-	put_u64(mut image, at + 48, 0x10)
+	put_u32(mut output, at, elf_ph_type_gnu_stack)
+	put_u32(mut output, at + 4, elf_ph_flags_read | elf_ph_flags_write)
+	put_u64(mut output, at + 48, 0x10)
 }
 
 // patch fills in every reference now that every offset is settled. It runs after
 // the parts are in place, because a displacement depends on the whole layout.
-fn patch(mut image []u8, program Program, target backend.Target, sections Sections) ! {
+fn patch(mut output []u8, program image.Program, target backend.Target, sections Sections) ! {
 	for fixup in program.fixups {
 		referent := referent_of(program, sections, fixup)!
 		instruction := sections.text + fixup.start
@@ -371,12 +374,12 @@ fn patch(mut image []u8, program Program, target backend.Target, sections Sectio
 		if replacement.len != fixup.length {
 			return error('the reference to ${fixup.name} was ${fixup.length} bytes and became ${replacement.len}')
 		}
-		put(mut image, instruction, replacement)
+		put(mut output, instruction, replacement)
 	}
 }
 
 // referent_of is where one reference points, as an offset into the image.
-fn referent_of(program Program, sections Sections, fixup Fixup) !int {
+fn referent_of(program image.Program, sections Sections, fixup image.Fixup) !int {
 	match fixup.kind {
 		.call_local, .jump_local, .branch_zero, .branch_nonzero {
 			return sections.text + (program.labels[fixup.name] or {
@@ -412,26 +415,26 @@ fn referent_of(program Program, sections Sections, fixup Fixup) !int {
 	}
 }
 
-fn put(mut image []u8, offset int, bytes []u8) {
+fn put(mut output []u8, offset int, bytes []u8) {
 	for i, byte in bytes {
-		image[offset + i] = byte
+		output[offset + i] = byte
 	}
 }
 
-fn put_u16(mut image []u8, offset int, value u16) {
-	image[offset] = u8(value & 0xff)
-	image[offset + 1] = u8((value >> 8) & 0xff)
+fn put_u16(mut output []u8, offset int, value u16) {
+	output[offset] = u8(value & 0xff)
+	output[offset + 1] = u8((value >> 8) & 0xff)
 }
 
-fn put_u32(mut image []u8, offset int, value u32) {
+fn put_u32(mut output []u8, offset int, value u32) {
 	for shift in [0, 8, 16, 24] {
-		image[offset + shift / 8] = u8((value >> shift) & 0xff)
+		output[offset + shift / 8] = u8((value >> shift) & 0xff)
 	}
 }
 
-fn put_u64(mut image []u8, offset int, value u64) {
+fn put_u64(mut output []u8, offset int, value u64) {
 	for shift in [0, 8, 16, 24, 32, 40, 48, 56] {
-		image[offset + shift / 8] = u8((value >> shift) & 0xff)
+		output[offset + shift / 8] = u8((value >> shift) & 0xff)
 	}
 }
 
