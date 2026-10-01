@@ -821,6 +821,9 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 			.while_stmt {
 				e.emit_while(stmt)!
 			}
+			.do_while_stmt {
+				e.emit_do_while(stmt)!
+			}
 			.break_stmt {
 				e.emit_jump_out(stmt, true)!
 			}
@@ -1604,6 +1607,37 @@ fn (mut e Emitter) emit_while(stmt ast.Stmt) !void {
 		_ := e.emit_statements(stmt.step)!
 	}
 	e.jump(top)!
+	e.place(end)
+}
+
+// emit_do_while writes a loop whose test is at the bottom. That placement is the
+// whole difference from emit_while: the body runs before the condition is read even
+// once, so `top` is where the body starts and the test sits between the body and the
+// jump back. A continue belongs at the test rather than at the jump: landing it on the
+// jump would read the condition nowhere and landing it on the top label would read it
+// only after the body had run again, and C asks for the condition next.
+fn (mut e Emitter) emit_do_while(stmt ast.Stmt) !void {
+	cond := stmt.cond or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a do without a condition')
+		return error('do without a condition')
+	}
+	top := e.label()
+	end := e.label()
+	test := e.label()
+	e.place(top)
+	e.loops << LoopLabels{
+		break_to:    end
+		continue_to: test
+	}
+	e.emit_branch_body(stmt.body)!
+	e.loops.pop()
+	e.place(test)
+	e.emit_expr(cond)!
+	e.emit_test(e.floating_of(cond), stmt.line, stmt.col)!
+	// Round again while the condition holds, which is the branch opposite the one a
+	// while takes to leave: a while leaves when the test is zero, and this one goes
+	// back when the test is not.
+	e.branch(.branch_nonzero, top, stmt.line, stmt.col)!
 	e.place(end)
 }
 

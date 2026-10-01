@@ -105,6 +105,9 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			.while_stmt {
 				out << '${indent}while at ${stmt.line}:${stmt.col}'
 			}
+			.do_while_stmt {
+				out << '${indent}do at ${stmt.line}:${stmt.col}'
+			}
 			.break_stmt {
 				out << '${indent}break at ${stmt.line}:${stmt.col}'
 			}

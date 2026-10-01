@@ -13,7 +13,7 @@ import types
 // statement_keywords are the statements this compiler does not implement. They
 // are named so that `switch (x)` is reported as an unsupported statement rather
 // than as an expression that went wrong at its first parenthesis.
-const statement_keywords = ['do', 'switch', 'case', 'default', 'goto']
+const statement_keywords = ['switch', 'case', 'default', 'goto']
 
 // parse_statement reads one statement. A statement that cannot be read is
 // reported where it starts and skipped by the reader that failed on it, so the
@@ -40,6 +40,9 @@ fn (mut p Parser) parse_statement() ![]ast.Stmt {
 		}
 		if t.text == 'while' {
 			return p.parse_while_statement()
+		}
+		if t.text == 'do' {
+			return p.parse_do_while_statement()
 		}
 		if t.text == 'for' {
 			return p.parse_for_statement()
@@ -427,6 +430,44 @@ fn (mut p Parser) parse_while_statement() ![]ast.Stmt {
 	body := p.parse_control_body()!
 	return [ast.Stmt{
 		kind: .while_stmt
+		cond: cond
+		body: body
+		line: t.line
+		col:  t.col
+	}]
+}
+
+// parse_do_while_statement reads `do stmt while (cond);`. The `while` at the end is
+// this loop's test and not a second statement, which is why it is read here: left for
+// the statement reader it would be a loop with no body and then a stray parenthesis
+// where the source has one loop.
+fn (mut p Parser) parse_do_while_statement() ![]ast.Stmt {
+	t := p.next() // do
+	body := p.parse_control_body()!
+	if p.peek().kind != .identifier || p.peek().text != 'while' {
+		p.error_at(p.peek(), 'unsupported: expected while, found ${describe(p.peek())}')
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	p.next() // while
+	if !p.expect_punct('(') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	cond := p.parse_expression() or {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(')') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	return [ast.Stmt{
+		kind: .do_while_stmt
 		cond: cond
 		body: body
 		line: t.line

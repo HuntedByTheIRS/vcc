@@ -365,9 +365,10 @@ fn test_a_definition_of_an_object_carries_its_type_and_constant() {
 
 // The statement is skipped to its semicolon, so the return after it parses and
 // the file produces exactly one diagnostic. A statement this compiler has no
-// form for is what that path is for.
+// form for is what that path is for, and `goto` is one of those: this test used
+// to write `do` here, and `do` has a form of its own now.
 fn test_one_unsupported_statement_does_not_cascade() {
-	result := parsed('int main() { do { return 1; } while (0); return 0; }')
+	result := parsed('int main() { goto end; return 0; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('unsupported statement')
 	assert result.unit.decls.len == 1
@@ -971,6 +972,29 @@ fn test_break_and_continue_are_statements() {
 	assert inner.body[0].kind == .if_stmt
 	assert inner.body[0].then_body[0].kind == .break_stmt
 	assert inner.body[1].kind == .continue_stmt
+}
+
+fn test_do_while_is_a_statement_of_its_own() {
+	result := parsed('int x;\nint main() { do { x = 1; } while (x < 3); return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[0].kind == .do_while_stmt
+	assert body[0].body.len == 1
+	assert body[0].body[0].kind == .block
+	// The `while` belongs to the loop, so the statement after this one is the return
+	// and not a second loop with no body.
+	assert body[1].kind == .return_stmt
+	assert body.len == 2
+}
+
+fn test_a_do_while_body_does_not_need_braces() {
+	result := parsed('int x;\nint main() { do x = 1; while (x < 3); return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[0].kind == .do_while_stmt
+	assert body[0].body.len == 1
+	assert body[0].body[0].kind == .assign
+	assert body[1].kind == .return_stmt
 }
 
 // A condition that does not parse is reported by the expression reader, and the

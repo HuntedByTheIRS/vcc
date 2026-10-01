@@ -109,6 +109,11 @@ pub enum StmtKind {
 	assign
 	if_stmt
 	while_stmt
+	// do_while_stmt is a loop whose test runs after its body, so the body runs at
+	// least once whatever the condition says. It holds what a while holds and has
+	// no step, because where the test sits is the whole difference between the two
+	// and that is what the kind says.
+	do_while_stmt
 	break_stmt
 	continue_stmt
 }

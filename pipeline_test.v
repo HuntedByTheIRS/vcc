@@ -1354,3 +1354,43 @@ fn test_a_pair_from_a_call_keeps_its_value_across_the_call() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// A do-while's body runs before its condition is read even once, which is the whole
+// difference from a while: this program's test is false from the start and the body
+// still runs, so it exits 1 and not 0. Measured on gcc 16.2.1.
+fn test_a_do_while_runs_its_body_before_reading_the_condition() {
+	source := scratch('do_once.c')
+	binary := scratch('do_once')
+	exit_status := compile_and_run([source, '-o', binary], 'int main() { int c = 0; do { c = c + 1; } while (0); return c; }\n')
+	assert exit_status == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A continue in a do-while belongs at the condition, which is the next thing C does
+// after one, and where it lands is visible only when the condition has gone false by
+// the time the continue runs. This program's third turn is that one: the condition is
+// already false, so a continue that lands on the body's top label runs the body a
+// fourth time and exits 7, while the right placement asks the condition and exits 3.
+// Measured on gcc 16.2.1, which exits 3.
+fn test_a_continue_in_a_do_while_goes_to_the_condition() {
+	source := scratch('do_continue.c')
+	binary := scratch('do_continue')
+	program := 'int main() { int i = 0; int n = 0; do { i = i + 1; if (i == 3) continue; n = n + i; } while (i < 3); return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 3
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A break in a do-while leaves the loop and lands after it. Measured on gcc 16.2.1,
+// this exits 3.
+fn test_a_break_in_a_do_while_leaves_the_loop() {
+	source := scratch('do_break.c')
+	binary := scratch('do_break')
+	program := 'int main() { int i = 0; int n = 0; do { i = i + 1; if (i > 3) break; n = n + 1; } while (i < 10); return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 3
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
