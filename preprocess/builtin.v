@@ -138,9 +138,9 @@ pub fn standard_defines(mode standard.Mode) []string {
 //
 // Nothing above the floor is bought. With 4.3, 7.0, 9.0 and 16.2 the twenty headers
 // this compiler reads over are equally clean, and the C99 corpus in ~/bs/main.c goes
-// 1355, 1355, 1354, 1353 diagnostics: a difference of two, against a higher number
-// turning on glibc branches written for a compiler with capabilities this one does
-// not have.
+// 1355, 1355, 1354, 1353 diagnostics. The spread is two in 1355 and it runs the other
+// way from what reaching further into glibc would predict: two fewer, not more. What
+// those two are was not chased down, so the claim stays at the floor.
 fn gnu_claim() []string {
 	return ['__GNUC__=4', '__GNUC_MINOR__=3', '__GNUC_PATCHLEVEL__=1']
 }
