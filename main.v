@@ -68,10 +68,6 @@ fn main() {
 		eprintln(cli.usage(false))
 		exit(1)
 	}
-	if opts.compile_only {
-		abort('compiling to an object file (-c) is not implemented yet')
-		return
-	}
 	if opts.inputs.len > 1 {
 		abort('linking more than one input is not implemented yet')
 		return
@@ -183,6 +179,7 @@ fn main() {
 	image := codegen.emit(optimized, codegen.Options{
 		target:       opts.target
 		entry:        'main'
+		compile_only: opts.compile_only
 		libraries:    opts.libraries
 		library_dirs: opts.library_dirs
 	})
@@ -195,14 +192,27 @@ fn main() {
 	}
 	out_path := if opts.output != '' {
 		opts.output
+	} else if opts.compile_only {
+		// The object keeps the source's name with .o where its last extension
+		// was, which is where a build looks for it without being told.
+		object_name(path, opts)
 	} else if opts.run {
 		temporary_path()
 	} else {
 		'a.out'
 	}
-	write_image(out_path, image.bytes) or {
-		abort('cannot write ${out_path}: ${err.msg()}')
-		return
+	if opts.compile_only {
+		// A relocatable file is read by a linker and never run, so it is written
+		// without the execute bit an image gets.
+		write_object(out_path, image.bytes) or {
+			abort('cannot write ${out_path}: ${err.msg()}')
+			return
+		}
+	} else {
+		write_image(out_path, image.bytes) or {
+			abort('cannot write ${out_path}: ${err.msg()}')
+			return
+		}
 	}
 	if opts.bench {
 		for line in cli.bench_lines(phases) {
@@ -298,6 +308,13 @@ fn read_source(path string) !string {
 fn write_image(path string, bytes []u8) ! {
 	os.write_file_array(path, bytes)!
 	os.chmod(path, 0o755)!
+}
+
+// write_object writes a relocatable file. It is the same bytes as an image and
+// not the same kind of file: a linker reads it rather than the kernel running
+// it, so it gets no execute bit.
+fn write_object(path string, bytes []u8) ! {
+	os.write_file_array(path, bytes)!
 }
 
 // run_image runs what was just compiled and leaves with its exit status, which is

@@ -349,7 +349,7 @@ pub fn usage(all bool) string {
 	out << 'General options:'
 	out << '  -o outfile    set the output filename (default a.out)'
 	out << '  -run          compile to a temporary file and run it'
-	out << '  -c            compile to an object file only (not implemented yet)'
+	out << '  -c            compile to an object file only, without linking'
 	out << '  -E            preprocess and print the token stream, then stop'
 	out << '  -print-ast    print the tree the emitter would be given, then stop'
 	out << '  -bench        print per-phase timings'

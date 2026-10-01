@@ -14,6 +14,11 @@ pub struct Options {
 pub:
 	target string
 	entry  string
+	// compile_only asks for a relocatable object rather than a program: the same
+	// code and data with the addresses left to whoever links it. It changes what
+	// the last stage wraps the program in and nothing before it, which is why it
+	// is an option here rather than a second entry point.
+	compile_only bool
 	// libraries are the -l names the command line gave, in the order they were
 	// written: a program that calls a function out of a shared library other
 	// than the C library has to name that library for the loader to map it.
@@ -86,7 +91,9 @@ struct WideWorking {
 struct Emitter {
 	target backend.Target
 	entry  string
-	unit   ast.TranslationUnit
+	// compile_only says the container to build is an object and not a program.
+	compile_only bool
+	unit         ast.TranslationUnit
 	// libraries are the -l names the command line gave, and library_dirs the
 	// -L directories they are looked for in. Both are resolved into the names
 	// the image carries before anything is emitted.
@@ -212,8 +219,12 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 			diagnostics: [problem(1, 1, err.msg())]
 		}
 	}
+	// A program has to start somewhere and a kernel starts it at one place, so a
+	// program without the entry function is one this compiler cannot produce. An
+	// object is not a program: it starts nowhere, and which function a link makes
+	// the entry is not decided here.
 	entry := if opts.entry == '' { 'main' } else { opts.entry }
-	if entry_definition(unit, entry) == none {
+	if !opts.compile_only && entry_definition(unit, entry) == none {
 		return Result{
 			target:      target
 			diagnostics: [problem(1, 1, 'no definition of ${entry} in this translation unit')]
@@ -222,6 +233,7 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	mut emitter := Emitter{
 		target:       target
 		entry:        entry
+		compile_only: opts.compile_only
 		unit:         unit
 		libraries:    opts.libraries
 		library_dirs: opts.library_dirs
@@ -301,13 +313,19 @@ fn (mut e Emitter) build() ![]u8 {
 	// alternative is worse than an error: a program that compiles and then
 	// dies at load with an undefined symbol says nothing about the flag that
 	// asked for the library.
-	for name in e.libraries {
-		soname := resolve_library(name, search_dirs(e.library_dirs, e.target.library_dirs)) or {
-			e.diagnostics << problem(1, 1, err.msg())
-			return error('cannot resolve -l${name}')
-		}
-		if soname !in e.program.libraries {
-			e.program.libraries << soname
+	// An object names no libraries. What a translation unit runs against is
+	// decided when it is linked, so a -l on a -c command line is not this
+	// stage's business, and resolving one here would fail a compile over a
+	// library the object never mentions.
+	if !e.compile_only {
+		for name in e.libraries {
+			soname := resolve_library(name, search_dirs(e.library_dirs, e.target.library_dirs)) or {
+				e.diagnostics << problem(1, 1, err.msg())
+				return error('cannot resolve -l${name}')
+			}
+			if soname !in e.program.libraries {
+				e.program.libraries << soname
+			}
 		}
 	}
 	// The names and the parameter widths come first so that a call binds to a
@@ -371,18 +389,34 @@ fn (mut e Emitter) build() ![]u8 {
 			}
 		}
 	}
-	e.emit_start()!
+	// The process stub is the place the kernel lands on: it calls the entry
+	// function and hands its result to the library's exit. An object has no such
+	// place, so it gets none; a link decides what the program starts at.
+	if !e.compile_only {
+		e.emit_start()!
+	}
 	for decl in e.unit.decls {
 		if decl.body.len == 0 {
 			continue
 		}
 		e.emit_function(decl)!
 	}
-	image_bytes := elf.executable(e.program, e.target) or {
-		e.diagnostics << problem(1, 1, 'internal: the image could not be laid out: ${err.msg()}')
-		return error('cannot lay out the image')
+	// The same program, wrapped as one of two things: an object a linker takes as
+	// input, or a program a kernel starts. This is the last decision the emitter
+	// makes and the only one that depends on the mode.
+	mut bytes := []u8{}
+	if e.compile_only {
+		bytes = elf.object(e.program, e.target) or {
+			e.diagnostics << problem(1, 1, 'internal: the object could not be laid out: ${err.msg()}')
+			return error('cannot lay out the object')
+		}
+	} else {
+		bytes = elf.executable(e.program, e.target) or {
+			e.diagnostics << problem(1, 1, 'internal: the image could not be laid out: ${err.msg()}')
+			return error('cannot lay out the image')
+		}
 	}
-	return image_bytes
+	return bytes
 }
 
 // refuse_unresolved refuses a tree that carries a value the model did not type.
@@ -4429,7 +4463,16 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	// are loaded, because loading them is the last thing that could disturb it.
 	result := e.accumulator(call.line, call.col)!
 	e.append(e.target.move_immediate32(result, u32(doubles))!)
-	e.reference(e.target.call_slot(0), .call_import, call.name, '')
+	// A program reaches a library function through the slot the loader fills in,
+	// because the function's address is not known until the loader has run. An
+	// object has no slots and no loader: it leaves the call for the linker to
+	// route, which is what a call to a symbol means in a relocatable file, and
+	// what lets the linker bring in a stub for a function in another object.
+	if e.compile_only {
+		e.reference(e.target.call_near(0), .call_import, call.name, '')
+	} else {
+		e.reference(e.target.call_slot(0), .call_import, call.name, '')
+	}
 	e.release_call_stack()
 }
 
