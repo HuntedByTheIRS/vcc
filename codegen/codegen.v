@@ -2,6 +2,7 @@ module codegen
 
 import ast
 import backend
+import backend.abi
 import backend.os.elf
 import backend.os.linux
 import image
@@ -91,7 +92,14 @@ struct WideWorking {
 
 struct Emitter {
 	target backend.Target
-	entry  string
+	// representation is what the target says about the C types: the width of a
+	// pointer, and the width of an int. The calling convention is read from it
+	// here rather than from the tree, because which register file carries an
+	// object is the target's answer: the same declaration is handed over
+	// differently on a machine with a different convention, and an answer
+	// carried on a node would be one machine's.
+	representation types.Representation
+	entry          string
 	// compile_only says the container to build is an object and not a program.
 	compile_only bool
 	unit         ast.TranslationUnit
@@ -116,7 +124,7 @@ mut:
 	// of one eightbyte is handed over as its bytes in one register rather than
 	// as a value, so a call has to know which parameters those are, and zero
 	// bytes means the parameter is a value.
-	aggregate_params map[string][]ast.Class
+	aggregate_params map[string][]abi.Class
 	// wide_params says, for the same functions, which parameters are one of the
 	// 128-bit integers. Such a parameter is passed as a pair of words in two
 	// registers at once rather than as one value, so a call has to know which
@@ -126,13 +134,13 @@ mut:
 	// return_classes says, for the same functions, which of them hand an object
 	// of an aggregate type back, and how many bytes of one. The value comes back
 	// in the register its class names rather than converted.
-	return_classes map[string]ast.Class
+	return_classes map[string]abi.Class
 	// returning is the return type of the function being emitted, as it was
 	// written, which is what a return statement's value is converted to.
 	returning string
 	// return_class is how the function being emitted hands its value back, and
 	// zero for a function that returns a value of its own width or nothing.
-	return_class ast.Class
+	return_class abi.Class
 	// returns is the return type of every function the file defines, which is
 	// what a call whose value is read has to be checked against: a void
 	// function's result is nothing, and a value read from a call to one would
@@ -232,12 +240,13 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 		}
 	}
 	mut emitter := Emitter{
-		target:       target
-		entry:        entry
-		compile_only: opts.compile_only
-		unit:         unit
-		libraries:    opts.libraries
-		library_dirs: opts.library_dirs
+		target:         target
+		representation: types.from_target(target).representation
+		entry:          entry
+		compile_only:   opts.compile_only
+		unit:           unit
+		libraries:      opts.libraries
+		library_dirs:   opts.library_dirs
 	}
 	// Nothing is written from a tree the model did not type. The check runs
 	// before the layout, so a tree it refuses produces no image at all.
@@ -280,6 +289,15 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 
 fn resolve_target(name string) !backend.Target {
 	return backend.resolve(name)
+}
+
+// class_of is how an object of this type is handed over on the target being emitted
+// for. The emitter asks the declaration's resolved type rather than reading an answer
+// off the node, because which register file carries an object is the target's answer
+// and not the tree's: a class carried on a node is one machine's answer travelling
+// with a file that another machine has to be emitted from.
+fn (e &Emitter) class_of(declared types.Type) abi.Class {
+	return abi.class_of(e.representation, declared)
 }
 
 // entry_definition finds the function the image starts in. The last definition
@@ -329,20 +347,21 @@ fn (mut e Emitter) build() ![]u8 {
 	// left out of the table, because its own emission is where that is reported.
 	for decl in e.unit.decls {
 		e.returns[decl.name] = decl.ret
-		if decl.ret_class.bytes > 0 {
-			e.return_classes[decl.name] = decl.ret_class
+		ret_class := e.class_of(decl.ret_type)
+		if ret_class.bytes > 0 {
+			e.return_classes[decl.name] = ret_class
 			// An object of more than two eightbytes comes back at an address the
 			// caller names, so the caller's storage for it is as large as the
 			// largest such object any declaration in this file returns.
-			if decl.ret_class.count > 2 && decl.ret_class.bytes > e.hidden_bytes {
-				e.hidden_bytes = decl.ret_class.bytes
+			if ret_class.count > 2 && ret_class.bytes > e.hidden_bytes {
+				e.hidden_bytes = ret_class.bytes
 			}
 		}
 		if decl.body.len > 0 {
 			e.program.defined[decl.name] = true
 			mut widths := []int{}
 			mut classes := []bool{}
-			mut aggregates := []ast.Class{}
+			mut aggregates := []abi.Class{}
 			mut wides := []bool{}
 			mut sized := true
 			for param in decl.params {
@@ -354,14 +373,16 @@ fn (mut e Emitter) build() ![]u8 {
 				// A parameter that is an object of an aggregate type is handed
 				// over as its bytes in one register: how many bytes it is and
 				// which file the register belongs to are the two facts the call
-				// needs, and both come from the declaration.
-				if param.class.bytes > 0 {
-					widths << param.class.bytes
-					classes << param.class.first_floating
-					aggregates << param.class
+				// needs, and both are the target's answer for the type the
+				// declaration resolved to.
+				class := e.class_of(param.resolved)
+				if class.bytes > 0 {
+					widths << class.bytes
+					classes << class.first_floating
+					aggregates << class
 					continue
 				}
-				aggregates << ast.Class{}
+				aggregates << abi.Class{}
 				if width := e.type_width(param.typ) {
 					widths << width
 					classes << e.writes_a_double(param.typ)
@@ -522,16 +543,20 @@ fn (mut e Emitter) emit_start() !void {
 // function here needs it, because falling through would otherwise hand the
 // caller whatever the last call left in the result register.
 fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
+	// How the value this function returns is handed back is the target's answer for
+	// the type the declaration resolved to. It is asked once here, where the frame
+	// is laid out, rather than read off the declaration.
+	ret_class := e.class_of(decl.ret_type)
 	// A definition returns a value the caller reads or nothing at all. There is
 	// no third answer the machine has a place for: the result register holds
 	// what a call leaves there, and a void function leaves nothing to read.
-	if decl.ret_class.bytes > 0 {
+	if ret_class.bytes > 0 {
 		// A function may hand an object of an aggregate type back, and the value
 		// comes back in the register the class names rather than converted. An
 		// object larger than one eightbyte is two registers or a copy in memory,
 		// which is the half of this that this compiler does not hand over.
-		if decl.ret_class.first_floating && decl.ret_class.bytes < e.target.word_size {
-			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${decl.ret_class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
+		if ret_class.first_floating && ret_class.bytes < e.target.word_size {
+			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${ret_class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
 			return error('aggregate floating class width')
 		}
 	} else if e.writes_a_128(decl.ret) {
@@ -546,7 +571,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		return error('unsupported return type')
 	}
 	e.returning = decl.ret
-	e.return_class = decl.ret_class
+	e.return_class = ret_class
 	if e.hidden_bytes > 0 {
 		e.hidden = e.reserve(e.hidden_bytes)
 	}
@@ -562,7 +587,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	frame_at := e.program.text.len + e.target.frame_immediate_offset()
 	e.append(e.target.frame_reserve(0))
 	e.push_scope()
-	if decl.ret_class.count > 2 {
+	if ret_class.count > 2 {
 		// A function that hands an object of more than two eightbytes back is given
 		// the address to put it at in the first general register, and keeps it in the
 		// frame until the return: the object it returns is written there, and the call
@@ -585,10 +610,14 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// arrives in the general file and a double in the floating one, each numbered
 	// from its own beginning, which is how `f(int a, double b)` finds a in the
 	// first general register and b in the first floating one.
-	mut integers := if decl.ret_class.count > 2 { 1 } else { 0 }
+	mut integers := if ret_class.count > 2 { 1 } else { 0 }
 	mut doubles := 0
 	mut stacked := 0
 	for _, param in decl.params {
+		// How this parameter is handed over is the target's answer for the type
+		// the declaration resolved to, and it is asked here rather than read off
+		// the node.
+		class := e.class_of(param.resolved)
 		if e.writes_a_128(param.typ) {
 			// A 128-bit parameter is a pair: its two words arrive in two
 			// consecutive argument registers of the general file, low word
@@ -619,31 +648,31 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// the class its members make, and the parameter is storage of exactly
 		// that many bytes: the value is copied into the slot rather than
 		// converted into it.
-		if param.class.bytes > 0 {
-			object := e.declare(param.name, param.typ, 0, param.class.bytes, param.line, param.col)!
+		if class.bytes > 0 {
+			object := e.declare(param.name, param.typ, 0, class.bytes, param.line, param.col)!
 			stacked_at := 2 * e.target.word_size + stacked * e.target.word_size
-			if param.class.count > 2 {
+			if class.count > 2 {
 				// An object of more than two eightbytes is passed in memory: the
 				// caller put a copy of it on the stack, and the parameter is
 				// storage of the layout's bytes that the copy goes into.
 				e.copy_stack_object(object, stacked_at, param.line, param.col)!
-				stacked += param.class.count
+				stacked += class.count
 				continue
 			}
-			if param.class.count == 2 {
+			if class.count == 2 {
 				// Two eightbytes: each arrives in a register of its own class,
 				// or both arrive as two words of the stack when either sequence
 				// had none left for the object, which is the same answer the
 				// caller reached.
-				placed := pair_places(e.target, param.class.first_floating, param.class.second_floating,
+				placed := pair_places(e.target, class.first_floating, class.second_floating,
 					integers, doubles)
 				if placed.registers {
 					integers = placed.integers
 					doubles = placed.doubles
 					e.store_argument_eightbyte(object, 0, e.target.word_size,
-						param.class.first_floating, placed.first, param.line, param.col)!
+						class.first_floating, placed.first, param.line, param.col)!
 					e.store_argument_eightbyte(object, e.target.word_size,
-						param.class.bytes - e.target.word_size, param.class.second_floating,
+						class.bytes - e.target.word_size, class.second_floating,
 						placed.second, param.line, param.col)!
 					continue
 				}
@@ -651,7 +680,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 				stacked += 2
 				continue
 			}
-			if param.class.first_floating {
+			if class.first_floating {
 				if register := e.target.float_arg_reg(doubles) {
 					e.store_double_register(object, register, param.line, param.col)!
 					doubles++
@@ -1155,7 +1184,7 @@ fn (mut e Emitter) copy_frame_object(source Slot, destination Slot, width int, l
 // the signature the declaration gave, so a call to a function this file defines
 // knows; a call to a name nothing declares has no signature, and an object is
 // refused there rather than handed to a function whose convention is unknown.
-fn (e Emitter) aggregate_argument(call ast.Call, position int) ?ast.Class {
+fn (e Emitter) aggregate_argument(call ast.Call, position int) ?abi.Class {
 	if classes := e.aggregate_params[call.name] {
 		if position < classes.len && classes[position].bytes > 0 {
 			return classes[position]
