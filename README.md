@@ -259,7 +259,7 @@ the compiler disagrees with the tag.
 | `backend/` | target description: `arch/` is the machine, `os/` is the system, `backend.v` composes them |
 | `codegen/` | translation unit to bytes: constant folding and the ELF64 container |
 | `tools/` | gate and benchmark scripts; not part of the compiler |
-| `extensions/` | the vendor extensions `-fvcc-exts=` names. Nothing is honored yet, so the flag changes nothing about what compiles |
+| `extensions/` | the vendor extensions `-fvcc-exts=` names. The names come off the rows in `standard/features.v`, and a name that matches a row turns that construct on |
 
 A target is data rather than a directory of hand-written emission, and it has
 two dimensions. `backend/arch/` describes a machine: its register file, how a
