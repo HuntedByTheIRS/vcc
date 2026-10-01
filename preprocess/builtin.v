@@ -98,21 +98,51 @@ fn builtins(target backend.Target) []Definition {
 // be a promise about a language this compiler does not have, and the headers
 // would read it.
 //
-// __STRICT_ANSI__ is the one macro a mode adds, and it is the one that makes a
-// C library's headers hide everything that is not the standard's: a program
-// compiled as c99 sees the C99 declarations gcc shows it and not the POSIX ones.
-// No other mode adds anything, so no spelling this compiler does not implement
-// can change a build.
+// The GNU spellings add the three names a header asks a GNU compiler for. gcc
+// defines those in every mode, because gcc is gcc; this compiler is not one, so the
+// claim is tied to the spelling that asks for a GNU dialect, and the ISO spellings
+// and the ones nobody here recognizes make no such claim. That keeps the dialect a
+// build asked for the thing that decides whether a GNU system's headers see a GNU
+// compiler.
 //
-// -undef takes the macro away with the rest of what describes the target, which
-// is what gcc does with it: `gcc -std=c99 -undef -dM -E -x c /dev/null` prints
-// no __STRICT_ANSI__, and the caller here asks for these defines only when the
-// compiler is meant to predefine things at all.
+// __STRICT_ANSI__ is the other macro a mode adds, and it is the one that makes a C
+// library's headers hide everything that is not the standard's: a program compiled
+// as c99 sees the C99 declarations gcc shows it and not the POSIX ones. An
+// unrecognized spelling adds nothing either, so no -std this compiler does not
+// implement can change a build.
+//
+// -undef takes these away with the rest of what describes the target, which is what
+// gcc does with it: `gcc -std=c99 -undef -dM -E -x c /dev/null` prints no
+// __STRICT_ANSI__, and the caller here asks for these defines only when the compiler
+// is meant to predefine things at all.
 pub fn standard_defines(mode standard.Mode) []string {
-	if mode == .c99 {
-		return ['__STRICT_ANSI__=1']
+	return match mode {
+		.c99 { ['__STRICT_ANSI__=1'] }
+		.gnu89, .gnu99, .gnu11, .gnu17, .gnu23 { gnu_claim() }
+		else { []string{} }
 	}
-	return []
+}
+
+// gnu_claim is the answer a GNU dialect gives a header that asks whether a GNU
+// compiler is reading it: the names glibc's __GNUC_PREREQ is built from, which is
+// `(__GNUC__ << 16) + __GNUC_MINOR__ >= (maj << 16) + min`, so the first two are
+// the ones that matter and both have to be there.
+//
+// The numbers are 4.3.1, and each of the three is measured rather than chosen.
+//
+// 4.3 is the floor on x86_64. <tgmath.h> refuses when `__HAVE_FLOAT128` is 0 while
+// `__HAVE_FLOAT64X` is 1, and bits/floatn.h sets __HAVE_FLOAT128 from
+// `__GNUC_PREREQ (4, 3)`; a 4.2 claim reaches
+// `tgmath.h:66: #error "Unsupported combination of types for <tgmath.h>."`. clang
+// claims 4.2 and survives only because glibc tests `__clang__` as well.
+//
+// Nothing above the floor is bought. With 4.3, 7.0, 9.0 and 16.2 the twenty headers
+// this compiler reads over are equally clean, and the C99 corpus in ~/bs/main.c goes
+// 1355, 1355, 1354, 1353 diagnostics: a difference of two, against a higher number
+// turning on glibc branches written for a compiler with capabilities this one does
+// not have.
+fn gnu_claim() []string {
+	return ['__GNUC__=4', '__GNUC_MINOR__=3', '__GNUC_PATCHLEVEL__=1']
 }
 
 // define_builtins puts them in the macro table, before anything else is read.

@@ -995,3 +995,24 @@ fn test_a_diagnostic_about_an_if_names_where_the_construct_is() {
 	assert indented.diagnostics[0].line == 2
 	assert indented.diagnostics[0].col == 9
 }
+
+fn test_a_gnu_dialect_claims_a_gnu_compiler() {
+	// glibc's __GNUC_PREREQ is `(__GNUC__ << 16) + __GNUC_MINOR__ >= ...`, so a
+	// dialect that claims to be a GNU compiler has to give both of those names, and
+	// not just the first. <tgmath.h> and the 132 other headers under /usr/include
+	// that ask about __GNUC__ read them; without them <tgmath.h> is an #error, and
+	// with a claim below 4.3 it is a different #error.
+	gnu := standard_defines(.gnu99)
+	assert '__GNUC__=4' in gnu
+	assert '__GNUC_MINOR__=3' in gnu
+	assert '__GNUC_PATCHLEVEL__=1' in gnu
+	// The claim belongs to the spelling, so every GNU spelling has it and the ISO
+	// ones and the unrecognized ones do not.
+	assert standard_defines(.gnu11).len == 3
+	assert standard_defines(.gnu23).len == 3
+	assert standard_defines(.c89) == []
+	assert standard_defines(.c11) == []
+	assert standard_defines(.other) == []
+	// c99 is the mode that also hides what the standard does not have.
+	assert standard_defines(.c99) == ['__STRICT_ANSI__=1']
+}
