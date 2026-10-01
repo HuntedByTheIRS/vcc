@@ -1533,6 +1533,12 @@ fn (mut e Emitter) emit_expression_statement(stmt ast.Stmt) !void {
 		e.emit_call(expr, 0)!
 		return
 	}
+	if expr is ast.IncDec {
+		// A statement use throws the value away, which is what `i++;` asks for:
+		// the step is what it does and the old value is not wanted.
+		e.emit_inc_dec(expr, 0)!
+		return
+	}
 	e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an expression statement is emitted when it is a call, and this one is not a call')
 	return error('not a call')
 }
@@ -2677,13 +2683,71 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 	}
 }
 
-// emit_inc_dec writes `++x`, `--x`, `x++` or `x--` for the name the node holds.
-// The reading that builds the node lands beside it in the parser; until then no
-// tree this compiler reads carries one, and a hand-built tree is refused by name
-// rather than emitted as an operator that does nothing.
+// emit_inc_dec writes `++x`, `--x`, `x++` or `x--` for the name the node holds,
+// which is the one operand the parser builds it for: a local in the frame or a
+// top-level object in the image, of an integer type.
+//
+// The step is one, added for `++` and subtracted for `--`. What separates the two
+// spellings is the value left in the accumulator: the prefix form leaves the
+// object after the step, the postfix form what it held before, so the postfix
+// form is the prefix form with the old value parked in a frame slot while the
+// step runs and read back at the end. The slot is the one this level of nesting
+// already uses for a half-finished value, which is free while the step runs
+// because the step evaluates nothing.
+//
+// A char is stepped and written at its own byte: the read widens it to the int
+// the language promotes it to, the step adds an int, and the store cuts the
+// result back to a byte, which is what `c++` is defined to do. The step runs at
+// the width of the object, so an int wraps at four bytes rather than producing a
+// value no int holds.
 fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
-	e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name} is not written yet')
-	return error('inc-dec not emitted')
+	step := if expr.op == '++' { i32(1) } else { i32(-1) }
+	if slot := e.lookup(expr.name) {
+		if slot.count > 0 || slot.bytes > 0 || slot.wide || slot.floating {
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer name only')
+			return error('inc-dec operand is not an integer name')
+		}
+		e.load_accumulator(slot, expr.line, expr.col)!
+		old := if expr.postfix { e.value_slot(depth) } else { Slot{} }
+		if expr.postfix {
+			e.store_accumulator(old, expr.line, expr.col)!
+		}
+		register := e.accumulator(expr.line, expr.col)!
+		e.append(e.target.add_immediate(register, step))
+		e.store_accumulator(slot, expr.line, expr.col)!
+		if expr.postfix {
+			e.load_accumulator(old, expr.line, expr.col)!
+		}
+		return
+	}
+	if object := e.global_of(expr.name) {
+		if object.count > 0 || object.object || object.floating || object.width == wide_bytes {
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer name only')
+			return error('inc-dec operand is not an integer name')
+		}
+		// The object is storage in the image, so its address is a reference the
+		// layout fills in and is parked while the step runs: the value is read
+		// through the address, stepped, and written back through it.
+		register := e.accumulator(expr.line, expr.col)!
+		e.reference(e.target.address_of(register, 0), .global_address, expr.name, e.target.name_of(register))
+		address := e.value_slot(depth)
+		e.store_accumulator(address, expr.line, expr.col)!
+		address_register := e.scratch(expr.line, expr.col)!
+		e.load_argument(address, address_register, e.target.word_size, expr.line, expr.col)!
+		e.append(e.target.load_indirect(address_register, register, object.width)!)
+		old := if expr.postfix { e.value_slot(depth + 1) } else { Slot{} }
+		if expr.postfix {
+			e.store_accumulator(old, expr.line, expr.col)!
+		}
+		e.append(e.target.add_immediate(register, step))
+		e.append(e.target.store_indirect(address_register, register, object.width)!)
+		if expr.postfix {
+			e.load_accumulator(old, expr.line, expr.col)!
+		}
+		return
+	}
+	e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and no local or top-level object of that name is in scope')
+	return error('unknown inc-dec target')
 }
 
 // emit_cast writes a conversion. The operand is computed first and what the

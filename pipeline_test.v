@@ -1394,3 +1394,76 @@ fn test_a_break_in_a_do_while_leaves_the_loop() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// `x++` is worth what x held before the step and `++x` what it holds after, and
+// these programs tell the two apart rather than only checking that a step
+// happened: the first exits 57 where a postfix form that yielded the new value
+// would exit 67, and the second exits 53 where one would exit 43. Measured on
+// gcc 16.2.1, which exits 57 and 53.
+fn test_a_postfix_step_is_worth_the_old_value_and_a_prefix_one_the_new() {
+	source := scratch('incdec_direction.c')
+	binary := scratch('incdec_direction')
+	increment := compile_and_run([source, '-o', binary],
+		'int main(void) { int i = 5; int a = i++; int b = ++i; return a * 10 + b; }\n')
+	assert increment == 57
+	decrement := compile_and_run([source, '-o', binary],
+		'int main(void) { int i = 5; int a = i--; int b = --i; return a * 10 + b; }\n')
+	assert decrement == 53
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The places a step is written: as a statement of its own, as the step of a for,
+// as the value of an expression around it, and on a top-level object rather than
+// a local. Each program is run, so what is checked is the bytes and not the
+// intent. Measured on gcc 16.2.1, which exits 3, 8, 14 and 35.
+fn test_a_step_runs_as_a_statement_a_loop_step_a_value_and_a_global() {
+	source := scratch('incdec_where.c')
+	binary := scratch('incdec_where')
+	statement := compile_and_run([source, '-o', binary],
+		'int main(void) { int i = 0; i++; i++; i++; return i; }\n')
+	assert statement == 3
+	loop_step := compile_and_run([source, '-o', binary],
+		'int main(void) { int n = 0; int i = 0; for (i = 0; i < 4; i++) { n = n + 2; } return n; }\n')
+	assert loop_step == 8
+	enclosing := compile_and_run([source, '-o', binary],
+		'int main(void) { int n = 10; int i = 4; return n + i++; }\n')
+	assert enclosing == 14
+	global := compile_and_run([source, '-o', binary],
+		'int g = 3; int main(void) { int a = g++; int b = ++g; return a * 10 + b; }\n')
+	assert global == 35
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A char is stepped at its own byte: the value 127 plus one is the byte 128,
+// which as a char is -128 and as the int the exit status is read at is 128. The
+// increment of a char is therefore a wrap at one byte, not an int that grew.
+// Measured on gcc 16.2.1, which exits 128.
+fn test_a_char_is_stepped_at_its_own_byte() {
+	source := scratch('incdec_char.c')
+	binary := scratch('incdec_char')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { char c = 127; c++; return c; }\n')
+	assert exit_status == 128
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// An element is not a name, and stepping one would have to reach the lvalue
+// through the subscript the tree has no node for. The program is refused where
+// the operator is written and nothing is written out: a silently wrong value is
+// the one outcome worse than a diagnostic.
+fn test_a_step_on_an_element_is_refused_and_writes_nothing() {
+	source := scratch('incdec_element.c')
+	binary := scratch('incdec_element')
+	text := 'int main(void) { int a[3]; a[0]++; return 0; }\n'
+	os.write_file(source, text) or { panic(err) }
+	lexed := tokenize.lex(text)
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 1
+	assert parsed.diagnostics[0].msg.contains('on a[...]')
+	assert parsed.diagnostics[0].msg.contains('implements ++ and -- on a plain name only')
+	assert !os.exists(binary)
+	os.rm(source) or {}
+}
