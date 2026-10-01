@@ -155,7 +155,11 @@ fn main() {
 		return
 	}
 	started = time.now()
-	parsed := parser.parse(processed.tokens)
+	// The front end needs the target as much as the emitter does: the width of a
+	// pointer and of an int, the offset a member sits at, the type a constant is
+	// given and the class an aggregate is handed over in are all the target's, and
+	// a second target would make the host the wrong answer for every one of them.
+	parsed := parser.parse_for(processed.tokens, parser_target(opts.target))
 	phases << cli.Phase{
 		name:   'parse'
 		micros: time.since(started).microseconds()
@@ -267,6 +271,19 @@ fn standard_line(opts cli.Options) string {
 			return '${opts.standard} (mode ${opts.dialect.spelling()}, ${opts.dialect.standard_name()})'
 		}
 	}
+}
+
+// parser_target is the target the front end resolves widths for: the one the
+// command line names, or the machine this binary runs on when it names none.
+//
+// A name this compiler does not describe is passed on as the host rather than as
+// no description at all. The refusal for an unknown target belongs to the
+// emitter, which is the layer that reads what the flag means, and a parse that
+// could answer no width at all would report the same bad command line as a page
+// of refusals about the source, which sends the reader to the wrong file.
+fn parser_target(name string) ?backend.Target {
+	target := backend.resolve(name) or { return backend.host() }
+	return target
 }
 
 // extensions_line is what -vv says about the vendor extensions: which are on,

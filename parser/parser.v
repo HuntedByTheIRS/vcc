@@ -69,12 +69,27 @@ const supported_types = ['int', 'char', 'void', 'double']
 // recursion until the stack runs out.
 const max_expression_depth = 200
 
-// parse reads a token stream into a translation unit.
+// parse reads a token stream into a translation unit, for the machine this binary
+// was built to run on. A caller that has chosen a target uses parse_for, because
+// the two are not the same machine once a second target exists.
 pub fn parse(tokens []tokenize.Token) Result {
+	return parse_for(tokens, backend.host())
+}
+
+// parse_for reads a token stream into a translation unit for a chosen target.
+//
+// The target is a parameter rather than something this file looks up, because
+// nearly every width it resolves is the target's: the width of a pointer and of an
+// int, the offset a member sits at, the type a constant is given, and the class an
+// object of aggregate type is handed over in. A parse is a parse for one machine,
+// so the caller that selected the machine has to say which one. An absent target
+// leaves every width unanswered, which turns a question about one into a refusal
+// that names what could not be answered instead of a number this file invented.
+pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 	mut p := Parser{
 		tokens:         tokens
 		scopes:         types.new_table()
-		representation: target_representation()
+		representation: representation_of(target)
 		declared:       map[string]bool{}
 	}
 	unit := p.parse_unit()
@@ -89,15 +104,15 @@ pub fn parse(tokens []tokenize.Token) Result {
 	}
 }
 
-// target_representation is what the target description says about the C types.
-// The host is the target this compiler emits for, and the description answers for
-// it what it carries: the width of a pointer, and the width of an int and of an
-// unsigned int, which is the width the back end writes a constant at. A question
-// the description cannot answer is refused by name, which is the difference
-// between a compiler that does not know something and one that guesses.
-fn target_representation() types.Representation {
-	target := backend.host() or { return types.Representation{} }
-	return types.from_target(target).representation
+// representation_of is what the description says about the C types: the width of a
+// pointer, and the width of an int and of an unsigned int, which is the width the
+// back end writes a constant at. A question the description cannot answer is
+// refused by name, which is the difference between a compiler that does not know
+// something and one that guesses. A description of nothing answers nothing, so a
+// missing target reaches the same refusal as an unknown width.
+fn representation_of(target ?backend.Target) types.Representation {
+	chosen := target or { return types.Representation{} }
+	return types.from_target(chosen).representation
 }
 
 // is_type_name says whether a name is one this file has declared as a type
