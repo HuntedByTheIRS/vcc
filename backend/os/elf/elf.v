@@ -23,8 +23,10 @@ import image
 
 const elf_magic = [u8(0x7f), `E`, `L`, `F`]
 
-// The class and data bytes are read by the library reader in `codegen/` as well
-// as written here, so they are the two constants this module makes public.
+// The constants a reader outside this module needs are `pub`. The class and data
+// bytes are read by the library reader in `codegen/libraries.v`, out of objects
+// other tools produced, and the naming constants below are read by the codegen
+// tests, back out of an image this module wrote.
 pub const elf_class_64 = u8(2)
 pub const elf_data_little_endian = u8(1)
 const elf_version_current = u8(1)
@@ -36,9 +38,9 @@ const elf_program_header_size = u16(56)
 const elf_program_header_count = u16(4)
 
 // The program header types this container uses.
-const elf_ph_type_load = u32(1)
-const elf_ph_type_dynamic = u32(2)
-const elf_ph_type_interp = u32(3)
+pub const elf_ph_type_load = u32(1)
+pub const elf_ph_type_dynamic = u32(2)
+pub const elf_ph_type_interp = u32(3)
 const elf_ph_type_gnu_stack = u32(0x6474E551)
 
 // The segment permissions, combined where a segment needs more than one.
@@ -48,13 +50,13 @@ const elf_ph_flags_read = u32(4)
 
 // The dynamic table's tags, from the System V ABI: what the loader is told about
 // the program it has been handed.
-const dt_null = u64(0)
-const dt_needed = u64(1)
-const dt_hash = u64(4)
-const dt_strtab = u64(5)
-const dt_symtab = u64(6)
-const dt_rela = u64(7)
-const dt_relasz = u64(8)
+pub const dt_null = u64(0)
+pub const dt_needed = u64(1)
+pub const dt_hash = u64(4)
+pub const dt_strtab = u64(5)
+pub const dt_symtab = u64(6)
+pub const dt_rela = u64(7)
+pub const dt_relasz = u64(8)
 const dt_relaent = u64(9)
 const dt_strsz = u64(10)
 const dt_syment = u64(11)
@@ -68,17 +70,17 @@ fn dynamic_entry_count(library_count int) int {
 }
 
 // A relocation that asks the loader to write a symbol's address into a slot.
-const relocation_glob_dat = u64(6)
+pub const relocation_glob_dat = u64(6)
 
 // The st_info byte of every symbol this image imports: global, and of function
 // type. The symbols are undefined, which is to say the value comes from
 // somewhere else.
-const symbol_global_function = u8(0x12)
+pub const symbol_global_function = u8(0x12)
 
 // Symbols and relocations are fixed-size records in this container.
-const elf_symbol_size = 24
-const elf_relocation_size = 24
-const elf_dynamic_entry_size = 16
+pub const elf_symbol_size = 24
+pub const elf_relocation_size = 24
+pub const elf_dynamic_entry_size = 16
 
 // The library every image here runs against, whether or not it was asked for:
 // a program written in C has the C library, and a -lc among the -l flags is
