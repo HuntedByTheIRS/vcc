@@ -268,7 +268,12 @@ register is numbered in an instruction, where a function's arguments arrive.
 numbers they take, and the loader constants a container is built from. Neither
 knows the other exists, and every arch-dependent answer the system gives is asked
 for by machine name, which is what lets a second system be written without
-touching the first one's file.
+touching the first one's module.
+
+Each machine and each system is a module of its own, in a directory named for it.
+A V module is a directory, so two machines in one directory would be one module
+with two of every name in it, which is why `backend/arch/x86_64/` is a directory
+and why a second machine is a second directory rather than a second file.
 
 `backend/backend.v` is where the two meet, in a `Target` composed from one of
 each. The emitter asks that, so a new architecture, a new system, or a new fact

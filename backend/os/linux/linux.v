@@ -1,4 +1,4 @@
-module os
+module linux
 
 // Linux, described where it adds something to a bare machine: the kernel entry
 // points a program can call, the registers their arguments arrive in, and the
@@ -6,8 +6,9 @@ module os
 //
 // A system does not know which machine it is running on, so everything that
 // depends on the architecture is asked for by name and answered per architecture.
-// A second system is another file in this directory, and it does not need the
-// machine's file to exist to be written.
+// A second system is a directory of its own beside this one, for the same reason
+// a second machine is, and it does not need the machine's file to exist to be
+// written.
 
 pub const name = 'linux'
 

@@ -1,7 +1,7 @@
 module backend
 
-import backend.arch
-import backend.os
+import backend.arch.x86_64
+import backend.os.linux
 
 // The machine and the system are written by hand in two files that do not know
 // about each other, which is the point of the split and also its one hazard: a
@@ -55,19 +55,19 @@ fn test_a_system_that_does_not_know_a_machine_answers_nothing() {
 	// An empty table is how the emitter finds out that the combination is not
 	// described yet. Falling back to another machine's numbers would be a wrong
 	// program rather than a refusal.
-	assert os.syscalls('z80').len == 0
-	assert os.syscall_args_regs('z80').len == 0
+	assert linux.syscalls('z80').len == 0
+	assert linux.syscall_args_regs('z80').len == 0
 }
 
 fn test_the_encoder_refuses_a_register_it_cannot_name() {
-	wide := arch.Register{
+	wide := x86_64.Register{
 		name:      'rax'
 		wide_name: 'rax'
 		code:      0
 		width:     8
 		call_arg:  -1
 	}
-	encoded := arch.mov_imm32(wide, 1) or { []u8{} }
+	encoded := x86_64.mov_imm32(wide, 1) or { []u8{} }
 	assert encoded.len == 0
 }
 
@@ -91,7 +91,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 	eax := target.reg('eax') or { panic('the target description has no such name') }
 	edi := target.reg('edi') or { panic('the target description has no such name') }
 	// load eax, [rbp-8] / load rax, [rbp-8]
-	assert arch.load_slot(rbp, -8, eax, 4) or { panic('the target description has no such name') } == [
+	assert x86_64.load_slot(rbp, -8, eax, 4) or { panic('the target description has no such name') } == [
 		u8(0x8b),
 		0x85,
 		0xf8,
@@ -99,7 +99,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 		0xff,
 		0xff,
 	]
-	assert arch.load_slot(rbp, -8, eax, 8) or { panic('the target description has no such name') } == [
+	assert x86_64.load_slot(rbp, -8, eax, 8) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x8b,
 		0x85,
@@ -109,7 +109,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 		0xff,
 	]
 	// mov [rbp-8], eax / mov [rbp-8], rax
-	assert arch.store_slot(rbp, -8, eax, 4) or { panic('the target description has no such name') } == [
+	assert x86_64.store_slot(rbp, -8, eax, 4) or { panic('the target description has no such name') } == [
 		u8(0x89),
 		0x85,
 		0xf8,
@@ -117,7 +117,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 		0xff,
 		0xff,
 	]
-	assert arch.store_slot(rbp, -8, eax, 8) or { panic('the target description has no such name') } == [
+	assert x86_64.store_slot(rbp, -8, eax, 8) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x89,
 		0x85,
@@ -128,7 +128,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 	]
 	// A register the low three bits cannot name and a wide move of it, which is
 	// how a pointer parameter arrives in the frame.
-	assert arch.load_slot(rbp, -8, edi, 4) or { panic('the target description has no such name') } == [
+	assert x86_64.load_slot(rbp, -8, edi, 4) or { panic('the target description has no such name') } == [
 		u8(0x8b),
 		0xbd,
 		0xf8,
@@ -136,7 +136,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 		0xff,
 		0xff,
 	]
-	assert arch.store_slot(rbp, -8, edi, 8) or { panic('the target description has no such name') } == [
+	assert x86_64.store_slot(rbp, -8, edi, 8) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x89,
 		0xbd,
@@ -150,7 +150,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 	// The prefix is written even when the low three bits could name a register
 	// without it, because those bits name a different register when it is
 	// missing.
-	assert arch.load_slot(rbp, -8, eax, 1) or { panic('the target description has no such name') } == [
+	assert x86_64.load_slot(rbp, -8, eax, 1) or { panic('the target description has no such name') } == [
 		u8(0x40),
 		0x0f,
 		0xbe,
@@ -160,7 +160,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 		0xff,
 		0xff,
 	]
-	assert arch.store_slot(rbp, -8, eax, 1) or { panic('the target description has no such name') } == [
+	assert x86_64.store_slot(rbp, -8, eax, 1) or { panic('the target description has no such name') } == [
 		u8(0x40),
 		0x88,
 		0x85,
@@ -169,7 +169,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 		0xff,
 		0xff,
 	]
-	assert arch.store_slot(rbp, -8, edi, 1) or { panic('the target description has no such name') } == [
+	assert x86_64.store_slot(rbp, -8, edi, 1) or { panic('the target description has no such name') } == [
 		u8(0x40),
 		0x88,
 		0xbd,
@@ -181,7 +181,7 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 	// A width that is neither a byte, an int nor a pointer is refused: two bytes
 	// is a value this back end has no instruction for, and moving it at four
 	// would read a neighbour.
-	assert arch.load_slot(rbp, -8, eax, 2) or { []u8{} }.len == 0
+	assert x86_64.load_slot(rbp, -8, eax, 2) or { []u8{} }.len == 0
 }
 
 fn test_a_conversion_widens_a_value_with_its_sign_kept() {
@@ -190,12 +190,12 @@ fn test_a_conversion_widens_a_value_with_its_sign_kept() {
 	rax := target.reg('rax') or { panic('the target description has no such name') }
 	// movsx eax, al is a value narrowed to a char, and movsxd rax, eax is an
 	// address made out of an int: 6.3.1.3 says the sign is the one kept.
-	assert arch.sign_extend_byte(eax) or { panic('the target description has no such name') } == [
+	assert x86_64.sign_extend_byte(eax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0xbe,
 		0xc0,
 	]
-	assert arch.sign_extend_word(rax, eax) or { panic('the target description has no such name') } == [
+	assert x86_64.sign_extend_word(rax, eax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x63,
 		0xc0,
@@ -215,10 +215,10 @@ fn test_a_conversion_widens_a_value_with_its_sign_kept() {
 fn test_the_frame_instructions_are_the_bytes_the_machine_reads() {
 	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
 	// sub rsp, 32, and the immediate is where the emitter will fill the size in
-	assert arch.frame_reserve(32) == [u8(0x48), 0x81, 0xec, 0x20, 0x00, 0x00, 0x00]
-	assert arch.frame_reserve_immediate == 3
+	assert x86_64.frame_reserve(32) == [u8(0x48), 0x81, 0xec, 0x20, 0x00, 0x00, 0x00]
+	assert x86_64.frame_reserve_immediate == 3
 	// mov rsp, rbp; pop rbp; ret
-	assert arch.frame_epilogue() == [u8(0x48), 0x89, 0xec, 0x5d, 0xc3]
+	assert x86_64.frame_epilogue() == [u8(0x48), 0x89, 0xec, 0x5d, 0xc3]
 	assert target.frame_immediate_offset() == 3
 }
 
@@ -226,30 +226,30 @@ fn test_the_arithmetic_is_the_bytes_the_machine_reads() {
 	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
 	eax := target.reg('eax') or { panic('the target description has no such name') }
 	ecx := target.reg('ecx') or { panic('the target description has no such name') }
-	assert arch.add_reg32(eax, ecx) or { panic('the target description has no such name') } == [
+	assert x86_64.add_reg32(eax, ecx) or { panic('the target description has no such name') } == [
 		u8(0x01),
 		0xc8,
 	]
-	assert arch.sub_reg32(eax, ecx) or { panic('the target description has no such name') } == [
+	assert x86_64.sub_reg32(eax, ecx) or { panic('the target description has no such name') } == [
 		u8(0x29),
 		0xc8,
 	]
-	assert arch.imul_reg32(eax, ecx) or { panic('the target description has no such name') } == [
+	assert x86_64.imul_reg32(eax, ecx) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0xaf,
 		0xc1,
 	]
 	// cdq then idiv ecx, which is the pair a signed division is
-	assert arch.cdq() == [u8(0x99)]
-	assert arch.idiv_reg32(ecx) or { panic('the target description has no such name') } == [
+	assert x86_64.cdq() == [u8(0x99)]
+	assert x86_64.idiv_reg32(ecx) or { panic('the target description has no such name') } == [
 		u8(0xf7),
 		0xf9,
 	]
-	assert arch.neg_reg32(eax) or { panic('the target description has no such name') } == [
+	assert x86_64.neg_reg32(eax) or { panic('the target description has no such name') } == [
 		u8(0xf7),
 		0xd8,
 	]
-	assert arch.not_reg32(eax) or { panic('the target description has no such name') } == [
+	assert x86_64.not_reg32(eax) or { panic('the target description has no such name') } == [
 		u8(0xf7),
 		0xd0,
 	]
@@ -261,45 +261,45 @@ fn test_a_comparison_becomes_a_zero_or_a_one_in_the_register() {
 	ecx := target.reg('ecx') or { panic('the target description has no such name') }
 	// cmp eax, ecx then setcc al then movzx eax, al, which is every comparison
 	// the language has: the order is the one that changes.
-	assert arch.test_reg32(eax) or { panic('the target description has no such name') } == [
+	assert x86_64.test_reg32(eax) or { panic('the target description has no such name') } == [
 		u8(0x85),
 		0xc0,
 	]
-	assert arch.cmp_reg32(eax, ecx) or { panic('the target description has no such name') } == [
+	assert x86_64.cmp_reg32(eax, ecx) or { panic('the target description has no such name') } == [
 		u8(0x39),
 		0xc8,
 	]
-	assert arch.set_condition(.equal, eax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.equal, eax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x94,
 		0xc0,
 	]
-	assert arch.set_condition(.not_equal, eax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.not_equal, eax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x95,
 		0xc0,
 	]
-	assert arch.set_condition(.less, eax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.less, eax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x9c,
 		0xc0,
 	]
-	assert arch.set_condition(.greater, eax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.greater, eax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x9f,
 		0xc0,
 	]
-	assert arch.set_condition(.less_or_equal, eax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.less_or_equal, eax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x9e,
 		0xc0,
 	]
-	assert arch.set_condition(.greater_or_equal, eax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.greater_or_equal, eax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x9d,
 		0xc0,
 	]
-	assert arch.movzx_byte(eax) or { panic('the target description has no such name') } == [
+	assert x86_64.movzx_byte(eax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0xb6,
 		0xc0,
@@ -320,7 +320,7 @@ fn test_a_comparison_becomes_a_zero_or_a_one_in_the_register() {
 	// Only the first four registers have a one-byte name a conditional set can
 	// write, so anything else is refused rather than encoded at the wrong width.
 	edi := target.reg('edi') or { panic('the target description has no such name') }
-	assert arch.set_condition(.equal, edi) or { []u8{} }.len == 0
+	assert x86_64.set_condition(.equal, edi) or { []u8{} }.len == 0
 }
 
 fn test_a_comparison_of_two_addresses_is_made_at_the_width_of_a_word() {
@@ -330,7 +330,7 @@ fn test_a_comparison_of_two_addresses_is_made_at_the_width_of_a_word() {
 	// cmp rax, rcx then setcc al then movzx eax, al. The wide compare is the same
 	// comparison with REX.W in front of it, because comparing the low halves of
 	// two addresses would call two different ones equal.
-	assert arch.cmp_reg64(rax, rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.cmp_reg64(rax, rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x39,
 		0xc8,
@@ -348,7 +348,7 @@ fn test_a_comparison_of_two_addresses_is_made_at_the_width_of_a_word() {
 	]
 	// The move an address makes into the scratch register is a word too, and the
 	// four-byte move beside it is what would keep the low half of the address.
-	assert arch.mov_reg64(rcx, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.mov_reg64(rcx, rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x89,
 		0xc1,
@@ -360,19 +360,19 @@ fn test_a_comparison_of_two_addresses_is_made_at_the_width_of_a_word() {
 	]
 	// A register the encoder cannot name at four bytes is refused rather than
 	// encoded at the wrong width.
-	al := arch.Register{
+	al := x86_64.Register{
 		name:  'al'
 		code:  0
 		width: 1
 	}
-	assert arch.cmp_reg64(al, rcx) or { []u8{} }.len == 0
-	assert arch.mov_reg64(rcx, al) or { []u8{} }.len == 0
+	assert x86_64.cmp_reg64(al, rcx) or { []u8{} }.len == 0
+	assert x86_64.mov_reg64(rcx, al) or { []u8{} }.len == 0
 }
 
 fn test_the_jumps_are_the_bytes_the_machine_reads() {
-	assert arch.jump_rel32(16) == [u8(0xe9), 0x10, 0x00, 0x00, 0x00]
-	assert arch.jump_zero_rel32(16) == [u8(0x0f), 0x84, 0x10, 0x00, 0x00, 0x00]
-	assert arch.jump_nonzero_rel32(16) == [u8(0x0f), 0x85, 0x10, 0x00, 0x00, 0x00]
+	assert x86_64.jump_rel32(16) == [u8(0xe9), 0x10, 0x00, 0x00, 0x00]
+	assert x86_64.jump_zero_rel32(16) == [u8(0x0f), 0x84, 0x10, 0x00, 0x00, 0x00]
+	assert x86_64.jump_nonzero_rel32(16) == [u8(0x0f), 0x85, 0x10, 0x00, 0x00, 0x00]
 	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
 	assert target.jump(-4) == [u8(0xe9), 0xfc, 0xff, 0xff, 0xff]
 }
@@ -384,9 +384,9 @@ fn test_the_address_instructions_are_the_bytes_the_machine_reads() {
 	eax := target.reg('eax') or { panic('the target description has no such name') }
 	rcx := target.reg('rcx') or { panic('the target description has no such name') }
 	// lea rax, [rbp-8]
-	assert arch.address_of_slot(rbp, -8, rax) == [u8(0x48), 0x8d, 0x85, 0xf8, 0xff, 0xff, 0xff]
+	assert x86_64.address_of_slot(rbp, -8, rax) == [u8(0x48), 0x8d, 0x85, 0xf8, 0xff, 0xff, 0xff]
 	// lea rax, [rbp + rax*4 - 8], and the same address with the scale of a char
-	assert arch.address_of_element(rbp, rax, 4, -8, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.address_of_element(rbp, rax, 4, -8, rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x8d,
 		0x84,
@@ -396,7 +396,7 @@ fn test_the_address_instructions_are_the_bytes_the_machine_reads() {
 		0xff,
 		0xff,
 	]
-	assert arch.address_of_element(rbp, rax, 1, -8, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.address_of_element(rbp, rax, 1, -8, rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x8d,
 		0x84,
@@ -407,35 +407,35 @@ fn test_the_address_instructions_are_the_bytes_the_machine_reads() {
 		0xff,
 	]
 	// mov eax, [rax] / mov rax, [rax] / movsx eax, byte [rax]
-	assert arch.load_indirect(rax, eax, 4) or { panic('the target description has no such name') } == [
+	assert x86_64.load_indirect(rax, eax, 4) or { panic('the target description has no such name') } == [
 		u8(0x8b),
 		0x00,
 	]
-	assert arch.load_indirect(rax, rax, 8) or { panic('the target description has no such name') } == [
+	assert x86_64.load_indirect(rax, rax, 8) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x8b,
 		0x00,
 	]
-	assert arch.load_indirect(rax, eax, 1) or { panic('the target description has no such name') } == [
+	assert x86_64.load_indirect(rax, eax, 1) or { panic('the target description has no such name') } == [
 		u8(0x40),
 		0x0f,
 		0xbe,
 		0x00,
 	]
 	// mov [rcx], eax / mov [rcx], al
-	assert arch.store_indirect(rcx, eax, 4) or { panic('the target description has no such name') } == [
+	assert x86_64.store_indirect(rcx, eax, 4) or { panic('the target description has no such name') } == [
 		u8(0x89),
 		0x01,
 	]
-	assert arch.store_indirect(rcx, eax, 1) or { panic('the target description has no such name') } == [
+	assert x86_64.store_indirect(rcx, eax, 1) or { panic('the target description has no such name') } == [
 		u8(0x40),
 		0x88,
 		0x01,
 	]
 	// An address the encoding cannot name without a displacement, and a scale
 	// that is not a width the machine scales by.
-	assert arch.load_indirect(rbp, eax, 4) or { []u8{} }.len == 0
-	assert arch.address_of_element(rbp, rax, 3, -8, rax) or { []u8{} }.len == 0
+	assert x86_64.load_indirect(rbp, eax, 4) or { []u8{} }.len == 0
+	assert x86_64.address_of_element(rbp, rax, 3, -8, rax) or { []u8{} }.len == 0
 }
 
 // A value two words wide lives in a pair of registers, so the instructions that
@@ -456,13 +456,13 @@ fn test_the_pairs_multiplication_is_the_bytes_the_machine_reads() {
 	// imul rax, rcx and imul rdx, rax, as the machine's own assembler writes
 	// them: the first register is the one multiplied into, and it is the one in
 	// the ModRM reg field.
-	assert arch.imul_word64(rax, rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.imul_word64(rax, rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x0f,
 		0xaf,
 		0xc1,
 	]
-	assert arch.imul_word64(rdx, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.imul_word64(rdx, rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x0f,
 		0xaf,
@@ -470,7 +470,7 @@ fn test_the_pairs_multiplication_is_the_bytes_the_machine_reads() {
 	]
 	r8 := target.reg('r8') or { panic('the target description has no such name') }
 	r9 := target.reg('r9') or { panic('the target description has no such name') }
-	assert arch.imul_word64(r8, r9) or { panic('the target description has no such name') } == [
+	assert x86_64.imul_word64(r8, r9) or { panic('the target description has no such name') } == [
 		u8(0x4d),
 		0x0f,
 		0xaf,
@@ -497,23 +497,23 @@ fn test_the_wide_arithmetic_is_the_bytes_the_machine_reads() {
 	rdx := target.reg('rdx') or { panic('the target description has no such name') }
 	// adc rdx, rax and sbb rdx, rax: the high words of an addition and a
 	// subtraction, after the low words have gone through add and sub.
-	assert arch.adc_reg64(rdx, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.adc_reg64(rdx, rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x11,
 		0xc2,
 	]
-	assert arch.sbb_reg64(rdx, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.sbb_reg64(rdx, rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x19,
 		0xc2,
 	]
-	assert arch.sub_reg64(rax, rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.sub_reg64(rax, rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x29,
 		0xc8,
 	]
 	// adc rdx, 0, which is the carry into the high word of a two-word negation.
-	assert arch.adc_immediate(rdx, 0) or { panic('the target description has no such name') } == [
+	assert x86_64.adc_immediate(rdx, 0) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x81,
 		0xd2,
@@ -523,22 +523,22 @@ fn test_the_wide_arithmetic_is_the_bytes_the_machine_reads() {
 		0,
 	]
 	// The bitwise operators on one word of the pair, and the test of one word.
-	assert arch.and_reg64(rax, rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.and_reg64(rax, rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x21,
 		0xc8,
 	]
-	assert arch.or_reg64(rax, rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.or_reg64(rax, rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x09,
 		0xc8,
 	]
-	assert arch.xor_reg64(rax, rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.xor_reg64(rax, rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x31,
 		0xc8,
 	]
-	assert arch.test_reg64(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.test_reg64(rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x85,
 		0xc0,
@@ -548,17 +548,17 @@ fn test_the_wide_arithmetic_is_the_bytes_the_machine_reads() {
 	// other: the source is in the reg field and the destination in the r/m one.
 	r8 := target.reg('r8') or { panic('the target description has no such name') }
 	r9 := target.reg('r9') or { panic('the target description has no such name') }
-	assert arch.adc_reg64(r8, r9) or { panic('the target description has no such name') } == [
+	assert x86_64.adc_reg64(r8, r9) or { panic('the target description has no such name') } == [
 		u8(0x4d),
 		0x11,
 		0xc8,
 	]
-	assert arch.sbb_reg64(r8, r9) or { panic('the target description has no such name') } == [
+	assert x86_64.sbb_reg64(r8, r9) or { panic('the target description has no such name') } == [
 		u8(0x4d),
 		0x19,
 		0xc8,
 	]
-	assert arch.and_reg64(r8, r9) or { panic('the target description has no such name') } == [
+	assert x86_64.and_reg64(r8, r9) or { panic('the target description has no such name') } == [
 		u8(0x4d),
 		0x21,
 		0xc8,
@@ -611,17 +611,17 @@ fn test_the_wide_arithmetic_is_the_bytes_the_machine_reads() {
 	]
 	// A register that is not a word is refused rather than encoded at the wrong
 	// width.
-	byte := arch.Register{
+	byte := x86_64.Register{
 		name:  'al'
 		code:  0
 		width: 1
 	}
-	assert arch.adc_reg64(byte, rcx) or { []u8{} }.len == 0
-	assert arch.adc_reg64(rax, byte) or { []u8{} }.len == 0
-	assert arch.adc_immediate(byte, 1) or { []u8{} }.len == 0
-	assert arch.sbb_reg64(byte, rcx) or { []u8{} }.len == 0
-	assert arch.sub_reg64(rax, byte) or { []u8{} }.len == 0
-	assert arch.test_reg64(byte) or { []u8{} }.len == 0
+	assert x86_64.adc_reg64(byte, rcx) or { []u8{} }.len == 0
+	assert x86_64.adc_reg64(rax, byte) or { []u8{} }.len == 0
+	assert x86_64.adc_immediate(byte, 1) or { []u8{} }.len == 0
+	assert x86_64.sbb_reg64(byte, rcx) or { []u8{} }.len == 0
+	assert x86_64.sub_reg64(rax, byte) or { []u8{} }.len == 0
+	assert x86_64.test_reg64(byte) or { []u8{} }.len == 0
 }
 
 fn test_the_wide_shifts_are_the_bytes_the_machine_reads() {
@@ -630,13 +630,13 @@ fn test_the_wide_shifts_are_the_bytes_the_machine_reads() {
 	rcx := target.reg('rcx') or { panic('the target description has no such name') }
 	rdx := target.reg('rdx') or { panic('the target description has no such name') }
 	// shl rax, 3 and shr rdx, 5, which shift one word of the pair each.
-	assert arch.shl_reg64(rax, 3) or { panic('the target description has no such name') } == [
+	assert x86_64.shl_reg64(rax, 3) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xc1,
 		0xe0,
 		0x03,
 	]
-	assert arch.shr_reg64(rdx, 5) or { panic('the target description has no such name') } == [
+	assert x86_64.shr_reg64(rdx, 5) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xc1,
 		0xea,
@@ -644,14 +644,14 @@ fn test_the_wide_shifts_are_the_bytes_the_machine_reads() {
 	]
 	// shld rax, rcx, 3 and shrd rax, rcx, 3: the two registers shifted as one
 	// value twice as wide, so the bits that leave one word arrive in the other.
-	assert arch.shld_immediate(rax, rcx, 3) or { panic('the target description has no such name') } == [
+	assert x86_64.shld_immediate(rax, rcx, 3) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x0f,
 		0xa4,
 		0xc8,
 		0x03,
 	]
-	assert arch.shrd_immediate(rax, rcx, 3) or { panic('the target description has no such name') } == [
+	assert x86_64.shrd_immediate(rax, rcx, 3) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x0f,
 		0xac,
@@ -660,7 +660,7 @@ fn test_the_wide_shifts_are_the_bytes_the_machine_reads() {
 	]
 	// The high word of a left shift takes the low word as its source, and 63 is
 	// the widest count that is not the whole register.
-	assert arch.shld_immediate(rdx, rax, 63) or { panic('the target description has no such name') } == [
+	assert x86_64.shld_immediate(rdx, rax, 63) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x0f,
 		0xa4,
@@ -669,26 +669,26 @@ fn test_the_wide_shifts_are_the_bytes_the_machine_reads() {
 	]
 	r8 := target.reg('r8') or { panic('the target description has no such name') }
 	r9 := target.reg('r9') or { panic('the target description has no such name') }
-	assert arch.shl_reg64(r8, 3) or { panic('the target description has no such name') } == [
+	assert x86_64.shl_reg64(r8, 3) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xc1,
 		0xe0,
 		0x03,
 	]
-	assert arch.shr_reg64(r8, 5) or { panic('the target description has no such name') } == [
+	assert x86_64.shr_reg64(r8, 5) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xc1,
 		0xe8,
 		0x05,
 	]
-	assert arch.shld_immediate(r8, r9, 3) or { panic('the target description has no such name') } == [
+	assert x86_64.shld_immediate(r8, r9, 3) or { panic('the target description has no such name') } == [
 		u8(0x4d),
 		0x0f,
 		0xa4,
 		0xc8,
 		0x03,
 	]
-	assert arch.shrd_immediate(r8, r9, 3) or { panic('the target description has no such name') } == [
+	assert x86_64.shrd_immediate(r8, r9, 3) or { panic('the target description has no such name') } == [
 		u8(0x4d),
 		0x0f,
 		0xac,
@@ -696,18 +696,18 @@ fn test_the_wide_shifts_are_the_bytes_the_machine_reads() {
 		0x03,
 	]
 	// A count as wide as the register is not a shift this machine encodes.
-	assert arch.shl_reg64(rax, 64) or { []u8{} }.len == 0
-	assert arch.shrd_immediate(rax, rcx, 64) or { []u8{} }.len == 0
+	assert x86_64.shl_reg64(rax, 64) or { []u8{} }.len == 0
+	assert x86_64.shrd_immediate(rax, rcx, 64) or { []u8{} }.len == 0
 	// A register that is not a word is refused.
-	byte := arch.Register{
+	byte := x86_64.Register{
 		name:  'al'
 		code:  0
 		width: 1
 	}
-	assert arch.shl_reg64(byte, 3) or { []u8{} }.len == 0
-	assert arch.shr_reg64(byte, 3) or { []u8{} }.len == 0
-	assert arch.shld_immediate(byte, rcx, 3) or { []u8{} }.len == 0
-	assert arch.shrd_immediate(rcx, byte, 3) or { []u8{} }.len == 0
+	assert x86_64.shl_reg64(byte, 3) or { []u8{} }.len == 0
+	assert x86_64.shr_reg64(byte, 3) or { []u8{} }.len == 0
+	assert x86_64.shld_immediate(byte, rcx, 3) or { []u8{} }.len == 0
+	assert x86_64.shrd_immediate(rcx, byte, 3) or { []u8{} }.len == 0
 	// The Target forwards each of them.
 	assert target.shift_left_word(rax, 3) or { panic('the target description has no such name') } == [
 		u8(0x48),
@@ -748,74 +748,74 @@ fn test_a_shift_whose_count_is_in_a_register() {
 	// shl eax, cl and shl rax, cl: the four-byte form and the word form of one
 	// operation, which are the two counts a value of each width is shifted by. The
 	// four-byte form is the one whose count the machine reads as five bits.
-	assert arch.shift_left_narrow(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.shift_left_narrow(rax) or { panic('the target description has no such name') } == [
 		u8(0xd3),
 		0xe0,
 	]
-	assert arch.shift_left_word_register(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.shift_left_word_register(rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xd3,
 		0xe0,
 	]
-	assert arch.shift_right_narrow(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.shift_right_narrow(rax) or { panic('the target description has no such name') } == [
 		u8(0xd3),
 		0xe8,
 	]
-	assert arch.shift_right_word_register(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.shift_right_word_register(rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xd3,
 		0xe8,
 	]
-	assert arch.shift_right_arithmetic_narrow(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.shift_right_arithmetic_narrow(rax) or { panic('the target description has no such name') } == [
 		u8(0xd3),
 		0xf8,
 	]
-	assert arch.shift_right_arithmetic_register(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.shift_right_arithmetic_register(rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xd3,
 		0xf8,
 	]
 	// The register the operation is in reaches past the first eight with a REX
 	// prefix, and the four-byte form needs one for that and for nothing else.
-	assert arch.shift_left_narrow(r8) or { panic('the target description has no such name') } == [
+	assert x86_64.shift_left_narrow(r8) or { panic('the target description has no such name') } == [
 		u8(0x41),
 		0xd3,
 		0xe0,
 	]
-	assert arch.shift_left_word_register(r8) or { panic('the target description has no such name') } == [
+	assert x86_64.shift_left_word_register(r8) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xd3,
 		0xe0,
 	]
 	// shld rax, rcx, cl and shrd rax, rcx, cl: the two words shifted as one, with the
 	// count in the register.
-	assert arch.shld_register(rax, rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.shld_register(rax, rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x0f,
 		0xa5,
 		0xc8,
 	]
-	assert arch.shrd_register(rax, rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.shrd_register(rax, rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0x0f,
 		0xad,
 		0xc8,
 	]
 	// test cl, 64: the bit of the count that says the count is a word or more.
-	assert arch.test_byte_immediate(rcx, 64) or { panic('the target description has no such name') } == [
+	assert x86_64.test_byte_immediate(rcx, 64) or { panic('the target description has no such name') } == [
 		u8(0xf6),
 		0xc1,
 		0x40,
 	]
 	// A register narrower than four bytes is not one of these.
-	byte := arch.Register{
+	byte := x86_64.Register{
 		name:  'al'
 		code:  0
 		width: 1
 	}
-	assert arch.shift_left_narrow(byte) or { []u8{} }.len == 0
-	assert arch.shift_left_word_register(byte) or { []u8{} }.len == 0
-	assert arch.test_byte_immediate(byte, 64) or { []u8{} }.len == 0
+	assert x86_64.shift_left_narrow(byte) or { []u8{} }.len == 0
+	assert x86_64.shift_left_word_register(byte) or { []u8{} }.len == 0
+	assert x86_64.test_byte_immediate(byte, 64) or { []u8{} }.len == 0
 }
 
 fn test_the_wide_multiply_and_divide_are_the_bytes_the_machine_reads() {
@@ -824,66 +824,66 @@ fn test_the_wide_multiply_and_divide_are_the_bytes_the_machine_reads() {
 	rcx := target.reg('rcx') or { panic('the target description has no such name') }
 	// mul rcx and imul rcx: the product of the result register and the source in
 	// the pair, read as unsigned values and as signed ones.
-	assert arch.mul_reg64(rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.mul_reg64(rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xf7,
 		0xe1,
 	]
-	assert arch.imul_reg64(rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.imul_reg64(rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xf7,
 		0xe9,
 	]
 	// div rcx and idiv rcx: the pair divided by the source, the quotient back in
 	// the result register and the remainder above it.
-	assert arch.div_reg64(rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.div_reg64(rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xf7,
 		0xf1,
 	]
-	assert arch.idiv_reg64(rcx) or { panic('the target description has no such name') } == [
+	assert x86_64.idiv_reg64(rcx) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xf7,
 		0xf9,
 	]
 	// The sign change and the complement, one word of the pair each.
-	assert arch.neg_reg64(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.neg_reg64(rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xf7,
 		0xd8,
 	]
-	assert arch.not_reg64(rax) or { panic('the target description has no such name') } == [
+	assert x86_64.not_reg64(rax) or { panic('the target description has no such name') } == [
 		u8(0x48),
 		0xf7,
 		0xd0,
 	]
 	r8 := target.reg('r8') or { panic('the target description has no such name') }
-	assert arch.mul_reg64(r8) or { panic('the target description has no such name') } == [
+	assert x86_64.mul_reg64(r8) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xf7,
 		0xe0,
 	]
-	assert arch.imul_reg64(r8) or { panic('the target description has no such name') } == [
+	assert x86_64.imul_reg64(r8) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xf7,
 		0xe8,
 	]
-	assert arch.div_reg64(r8) or { panic('the target description has no such name') } == [
+	assert x86_64.div_reg64(r8) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xf7,
 		0xf0,
 	]
-	assert arch.idiv_reg64(r8) or { panic('the target description has no such name') } == [
+	assert x86_64.idiv_reg64(r8) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xf7,
 		0xf8,
 	]
-	assert arch.neg_reg64(r8) or { panic('the target description has no such name') } == [
+	assert x86_64.neg_reg64(r8) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xf7,
 		0xd8,
 	]
-	assert arch.not_reg64(r8) or { panic('the target description has no such name') } == [
+	assert x86_64.not_reg64(r8) or { panic('the target description has no such name') } == [
 		u8(0x49),
 		0xf7,
 		0xd0,
@@ -920,17 +920,17 @@ fn test_the_wide_multiply_and_divide_are_the_bytes_the_machine_reads() {
 		0xd0,
 	]
 	// These take one operand, so a register that is not a word is refused.
-	byte := arch.Register{
+	byte := x86_64.Register{
 		name:  'al'
 		code:  0
 		width: 1
 	}
-	assert arch.mul_reg64(byte) or { []u8{} }.len == 0
-	assert arch.imul_reg64(byte) or { []u8{} }.len == 0
-	assert arch.div_reg64(byte) or { []u8{} }.len == 0
-	assert arch.idiv_reg64(byte) or { []u8{} }.len == 0
-	assert arch.neg_reg64(byte) or { []u8{} }.len == 0
-	assert arch.not_reg64(byte) or { []u8{} }.len == 0
+	assert x86_64.mul_reg64(byte) or { []u8{} }.len == 0
+	assert x86_64.imul_reg64(byte) or { []u8{} }.len == 0
+	assert x86_64.div_reg64(byte) or { []u8{} }.len == 0
+	assert x86_64.idiv_reg64(byte) or { []u8{} }.len == 0
+	assert x86_64.neg_reg64(byte) or { []u8{} }.len == 0
+	assert x86_64.not_reg64(byte) or { []u8{} }.len == 0
 }
 
 fn test_the_unsigned_orders_are_the_bytes_the_machine_reads() {
@@ -938,24 +938,24 @@ fn test_the_unsigned_orders_are_the_bytes_the_machine_reads() {
 	rax := target.reg('rax') or { panic('the target description has no such name') }
 	// The four orders that read the carry flag, which are the ones a value two
 	// words wide is compared with: setb, setbe, seta and setae.
-	below := arch.Condition.below
+	below := x86_64.Condition.below
 	assert below.code() == u8(0x92)
-	assert arch.set_condition(.below, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.below, rax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x92,
 		0xc0,
 	]
-	assert arch.set_condition(.below_or_equal, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.below_or_equal, rax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x96,
 		0xc0,
 	]
-	assert arch.set_condition(.above, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.above, rax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x97,
 		0xc0,
 	]
-	assert arch.set_condition(.above_or_equal, rax) or { panic('the target description has no such name') } == [
+	assert x86_64.set_condition(.above_or_equal, rax) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0x93,
 		0xc0,
@@ -978,7 +978,7 @@ fn test_the_unsigned_orders_are_the_bytes_the_machine_reads() {
 	// A register with no one-byte name cannot be the destination of a conditional
 	// set, and the same refusal stands on the Target.
 	rdi := target.reg('rdi') or { panic('the target description has no such name') }
-	assert arch.set_condition(.below, rdi) or { []u8{} }.len == 0
+	assert x86_64.set_condition(.below, rdi) or { []u8{} }.len == 0
 	assert target.set_condition(.above, rdi) or { []u8{} }.len == 0
 	assert target.widen_byte(rdi) or { []u8{} }.len == 0
 }

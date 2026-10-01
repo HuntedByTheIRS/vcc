@@ -1,4 +1,4 @@
-module arch
+module x86_64
 
 // One machine, in the terms an emitter needs: the registers it has, how they are
 // numbered in an instruction, and the encoders for the instructions this
@@ -7,8 +7,12 @@ module arch
 // Nothing here mentions an operating system. The register a syscall number goes
 // in is the one place the two descriptions touch, and it is here because the trap
 // instruction is what reads it; the numbers themselves belong to the system, in
-// `backend/os`. A second architecture is another file in this directory, and
-// `backend/backend.v` composes it with a system rather than branching on it.
+// `backend/os`.
+//
+// A second machine is a directory of its own beside this one, because a V module
+// is a directory: two machines in one module would collide on every name they
+// share, and this file has no way to say which one it means. `backend/backend.v`
+// is where a machine and a system are composed into a target.
 
 pub const name = 'x86_64'
 
