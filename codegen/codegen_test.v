@@ -2,6 +2,7 @@ module codegen
 
 import ast
 import backend
+import backend.os.elf
 import os
 import parser
 import time
@@ -430,15 +431,15 @@ fn test_the_image_is_a_dynamic_elf_the_kernel_can_start() {
 	assert u16_at(bytes, 18) == 62 // EM_X86_64
 	headers := segments(bytes)
 	assert headers.len == 4
-	interp := only_segment(headers, elf_ph_type_interp)
+	interp := only_segment(headers, elf.elf_ph_type_interp)
 	assert read_string(bytes, int(interp.offset)) == emitted.target.interpreter
-	load := only_segment(headers, elf_ph_type_load)
+	load := only_segment(headers, elf.elf_ph_type_load)
 	entry := u64_at(bytes, 24)
 	assert entry >= load.vaddr
 	assert entry < load.vaddr + load.filesz
 	assert load.filesz == u64(bytes.len)
-	needed := dynamic_value(bytes, dt_needed) or { panic('the image has no DT_NEEDED') }
-	strtab := dynamic_value(bytes, dt_strtab) or { panic('the image has no DT_STRTAB') }
+	needed := dynamic_value(bytes, elf.dt_needed) or { panic('the image has no DT_NEEDED') }
+	strtab := dynamic_value(bytes, elf.dt_strtab) or { panic('the image has no DT_STRTAB') }
 	assert read_string(bytes, int(strtab - base) + int(needed)) == 'libc.so.6'
 }
 
@@ -454,11 +455,11 @@ fn test_an_imported_function_is_an_undefined_symbol_with_a_relocation() {
 	assert emitted.diagnostics.len == 0
 	bytes := emitted.bytes
 	base := emitted.target.load_base
-	dynsym := dynamic_value(bytes, dt_symtab) or { panic('the image has no DT_SYMTAB') }
-	dynstr := dynamic_value(bytes, dt_strtab) or { panic('the image has no DT_STRTAB') }
-	hash := dynamic_value(bytes, dt_hash) or { panic('the image has no DT_HASH') }
-	rela := dynamic_value(bytes, dt_rela) or { panic('the image has no DT_RELA') }
-	relasz := dynamic_value(bytes, dt_relasz) or { panic('the image has no DT_RELASZ') }
+	dynsym := dynamic_value(bytes, elf.dt_symtab) or { panic('the image has no DT_SYMTAB') }
+	dynstr := dynamic_value(bytes, elf.dt_strtab) or { panic('the image has no DT_STRTAB') }
+	hash := dynamic_value(bytes, elf.dt_hash) or { panic('the image has no DT_HASH') }
+	rela := dynamic_value(bytes, elf.dt_rela) or { panic('the image has no DT_RELA') }
+	relasz := dynamic_value(bytes, elf.dt_relasz) or { panic('the image has no DT_RELASZ') }
 	// The hash table's chain count is how many symbols there are, which is what
 	// walks the table: the null entry, the called function, and the exit the
 	// entry point leaves through.
@@ -466,8 +467,8 @@ fn test_an_imported_function_is_an_undefined_symbol_with_a_relocation() {
 	assert count == 3
 	mut names := []string{}
 	for i in 1 .. count {
-		at := int(dynsym - base) + i * elf_symbol_size
-		assert bytes[at + 4] == symbol_global_function
+		at := int(dynsym - base) + i * elf.elf_symbol_size
+		assert bytes[at + 4] == elf.symbol_global_function
 		assert u16_at(bytes, at + 6) == 0 // undefined: the definition is elsewhere
 		names << read_string(bytes, int(dynstr - base) + int(u32_at(bytes, at)))
 	}
@@ -475,13 +476,13 @@ fn test_an_imported_function_is_an_undefined_symbol_with_a_relocation() {
 	assert 'exit' in names
 	// One relocation per imported function, each one a global data relocation
 	// naming a symbol and pointing at a slot the code reads.
-	assert relasz == u64(2 * elf_relocation_size)
+	assert relasz == u64(2 * elf.elf_relocation_size)
 	mut slots := []u64{}
 	for i in 0 .. 2 {
-		at := int(rela - base) + i * elf_relocation_size
+		at := int(rela - base) + i * elf.elf_relocation_size
 		slots << u64_at(bytes, at)
 		info := u64_at(bytes, at + 8)
-		assert (info & 0xffffffff) == relocation_glob_dat
+		assert (info & 0xffffffff) == elf.relocation_glob_dat
 		assert (info >> 32) >= 1 // the null symbol is never referenced
 	}
 	assert slots[0] != slots[1]
@@ -1504,10 +1505,10 @@ fn only_segment(headers []Segment, kind u32) Segment {
 
 // dynamic_value looks a tag up in the dynamic table the loader reads.
 fn dynamic_value(bytes []u8, tag u64) ?u64 {
-	dynamic := only_segment(segments(bytes), elf_ph_type_dynamic)
-	for i in 0 .. int(dynamic.filesz) / elf_dynamic_entry_size {
-		at := int(dynamic.offset) + i * elf_dynamic_entry_size
-		if u64_at(bytes, at) == dt_null {
+	dynamic := only_segment(segments(bytes), elf.elf_ph_type_dynamic)
+	for i in 0 .. int(dynamic.filesz) / elf.elf_dynamic_entry_size {
+		at := int(dynamic.offset) + i * elf.elf_dynamic_entry_size
+		if u64_at(bytes, at) == elf.dt_null {
 			break
 		}
 		if u64_at(bytes, at) == tag {
