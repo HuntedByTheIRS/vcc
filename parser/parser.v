@@ -323,6 +323,11 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_expression(expr.left, mut reported)
 			p.check_undeclared_expression(expr.right, mut reported)
 		}
+		ast.IncDec {
+			// The name the operator steps is a use of it: `++missing;` names
+			// a missing declaration just as reading the name does.
+			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+		}
 		ast.IntLit, ast.StrLit, ast.FloatLit {}
 	}
 }
@@ -596,6 +601,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Unary { 'a value with ${expr.op} applied to it' }
 		ast.Cast { 'a value converted to ${expr.spelling}' }
 		ast.Binary { 'a value of ${expr.op}' }
+		ast.IncDec { 'a value with ${expr.op} applied to ${expr.name}' }
 	}
 }
 
@@ -690,6 +696,16 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	if t.kind == .punct && t.text == '(' && p.starts_declaration(p.peek_at(1)) {
 		return p.parse_cast(t)
 	}
+	// `++` and `--` are prefix operators here: what follows is the operand they
+	// step, and the value they are worth is the operand after the step. They
+	// are read with the other prefix operators because that is where they bind
+	// - `++*p` steps the value p points at - and because the operand is read by
+	// the same function that reads the operand of a cast.
+	if t.kind == .punct && (t.text == '++' || t.text == '--') {
+		p.next()
+		operand := p.parse_unary()!
+		return p.inc_dec(t, operand, false)
+	}
 	// `&` and `*` are here with the other prefix operators: the address of a
 	// value and the value at an address both bind as tightly as they do -
 	// `&x + 1` is the address of x plus one, and `*p + 1` adds one to the char p
@@ -707,7 +723,59 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 			col:  t.col
 		})
 	}
-	return p.parse_primary()
+	return p.parse_postfix()
+}
+
+// parse_postfix reads a name, a call, an element or a member and then the
+// postfix operators that follow it: `x++` and `x--`. A postfix operator binds to
+// what comes before it, so it is read here, after parse_primary has built the
+// operand, and before parse_binary is given a chance to read a binary operator
+// at the same position.
+//
+// The loop takes every operator that follows, because `x++++` is two steps in
+// the grammar; the second operand is an expression that is not a name and is
+// refused by inc_dec, which is where the refusal belongs.
+fn (mut p Parser) parse_postfix() !ast.Expr {
+	mut expr := p.parse_primary()!
+	for p.peek().kind == .punct && (p.peek().text == '++' || p.peek().text == '--') {
+		op := p.next()
+		expr = p.inc_dec(op, expr, true)!
+	}
+	return expr
+}
+
+// inc_dec builds the node for `++` or `--` on a name, and refuses every other
+// operand where the operator is written: the lvalue this compiler steps is a
+// plain object, so an element, a member and a literal are named in a diagnostic
+// rather than read as something else.
+//
+// The type has to be an integer the back end moves as a value. The step is one,
+// which is the increment of an integer and not of a pointer or a double, so a
+// name of another type is refused by the type it is. A name whose type the
+// reader never resolved is left for the walk that reports names nothing
+// declares, so an undeclared name gets that message and not this one.
+fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !ast.Expr {
+	match operand {
+		ast.Ident {
+			if operand.typ.kind != .unknown
+				&& operand.typ.kind !in [.int_, .char_, .signed_char, .unsigned_char] {
+				p.error_at(op, 'unsupported: ${op.text} on ${operand.name}, which is ${operand.typ.describe()}, and this compiler steps an int or a char name only')
+				return error('operand is not an integer name')
+			}
+			return ast.Expr(ast.IncDec{
+				op:      op.text
+				name:    operand.name
+				postfix: postfix
+				typ:     operand.typ
+				line:    op.line
+				col:     op.col
+			})
+		}
+		else {
+			p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, and this compiler implements ++ and -- on a plain name only')
+			return error('operand is not a name')
+		}
+	}
 }
 
 // parse_cast reads a conversion: the type name in parentheses, and the operand it
