@@ -329,10 +329,23 @@ fn digit_value(c u8) ?int {
 // escapes are the ones a C compiler has to know; a multi-character constant is
 // C's implementation-defined case and is refused rather than guessed at.
 fn character_value(text string) ?i64 {
-	if text.len < 3 || text[0] != `'` || text[text.len - 1] != `'` {
+	// C99 6.4.4.4 lets a character constant name the encoding of what it holds: `L` for
+	// wchar_t, `u` for char16_t, `U` for char32_t. The #if evaluator wants the value, and
+	// the prefix does not change it, so the prefix is dropped and the constant read the
+	// same way either side of it. This is not a corner: glibc's <bits/wchar.h> asks
+	// `#elif L'\0' - 1 > 0`, so a prefix refused here refuses every translation unit that
+	// includes <wchar.h>.
+	mut quoted := text
+	for prefix in ['u8', 'L', 'u', 'U'] {
+		if quoted.starts_with(prefix) {
+			quoted = quoted[prefix.len..]
+			break
+		}
+	}
+	if quoted.len < 3 || quoted[0] != `'` || quoted[quoted.len - 1] != `'` {
 		return none
 	}
-	body := text[1..text.len - 1]
+	body := quoted[1..quoted.len - 1]
 	if body.len == 0 {
 		return none
 	}

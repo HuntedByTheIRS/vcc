@@ -963,3 +963,18 @@ fn test_phase_one_is_gated_by_the_dialect_the_command_line_chose() {
 	assert processed_in('char *s = "??!";', .c99) == ['char', '*', 's', '=', '"|"', ';']
 	assert processed_in('char *s = "??!";', .gnu99) == ['char', '*', 's', '=', '"??!"', ';']
 }
+
+fn test_a_character_constant_may_name_its_encoding_in_an_if() {
+	// C99 6.4.4.4 lets a character constant say which encoding it holds, and what the #if
+	// evaluator wants is the value, which the prefix does not change. This is not a
+	// corner: glibc's <bits/wchar.h> asks `#elif L'\0' - 1 > 0` to choose between the
+	// limits of a signed and an unsigned wchar_t, so an evaluator that could not read the
+	// prefix could not read <wchar.h> at all.
+	assert processed("${hash}if L'a' == 97\nint a;\n${hash}endif\n") == ['int', 'a', ';']
+	assert processed("${hash}if u'a' == 97\nint a;\n${hash}endif\n") == ['int', 'a', ';']
+	assert processed("${hash}if U'a' == 97\nint a;\n${hash}endif\n") == ['int', 'a', ';']
+	// The prefix is not read as part of the value, which is the claim the header's
+	// branch turns on: `L'\0'` has to be zero for the chain to pick the other arm.
+	chained := "${hash}if L'\\0' - 1 > 0\nint a;\n${hash}elif L'\\0' + 0 == 0\nint b;\n${hash}endif\n"
+	assert processed(chained) == ['int', 'b', ';']
+}
