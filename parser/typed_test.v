@@ -1,8 +1,10 @@
 module parser
 
 import ast
+import backend.abi
 import tokenize
 import types
+import types.measured
 
 // The typed tree: what the reader resolved each node to, checked one construct at
 // a time. A node the model has no answer for carries the zero type and no
@@ -572,59 +574,66 @@ fn test_an_object_of_an_incomplete_tag_is_refused_by_the_tag() {
 // by a path that has no room for an aggregate yet. Refusing it where it is
 // written is what keeps an object nothing uses from being dropped silently.
 // A parameter that is an object of an aggregate type is storage of the layout's
-// size in the frame of the call, and it arrives as its bytes: how many bytes it is
-// and which register file carries each of its eightbytes are what the declaration
-// carries, so a call and a definition agree without either asking the other.
-fn test_a_parameter_of_an_aggregate_type_carries_how_it_is_handed_over() {
+// size in the frame of the call, and it arrives as its bytes. What the parser owes
+// is the resolved type: a caller and a callee each ask the target what that type is
+// handed over in, and neither has to be told by the other. The classes below are the
+// ones gcc reports for the same declarations, asked the way the emitter asks them,
+// so this fails if the parser resolves a parameter to the wrong type just as it
+// would if the convention were written down wrongly.
+fn class_of(decl ast.FnDecl) abi.Class {
+	return abi.class_of(measured.representation(), decl.params[0].resolved)
+}
+
+fn test_a_parameter_of_an_aggregate_type_is_classified_by_the_target() {
 	decl := first('struct S { int a; int b; };\nint f(struct S s) { return s.a; }')
 	assert decl.params.len == 1
-	assert decl.params[0].class.bytes == 8
-	assert decl.params[0].class.count == 1
-	assert !decl.params[0].class.first_floating
+	assert class_of(decl).bytes == 8
+	assert class_of(decl).count == 1
+	assert !class_of(decl).first_floating
 	// An object whose members are all doubles is handed over in the floating-point
 	// file, which is the class the convention gives an eightbyte of doubles. The
 	// second eightbyte is not read at all when there is only one.
 	doubles := first('struct D { double d; };\nint f(struct D x) { return 0; }')
-	assert doubles.params[0].class.bytes == 8
-	assert doubles.params[0].class.count == 1
-	assert doubles.params[0].class.first_floating
+	assert class_of(doubles).bytes == 8
+	assert class_of(doubles).count == 1
+	assert class_of(doubles).first_floating
 	// An object of more than one eightbyte carries the class of each: a pointer
 	// and an int are two eightbytes the general file carries, and two doubles are
 	// two the floating-point file carries.
 	wide := first('struct W { int a; int b; int c; };\nint f(struct W w) { return 0; }')
-	assert wide.params[0].class.bytes == 12
-	assert wide.params[0].class.count == 2
-	assert !wide.params[0].class.first_floating
-	assert !wide.params[0].class.second_floating
+	assert class_of(wide).bytes == 12
+	assert class_of(wide).count == 2
+	assert !class_of(wide).first_floating
+	assert !class_of(wide).second_floating
 	pair := first('struct P { int *p; int n; };\nint f(struct P x) { return 0; }')
-	assert pair.params[0].class.count == 2
-	assert !pair.params[0].class.first_floating
+	assert class_of(pair).count == 2
+	assert !class_of(pair).first_floating
 	both := first('struct T { double x; double y; };\nint f(struct T x) { return 0; }')
-	assert both.params[0].class.bytes == 16
-	assert both.params[0].class.count == 2
-	assert both.params[0].class.first_floating
-	assert both.params[0].class.second_floating
+	assert class_of(both).bytes == 16
+	assert class_of(both).count == 2
+	assert class_of(both).first_floating
+	assert class_of(both).second_floating
 	// An eightbyte carrying both a double and something else is the general one,
 	// and so is one that only holds the bytes between members.
 	mixed := first('struct M { double d; int i; };\nint f(struct M x) { return 0; }')
-	assert mixed.params[0].class.count == 2
-	assert mixed.params[0].class.first_floating
-	assert !mixed.params[0].class.second_floating
+	assert class_of(mixed).count == 2
+	assert class_of(mixed).first_floating
+	assert !class_of(mixed).second_floating
 	hole := first('struct H { char c; double d; };\nint f(struct H x) { return 0; }')
-	assert hole.params[0].class.count == 2
-	assert hole.params[0].class.first_floating == false
-	assert hole.params[0].class.second_floating
+	assert class_of(hole).count == 2
+	assert class_of(hole).first_floating == false
+	assert class_of(hole).second_floating
 	// A member that is itself an object of an aggregate type is read at the bottom
 	// of the layout: a struct of one double in a struct of one of them carries the
 	// floating-point class through.
 	nested := first('struct D { double d; };\nstruct N { struct D a; };\nint f(struct N x) { return 0; }')
-	assert nested.params[0].class.count == 1
-	assert nested.params[0].class.first_floating
+	assert class_of(nested).count == 1
+	assert class_of(nested).first_floating
 	// An object larger than two eightbytes is a copy in memory, and how many
 	// eightbytes it is says so.
 	beyond := first('struct B { double a; double b; double c; };\nint f(struct B x) { return 0; }')
-	assert beyond.params[0].class.bytes == 24
-	assert beyond.params[0].class.count == 3
+	assert class_of(beyond).bytes == 24
+	assert class_of(beyond).count == 3
 }
 
 // A tag that was declared and never defined has no size and no class, so a
