@@ -1,5 +1,6 @@
 module abi
 
+import backend
 import types.measured
 import types
 
@@ -121,4 +122,46 @@ fn test_a_description_that_carries_nothing_answers_nothing() {
 	assert answer.count == 0
 	assert !answer.first_floating
 	assert !answer.second_floating
+}
+
+// pair_places is the one answer a caller and a callee both have to reach, so the two
+// sequences are checked apart: two general eightbytes take two registers of the
+// general file, two floating ones take two of the floating file, and a mixed object
+// takes one of each. The positions are what a caller that has already placed two
+// general arguments would get, which is why the cursors are not both zero.
+fn test_a_pair_of_eightbytes_takes_a_register_of_each_its_classes_name() {
+	target := backend.host() or { panic('this test needs the host target') }
+	general := pair_places(target, false, false, 2, 0)
+	assert general.first == 2
+	assert general.second == 3
+	assert general.integers == 4
+	assert general.doubles == 0
+	assert general.registers
+
+	floating := pair_places(target, true, true, 2, 1)
+	assert floating.first == 1
+	assert floating.second == 2
+	assert floating.integers == 2
+	assert floating.doubles == 3
+	assert floating.registers
+
+	mixed := pair_places(target, true, false, 2, 1)
+	assert mixed.first == 1
+	assert mixed.second == 2
+	assert mixed.integers == 3
+	assert mixed.doubles == 2
+	assert mixed.registers
+}
+
+// An object whose second eightbyte has no register of its class left is two words on
+// the stack whole, and the answer says so rather than splitting it between a register
+// and a word of memory: a caller that split one and a callee that did not would read
+// a word from somewhere the caller never wrote.
+fn test_a_pair_that_does_not_fit_is_not_split() {
+	target := backend.host() or { panic('this test needs the host target') }
+	// The last general register carries the first eightbyte and the sequence is spent.
+	late := pair_places(target, false, false, 5, 0)
+	assert !late.registers
+	spent := pair_places(target, true, true, 0, 7)
+	assert !spent.registers
 }

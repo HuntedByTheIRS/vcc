@@ -664,7 +664,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 				// or both arrive as two words of the stack when either sequence
 				// had none left for the object, which is the same answer the
 				// caller reached.
-				placed := pair_places(e.target, class.first_floating, class.second_floating,
+				placed := abi.pair_places(e.target, class.first_floating, class.second_floating,
 					integers, doubles)
 				if placed.registers {
 					integers = placed.integers
@@ -4200,7 +4200,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				// Two eightbytes: each takes a register of its own class, and
 				// the object goes on the stack whole when either one has none
 				// left, which is the answer pair_places gives both sides.
-				placed := pair_places(e.target, c.first_floating, c.second_floating,
+				placed := abi.pair_places(e.target, c.first_floating, c.second_floating,
 					integers, doubles)
 				if placed.registers {
 					places << ArgPlace{
@@ -4536,57 +4536,6 @@ struct ArgPlace {
 	// pair waits in a slot of its own until the registers are loaded, so nothing
 	// of it is read from the slot a value argument waits in.
 	wide bool
-}
-
-// PairPlaces is where the two eightbytes of an object of two of them go, and it is
-// the one answer a caller and a callee both have to reach, because an object the
-// caller puts in a register and the callee expects in memory arrives as whatever
-// happened to be in the register.
-//
-// The convention places an object of two eightbytes in registers when both of them
-// have a register of their own class left, and in memory when either one does not:
-// the object is not split between the two. registers is false in that second case,
-// and then the object is two words on the stack, first eightbyte at the lower
-// address.
-struct PairPlaces {
-	first     int
-	second    int
-	integers  int
-	doubles   int
-	registers bool
-}
-
-fn pair_places(target backend.Target, first_floating bool, second_floating bool, integers int, doubles int) PairPlaces {
-	// How far each sequence moves for the first eightbyte, and for the second one
-	// on top of that: an object of two eightbytes takes a register per eightbyte
-	// from the sequence that eightbyte's class names, so two general eightbytes
-	// take two general registers and a mixed pair takes one of each.
-	first_integer := if first_floating { 0 } else { 1 }
-	first_double := if first_floating { 1 } else { 0 }
-	second_integer := first_integer + (if second_floating { 0 } else { 1 })
-	second_double := first_double + (if second_floating { 1 } else { 0 })
-	mut fits := true
-	if first_floating {
-		if target.float_arg_reg(doubles) == none {
-			fits = false
-		}
-	} else if target.arg_reg(integers) == none {
-		fits = false
-	}
-	if second_floating {
-		if target.float_arg_reg(doubles + first_double) == none {
-			fits = false
-		}
-	} else if target.arg_reg(integers + first_integer) == none {
-		fits = false
-	}
-	return PairPlaces{
-		first:     if first_floating { doubles } else { integers }
-		second:    if second_floating { doubles + first_double } else { integers + first_integer }
-		integers:  integers + second_integer
-		doubles:   doubles + second_double
-		registers: fits
-	}
 }
 
 // store_return_eightbyte writes one of the registers a call handed its object back

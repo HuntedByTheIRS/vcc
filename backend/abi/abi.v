@@ -1,5 +1,6 @@
 module abi
 
+import backend
 import types
 
 // The third axis of a target, beside the machine and the system: not how an
@@ -51,6 +52,66 @@ pub fn class_of(r types.Representation, declared types.Type) Class {
 		count:           count
 		first_floating:  eightbyte_is_floating(r, declared, 0)
 		second_floating: count == 2 && eightbyte_is_floating(r, declared, 1)
+	}
+}
+
+// PairPlaces is where the two eightbytes of an object of two of them go, and it is
+// the one answer a caller and a callee both have to reach, because an object the
+// caller puts in a register and the callee expects in memory arrives as whatever
+// happened to be in the register.
+//
+// The convention places an object of two eightbytes in registers when both of them
+// have a register of their own class left, and in memory when either one does not:
+// the object is not split between the two. registers is false in that second case,
+// and then the object is two words on the stack, first eightbyte at the lower
+// address.
+pub struct PairPlaces {
+pub:
+	first     int
+	second    int
+	integers  int
+	doubles   int
+	registers bool
+}
+
+// pair_places answers where an object of two eightbytes goes when `integers` and
+// `doubles` registers of each sequence are used already, and whether it fits at all.
+//
+// The caller placing an argument and the callee reading one both ask this, and they
+// have to reach the same answer: a caller that reached one and a callee that reached
+// the other would read words from somewhere the caller never wrote. It is here for
+// that reason, because the rule is the convention's and belongs beside the class that
+// feeds it, and not inside either side of the call.
+pub fn pair_places(target backend.Target, first_floating bool, second_floating bool, integers int, doubles int) PairPlaces {
+	// How far each sequence moves for the first eightbyte, and for the second one
+	// on top of that: an object of two eightbytes takes a register per eightbyte
+	// from the sequence that eightbyte's class names, so two general eightbytes
+	// take two general registers and a mixed pair takes one of each.
+	first_integer := if first_floating { 0 } else { 1 }
+	first_double := if first_floating { 1 } else { 0 }
+	second_integer := first_integer + (if second_floating { 0 } else { 1 })
+	second_double := first_double + (if second_floating { 1 } else { 0 })
+	mut fits := true
+	if first_floating {
+		if target.float_arg_reg(doubles) == none {
+			fits = false
+		}
+	} else if target.arg_reg(integers) == none {
+		fits = false
+	}
+	if second_floating {
+		if target.float_arg_reg(doubles + first_double) == none {
+			fits = false
+		}
+	} else if target.arg_reg(integers + first_integer) == none {
+		fits = false
+	}
+	return PairPlaces{
+		first:     if first_floating { doubles } else { integers }
+		second:    if second_floating { doubles + first_double } else { integers + first_integer }
+		integers:  integers + second_integer
+		doubles:   doubles + second_double
+		registers: fits
 	}
 }
 
