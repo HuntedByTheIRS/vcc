@@ -89,8 +89,16 @@ pub:
 	bytes      int
 	init       ?i64
 	init_float ?f64
-	line       int
-	col        int
+	// inits and init_floats are a brace initializer for an array: one constant
+	// per element in the order written, the first list for an object whose
+	// elements are integers and the second for one whose elements are doubles,
+	// the same split a scalar initializer has. The elements the list did not
+	// write are the zeros the storage starts as, which is what C says the rest
+	// of a partly initialized array holds.
+	inits       []i64
+	init_floats []f64
+	line        int
+	col         int
 }
 
 pub enum StmtKind {

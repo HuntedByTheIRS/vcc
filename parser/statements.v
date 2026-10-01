@@ -640,25 +640,60 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			p.skip_declaration()
 			return stmts
 		}
-		if d.array_dims == 1 && d.array_count <= 0 {
-			p.error_at(d.array_at, 'unsupported: an array declaration in a body needs a size that is a number and more than zero')
-			p.skip_declaration()
-			return stmts
-		}
+		declared := p.declared_type(spec.clause, d)
 		mut init := ?ast.Expr(none)
+		// brace says the initializer was written as a list, elements are its
+		// values as expressions, and list_ok says the list was read. A list that
+		// was refused has already been reported and is not reported again as an
+		// array with no size.
+		mut brace := false
+		mut list_ok := false
+		mut elements := []ast.Expr{}
 		if p.at_punct('=') {
 			p.next()
 			if p.at_punct('{') {
-				p.error_at(p.peek(), 'unsupported: a brace initializer is not implemented')
-				p.skip_declaration()
-				return stmts
-			}
-			init = p.parse_expression() or {
-				p.skip_declaration()
-				return stmts
+				brace = true
+				if d.stars == 0 && spec.clause.kind in [types.Kind.struct_, .union_] {
+					// A list for an object of an aggregate type is a list of
+					// lists: a member may itself be an aggregate, and the
+					// designators and the nesting are not shapes this reader
+					// has. Measured, gcc 16.2.1 refuses `struct S s = {5, 6};`
+					// with `invalid initializer`, and this compiler used to
+					// report the same declaration twice.
+					p.error_at(p.peek(), 'unsupported: ${d.name} is an object of the type ${spec.clause.describe()}, and a brace initializer for one is not implemented')
+					p.skip_declaration()
+					return stmts
+				}
+				if list := p.parse_brace_initializer() {
+					list_ok = true
+					if d.array_at.line == 0 {
+						// One scalar in braces. A list of more values has no
+						// room in one object (6.7.8p2, measured on gcc
+						// 16.2.1: `int x = {1, 2};` is `excess elements in
+						// scalar initializer`).
+						if list.values.len > 1 {
+							p.error_at(list.at, 'a constraint violation: ${d.name} holds one value and its initializer writes ${list.values.len}')
+						}
+						init = p.constant_expr(list.values[0])
+					} else {
+						// A written size smaller than the list is the same
+						// violation (measured, `int a[2] = {1, 2, 3};` is
+						// `excess elements in array initializer`).
+						if d.array_count > 0 && list.values.len > d.array_count {
+							p.error_at(list.at, 'a constraint violation: ${d.name} holds ${d.array_count} elements and its initializer writes ${list.values.len}')
+						}
+						for value in list.values {
+							elements << p.constant_expr(value)
+						}
+					}
+				}
+			} else {
+				init = p.parse_expression() or {
+					p.skip_declaration()
+					return stmts
+				}
 			}
 			if initializer := init {
-				declared := p.declared_type(spec.clause, d)
 				// 6.7.8 lets an array of characters be initialized by a string
 				// literal, which is not an assignment and not this constraint's
 				// business: it is the one initializer that is not a value written
@@ -668,12 +703,22 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				}
 			}
 		}
+		// An array declaration needs a size, and a brace list is one for an
+		// array whose brackets were empty: `int a[] = {1, 2, 3};` declares a of
+		// three. A list the reader refused has already been named and the size
+		// is not reported a second time.
+		if d.array_at.line > 0 && d.array_count <= 0 && !brace {
+			p.error_at(d.array_at, 'unsupported: an array declaration in a body needs a size that is a number and more than zero')
+			p.skip_declaration()
+			return stmts
+		}
+		count := if d.array_count > 0 { d.array_count } else { elements.len }
 		stmts << ast.Stmt{
 			kind:       .var_decl
 			init:       init
 			decl_name:  d.name
 			decl_type:  p.spelling_of(spec, d.stars)
-			decl_count: d.array_count
+			decl_count: count
 			// The declarator decides whether the object is the aggregate or
 			// something derived from it: `struct S x;` is the object, and
 			// `struct S *p;` is one word holding an address, which the back end
@@ -681,9 +726,43 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			// An array of aggregates carries the size of one element here, and
 			// the count it was declared with travels beside it: the frame reserves
 			// the product, and an index scales by the size of one element.
-			bytes:      p.aggregate_bytes(p.declared_type(spec.clause, d))
+			bytes:      p.aggregate_bytes(declared)
 			line:       d.name_at.line
 			col:        d.name_at.col
+		}
+		// A list for an array is the stores the initialization makes at the
+		// point of the declaration: one per value the list wrote, and a zero for
+		// each the list did not, because the rest of a partly initialized array
+		// is the zeros C says it holds. The frame slot starts as whatever was
+		// there, so the unwritten elements have to be written.
+		if brace && list_ok && d.array_at.line > 0 {
+			for i in 0 .. count {
+				value := if i < elements.len {
+					elements[i]
+				} else {
+					ast.Expr(ast.IntLit{
+						value: 0
+						text:  '0'
+						typ:   types.int_type()
+						line:  d.name_at.line
+						col:   d.name_at.col
+					})
+				}
+				stmts << ast.Stmt{
+					kind:   .assign
+					target: d.name
+					index:  ast.Expr(ast.IntLit{
+						value: i64(i)
+						text:  '${i}'
+						typ:   types.int_type()
+						line:  d.name_at.line
+						col:   d.name_at.col
+					})
+					expr:   value
+					line:   d.name_at.line
+					col:    d.name_at.col
+				}
+			}
 		}
 		if p.at_punct(',') {
 			p.next()

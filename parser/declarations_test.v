@@ -130,15 +130,197 @@ fn test_an_extern_object_is_read_and_dropped() {
 	assert result.unit.decls.len == 0
 }
 
-// An initializer makes the declaration a definition even when it says extern,
-// and a definition is storage the image holds. A brace list is not a number this
-// compiler can write into the image, so the definition is reported rather than
-// laid out as something it is not.
-fn test_an_extern_object_with_a_brace_initializer_is_reported() {
+// A brace initializer is a definition even when the declaration says extern:
+// the object has to live somewhere, and the values written are the ones the
+// image holds. Measured with gcc 16.2.1 and this compiler, `int x[2] = {1, 2};`
+// returns 3 when the program reads a[0] + a[1].
+fn test_a_file_scope_brace_initializer_lays_out_the_values_it_wrote() {
 	result := declarations_of('extern int table[4] = { 1, 2, 3, 4 };')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	global := result.unit.globals[0]
+	assert global.count == 4
+	assert global.inits.len == 4
+	assert global.inits[0] == 1 && global.inits[3] == 4
+}
+
+// A list is what an array with empty brackets is as long as: measured on gcc
+// 16.2.1, `int x[] = {1, 2, 3};` declares x with three elements and the program
+// returns 3 when it reads x[2].
+fn test_a_file_scope_list_gives_an_empty_bracket_array_its_size() {
+	result := declarations_of('int x[] = {1, 2, 3};')
+	assert result.diagnostics.len == 0
+	global := result.unit.globals[0]
+	assert global.count == 3
+	assert global.inits.len == 3
+	assert global.inits[2] == 3
+}
+
+// A scalar wrapped in braces is the same definition as the bare number:
+// measured, `int x = {5};` returns 5 when the program reads x.
+fn test_a_file_scope_scalar_in_braces_is_the_number_in_them() {
+	result := declarations_of('int x = {5};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	value := result.unit.globals[0].init or {
+		assert false
+		return
+	}
+	assert value == 5
+}
+
+// A list of floating constants for an object whose element type is double is
+// the same list in the class the object holds, and an integer constant in it is
+// that integer as a double.
+fn test_a_file_scope_list_of_doubles_keeps_the_class_of_the_object() {
+	result := declarations_of('static const double d[] = {1.5, 2};')
+	assert result.diagnostics.len == 0
+	global := result.unit.globals[0]
+	assert global.count == 2
+	assert global.init_floats.len == 2
+	assert global.init_floats[0] == 1.5
+	assert global.init_floats[1] == 2.0
+}
+
+// Fewer values than the array holds leaves the rest at the zeros the storage
+// started as. Measured, `int a[4] = {9};` returns 40 for
+// `a[0]*1000 + a[1]*100 + a[2]*10 + a[3]`, which is 9000 taken modulo 256, and
+// the elements after the first are zero.
+fn test_a_file_scope_list_shorter_than_the_array_leaves_the_rest_alone() {
+	result := declarations_of('int a[4] = {9};')
+	assert result.diagnostics.len == 0
+	global := result.unit.globals[0]
+	assert global.count == 4
+	assert global.inits.len == 1
+	assert global.inits[0] == 9
+}
+
+// Too many values for the object is a constraint violation (6.7.8p2). Measured
+// on gcc 16.2.1, `int a[2] = {1, 2, 3};` is `excess elements in array
+// initializer` and `int x = {1, 2};` is `excess elements in scalar
+// initializer`, and gcc exits 1 for both.
+fn test_a_file_scope_list_too_long_for_the_object_is_refused() {
+	arrays := declarations_of('int a[2] = {1, 2, 3};')
+	assert arrays.diagnostics.len == 1
+	assert arrays.diagnostics[0].msg.contains('holds 2 elements')
+	assert arrays.unit.globals.len == 0
+	scalars := declarations_of('int x = {1, 2};')
+	assert scalars.diagnostics.len == 1
+	assert scalars.diagnostics[0].msg.contains('holds one value')
+	assert scalars.unit.globals.len == 0
+}
+
+// A shape the reader does not implement is refused by name: a nested list, a
+// designator, an element that is not a written number, and an empty pair of
+// braces. Measured on gcc 16.2.1, `int a[] = {};` under `-std=gnu99` is `ISO C
+// forbids empty initializer braces before C23` and `zero or negative size
+// array`.
+fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
+	nested := declarations_of('static int a[2][2] = {{1, 2}, {3, 4}};')
+	assert nested.diagnostics.len == 1
+	assert nested.diagnostics[0].msg.contains('nested brace initializer')
+	designated := declarations_of('int a[3] = {[1] = 5};')
+	assert designated.diagnostics.len == 1
+	assert designated.diagnostics[0].msg.contains('designator')
+	element := declarations_of('int a[2] = {name};')
+	assert element.diagnostics.len == 1
+	assert element.diagnostics[0].msg.contains('written number')
+	empty := declarations_of('int a[] = {};')
+	assert empty.diagnostics.len == 1
+	assert empty.diagnostics[0].msg.contains('empty brace initializer')
+}
+
+// An object of an aggregate type has a list of lists, which this reader does
+// not implement, so a file-scope brace initializer for one is refused rather
+// than laid out as the zeros it would otherwise silently be. Measured before
+// this was refused, `struct S s = {5, 6};` compiled and returned 0 where gcc
+// 16.2.1 returns 56.
+fn test_a_file_scope_brace_initializer_for_an_aggregate_is_refused() {
+	result := declarations_of('struct S { int a; int b; };\nstruct S s = {5, 6};')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('not a number')
+	assert result.diagnostics[0].msg.contains('brace initializer for one is not implemented')
 	assert result.unit.globals.len == 0
+}
+
+// In a body a list is the stores the initialization makes at the declaration:
+// one assignment per element, and a zero for every element the list did not
+// write, because the frame slot is whatever was there and the rest of a partly
+// initialized array is zero. Measured, `int a[3] = {7};` returns 188 for
+// `a[0]*100 + a[1]*10 + a[2]`.
+fn test_a_body_brace_initializer_becomes_the_stores_of_the_values_written() {
+	result := declarations_of('int main(void) { int a[3] = {7}; return a[0]; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 5
+	assert body[0].kind == .var_decl
+	assert body[0].decl_count == 3
+	assert body[1].kind == .assign
+	assert body[2].kind == .assign
+	assert body[3].kind == .assign
+	assert body[4].kind == .return_stmt
+}
+
+// A list gives an array declared with empty brackets its size in a body too:
+// measured on gcc 16.2.1, `int deduced[] = {2, 3, 5, 7, 11};` declares an array
+// of five elements.
+fn test_a_body_list_gives_an_empty_bracket_array_its_size() {
+	result := declarations_of('int main(void) { int a[] = {2, 3, 5}; return a[2]; }')
+	assert result.diagnostics.len == 0
+	decl := result.unit.decls[0].body[0]
+	assert decl.kind == .var_decl
+	assert decl.decl_count == 3
+}
+
+// A scalar in braces in a body is the number in them: measured, `int x = {5};`
+// returns 5 when the program reads x.
+fn test_a_body_scalar_in_braces_is_the_number_in_them() {
+	result := declarations_of('int main(void) { int x = {5}; return x; }')
+	assert result.diagnostics.len == 0
+	decl := result.unit.decls[0].body[0]
+	assert decl.kind == .var_decl
+	value := decl.init or {
+		assert false
+		return
+	}
+	assert value is ast.IntLit
+	assert (value as ast.IntLit).value == 5
+}
+
+// The refusals are the same in a body: a nested list, a designator, an element
+// that is not a written number, and a list too long for the array. Each is one
+// diagnostic that names the construct, and the declaration after the list is
+// still read where it starts.
+fn test_a_body_brace_initializer_shape_that_is_not_implemented_is_named() {
+	nested := declarations_of('int main(void) { int a[2] = {{1}, {2}}; return 0; }')
+	assert nested.diagnostics.len == 1
+	assert nested.diagnostics[0].msg.contains('nested brace initializer')
+	designated := declarations_of('int main(void) { int a[3] = {[1] = 5}; return 0; }')
+	assert designated.diagnostics.len == 1
+	assert designated.diagnostics[0].msg.contains('designator')
+	element := declarations_of('int main(void) { int a[2] = {name}; return 0; }')
+	assert element.diagnostics.len == 1
+	assert element.diagnostics[0].msg.contains('written number')
+	excess := declarations_of('int main(void) { int a[2] = {1, 2, 3}; return 0; }')
+	assert excess.diagnostics.len == 1
+	assert excess.diagnostics[0].msg.contains('holds 2 elements')
+}
+
+// A pointer array is a list of addresses, which are not the written constants
+// this reader takes, so its list is refused rather than written as numbers.
+fn test_a_body_list_of_addresses_is_refused() {
+	result := declarations_of('int main(void) { int v = 1; int *p[2] = {&v, 0}; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('written number')
+}
+
+// An object of an aggregate type in a body has a list of lists, which this
+// reader does not read, so the declaration is refused by name once and not
+// reported again by the scalar path as a value of the wrong type. Measured, gcc
+// 16.2.1 refuses `struct S s = {5, 6};` with `invalid initializer`.
+fn test_a_body_brace_initializer_for_an_aggregate_is_refused() {
+	result := declarations_of('struct S { int a; int b; };\nint main(void) { struct S s = {5, 6}; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('brace initializer for one is not implemented')
 }
 
 // A file-scope initializer that is a number the literal reader refuses gets the
@@ -154,6 +336,38 @@ fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
 	assert result.diagnostics[0].line == 1
 	assert result.diagnostics[0].col == 9
 	assert result.unit.globals.len == 0
+}
+
+// A file-scope initializer written as one parenthesized number is that number.
+// It is the shape a macro that wraps its argument in parentheses writes: the
+// corpus reaches `int c99_slot_7 = (7);` through `C99_DECLARE(7)`. Measured on
+// gcc 16.2.1, `int c99_slot_7 = (7); int g = (-3);` returns 4 for
+// `c99_slot_7 + g`, which is 7 + (-3). A parenthesized expression with anything
+// around it is not a shape this folds and is still refused by name: measured,
+// gcc accepts `int g = (7) + 1;` and this compiler refuses it.
+fn test_a_file_scope_parenthesized_constant_is_the_number_in_them() {
+	result := declarations_of('int c99_slot_7 = (7);')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	value := result.unit.globals[0].init or {
+		assert false
+		return
+	}
+	assert value == 7
+	signed := declarations_of('int g = (-3);')
+	assert signed.diagnostics.len == 0
+	signed_value := signed.unit.globals[0].init or {
+		assert false
+		return
+	}
+	assert signed_value == -3
+	// The pair has to end the declaration: an operator or a second operand after
+	// it is an expression this does not fold, and it stays refused.
+	for refused_source in ['int g = (7) + 1;', 'int g = (7, 8);'] {
+		refused := declarations_of(refused_source)
+		assert refused.diagnostics.len == 1
+		assert refused.diagnostics[0].msg.contains('is initialized with something that is not a number')
+	}
 }
 
 // A pointer at the top level is a relocation this compiler does not write yet,
