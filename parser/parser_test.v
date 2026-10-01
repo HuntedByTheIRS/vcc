@@ -1271,3 +1271,112 @@ fn test_a_name_declared_later_in_the_file_is_not_refused() {
 	assert call is ast.Call
 	assert (call as ast.Call).typ.kind == .unknown
 }
+
+// `++` and `--` are operators and not statements, so each is read as an
+// expression that is worth a value. The prefix form is worth the operand after
+// the step and the postfix form what it held before, and the node says which by
+// the `postfix` flag; a reader that swapped them would leave a program whose
+// answer is wrong, which is why the flag is checked on its own here. Whether the
+// value is the right one is the emitter's test.
+fn test_the_increment_and_decrement_are_read_as_prefix_and_postfix_values() {
+	result := parsed('int main(void) { int i = 0; i++; ++i; i--; --i; return i; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 6
+	post_increment := body[1].expr or {
+		assert false
+		return
+	}
+	assert post_increment is ast.IncDec
+	assert (post_increment as ast.IncDec).name == 'i'
+	assert (post_increment as ast.IncDec).op == '++'
+	assert (post_increment as ast.IncDec).postfix
+	pre_increment := body[2].expr or {
+		assert false
+		return
+	}
+	assert (pre_increment as ast.IncDec).op == '++'
+	assert !(pre_increment as ast.IncDec).postfix
+	post_decrement := body[3].expr or {
+		assert false
+		return
+	}
+	assert (post_decrement as ast.IncDec).op == '--'
+	assert (post_decrement as ast.IncDec).postfix
+	pre_decrement := body[4].expr or {
+		assert false
+		return
+	}
+	assert (pre_decrement as ast.IncDec).op == '--'
+	assert !(pre_decrement as ast.IncDec).postfix
+	// The value the node is worth is the type of the name, which is what makes
+	// `i++` an int the expression around it can use.
+	assert (post_increment as ast.IncDec).typ.kind == .int_
+}
+
+// The step of a for is the third part of the header, and `i++` there is a
+// statement use of the operator like `i++` anywhere else: the reader turns the
+// for into a block holding the head and a while whose step is the operator.
+fn test_an_increment_is_read_as_the_step_of_a_for() {
+	result := parsed('int main(void) { int i; for (i = 0; i < 3; i++) { } return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 3
+	for_block := body[1]
+	assert for_block.kind == .block
+	assert for_block.body.len == 2
+	loop := for_block.body[1]
+	assert loop.kind == .while_stmt
+	assert loop.step.len == 1
+	step := loop.step[0]
+	assert step.kind == .expr_stmt
+	expr := step.expr or {
+		assert false
+		return
+	}
+	assert expr is ast.IncDec
+	assert (expr as ast.IncDec).postfix
+}
+
+// Every operand that is not a name is refused where the operator is written,
+// and the message names the construct it refused: a silently wrong value from an
+// element or a member read as the name beside it is the worst outcome here.
+fn test_an_increment_refuses_every_operand_that_is_not_a_name() {
+	element := parsed('int main(void) { int a[3]; a[0]++; return 0; }')
+	assert element.diagnostics.len == 1
+	assert element.diagnostics[0].msg.contains('on a[...]')
+	assert element.diagnostics[0].msg.contains('implements ++ and -- on a plain name only')
+	literal := parsed('int main(void) { ++5; return 0; }')
+	assert literal.diagnostics.len == 1
+	assert literal.diagnostics[0].msg.contains('on 5')
+	member := parsed('struct S { int a; };\nint main(void) { struct S s; --s.a; return 0; }')
+	assert member.diagnostics.len == 1
+	assert member.diagnostics[0].msg.contains('on s.a')
+}
+
+// The step is one, which is the increment of an integer name. A pointer, a
+// double and an array are named by their type rather than stepped by one byte,
+// which would be a wrong answer for every use of the value afterwards.
+fn test_an_increment_refuses_a_name_that_is_not_an_integer() {
+	pointer := parsed('int main(void) { int *p; p++; return 0; }')
+	assert pointer.diagnostics.len == 1
+	assert pointer.diagnostics[0].msg.contains('which is int *')
+	assert pointer.diagnostics[0].msg.contains('on an integer name only')
+	floating := parsed('int main(void) { double d = 0.0; d--; return 0; }')
+	assert floating.diagnostics.len == 1
+	assert floating.diagnostics[0].msg.contains('which is double')
+	// A char is an integer the back end steps at its own byte, so it is read
+	// and not refused.
+	character := parsed('int main(void) { char c = 0; c++; return c; }')
+	assert character.diagnostics.len == 0
+}
+
+// A name nothing declares gets the message about a missing declaration and not
+// one about the operator: the walk over the unit is what answers for names, and
+// a second message about the operator would say something untrue about the
+// source.
+fn test_an_increment_of_an_undeclared_name_is_reported_as_a_missing_declaration() {
+	result := parsed('int main(void) { ++missing; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('missing is used here and nothing in this file declares it')
+}
