@@ -54,6 +54,31 @@ fn test_a_mode_can_be_written_back() {
 	assert Mode.other.spelling() == ''
 }
 
+fn test_a_digraph_comes_with_c99_and_not_with_c89() {
+	// Measured on gcc 16.2.1 over `%:define A 41`: -std=c89 answers `error:
+	// expected identifier or '('` at 1:1, and every other mode, gnu89 included,
+	// is rc 0. A GNU dialect of that same standard has them as an extension,
+	// which is what gcc does with a feature its own strict mode lacks.
+	assert !has_digraphs(.c89)
+	assert has_digraphs(.c99)
+	assert has_digraphs(.c11)
+	assert has_digraphs(.c17)
+	assert has_digraphs(.c23)
+	assert has_digraphs(.gnu89)
+	assert has_digraphs(.gnu99)
+	assert has_digraphs(.gnu23)
+	// No -std is the default dialect, which is gnu-like, and a spelling this
+	// compiler does not implement takes that same answer.
+	assert has_digraphs(.none)
+	assert has_digraphs(.other)
+	// The two spelling questions are not the same question, and this is where
+	// that shows: c99 has both, and C23 has the digraphs without the trigraph
+	// replacement.
+	assert replaces_trigraphs(.c99) && has_digraphs(.c99)
+	assert !replaces_trigraphs(.c23) && has_digraphs(.c23)
+	assert replaces_trigraphs(.c89) && !has_digraphs(.c89)
+}
+
 fn test_the_gnu_dialects_are_the_ones_that_take_gnu_c() {
 	assert Mode.gnu99.is_gnu()
 	assert Mode.gnu11.is_gnu()

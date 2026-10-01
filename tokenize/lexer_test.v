@@ -161,19 +161,19 @@ fn test_a_comment_does_not_move_a_directive_off_the_start_of_its_line() {
 }
 
 fn test_a_fragment_lexes_its_hashes_as_punctuators() {
-	fragment := lex_fragment('define S(x) #x')
+	fragment := lex_fragment('define S(x) #x', true)
 	assert fragment.len == 7
 	assert fragment[0].text == 'define'
 	assert fragment[5].text == '#'
-	paste := lex_fragment('define PS(a, b) a ## b')
+	paste := lex_fragment('define PS(a, b) a ## b', true)
 	assert paste[8].text == '##'
 }
 
 fn test_a_fragment_has_no_end_of_file_token() {
 	// A fragment ends where the caller's text ends, so there is nothing for an
 	// eof token to mark.
-	assert lex_fragment('').len == 0
-	assert lex_fragment('x').len == 1
+	assert lex_fragment('', true).len == 0
+	assert lex_fragment('x', true).len == 1
 }
 
 // The translation phases. Phase 1 is trigraph replacement, phase 2 is line
@@ -385,7 +385,7 @@ fn test_phase_one_is_the_selected_mode_s_answer() {
 	// lexer copied, a macro body, a name a paste built — so the fragment reader
 	// never replaces. gcc is the same about text that was never a file's bytes:
 	// measured, `gcc -std=c99 -E -DX='??!'` prints `??!`.
-	assert lex_fragment('??!').map(it.text) == ['?', '?', '!']
+	assert lex_fragment('??!', true).map(it.text) == ['?', '?', '!']
 }
 
 fn test_a_spliced_continuation_of_a_hundred_thousand_lines_is_one_line() {
@@ -558,4 +558,50 @@ fn test_a_universal_character_name_escape_stays_in_the_literal() {
 	assert texts('"\\u00e9" "\\U0001F600"') == ['"\\u00e9"', '"\\U0001F600"', '']
 	assert texts("'\\u00e9'") == ["'\\u00e9'", '']
 	assert kinds('"\\u00e9"') == [.string, .eof]
+}
+
+// The C99 6.4.6 digraphs are token spellings and not a phase 1 replacement, so
+// the punctuator match reads them and the token it makes carries the punctuator's
+// own spelling. The answer is the selected mode's, and `standard.has_digraphs` is
+// where it is written down; this module cannot import `standard`, because
+// `standard` imports this one, so the tests spell the answer out the way the
+// trigraph ones do.
+fn digraphs(source string) Result {
+	return lex_with(source, Options{
+		digraphs: true
+	})
+}
+
+fn test_a_digraph_is_the_punctuator_it_names() {
+	// Measured on gcc 16.2.1: `%:define A 41` is a definition there and not a
+	// percent and a colon, which is the whole of that line — which is why gcc
+	// accepts it under -std=c99 and refuses it at 1:1 under -std=c89. The token
+	// this compiler makes carries the `#` spelling, because a `#` is what
+	// everything downstream reads a directive by.
+	opened := digraphs('%:define A 41\n')
+	assert opened.diagnostics.len == 0
+	assert opened.tokens[0].kind == .directive
+	assert opened.tokens[0].text == '#define A 41'
+	// All six spellings, a token each. `%:%:` is four characters, so a match that
+	// looked three ahead would read a `#` and call the paste a stringize.
+	assert lex_fragment('a %:%: b', true).map(it.text) == ['a', '##', 'b']
+	assert lex_fragment('<% %> <: :>', true).map(it.text) == ['{', '}', '[', ']']
+}
+
+fn test_a_digraph_inside_a_literal_is_text() {
+	// A literal is one token before the punctuator match reads anything, and that
+	// is what separates a digraph from a trigraph: `??!` inside a literal is
+	// replaced in a strict ISO mode, and `%:` inside one is a percent and a colon.
+	assert digraphs('char *s = "%:";\n').tokens.map(it.text) == ['char', '*', 's', '=', '"%:"',
+		';', '']
+}
+
+fn test_a_mode_without_the_digraphs_has_the_punctuators() {
+	// The answer `-std=c89` gives. gcc 16.2.1 refuses `%:define` there with
+	// `error: expected identifier or '('`, which is what reading it as `%` and
+	// `:` costs, and a `%:%:` in a body is two punctuators rather than a paste.
+	result := lex('%:define A 41\n')
+	assert result.diagnostics.len == 0
+	assert result.tokens.map(it.text) == ['%', ':', 'define', 'A', '41', '']
+	assert lex_fragment('a %:%: b', false).map(it.text) == ['a', '%', ':', '%', ':', 'b']
 }

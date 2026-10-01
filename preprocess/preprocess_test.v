@@ -964,6 +964,31 @@ fn test_phase_one_is_gated_by_the_dialect_the_command_line_chose() {
 	assert processed_in('char *s = "??!";', .gnu99) == ['char', '*', 's', '=', '"??!"', ';']
 }
 
+fn test_a_digraph_is_the_punctuator_it_names() {
+	// The six C99 spellings on the path a program takes: `%:` opens a directive
+	// the same way `#` does, `%:%:` pastes in a macro body, and the brackets and
+	// braces are the punctuators they name. Measured on gcc 16.2.1 with
+	// `gcc -std=c99 -E`: the definitions produce no output and the use line prints
+	// `int dg_var_3 = (3) * 2;`, so the paste happened. gcc writes `int y<:2:>;`
+	// back as it was spelled, which is its output's spelling rather than its
+	// tokens; what this compiler hands over is tokens, and the `[` is a `[`.
+	source := '%:define A 41\n%:define PASTE(a, b) a %:%: b\n%:define X(n) int PASTE(dg_var_, n) = (n) * 2\nX(3);\nint y<:2:>;\n'
+	assert processed_in(source, .c99) == ['int', 'dg_var_3', '=', '(', '3', ')', '*', '2', ';',
+		'int', 'y', '[', '2', ']', ';']
+}
+
+fn test_c89_is_the_one_mode_without_the_digraph_spellings() {
+	// Under the mode they arrived after, `%:define` is a percent and a colon, so
+	// it is not a directive and the line reaches the parser as it stands. gcc
+	// 16.2.1 refuses the same file at 1:1 with `error: expected identifier or
+	// '('`, which is what reading it that way costs.
+	assert processed_in('%:define A 41\n', .c89) == ['%', ':', 'define', 'A', '41']
+	// Every other mode reads it as a definition, gnu89 included, which is what
+	// gcc does with a feature its own strict mode of the same standard lacks.
+	assert processed_in('%:define A 41\nA\n', .gnu89) == ['41']
+	assert processed_in('%:define A 41\nA\n', .none) == ['41']
+}
+
 fn test_a_character_constant_may_name_its_encoding_in_an_if() {
 	// C99 6.4.4.4 lets a character constant say which encoding it holds, and what the #if
 	// evaluator wants is the value, which the prefix does not change. This is not a

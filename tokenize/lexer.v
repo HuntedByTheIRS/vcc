@@ -12,6 +12,42 @@ const punct2 = ['->', '++', '--', '<<', '>>', '<=', '>=', '==', '!=', '&&', '||'
 
 const punct1 = '+-*/%&|^~!<>=()[]{};,.?:#'
 
+// The C99 6.4.6 digraphs are alternate spellings of six punctuators. They are
+// tokens and not a replacement, which is what separates them from a trigraph: a
+// string literal holding `%:` holds a percent and a colon, because the spelling
+// is read when the text becomes tokens and a literal is one token by then. The
+// two tables below are what the punctuator match reads when the selected mode
+// has them, and they are matched at their own length. `%:%:` is four characters
+// and not three, so the match looks one character further than the longest
+// punctuator that is not a digraph: at three it would read `%:` and make a `#`
+// out of the front of a paste.
+//
+// Measured on gcc 16.2.1 over `%:define A 41` and a `return A + 1`:
+//
+//	-std=c89   rc 1: `error: expected identifier or '('`, at 1:1
+//	every other mode, gnu89 included, and no -std at all   rc 0
+//
+// So a digraph is a row of C99 that a GNU dialect and a `-std=` spelling this
+// compiler does not implement take as well, which is `standard.has_digraphs`.
+const digraph4 = ['%:%:']
+
+const digraph2 = ['%:', '<:', ':>', '<%', '%>']
+
+// spelled is the punctuator a spelling names. Most punctuators name themselves;
+// these six are spelled twice, and what reads the result reads the name: the
+// directive detector wants `#`, and a macro body pastes on `##`.
+fn spelled(text string) string {
+	return match text {
+		'%:%:' { '##' }
+		'%:' { '#' }
+		'<:' { '[' }
+		':>' { ']' }
+		'<%' { '{' }
+		'%>' { '}' }
+		else { text }
+	}
+}
+
 // The first three translation phases, which turn the bytes of a file into the
 // text a token is read from. They run in the order C99 gives them, and the
 // order is what the reader below is for:
@@ -142,6 +178,12 @@ pub mut:
 	// a `-std=` spelling this compiler does not implement.
 	// `standard.replaces_trigraphs` is where that answer is written down.
 	replace_trigraphs bool
+	// digraphs is the selected mode's answer to the other spelling question:
+	// whether `%:` is a `#` token. It is a token spelling and not a phase 1
+	// replacement, so it is not in the bytes and it is not in the token stream
+	// either — `%:` arrives as `#`, which is what everything downstream reads.
+	// `standard.has_digraphs` is where that answer is written down.
+	digraphs bool
 }
 
 // Options are the answers the translation phases need from the language the
@@ -157,6 +199,11 @@ pub:
 	// compiler does not implement. The field's zero value, false, is the answer
 	// no mode gets: a caller that does not say leaves the bytes alone.
 	trigraphs bool
+	// digraphs says whether the six C99 digraph spellings are read as the
+	// punctuators they name. It is the selected mode's answer, and
+	// `standard.has_digraphs` is where that answer is written down: every mode
+	// has them but the strict ISO one they arrived after, which is `-std=c89`.
+	digraphs bool
 }
 
 // lex reads a whole source file into tokens. Directives are recorded as single
@@ -180,6 +227,7 @@ pub fn lex_with(src string, opts Options) Result {
 		directives:        true
 		at_line_start:     true
 		replace_trigraphs: opts.trigraphs
+		digraphs:          opts.digraphs
 	}
 	tokens := l.run()
 	return Result{
@@ -197,8 +245,12 @@ pub fn lex_with(src string, opts Options) Result {
 // replace a trigraph: `??!` is the three punctuators the text is made of. That
 // is gcc's answer for text that never was a file's bytes: measured,
 // `gcc -std=c99 -E -DX='??!'` prints `??!` and not `|`.
-pub fn lex_fragment(text string) []Token {
-	return lex_fragment_at(text, 1, 1)
+//
+// A digraph is not phase 1, so `digraphs` is asked here as well: the `a %:%: b`
+// in a macro body is a paste on the same terms as the one in a file, and the
+// selected mode's answer is `standard.has_digraphs`.
+pub fn lex_fragment(text string, digraphs bool) []Token {
+	return lex_fragment_at(text, 1, 1, digraphs)
 }
 
 // lex_fragment_at is lex_fragment for a caller that knows where in the file the text
@@ -210,11 +262,12 @@ pub fn lex_fragment(text string) []Token {
 //
 // col is the column the fragment's first character sits at in the file, so a token the
 // fragment finds at column 1 is at col.
-pub fn lex_fragment_at(text string, line int, col int) []Token {
+pub fn lex_fragment_at(text string, line int, col int, digraphs bool) []Token {
 	mut l := Lexer{
-		src:  text
-		line: line
-		col:  col
+		src:      text
+		line:     line
+		col:      col
+		digraphs: digraphs
 	}
 	tokens := l.run()
 	if tokens.len > 0 && tokens[tokens.len - 1].kind == .eof {
@@ -252,7 +305,14 @@ fn (mut l Lexer) run() []Token {
 		// `#` opens a directive when it is the first token on its line and this
 		// text is source rather than a fragment. Anywhere else the same byte is
 		// a punctuator, which is what a macro body uses to paste and stringize.
-		if c == `#` && l.directives && l.at_line_start {
+		//
+		// A mode with the digraph spellings opens a directive with `%:` as well,
+		// because `%:` is the same token as `#` there. The question is what the
+		// token will be rather than which byte it was written with, or a file
+		// whose directives are all spelled as digraphs reads as one long
+		// declaration.
+		opens_directive := c == `#` || (l.digraphs && c == `%` && l.peek(1) == `:`)
+		if opens_directive && l.directives && l.at_line_start {
 			tokens << l.lex_directive()
 			l.at_line_start = false
 			continue
@@ -293,7 +353,17 @@ fn (mut l Lexer) skip_block_comment() bool {
 fn (mut l Lexer) lex_directive() Token {
 	line := l.line
 	col := l.col
-	mut text := ''
+	// The opening is one `#`, or one `%:` in a mode that has the digraph
+	// spellings, and the text carries the `#`: the two are the same token and
+	// differ in the spelling a person wrote, so what the rest of the compiler
+	// reads past the opening is the same either way.
+	mut text := '#'
+	if l.digraphs && l.at() == `%` {
+		l.advance() // %
+		l.advance() // :
+	} else {
+		l.advance() // #
+	}
 	for l.pos < l.src.len && l.at() != `\n` {
 		c := l.at()
 		// A comment is one space as far as a directive is concerned, and a
@@ -390,9 +460,11 @@ fn (mut l Lexer) lex_token() ?Token {
 	}
 	// Punctuation is matched longest first against the text the phases produced,
 	// so a punctuator written as a trigraph is the punctuator it stands for:
-	// `??=??=` is `##` and `??(` is `[`.
-	ahead := l.ahead(3)
-	for n in [3, 2, 1] {
+	// `??=??=` is `##` and `??(` is `[`. A digraph is a spelling rather than a
+	// replacement, so it is matched here as well, and the token it makes is
+	// written the way the language names it.
+	ahead := l.ahead(4)
+	for n in [4, 3, 2, 1] {
 		if ahead.len < n {
 			continue
 		}
@@ -400,13 +472,14 @@ fn (mut l Lexer) lex_token() ?Token {
 		if n == 1 && !punct1.contains_u8(c) {
 			continue
 		}
-		if (n == 3 && text in punct3) || (n == 2 && text in punct2) || n == 1 {
+		if (n == 4 && l.digraphs && text in digraph4) || (n == 3 && text in punct3)
+			|| (n == 2 && (text in punct2 || (l.digraphs && text in digraph2))) || n == 1 {
 			for _ in 0 .. n {
 				l.advance()
 			}
 			return Token{
 				kind: .punct
-				text: text
+				text: if l.digraphs { spelled(text) } else { text }
 				line: start_line
 				col:  start_col
 			}

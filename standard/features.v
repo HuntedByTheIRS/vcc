@@ -418,6 +418,33 @@ pub fn replaces_trigraphs(mode Mode) bool {
 	}
 }
 
+// has_digraphs answers the other spelling question for the selected mode, and it
+// is a separate question because C asks it separately: the six C99 digraphs
+// (`%:` for `#`, `%:%:` for `##`, `<:` and `:>` for the brackets and `<%` and
+// `%>` for the braces) are token spellings, not a replacement phase 1 makes in
+// the bytes. `replaces_trigraphs` above is the other one, and the two answers
+// are not the same: a trigraph is replaced only up to C17, and a digraph is read
+// everywhere.
+//
+// Measured on gcc 16.2.1, one mode at a time over `%:define A 41` and a program
+// that returns `A + 1`:
+//
+//	-std=c89            rc 1: `error: expected identifier or '('`, at 1:1
+//	-std=gnu89, -std=c99, -std=c11, -std=c17,
+//	-std=c23, -std=gnu23, and no -std at all   rc 0
+//
+// The one mode without them is the strict ISO mode they arrived after, and the
+// GNU dialect of that same standard has them, which is what gcc does with a
+// feature its own strict mode lacks. A `-std=` spelling this compiler does not
+// implement is recorded and refused nothing, and it takes the default dialect's
+// answer, which is gnu-like: it has them.
+pub fn has_digraphs(mode Mode) bool {
+	return match mode {
+		.c89 { false }
+		.none, .c99, .c11, .c17, .c23, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23, .other { true }
+	}
+}
+
 // Question is what a dialect check is asked under: the mode the command line
 // named, the extensions -fvcc-exts= turned on, and the files the check stays out
 // of.

@@ -303,7 +303,7 @@ fn (mut p Processor) apply_command_line_defines() {
 			function_like: function_like
 			params:        params
 			variadic:      variadic
-			body:          tokenize.lex_fragment(body)
+			body:          tokenize.lex_fragment(body, standard.has_digraphs(p.opts.dialect))
 			file:          '<command line>'
 			line:          1
 			col:           1
@@ -322,7 +322,7 @@ fn (mut p Processor) apply_command_line_defines() {
 // can say where it came from, so a diagnostic points at the file it was
 // generated from rather than at the file that happens to be compiled.
 fn (mut p Processor) line_directive(tok tokenize.Token, args string) {
-	tokens := p.expand_all(tokenize.lex_fragment(args))
+	tokens := p.expand_all(tokenize.lex_fragment(args, standard.has_digraphs(p.opts.dialect)))
 	if tokens.len == 0 {
 		p.problem(tok, '${hash}line wants a line number')
 		return
@@ -360,7 +360,7 @@ fn (mut p Processor) include(tok tokenize.Token, args string, after bool) {
 		p.problem(tok, 'includes are ${max_include_depth} files deep and still going; a file that includes itself with nothing to stop it is the shape of this')
 		return
 	}
-	mut tokens := tokenize.lex_fragment(args)
+	mut tokens := tokenize.lex_fragment(args, standard.has_digraphs(p.opts.dialect))
 	if tokens.len > 0 && tokens[0].kind == .identifier {
 		// A computed include: `NAME`, where NAME is a macro that stands for the
 		// name of the file. The expansion is the same one the text gets, so what
@@ -540,9 +540,11 @@ fn (mut p Processor) push(path string, source string, found_index int, silent bo
 	// Phase 1 is the selected mode's answer and not the lexer's, so the mode is
 	// handed to the read rather than assumed by it: the strict ISO modes up to
 	// C17 replace a trigraph, and a GNU dialect, C23 and a spelling this compiler
-	// does not implement leave the bytes alone.
+	// does not implement leave the bytes alone. The digraph spellings are the
+	// other dialect answer the read needs, and the same mode gives it.
 	lexed := tokenize.lex_with(source, tokenize.Options{
 		trigraphs: standard.replaces_trigraphs(p.opts.dialect)
+		digraphs:  standard.has_digraphs(p.opts.dialect)
 	})
 	for diagnostic in lexed.diagnostics {
 		p.diagnostics << tokenize.Diagnostic{
@@ -691,7 +693,7 @@ fn (mut p Processor) ifdef_directive(tok tokenize.Token, args string, negated bo
 	parent := p.reading()
 	mut taken := false
 	if parent {
-		tokens := tokenize.lex_fragment(args)
+		tokens := tokenize.lex_fragment(args, standard.has_digraphs(p.opts.dialect))
 		if tokens.len == 0 || tokens[0].kind != .identifier {
 			p.problem(tok, 'expected an identifier after #${if negated { 'ifndef' } else { 'ifdef' }}')
 		} else {
@@ -766,7 +768,7 @@ fn (mut p Processor) if_value(tok tokenize.Token, args string) ?i64 {
 	// the file: `#if` and what follows it are the same line, and a diagnostic about a
 	// construct in the expression names a place in the file's text, not in a copy of
 	// part of one line.
-	raw := tokenize.lex_fragment_at(args, tok.line, tok.col + (tok.text.len - args.len))
+	raw := tokenize.lex_fragment_at(args, tok.line, tok.col + (tok.text.len - args.len), standard.has_digraphs(p.opts.dialect))
 	// `defined` is answered before anything is expanded, because what it takes
 	// is the name of a macro and not a use of one: it is rewritten to 1 or 0
 	// here, and the expansion that follows is the ordinary one — which is what
@@ -880,7 +882,7 @@ fn (mut p Processor) text_directive(tok tokenize.Token, name string, args string
 // `#define F (x)` is an object-like macro whose replacement is `(x)`.
 fn (mut p Processor) define(tok tokenize.Token, args string) {
 	text := args.trim_left(' \t')
-	tokens := tokenize.lex_fragment(text)
+	tokens := tokenize.lex_fragment(text, standard.has_digraphs(p.opts.dialect))
 	if tokens.len == 0 || tokens[0].kind != .identifier {
 		p.problem(tok, 'expected a macro name after #define')
 		return
@@ -918,7 +920,7 @@ fn (mut p Processor) define(tok tokenize.Token, args string) {
 		function_like: function_like
 		params:        params
 		variadic:      variadic
-		body:          tokenize.lex_fragment(body_text)
+		body:          tokenize.lex_fragment(body_text, standard.has_digraphs(p.opts.dialect))
 		file:          p.frames.last().path
 		line:          tok.line
 		col:           tok.col
@@ -926,7 +928,7 @@ fn (mut p Processor) define(tok tokenize.Token, args string) {
 }
 
 fn (mut p Processor) undef(tok tokenize.Token, args string) {
-	tokens := tokenize.lex_fragment(args)
+	tokens := tokenize.lex_fragment(args, standard.has_digraphs(p.opts.dialect))
 	if tokens.len == 0 || tokens[0].kind != .identifier {
 		p.problem(tok, 'expected a macro name after #undef')
 		return

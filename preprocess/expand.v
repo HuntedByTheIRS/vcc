@@ -1,5 +1,6 @@
 module preprocess
 
+import standard
 import tokenize
 
 // Expanding a macro with arguments is the part of the preprocessor that is
@@ -338,7 +339,7 @@ fn (mut p Processor) substitute(macro Macro, arguments Arguments, tok tokenize.T
 // are real and the one that is not real is the joined one.
 fn (mut p Processor) paste(left tokenize.Token, right tokenize.Token, tok tokenize.Token) []tokenize.Token {
 	joined := left.text + right.text
-	lexed := tokenize.lex_fragment(joined)
+	lexed := tokenize.lex_fragment(joined, standard.has_digraphs(p.opts.dialect))
 	if lexed.len == 1 {
 		return [
 			tokenize.Token{
