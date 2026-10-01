@@ -24,6 +24,18 @@ pub const word_size = 8
 // and not with the format that stores it.
 pub const machine = u16(62)
 
+// The relocations this machine's psABI gives a reference between two objects:
+// the numbers an object file carries for them. They are the psABI's rather than
+// the container format's, because another machine numbers its own differently
+// for the same reference, which is why they sit beside `machine` and not in
+// `backend/os/elf`.
+pub const relocation_call = u32(4) // R_X86_64_PLT32
+
+// relocation_pc_relative is for a distance the code computes rather than jumps
+// to: the address of a string, of a constant, or of an object defined at the
+// top level.
+pub const relocation_pc_relative = u32(2) // R_X86_64_PC32
+
 // syscall_number_reg is the register the kernel reads a syscall number from once
 // the trap is taken.
 pub const syscall_number_reg = 'eax'

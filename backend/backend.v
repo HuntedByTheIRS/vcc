@@ -210,6 +210,19 @@ pub fn (t Target) call_slot(disp i32) []u8 {
 	return x86_64.call_rip_slot(disp)
 }
 
+// call_relocation is the number an object file gives a call, for a reference the
+// linker still has to fill in: a call to a symbol this object does not define,
+// or one it leaves to the linker to route.
+pub fn (t Target) call_relocation() u32 {
+	return x86_64.relocation_call
+}
+
+// address_relocation is the number an object file gives a distance the code
+// computes rather than jumps to, which is every reference to data.
+pub fn (t Target) address_relocation() u32 {
+	return x86_64.relocation_pc_relative
+}
+
 // address_of computes the address of a byte string in the image and puts it in
 // the register, which is how a string argument is passed.
 pub fn (t Target) address_of(reg x86_64.Register, disp i32) []u8 {
