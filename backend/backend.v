@@ -136,10 +136,13 @@ pub fn no_target() string {
 
 // reg finds a register by the name it is written with. Both spellings of the
 // same register answer, because callers name the width they mean.
-pub fn (t Target) reg(name string) ?x86_64.Register {
-	for r in t.registers {
+pub fn (t Target) reg(name string) ?Register {
+	for i, r in t.registers {
 		if r.name == name || r.wide_name == name {
-			return r
+			return Register{
+				file:  .general
+				index: i
+			}
 		}
 	}
 	return none
@@ -149,20 +152,26 @@ pub fn (t Target) reg(name string) ?x86_64.Register {
 // or none once the machine's convention has run out of registers. Callers ask
 // for a position rather than for a register name so that a second machine with a
 // different convention is a table, not an emitter change.
-pub fn (t Target) arg_reg(position int) ?x86_64.Register {
-	for r in t.registers {
+pub fn (t Target) arg_reg(position int) ?Register {
+	for i, r in t.registers {
 		if r.call_arg == position {
-			return r
+			return Register{
+				file:  .general
+				index: i
+			}
 		}
 	}
 	return none
 }
 
 // float_reg finds a register in the machine's floating-point file by name.
-pub fn (t Target) float_reg(name string) ?x86_64.Register {
-	for r in t.float_registers {
+pub fn (t Target) float_reg(name string) ?Register {
+	for i, r in t.float_registers {
 		if r.name == name || r.wide_name == name {
-			return r
+			return Register{
+				file:  .floating
+				index: i
+			}
 		}
 	}
 	return none
@@ -172,10 +181,13 @@ pub fn (t Target) float_reg(name string) ?x86_64.Register {
 // It is a second sequence on purpose: a call to `printf("%f", 1.5)` numbers the
 // format string in the integer sequence and the double in this one, so both
 // start at zero.
-pub fn (t Target) float_arg_reg(position int) ?x86_64.Register {
-	for r in t.float_registers {
+pub fn (t Target) float_arg_reg(position int) ?Register {
+	for i, r in t.float_registers {
 		if r.float_call_arg == position {
-			return r
+			return Register{
+				file:  .floating
+				index: i
+			}
 		}
 	}
 	return none
@@ -185,11 +197,11 @@ pub fn (t Target) float_arg_reg(position int) ?x86_64.Register {
 // float_scratch is where the right-hand value of a floating-point operation
 // waits while the left-hand one sits in the first. They are the same pair of
 // roles the general register file has, one file over.
-pub fn (t Target) float_return() ?x86_64.Register {
+pub fn (t Target) float_return() ?Register {
 	return t.float_reg(x86_64.float_return_reg)
 }
 
-pub fn (t Target) float_scratch() ?x86_64.Register {
+pub fn (t Target) float_scratch() ?Register {
 	return t.float_reg(x86_64.float_scratch_reg)
 }
 
@@ -222,8 +234,8 @@ pub fn (t Target) exit_sequence(code u8) ![]u8 {
 	status_reg := t.reg(exit_call.args[0]) or {
 		return error('${t.name}: no register named ${exit_call.args[0]}')
 	}
-	mut out := x86_64.mov_imm32(status_reg, u32(code))!
-	out << x86_64.mov_imm32(number_reg, exit_call.number)!
+	mut out := x86_64.mov_imm32(t.describe(status_reg), u32(code))!
+	out << x86_64.mov_imm32(t.describe(number_reg), exit_call.number)!
 	out << x86_64.trap()
 	return out
 }
@@ -264,19 +276,19 @@ pub fn (t Target) address_relocation() u32 {
 
 // address_of computes the address of a byte string in the image and puts it in
 // the register, which is how a string argument is passed.
-pub fn (t Target) address_of(reg x86_64.Register, disp i32) []u8 {
-	return x86_64.lea_rip(reg, disp)
+pub fn (t Target) address_of(reg Register, disp i32) []u8 {
+	return x86_64.lea_rip(t.describe(reg), disp)
 }
 
 // move_immediate32 loads a constant into a register.
-pub fn (t Target) move_immediate32(reg x86_64.Register, value u32) ![]u8 {
-	return x86_64.mov_imm32(reg, value)
+pub fn (t Target) move_immediate32(reg Register, value u32) ![]u8 {
+	return x86_64.mov_imm32(t.describe(reg), value)
 }
 
 // move_register32 copies one register into another, which is how a value a
 // function returned reaches the register the next call reads it from.
-pub fn (t Target) move_register32(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.mov_reg32(dst, src)
+pub fn (t Target) move_register32(dst Register, src Register) ![]u8 {
+	return x86_64.mov_reg32(t.describe(dst), t.describe(src))
 }
 
 // frame_prologue and frame_epilogue are the two ends of a function body.
@@ -294,10 +306,57 @@ pub fn (t Target) halt() []u8 {
 	return x86_64.halt()
 }
 
-// Register is the machine's register, named again here because it is what the
-// functions below hand back: a caller asks this module for a machine fact and
-// should not have to reach into the machine's own file to say what it received.
-pub type Register = x86_64.Register
+// Register is one of a machine's registers as this side of the seam sees it: a handle
+// the machine that produced it interprets and nothing else does. The emitter gets one
+// from the target and hands it back to the target; it never asks what is inside, which
+// is what lets a second machine carry its registers in its own terms instead of having
+// to accept this one's.
+//
+// file says which of the machine's register files the register is in, and index where
+// it sits in that file's table. Neither half means anything on its own: the same pair
+// names a different register on a different machine, and the number is never computed
+// outside the machine that published the table it indexes.
+pub struct Register {
+pub:
+	file  RegisterFile
+	index int
+}
+
+// RegisterFile is one of a machine's register files. A machine that keeps the registers
+// a double travels in apart from the rest has two, which is what lets a call number its
+// integer arguments and its floating-point ones in two sequences that both start at
+// zero. A machine that keeps one file answers with the general kind for everything.
+pub enum RegisterFile {
+	general
+	floating
+}
+
+// describe answers the register a handle names, in the terms the machine's instruction
+// encodings are written in. It is the one place a handle becomes a register again, and
+// the reason the handle is an index: every question about a register is asked here, so
+// no other file has to know how a machine stores one.
+pub fn (t Target) describe(handle Register) x86_64.Register {
+	return match handle.file {
+		.general { t.registers[handle.index] }
+		.floating { t.float_registers[handle.index] }
+	}
+}
+
+// name_of is what the machine calls this register. The emitter needs the name for two
+// things that are not questions about an encoding: what a reference in the image is
+// recorded under, and what a diagnostic says.
+pub fn (t Target) name_of(handle Register) string {
+	return t.describe(handle).name
+}
+
+// carries_shift_count says whether this is the register the machine reads a shift count
+// from. The encodings of a computed shift name no place for the count, because there is
+// only one place they can name, so a count that ended up anywhere else would shift by
+// whatever that register happened to hold. The emitter needs to ask this, and asking it
+// by the register's bit pattern would be the emitter knowing an encoding.
+pub fn (t Target) carries_shift_count(handle Register) bool {
+	return t.describe(handle).code == x86_64.shift_count_code
+}
 
 // The instructions a body with locals, branches and arithmetic needs, in the
 // same spirit as the ones above: each asks the machine's file for the encoding
@@ -307,15 +366,15 @@ pub type Register = x86_64.Register
 // right-hand value of an operation waits while the left-hand one sits in the
 // result register, and remainder is where a division leaves what did not divide
 // evenly.
-pub fn (t Target) frame_pointer() ?x86_64.Register {
+pub fn (t Target) frame_pointer() ?Register {
 	return t.reg(x86_64.frame_pointer)
 }
 
-pub fn (t Target) scratch() ?x86_64.Register {
+pub fn (t Target) scratch() ?Register {
 	return t.reg(x86_64.scratch_reg)
 }
 
-pub fn (t Target) remainder() ?x86_64.Register {
+pub fn (t Target) remainder() ?Register {
 	return t.reg(x86_64.remainder_reg)
 }
 
@@ -326,8 +385,8 @@ pub fn (t Target) remainder() ?x86_64.Register {
 // past the registers need: the caller puts them on the stack before the call and
 // gives the stack back after it, and the callee reads them from where the
 // convention says they are.
-pub fn (t Target) push_register(reg x86_64.Register) []u8 {
-	return x86_64.push_register(reg)
+pub fn (t Target) push_register(reg Register) []u8 {
+	return x86_64.push_register(t.describe(reg))
 }
 
 pub fn (t Target) stack_release(size u32) []u8 {
@@ -351,12 +410,12 @@ pub fn (t Target) align_stack() []u8 {
 
 // load_slot and store_slot move a value between the frame and a register at the
 // width the value has: four bytes for an int, eight for a pointer.
-pub fn (t Target) load_slot(base x86_64.Register, disp i32, dst x86_64.Register, width int) ![]u8 {
-	return x86_64.load_slot(base, disp, dst, width)
+pub fn (t Target) load_slot(base Register, disp i32, dst Register, width int) ![]u8 {
+	return x86_64.load_slot(t.describe(base), disp, t.describe(dst), width)
 }
 
-pub fn (t Target) store_slot(base x86_64.Register, disp i32, src x86_64.Register, width int) ![]u8 {
-	return x86_64.store_slot(base, disp, src, width)
+pub fn (t Target) store_slot(base Register, disp i32, src Register, width int) ![]u8 {
+	return x86_64.store_slot(t.describe(base), disp, t.describe(src), width)
 }
 
 // The address of a value in the frame, the address of one element of it, and the
@@ -365,127 +424,127 @@ pub fn (t Target) store_slot(base x86_64.Register, disp i32, src x86_64.Register
 // add_immediate folds a constant into a register. A member of an object named by a
 // pointer is read at the pointer's value plus the member's offset, and this is the
 // addition that makes the two one address.
-pub fn (t Target) add_immediate(dst x86_64.Register, value i32) []u8 {
-	return x86_64.add_immediate(dst, value)
+pub fn (t Target) add_immediate(dst Register, value i32) []u8 {
+	return x86_64.add_immediate(t.describe(dst), value)
 }
 
 // add_reg64 and imul_immediate are the two steps that reach an element whose
 // stride the scaled address cannot write: multiply the index by the stride, add
 // the array's address.
-pub fn (t Target) add_reg64(dst x86_64.Register, src x86_64.Register) []u8 {
-	return x86_64.add_reg64(dst, src)
+pub fn (t Target) add_reg64(dst Register, src Register) []u8 {
+	return x86_64.add_reg64(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) imul_immediate(dst x86_64.Register, value i32) []u8 {
-	return x86_64.imul_immediate(dst, value)
+pub fn (t Target) imul_immediate(dst Register, value i32) []u8 {
+	return x86_64.imul_immediate(t.describe(dst), value)
 }
 
-pub fn (t Target) address_of_slot(base x86_64.Register, disp i32, dst x86_64.Register) []u8 {
-	return x86_64.address_of_slot(base, disp, dst)
+pub fn (t Target) address_of_slot(base Register, disp i32, dst Register) []u8 {
+	return x86_64.address_of_slot(t.describe(base), disp, t.describe(dst))
 }
 
-pub fn (t Target) address_of_element(base x86_64.Register, index x86_64.Register, scale int, disp i32, dst x86_64.Register) ![]u8 {
-	return x86_64.address_of_element(base, index, scale, disp, dst)
+pub fn (t Target) address_of_element(base Register, index Register, scale int, disp i32, dst Register) ![]u8 {
+	return x86_64.address_of_element(t.describe(base), t.describe(index), scale, disp, t.describe(dst))
 }
 
-pub fn (t Target) load_indirect(address x86_64.Register, dst x86_64.Register, width int) ![]u8 {
-	return x86_64.load_indirect(address, dst, width)
+pub fn (t Target) load_indirect(address Register, dst Register, width int) ![]u8 {
+	return x86_64.load_indirect(t.describe(address), t.describe(dst), width)
 }
 
-pub fn (t Target) store_indirect(address x86_64.Register, src x86_64.Register, width int) ![]u8 {
-	return x86_64.store_indirect(address, src, width)
+pub fn (t Target) store_indirect(address Register, src Register, width int) ![]u8 {
+	return x86_64.store_indirect(t.describe(address), t.describe(src), width)
 }
 
 // The two widenings a conversion between the value classes needs. A byte is
 // widened with its sign kept, which is what converting a value to a char is; a
 // word is widened into the whole register, which is what converting an int to a
 // pointer is, because a pointer is the machine's word.
-pub fn (t Target) sign_extend_byte(reg x86_64.Register) ![]u8 {
-	return x86_64.sign_extend_byte(reg)
+pub fn (t Target) sign_extend_byte(reg Register) ![]u8 {
+	return x86_64.sign_extend_byte(t.describe(reg))
 }
 
-pub fn (t Target) sign_extend_word(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.sign_extend_word(dst, src)
+pub fn (t Target) sign_extend_word(dst Register, src Register) ![]u8 {
+	return x86_64.sign_extend_word(t.describe(dst), t.describe(src))
 }
 
 // shift_right_arithmetic spreads the sign of a value over the whole register,
 // which is what storing a value narrower than the word it goes into needs.
-pub fn (t Target) shift_right_arithmetic(reg x86_64.Register, bits u8) ![]u8 {
-	return x86_64.shift_right_arithmetic(reg, bits)
+pub fn (t Target) shift_right_arithmetic(reg Register, bits u8) ![]u8 {
+	return x86_64.shift_right_arithmetic(t.describe(reg), bits)
 }
 
 // The arithmetic, named for what the language asks for rather than for the
 // instruction that carries it.
-pub fn (t Target) add(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.add_reg32(dst, src)
+pub fn (t Target) add(dst Register, src Register) ![]u8 {
+	return x86_64.add_reg32(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) subtract(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.sub_reg32(dst, src)
+pub fn (t Target) subtract(dst Register, src Register) ![]u8 {
+	return x86_64.sub_reg32(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) multiply(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.imul_reg32(dst, src)
+pub fn (t Target) multiply(dst Register, src Register) ![]u8 {
+	return x86_64.imul_reg32(t.describe(dst), t.describe(src))
 }
 
 // divide divides the result register by another one, signed. The sign goes over
 // the register above first, because that pair is what the machine divides: the
 // quotient is left in the result register and the remainder above it.
-pub fn (t Target) divide(src x86_64.Register) ![]u8 {
+pub fn (t Target) divide(src Register) ![]u8 {
 	mut out := x86_64.cdq()
-	out << x86_64.idiv_reg32(src)!
+	out << x86_64.idiv_reg32(t.describe(src))!
 	return out
 }
 
-pub fn (t Target) negate(reg x86_64.Register) ![]u8 {
-	return x86_64.neg_reg32(reg)
+pub fn (t Target) negate(reg Register) ![]u8 {
+	return x86_64.neg_reg32(t.describe(reg))
 }
 
-pub fn (t Target) complement(reg x86_64.Register) ![]u8 {
-	return x86_64.not_reg32(reg)
+pub fn (t Target) complement(reg Register) ![]u8 {
+	return x86_64.not_reg32(t.describe(reg))
 }
 
 // test and compare set the flags a branch reads. test compares a value with zero;
 // compare puts two values in the order the operator names and turns the flags
 // into a value of the language's int width, zero or one.
-pub fn (t Target) test(reg x86_64.Register) ![]u8 {
-	return x86_64.test_reg32(reg)
+pub fn (t Target) test(reg Register) ![]u8 {
+	return x86_64.test_reg32(t.describe(reg))
 }
 
 // logical_not answers whether a value is zero, as the language's not operator
 // asks: the value is compared with zero and the flags become a value of int
 // width, which is the same shape a comparison has and the reason it is written
 // here rather than as an instruction of its own.
-pub fn (t Target) logical_not(reg x86_64.Register) ![]u8 {
-	mut out := x86_64.test_reg32(reg)!
-	out << x86_64.set_condition(x86_64.Condition.equal, reg)!
-	out << x86_64.movzx_byte(reg)!
+pub fn (t Target) logical_not(reg Register) ![]u8 {
+	mut out := x86_64.test_reg32(t.describe(reg))!
+	out << x86_64.set_condition(x86_64.Condition.equal, t.describe(reg))!
+	out << x86_64.movzx_byte(t.describe(reg))!
 	return out
 }
 
-pub fn (t Target) compare(op string, left x86_64.Register, right x86_64.Register) ![]u8 {
+pub fn (t Target) compare(op string, left Register, right Register) ![]u8 {
 	condition := condition_of(t.name, op)!
-	mut out := x86_64.cmp_reg32(left, right)!
-	out << x86_64.set_condition(condition, left)!
-	out << x86_64.movzx_byte(left)!
+	mut out := x86_64.cmp_reg32(t.describe(left), t.describe(right))!
+	out << x86_64.set_condition(condition, t.describe(left))!
+	out << x86_64.movzx_byte(t.describe(left))!
 	return out
 }
 
 // compare_word is the same comparison at the width of a word, which is what two
 // addresses are compared at: comparing the low halves of two addresses would call
 // two different ones equal.
-pub fn (t Target) compare_word(op string, left x86_64.Register, right x86_64.Register) ![]u8 {
+pub fn (t Target) compare_word(op string, left Register, right Register) ![]u8 {
 	condition := condition_of(t.name, op)!
-	mut out := x86_64.cmp_reg64(left, right)!
-	out << x86_64.set_condition(condition, left)!
-	out << x86_64.movzx_byte(left)!
+	mut out := x86_64.cmp_reg64(t.describe(left), t.describe(right))!
+	out << x86_64.set_condition(condition, t.describe(left))!
+	out << x86_64.movzx_byte(t.describe(left))!
 	return out
 }
 
 // move_register64 copies one register into another at the width of a word, which
 // is how an address moves from where it was computed to where it is wanted.
-pub fn (t Target) move_register64(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.mov_reg64(dst, src)
+pub fn (t Target) move_register64(dst Register, src Register) ![]u8 {
+	return x86_64.mov_reg64(t.describe(dst), t.describe(src))
 }
 
 // condition_of is the order an operator names as the machine's condition, and the
@@ -532,36 +591,36 @@ pub fn condition_for(target string, op string, unsigned bool) !x86_64.Condition 
 // the instruction that carries it. A double is not a wide int: the machine moves
 // it, computes it and compares it with a different set of instructions, which is
 // why these are written beside the ones above rather than as a width on them.
-pub fn (t Target) load_double_slot(base x86_64.Register, disp i32, dst x86_64.Register) ![]u8 {
-	return x86_64.load_double_slot(base, disp, dst)
+pub fn (t Target) load_double_slot(base Register, disp i32, dst Register) ![]u8 {
+	return x86_64.load_double_slot(t.describe(base), disp, t.describe(dst))
 }
 
-pub fn (t Target) store_double_slot(base x86_64.Register, disp i32, src x86_64.Register) ![]u8 {
-	return x86_64.store_double_slot(base, disp, src)
+pub fn (t Target) store_double_slot(base Register, disp i32, src Register) ![]u8 {
+	return x86_64.store_double_slot(t.describe(base), disp, t.describe(src))
 }
 
 // load_double_constant reads a double out of the image's read-only data, which
 // is where a floating constant lives: the eight bytes are the value, and the
 // instruction names the place they are at relative to itself.
-pub fn (t Target) load_double_constant(dst x86_64.Register, disp i32) ![]u8 {
-	return x86_64.load_double_rip(dst, disp)
+pub fn (t Target) load_double_constant(dst Register, disp i32) ![]u8 {
+	return x86_64.load_double_rip(t.describe(dst), disp)
 }
 
-pub fn (t Target) load_double_indirect(address x86_64.Register, dst x86_64.Register) ![]u8 {
-	return x86_64.load_double_indirect(address, dst)
+pub fn (t Target) load_double_indirect(address Register, dst Register) ![]u8 {
+	return x86_64.load_double_indirect(t.describe(address), t.describe(dst))
 }
 
-pub fn (t Target) store_double_indirect(address x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.store_double_indirect(address, src)
+pub fn (t Target) store_double_indirect(address Register, src Register) ![]u8 {
+	return x86_64.store_double_indirect(t.describe(address), t.describe(src))
 }
 
-pub fn (t Target) move_double(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.move_double(dst, src)
+pub fn (t Target) move_double(dst Register, src Register) ![]u8 {
+	return x86_64.move_double(t.describe(dst), t.describe(src))
 }
 
 // double_arithmetic applies an arithmetic operator to two doubles. The operator
 // names are the language's, so the four instructions stay in the machine's file.
-pub fn (t Target) double_arithmetic(op string, dst x86_64.Register, src x86_64.Register) ![]u8 {
+pub fn (t Target) double_arithmetic(op string, dst Register, src Register) ![]u8 {
 	opcode := match op {
 		'+' { x86_64.double_add }
 		'-' { x86_64.double_subtract }
@@ -571,7 +630,7 @@ pub fn (t Target) double_arithmetic(op string, dst x86_64.Register, src x86_64.R
 			return error('${t.name}: ${op} is not an operation this machine computes a double with')
 		}
 	}
-	return x86_64.double_arithmetic(opcode, dst, src)
+	return x86_64.double_arithmetic(opcode, t.describe(dst), t.describe(src))
 }
 
 // double_comparison puts two doubles in the order the operator names and leaves
@@ -580,35 +639,35 @@ pub fn (t Target) double_arithmetic(op string, dst x86_64.Register, src x86_64.R
 // unordered pair would otherwise answer wrongly a second flag is read and
 // combined with the first. A NaN is not less than, equal to, or greater than
 // anything, and the pair of flags is what says so.
-pub fn (t Target) double_comparison(op string, left x86_64.Register, right x86_64.Register, reg x86_64.Register, scratch x86_64.Register) ![]u8 {
-	mut out := x86_64.compare_double(left, right)!
-	out << x86_64.set_float_condition(op, reg, scratch)!
+pub fn (t Target) double_comparison(op string, left Register, right Register, reg Register, scratch Register) ![]u8 {
+	mut out := x86_64.compare_double(t.describe(left), t.describe(right))!
+	out << x86_64.set_float_condition(op, t.describe(reg), t.describe(scratch))!
 	return out
 }
 
 // zero_double clears a register. It is how the right-hand side of a comparison
 // against zero is made without a constant in memory.
-pub fn (t Target) zero_double(reg x86_64.Register) ![]u8 {
-	return x86_64.zero_double(reg)
+pub fn (t Target) zero_double(reg Register) ![]u8 {
+	return x86_64.zero_double(t.describe(reg))
 }
 
 // negate_double flips the sign of a double through a general register, because
 // the machine has an instruction that negates an integer and none that negates a
 // floating value.
-pub fn (t Target) negate_double(reg x86_64.Register, gp x86_64.Register) ![]u8 {
-	return x86_64.negate_double(reg, gp)
+pub fn (t Target) negate_double(reg Register, gp Register) ![]u8 {
+	return x86_64.negate_double(t.describe(reg), t.describe(gp))
 }
 
 // int_to_double widens a four-byte integer to a double, and double_to_int
 // truncates a double to a four-byte integer. Those are the two conversions the
 // language asks for between the classes, and the machine keeps them in the
 // floating-point file, which is why they are named here.
-pub fn (t Target) int_to_double(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.int_to_double(dst, src)
+pub fn (t Target) int_to_double(dst Register, src Register) ![]u8 {
+	return x86_64.int_to_double(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) double_to_int(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.double_to_int(dst, src)
+pub fn (t Target) double_to_int(dst Register, src Register) ![]u8 {
+	return x86_64.double_to_int(t.describe(dst), t.describe(src))
 }
 
 // The jumps. The distance is filled in once the whole function is laid out,
@@ -632,49 +691,49 @@ pub fn (t Target) jump_if_not_zero(disp i32) []u8 {
 // word it works on. Nothing here decides which word a caller wants; it forwards
 // the machine's instruction and the name carries the side.
 
-pub fn (t Target) subtract_word(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.sub_reg64(dst, src)
+pub fn (t Target) subtract_word(dst Register, src Register) ![]u8 {
+	return x86_64.sub_reg64(t.describe(dst), t.describe(src))
 }
 
 // add_with_carry is the high word of a two-word addition: it adds the carry out of
 // the addition of the low words as well as the two sources. It reads the flags the
 // instruction before it left, so it is always the second instruction of the pair.
-pub fn (t Target) add_with_carry(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.adc_reg64(dst, src)
+pub fn (t Target) add_with_carry(dst Register, src Register) ![]u8 {
+	return x86_64.adc_reg64(t.describe(dst), t.describe(src))
 }
 
 // add_with_carry_immediate is the same addition with the second value in the
 // instruction. The high word of a two-word negation takes a carry of zero through
 // it: negating the low word leaves a borrow in the flag when that word was not
 // zero, and no register is free to hold the zero being added.
-pub fn (t Target) add_with_carry_immediate(dst x86_64.Register, value i32) ![]u8 {
-	return x86_64.adc_immediate(dst, value)
+pub fn (t Target) add_with_carry_immediate(dst Register, value i32) ![]u8 {
+	return x86_64.adc_immediate(t.describe(dst), value)
 }
 
 // subtract_with_borrow is the high word of a two-word subtraction: it takes the
 // borrow out of the subtraction of the low words as well as subtracting the two
 // sources. The flags it leaves are the order of the two words, which is the
 // comparison a value two words wide is made of.
-pub fn (t Target) subtract_with_borrow(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.sbb_reg64(dst, src)
+pub fn (t Target) subtract_with_borrow(dst Register, src Register) ![]u8 {
+	return x86_64.sbb_reg64(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) and_word(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.and_reg64(dst, src)
+pub fn (t Target) and_word(dst Register, src Register) ![]u8 {
+	return x86_64.and_reg64(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) or_word(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.or_reg64(dst, src)
+pub fn (t Target) or_word(dst Register, src Register) ![]u8 {
+	return x86_64.or_reg64(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) xor_word(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.xor_reg64(dst, src)
+pub fn (t Target) xor_word(dst Register, src Register) ![]u8 {
+	return x86_64.xor_reg64(t.describe(dst), t.describe(src))
 }
 
 // test_word asks one word whether it is zero and sets the flags without producing
 // a value, which is how the first half of a two-word value is asked.
-pub fn (t Target) test_word(reg x86_64.Register) ![]u8 {
-	return x86_64.test_reg64(reg)
+pub fn (t Target) test_word(reg Register) ![]u8 {
+	return x86_64.test_reg64(t.describe(reg))
 }
 
 // shift_left_word and shift_right_word shift one word of the pair by a constant
@@ -682,59 +741,59 @@ pub fn (t Target) test_word(reg x86_64.Register) ![]u8 {
 // twice as wide: the bits that leave the word being shifted are not lost but come
 // in at the other end of the word beside it, which is what the middle word of a
 // shift of a value wider than one word needs.
-pub fn (t Target) shift_left_word(reg x86_64.Register, bits u8) ![]u8 {
-	return x86_64.shl_reg64(reg, bits)
+pub fn (t Target) shift_left_word(reg Register, bits u8) ![]u8 {
+	return x86_64.shl_reg64(t.describe(reg), bits)
 }
 
-pub fn (t Target) shift_right_word(reg x86_64.Register, bits u8) ![]u8 {
-	return x86_64.shr_reg64(reg, bits)
+pub fn (t Target) shift_right_word(reg Register, bits u8) ![]u8 {
+	return x86_64.shr_reg64(t.describe(reg), bits)
 }
 
-pub fn (t Target) shift_wide_left(dst x86_64.Register, src x86_64.Register, bits u8) ![]u8 {
-	return x86_64.shld_immediate(dst, src, bits)
+pub fn (t Target) shift_wide_left(dst Register, src Register, bits u8) ![]u8 {
+	return x86_64.shld_immediate(t.describe(dst), t.describe(src), bits)
 }
 
-pub fn (t Target) shift_wide_right(dst x86_64.Register, src x86_64.Register, bits u8) ![]u8 {
-	return x86_64.shrd_immediate(dst, src, bits)
+pub fn (t Target) shift_wide_right(dst Register, src Register, bits u8) ![]u8 {
+	return x86_64.shrd_immediate(t.describe(dst), t.describe(src), bits)
 }
 
 // The shifts whose count is in a register rather than in the instruction. Each is
 // what a shift by a count the program works out needs, and the machine reads the
 // count modulo the register's width rather than being told not to.
-pub fn (t Target) shift_left_narrow_register(reg x86_64.Register) ![]u8 {
-	return x86_64.shift_left_narrow(reg)
+pub fn (t Target) shift_left_narrow_register(reg Register) ![]u8 {
+	return x86_64.shift_left_narrow(t.describe(reg))
 }
 
-pub fn (t Target) shift_right_narrow_register(reg x86_64.Register) ![]u8 {
-	return x86_64.shift_right_narrow(reg)
+pub fn (t Target) shift_right_narrow_register(reg Register) ![]u8 {
+	return x86_64.shift_right_narrow(t.describe(reg))
 }
 
-pub fn (t Target) shift_right_arithmetic_narrow_register(reg x86_64.Register) ![]u8 {
-	return x86_64.shift_right_arithmetic_narrow(reg)
+pub fn (t Target) shift_right_arithmetic_narrow_register(reg Register) ![]u8 {
+	return x86_64.shift_right_arithmetic_narrow(t.describe(reg))
 }
 
-pub fn (t Target) shift_left_word_register(reg x86_64.Register) ![]u8 {
-	return x86_64.shift_left_word_register(reg)
+pub fn (t Target) shift_left_word_register(reg Register) ![]u8 {
+	return x86_64.shift_left_word_register(t.describe(reg))
 }
 
-pub fn (t Target) shift_right_word_register(reg x86_64.Register) ![]u8 {
-	return x86_64.shift_right_word_register(reg)
+pub fn (t Target) shift_right_word_register(reg Register) ![]u8 {
+	return x86_64.shift_right_word_register(t.describe(reg))
 }
 
-pub fn (t Target) shift_right_arithmetic_word_register(reg x86_64.Register) ![]u8 {
-	return x86_64.shift_right_arithmetic_register(reg)
+pub fn (t Target) shift_right_arithmetic_word_register(reg Register) ![]u8 {
+	return x86_64.shift_right_arithmetic_register(t.describe(reg))
 }
 
-pub fn (t Target) shift_wide_left_register(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.shld_register(dst, src)
+pub fn (t Target) shift_wide_left_register(dst Register, src Register) ![]u8 {
+	return x86_64.shld_register(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) shift_wide_right_register(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.shrd_register(dst, src)
+pub fn (t Target) shift_wide_right_register(dst Register, src Register) ![]u8 {
+	return x86_64.shrd_register(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) test_byte_immediate(reg x86_64.Register, value u8) ![]u8 {
-	return x86_64.test_byte_immediate(reg, value)
+pub fn (t Target) test_byte_immediate(reg Register, value u8) ![]u8 {
+	return x86_64.test_byte_immediate(t.describe(reg), value)
 }
 
 // multiply_pair and multiply_pair_signed multiply the result register by the
@@ -742,35 +801,35 @@ pub fn (t Target) test_byte_immediate(reg x86_64.Register, value u8) ![]u8 {
 // multiply_word multiplies one word by another and keeps the low word of the
 // answer. A pair's multiplication uses it for the two cross products, whose upper
 // halves cannot reach the answer.
-pub fn (t Target) multiply_word(dst x86_64.Register, src x86_64.Register) ![]u8 {
-	return x86_64.imul_word64(dst, src)
+pub fn (t Target) multiply_word(dst Register, src Register) ![]u8 {
+	return x86_64.imul_word64(t.describe(dst), t.describe(src))
 }
 
-pub fn (t Target) multiply_pair(src x86_64.Register) ![]u8 {
-	return x86_64.mul_reg64(src)
+pub fn (t Target) multiply_pair(src Register) ![]u8 {
+	return x86_64.mul_reg64(t.describe(src))
 }
 
-pub fn (t Target) multiply_pair_signed(src x86_64.Register) ![]u8 {
-	return x86_64.imul_reg64(src)
+pub fn (t Target) multiply_pair_signed(src Register) ![]u8 {
+	return x86_64.imul_reg64(t.describe(src))
 }
 
 // divide_pair and divide_pair_signed divide the pair by the source and leave the
 // quotient in the result register with the remainder above it, which is where the
 // language's two division operators read their answers from.
-pub fn (t Target) divide_pair(src x86_64.Register) ![]u8 {
-	return x86_64.div_reg64(src)
+pub fn (t Target) divide_pair(src Register) ![]u8 {
+	return x86_64.div_reg64(t.describe(src))
 }
 
-pub fn (t Target) divide_pair_signed(src x86_64.Register) ![]u8 {
-	return x86_64.idiv_reg64(src)
+pub fn (t Target) divide_pair_signed(src Register) ![]u8 {
+	return x86_64.idiv_reg64(t.describe(src))
 }
 
-pub fn (t Target) negate_word(reg x86_64.Register) ![]u8 {
-	return x86_64.neg_reg64(reg)
+pub fn (t Target) negate_word(reg Register) ![]u8 {
+	return x86_64.neg_reg64(t.describe(reg))
 }
 
-pub fn (t Target) complement_word(reg x86_64.Register) ![]u8 {
-	return x86_64.not_reg64(reg)
+pub fn (t Target) complement_word(reg Register) ![]u8 {
+	return x86_64.not_reg64(t.describe(reg))
 }
 
 // Condition is the machine's condition, named here for the same reason Register is
@@ -785,12 +844,12 @@ pub type Condition = x86_64.Condition
 // two words ends with, and it is here rather than inside a comparison method
 // because the flags a caller hands it come from the subtraction of the pair, which
 // that caller wrote. The byte is widened with widen_byte.
-pub fn (t Target) set_condition(condition Condition, reg x86_64.Register) ![]u8 {
-	return x86_64.set_condition(condition, reg)
+pub fn (t Target) set_condition(condition Condition, reg Register) ![]u8 {
+	return x86_64.set_condition(condition, t.describe(reg))
 }
 
 // widen_byte turns that one byte into a value of the language's int width, since a
 // comparison is a value of that width and not a byte.
-pub fn (t Target) widen_byte(reg x86_64.Register) ![]u8 {
-	return x86_64.movzx_byte(reg)
+pub fn (t Target) widen_byte(reg Register) ![]u8 {
+	return x86_64.movzx_byte(t.describe(reg))
 }

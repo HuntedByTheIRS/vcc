@@ -457,6 +457,11 @@ pub:
 	float_call_arg int = -1
 }
 
+// shift_count_code is the register number the machine reads a shift count from. The
+// encodings of a shift by a computed count name no register, because there is only one
+// place they can name, so the count has to be there and this is what says so.
+pub const shift_count_code = u8(1)
+
 // registers is the general register file. The stub emits with the 32-bit names,
 // and both spellings are listed so a caller can ask for the width it means.
 pub fn registers() []Register {

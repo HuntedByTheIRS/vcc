@@ -1055,7 +1055,7 @@ fn (mut e Emitter) assign_object_local(stmt ast.Stmt, target Slot) !void {
 fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object image.GlobalSlot) !void {
 	expr_value := stmt.expr or { return error('assignment without a value') }
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, register.name)
+	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, e.target.name_of(register))
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	return e.assign_object(address, object.width, expr_value, stmt.line, stmt.col)
@@ -1259,7 +1259,7 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 				return error('not an array')
 			}
 			stride = object.width
-			e.reference(e.target.address_of(base, 0), .global_address, name, base.name)
+			e.reference(e.target.address_of(base, 0), .global_address, name, e.target.name_of(base))
 		} else {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is read as an array, and no declaration of that name is in scope')
 			return error('unknown name')
@@ -1289,7 +1289,7 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 		// fills in is meaningless until there is an object to point at.
 		if _ := e.global_of(name) {
 			register := e.accumulator(line, col)!
-			e.reference(e.target.address_of(register, 0), .global_address, name, register.name)
+			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
 			if offset != 0 && !through_pointer {
 				e.append(e.target.add_immediate(register, offset))
 			}
@@ -1420,7 +1420,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			e.emit_expr_at(subscript, 0)!
 			register := e.accumulator(stmt.line, stmt.col)!
 			base := e.scratch(stmt.line, stmt.col)!
-			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, base.name)
+			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, e.target.name_of(base))
 			is_wide := !object.object && object.width == wide_bytes
 			e.element_address(base, register, object.width, 0, is_wide, stmt.target, stmt.line,
 				stmt.col)!
@@ -2320,7 +2320,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			// makes two constants with the same value one entry.
 			e.intern_double(expr.value)
 			register := e.float_accumulator(expr.line, expr.col)!
-			e.reference(e.target.load_double_constant(register, 0)!, .float_constant, float_key(expr.value), register.name)
+			e.reference(e.target.load_double_constant(register, 0)!, .float_constant, float_key(expr.value), e.target.name_of(register))
 		}
 		ast.Ident {
 			slot := e.lookup(expr.name) or {
@@ -2330,7 +2330,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				// the same load an element of an array takes.
 				if object := e.global_of(expr.name) {
 					register := e.accumulator(expr.line, expr.col)!
-					e.reference(e.target.address_of(register, 0), .global_address, expr.name, register.name)
+					e.reference(e.target.address_of(register, 0), .global_address, expr.name, e.target.name_of(register))
 					if object.count > 0 {
 						// The name of an array is the address of its first
 						// element.
@@ -2421,7 +2421,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			// and the instruction says where they landed.
 			e.intern(expr.value)
 			register := e.accumulator(expr.line, expr.col)!
-			e.reference(e.target.address_of(register, 0), .take_address, expr.value, register.name)
+			e.reference(e.target.address_of(register, 0), .take_address, expr.value, e.target.name_of(register))
 		}
 		ast.Unary {
 			e.emit_unary(expr, depth)!
@@ -2470,7 +2470,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 					// after the index is computed, so that the index expression
 					// cannot overwrite it on the way.
 					base := e.scratch(expr.line, expr.col)!
-					e.reference(e.target.address_of(base, 0), .global_address, expr.name, base.name)
+					e.reference(e.target.address_of(base, 0), .global_address, expr.name, e.target.name_of(base))
 					wide := !object.object && object.width == wide_bytes
 					e.element_address(base, register, object.width, 0, wide, expr.name, expr.line,
 						expr.col)!
@@ -2536,7 +2536,7 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 			return
 		}
 		if _ := e.global_of(name) {
-			e.reference(e.target.address_of(register, 0), .global_address, name, register.name)
+			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
 			return
 		}
 	}
@@ -2689,7 +2689,7 @@ fn (mut e Emitter) low_word_of_object(expr ast.Expr, width int, line int, col in
 					// The address of the object goes into the scratch register after
 					// the index is computed, so the index cannot overwrite it.
 					base := e.scratch(line, col)!
-					e.reference(e.target.address_of(base, 0), .global_address, expr.name, base.name)
+					e.reference(e.target.address_of(base, 0), .global_address, expr.name, e.target.name_of(base))
 					e.element_address(base, register, object.width, 0, !object.object && object.width == wide_bytes, expr.name, line, col)!
 					e.append(e.target.load_indirect(register, register, width)!)
 					if width == 1 {
@@ -3304,10 +3304,10 @@ fn (mut e Emitter) emit_wide_division(step ast.Binary, left Slot, right Slot, de
 // name no place for the count, because there is only one place they can name, and a
 // count that ended up anywhere else would shift by whatever that register held.
 fn (mut e Emitter) check_count_register(binary ast.Binary, reg backend.Register) !void {
-	if reg.code == 1 {
+	if e.target.carries_shift_count(reg) {
 		return
 	}
-	e.diagnostics << problem(binary.line, binary.col, 'internal: the count of ${binary.op} is in ${reg.name}, and the machine reads the count of a shift from cl')
+	e.diagnostics << problem(binary.line, binary.col, 'internal: the count of ${binary.op} is in ${e.target.name_of(reg)}, and the machine reads the count of a shift from cl')
 	return error('the count is not in cl')
 }
 
@@ -4940,7 +4940,7 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 // written through the address.
 fn (mut e Emitter) assign_global(stmt ast.Stmt, object image.GlobalSlot, expr ast.Expr) !void {
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, register.name)
+	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, e.target.name_of(register))
 	address := e.value_slot(0)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	if object.width == wide_bytes {
