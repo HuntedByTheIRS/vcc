@@ -132,17 +132,13 @@ fn test_the_type_of_an_expression_is_the_type_its_operators_give_it() {
 	assert negative.typ.same(types.int_type())
 }
 
-fn test_a_constant_whose_type_needs_a_width_the_description_lacks_is_refused() {
+fn test_a_constant_is_typed_by_the_widths_the_description_carries() {
 	// 42 fits in the range every int has, so the type is settled without asking
 	// the target description for a width. 100000 and 0xffffffff are past that
 	// range and are still values the four-byte integer the back end writes a
 	// constant at holds, so the description answers int and unsigned int for
-	// them. 4294967296 needs a long, whose width the description does not
-	// carry, so the model refuses, and the refusal is reported where the
-	// constant is written rather than discarded: a node left unresolved is one
-	// the emitter would have to guess a width for, which is how
-	// `return 4294967295 > 2147483647;` was emitted as an int comparison and
-	// returned 0 where ISO C and gcc return 1.
+	// them. 4294967296 needs a long, whose width the description carries now
+	// that the back end has a value of that width, so the constant is a long.
 	small := checked('int main() { return 42; }')
 	small_lit := small.unit.decls[0].body[0].expr or {
 		assert false
@@ -161,15 +157,30 @@ fn test_a_constant_whose_type_needs_a_width_the_description_lacks_is_refused() {
 		return
 	}
 	assert (big_lit as ast.IntLit).typ.same(types.int_type())
-	// Past the width the back end writes, the refusal stands.
-	refused := parsed('int main() { return 4294967296; }')
+	// 4294967296 is the first value a four-byte int cannot hold, and `sizeof(long)`
+	// is 8 on this target, measured, so it is a long. `LL` names the same width
+	// and the answer is a long long.
+	long_one := checked('int main() { return 4294967296; }')
+	long_lit := long_one.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (long_lit as ast.IntLit).typ.same(types.long_type())
+	suffixed := checked('int main() { return 4294967296LL; }')
+	suffixed_lit := suffixed.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (suffixed_lit as ast.IntLit).typ.same(types.long_long_type())
+	// A constant too large for every type it could be is still refused, and the
+	// node keeps the zero type so nothing is compiled at a width nothing
+	// decided. 18446744073709551615 is 2^64 - 1, and a decimal constant with no
+	// suffix may not take an unsigned type.
+	refused := parsed('int main() { return 18446744073709551615; }')
 	assert refused.diagnostics.len == 1
-	assert refused.diagnostics[0].msg.contains('4294967296')
+	assert refused.diagnostics[0].msg.contains('18446744073709551615')
 	assert refused.diagnostics[0].line == 1
 	assert refused.diagnostics[0].col == 21
-	// The clause is the zero type: the constant is still a constant, and the
-	// diagnostic is what keeps it from being compiled at a width nothing
-	// decided.
 	refused_lit := refused.unit.decls[0].body[0].expr or {
 		assert false
 		return
@@ -724,18 +735,19 @@ fn test_a_member_of_something_without_members_is_refused() {
 }
 
 fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type() {
-	// The name is not what is asked about, the type it names is: `Big` is a
-	// `long` here, and a `long` is a type this compiler has no width for. The
-	// refusal names `long` rather than `Big`, and it happens at the declaration,
-	// which is where the object is defined and not only where something uses it.
-	wider := parsed('typedef long Big;\nBig x;')
+	// The name is not what is asked about, the type it names is: `Small` is a
+	// `short` here, and a `short` is a type this compiler has no width for. The
+	// refusal names `short` rather than `Small`, and it happens at the
+	// declaration, which is where the object is defined and not only where
+	// something uses it.
+	wider := parsed('typedef short Small;\nSmall x;')
 	assert wider.diagnostics.len == 1
-	assert wider.diagnostics[0].msg == 'unsupported type long'
+	assert wider.diagnostics[0].msg == 'unsupported type short'
 	assert wider.diagnostics[0].line == 2
 	// A parameter is the same question, asked where the call's frame is laid out.
-	parameter := parsed('typedef long Big;\nint f(Big b) { return 0; }')
+	parameter := parsed('typedef short Small;\nint f(Small b) { return 0; }')
 	assert parameter.diagnostics.len == 1
-	assert parameter.diagnostics[0].msg.contains('unsupported type long')
+	assert parameter.diagnostics[0].msg.contains('unsupported type short')
 }
 
 fn test_the_float_family_is_refused_by_name_and_by_location() {
@@ -784,12 +796,22 @@ fn test_a_complex_type_is_refused_by_name() {
 	parameter := parsed('int h(double _Complex z) { return 0; }')
 	assert parameter.diagnostics.len == 1
 	assert parameter.diagnostics[0].msg == 'unsupported type double _Complex'
+	// A declaration of an object of one is refused by the word that makes it
+	// complex rather than by the `double` in front of it: `double` on its own
+	// is a type this compiler reads, so naming it would name a type that works.
+	local := parsed('int main(void) { double _Complex z = 0; return 0; }')
+	assert local.diagnostics.len == 1
+	assert local.diagnostics[0].msg == 'unsupported type _Complex'
+	assert local.diagnostics[0].line == 1
 }
 
 fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
 	// The wording for a definition of an object: the emitter stops at the first
-	// word of the type, and that is the message the compiler has published.
-	wider := parsed('unsigned long long h(void) { return 0; }')
+	// word of the type, and that is the message the compiler has published. The
+	// 64-bit integer spellings are not that case any more, so the type here is
+	// one that is still two words with no form: `short` is not a width this back
+	// end has, and the message names the word in front of it.
+	wider := parsed('unsigned short h(void) { return 0; }')
 	assert wider.diagnostics.len == 1
 	assert wider.diagnostics[0].msg == 'unsupported type unsigned'
 	assert wider.diagnostics[0].line == 1

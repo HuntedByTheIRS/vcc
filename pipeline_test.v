@@ -1246,12 +1246,12 @@ fn test_a_typedef_of_a_pointer_reads_through_it() {
 // image has to hold. The refusal is at the declaration, so an object nothing uses
 // is refused too rather than dropped quietly.
 fn test_a_typedef_of_a_type_with_no_form_is_refused_by_that_type() {
-	program := 'typedef long Big;\nBig x;\nint main(void) { return 0; }\n'
+	program := 'typedef short Small;\nSmall x;\nint main(void) { return 0; }\n'
 	lexed := tokenize.lex(program)
 	assert lexed.diagnostics.len == 0
 	parsed := parser.parse(lexed.tokens)
 	assert parsed.diagnostics.len == 1
-	assert parsed.diagnostics[0].msg == 'unsupported type long'
+	assert parsed.diagnostics[0].msg == 'unsupported type short'
 	assert parsed.diagnostics[0].line == 2
 }
 
