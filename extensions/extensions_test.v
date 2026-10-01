@@ -1,6 +1,7 @@
 module extensions
 
 import cli
+import standard
 
 // flags reads a list of arguments that are the extension flags, which is what a
 // caller holding only those flags has. Every one of them has to be accepted:
@@ -15,30 +16,40 @@ fn flags(args []string) Options {
 	return o
 }
 
-fn test_the_registry_has_one_row_per_name() {
-	assert registry.len > 0
+fn test_the_names_are_one_per_extension() {
+	// There is no list here to keep in step with the table: the names are the
+	// extension column of standard's feature rows, and the table cannot name
+	// one extension twice.
+	offered := names()
+	assert offered.len > 0
 	mut seen := []string{}
-	for row in registry {
-		assert row.name != ''
-		assert row.brings != ''
-		assert !seen.contains(row.name), '${row.name} is in the registry twice'
-		seen << row.name
+	for name in offered {
+		assert name != ''
+		assert brings(name) != '', '${name} names no construct the table describes'
+		assert !seen.contains(name), '${name} is in the table twice'
+		seen << name
 	}
 }
 
-fn test_nothing_is_honored_yet() {
-	// The whole of what this milestone is allowed to do with an extension: name
-	// it. A row that is honored is a row that changes what compiles, and there
-	// is no such row.
-	for row in registry {
-		assert !row.honored
+// The two directions the two modules have to agree in, which is the check the
+// string comparison never had: every name the flag offers comes from a row, and
+// every row that names an extension names one the flag offers.
+fn test_every_name_comes_from_a_row_and_every_row_name_is_offered() {
+	for name in names() {
+		assert standard.features.any(it.extension == name), '${name} names no construct'
+	}
+	for feature in standard.features {
+		if feature.extension == '' {
+			continue
+		}
+		assert known(feature.extension), '${feature.extension} is not a name the flag offers'
 	}
 }
 
 fn test_every_extension_is_off_until_it_is_named() {
 	o := flags([])
-	for row in registry {
-		assert !o.enabled(row.name)
+	for name in names() {
+		assert !o.enabled(name)
 	}
 	assert o.enabled_names() == []
 }
@@ -53,7 +64,7 @@ fn test_a_list_of_names_is_accepted() {
 
 fn test_all_names_every_extension() {
 	o := flags(['-fvcc-exts=all'])
-	assert o.enabled_names() == registry.map(it.name)
+	assert o.enabled_names() == names()
 }
 
 fn test_the_last_mention_of_a_name_wins() {
@@ -64,18 +75,19 @@ fn test_the_last_mention_of_a_name_wins() {
 }
 
 fn test_all_then_off_leaves_the_others_on() {
-	// The one clause of the flag that is worth writing down: `all` is the
-	// registry, so turning one name off afterwards takes nothing else with it.
+	// The one clause of the flag that is worth writing down: `all` is the names
+	// the table carries, so turning one name off afterwards takes nothing else
+	// with it.
 	o := flags(['-fvcc-exts=all', '-fno-vcc-exts=x'])
 	assert !o.enabled('x')
-	for row in registry {
-		assert o.enabled(row.name)
+	for name in names() {
+		assert o.enabled(name)
 	}
 }
 
 fn test_all_in_the_other_direction_turns_everything_off() {
 	on := flags(['-fvcc-exts=all'])
-	assert on.enabled_names() == registry.map(it.name)
+	assert on.enabled_names() == names()
 	off := flags(['-fvcc-exts=all', '-fno-vcc-exts=all'])
 	assert off.enabled_names() == []
 }
@@ -87,8 +99,8 @@ fn test_naming_something_this_compiler_does_not_have_is_refused() {
 	} else {
 		assert err.msg().contains('aotu')
 		assert err.msg().contains('none')
-		for row in registry {
-			assert err.msg().contains(row.name)
+		for name in names() {
+			assert err.msg().contains(name)
 		}
 	}
 }
@@ -140,10 +152,10 @@ fn test_the_command_line_parses_the_flag_family() {
 	opts := cli.parse(['-std=c99', '-fvcc-exts=all', '-fno-vcc-exts=x', 'src.c', '-o', 'out'])!
 	assert opts.inputs == ['src.c']
 	assert !opts.vcc_extensions.enabled('x')
-	for row in registry {
-		assert opts.vcc_extensions.enabled(row.name)
+	for name in names() {
+		assert opts.vcc_extensions.enabled(name)
 	}
-	assert opts.vcc_extensions.enabled_names() == registry.map(it.name)
+	assert opts.vcc_extensions.enabled_names() == names()
 	// Read and acted on, so not in the list of flags that were passed over.
 	assert !opts.ignored.contains('-fvcc-exts=all')
 	assert !opts.ignored.contains('-fno-vcc-exts=x')

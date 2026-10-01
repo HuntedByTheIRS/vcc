@@ -259,21 +259,21 @@ fn standard_line(opts cli.Options) string {
 	}
 }
 
-// extensions_line is what -vv says about the vendor extensions: which are on, and
-// which names exist, so that one command answers what -fvcc-exts= did.
+// extensions_line is what -vv says about the vendor extensions: which are on,
+// what each one brings down, and which names exist, so that one command answers
+// what -fvcc-exts= did. Every part of it comes from the extension column of the
+// standard table, which is the only place an extension is named.
 fn extensions_line(chosen extensions.Options) string {
-	if chosen.enabled_names().len == 0 {
-		return 'none enabled (the names it has are ${extension_names()}; none is honored yet)'
+	offered := extensions.names()
+	enabled := chosen.enabled_names()
+	if enabled.len == 0 {
+		return 'none enabled (the names it has are ${offered.join(', ')})'
 	}
-	return '${chosen.enabled_names().join(', ')} enabled (of ${extension_names()}; nothing is honored yet)'
-}
-
-fn extension_names() string {
-	mut names := []string{}
-	for row in extensions.registry {
-		names << row.name
+	mut said := []string{}
+	for name in enabled {
+		said << '${name} brings down ${extensions.brings(name)}'
 	}
-	return names.join(', ')
+	return '${said.join('; ')} (of ${offered.join(', ')})'
 }
 
 // recorded_line is what -vv says about the flags the compiler accepted and did

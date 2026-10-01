@@ -1,65 +1,48 @@
 module extensions
 
+import standard
+
 // The vendor extensions: the constructs this compiler can be asked to accept
 // that the standard it was pointed at does not have, told apart from the
 // standard by a flag of their own, -fvcc-exts=.
 //
-// A row is a name, what the extension will bring down to an earlier mode, and
-// whether the compiler honors it. Nothing is honored yet, so the flag parses
-// names, reports what it was given, and changes nothing about what compiles;
-// the names and their rows are here so that the flag has a surface to be
-// checked against before there is anything behind it.
+// No list of names is kept here. A name is the extension column of a feature
+// row in `standard/`, read through the functions below, so a construct that
+// gains an extension gains it in the table and nowhere else.
 
-// Row is one extension the flag can name.
-pub struct Row {
-pub:
-	// name is what -fvcc-exts= takes.
-	name string
-	// brings is what the extension brings down to an earlier mode, in one
-	// line, which is what a person reading -vv or the usage wants to know
-	// about a name they do not recognize.
-	brings string
-	// honored says whether this compiler does it yet. A name that is not
-	// honored is recorded and nothing else: turning it on cannot change what
-	// the compiler accepts, which is the whole of what this milestone is
-	// allowed to do.
-	honored bool
+// names lists the extensions the flag can name: the names the standard table's
+// rows carry, in one order that does not depend on where in the table a row
+// sits, with no name twice.
+pub fn names() []string {
+	return standard.extension_names()
 }
 
-// registry is the extensions this compiler has a name for: the constructs of
-// C11 and C23 that the C99 work is aimed at, which are the ones a program
-// written for a newer standard needs and an extension can bring down.
-pub const registry = [
-	Row{
-		name:    'auto'
-		brings:  'the auto type specifier, which C23 added'
-		honored: false
-	},
-	Row{
-		name:    'typeof'
-		brings:  'the typeof specifier, which C23 added'
-		honored: false
-	},
-	Row{
-		name:    'generic'
-		brings:  'the _Generic selection, which C11 added'
-		honored: false
-	},
-	Row{
-		name:    'static-assert'
-		brings:  'the _Static_assert declaration, which C11 added'
-		honored: false
-	},
-]
-
-// known says whether the registry has a row for a name.
+// known says whether the flag can name an extension.
+//
+// A name the table does not carry is answered here rather than collected from
+// rows: false is the answer, and it is a miss the caller can report against the
+// list names() hands out beside it.
 pub fn known(name string) bool {
-	for row in registry {
-		if row.name == name {
-			return true
+	return standard.extension_names().contains(name)
+}
+
+// brings is what an extension brings down to an earlier mode, in one line, for
+// -vv and the usage text. It is the rows that name the extension read back:
+// each construct's phrase and the standard that made it standard, so a row that
+// changes its standard changes this line with it.
+pub fn brings(name string) string {
+	mut clauses := []string{}
+	for feature in standard.features {
+		if feature.extension != name || feature.pedantic == '' {
+			continue
 		}
+		if feature.since == .none {
+			clauses << feature.pedantic
+			continue
+		}
+		clauses << '${feature.pedantic}, which ${feature.since.standard_name()} added'
 	}
-	return false
+	return clauses.join('; ')
 }
 
 // Mention is one name the command line named and the state it asked for. The
@@ -76,7 +59,8 @@ pub struct Options {
 pub mut:
 	mentions []Mention
 	// recorded keeps the flags as they were written, so a verbose mode can
-	// show what the command line asked for rather than only what was honored.
+	// show what the command line asked for rather than only what the compiler
+	// acts on.
 	recorded []string
 }
 
@@ -93,16 +77,17 @@ pub fn (o Options) enabled(name string) bool {
 	return on
 }
 
-// enabled_names lists the extensions that are on, in the order of the registry,
-// which is what a verbose mode prints and what the dialect check is handed.
+// enabled_names lists the extensions that are on, in the order names() gives
+// them, which is what a verbose mode prints and what the dialect check is
+// handed.
 pub fn (o Options) enabled_names() []string {
-	mut names := []string{}
-	for row in registry {
-		if o.enabled(row.name) {
-			names << row.name
+	mut out := []string{}
+	for name in names() {
+		if o.enabled(name) {
+			out << name
 		}
 	}
-	return names
+	return out
 }
 
 // accept reads one command-line argument and reports whether it is one of the
@@ -117,27 +102,27 @@ pub fn (o Options) enabled_names() []string {
 // asked for is worse than one that is told.
 pub fn (mut o Options) accept(arg string) !bool {
 	mut on := true
-	mut names := ''
+	mut listed := ''
 	if arg.starts_with('-fvcc-exts=') {
-		names = arg[11..]
+		listed = arg[11..]
 	} else if arg.starts_with('-fno-vcc-exts=') {
 		on = false
-		names = arg[14..]
+		listed = arg[14..]
 	} else {
 		return false
 	}
-	if names == '' {
+	if listed == '' {
 		return error('${arg} names no extension')
 	}
 	o.recorded << arg
-	for name in names.split(',') {
+	for name in listed.split(',') {
 		if name == '' {
 			return error('${arg} has an empty name in its list')
 		}
 		if name == 'all' {
-			for row in registry {
+			for every in names() {
 				o.mentions << Mention{
-					name: row.name
+					name: every
 					on:   on
 				}
 			}
@@ -154,18 +139,14 @@ pub fn (mut o Options) accept(arg string) !bool {
 	return true
 }
 
-// unknown_name is what a command line hears for a name the registry does not
-// have: the name it wrote, the names the compiler does have, and the fact that
-// it honors none of them yet. Naming an extension is a request, and the answer
-// a request this compiler cannot grant deserves is the reason and not a silent
-// build without it.
+// unknown_name is what a command line hears for a name this compiler does not
+// have: the name it wrote and the names it does have. Naming an extension is a
+// request, and the answer a request this compiler cannot grant deserves is the
+// reason and not a silent build without it.
 fn unknown_name(name string) string {
-	mut names := []string{}
-	for row in registry {
-		names << row.name
-	}
-	if names.len == 0 {
+	offered := names()
+	if offered.len == 0 {
 		return "unknown extension '${name}': this compiler has none"
 	}
-	return "unknown extension '${name}': this compiler honors none yet, and the names it has are ${names.join(', ')}"
+	return "unknown extension '${name}': it is none of the names this compiler has, which are ${offered.join(', ')}"
 }
