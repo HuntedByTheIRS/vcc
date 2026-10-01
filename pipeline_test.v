@@ -161,6 +161,48 @@ fn test_sizeof_is_the_constant_the_program_returns() {
 	os.rm(binary) or {}
 }
 
+// `sizeof` asks about a type and not about a value, so the operand is read and
+// never evaluated. The operand here is a call that counts itself, and measured on
+// gcc 16.2.1 the program exits 4: the counter is still 0 and the size of the
+// call's int is 4. A reader that evaluated the operand would exit 104.
+fn test_sizeof_does_not_evaluate_its_operand() {
+	source := scratch('noeval.c')
+	binary := scratch('noeval')
+	exit_status := compile_and_run([source, '-o', binary], 'static int g_calls = 0;\nstatic int bump(void) { ++g_calls; return 1; }\nint main() { int n = sizeof(bump()); return g_calls * 100 + n; }\n')
+	assert exit_status == 4
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The constant `sizeof` answers with has the type the target gives size_t, which
+// is unsigned long here, and a signedness shows where the value is compared.
+// Measured on gcc 16.2.1, this program exits 2: `sizeof(int) - 5` is four minus
+// five in an unsigned 64-bit type and so greater than zero, and `sizeof(char) - 2`
+// is 1 - 2, which is not less than zero. Read as an int both comparisons go the
+// other way and the count is 1, which is what this returned before the result
+// type was size_t.
+fn test_sizeof_is_size_t_where_the_signedness_shows() {
+	source := scratch('sizet.c')
+	binary := scratch('sizet')
+	exit_status := compile_and_run([source, '-o', binary], 'int main() { return (sizeof(int) - 5 > 0) * 2 + (sizeof(char) - 2 < 0); }\n')
+	assert exit_status == 2
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// `sizeof` of an array is the whole array and not the address its name is worth
+// everywhere else in an expression. Measured on gcc 16.2.1, `int a[10]` is 40
+// bytes, which is what the program returns. A reader that let the operand decay
+// would answer 8, the width of a pointer on this target.
+fn test_sizeof_of_an_array_is_the_whole_array() {
+	source := scratch('wholearray.c')
+	binary := scratch('wholearray')
+	exit_status := compile_and_run([source, '-o', binary], 'int main() { int a[10]; return sizeof(a); }\n')
+	assert exit_status == 40
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // typeof is read by the parser and answered by the emitter as the type behind
 // it: a program that declares an object through typeof compiles and runs, and
 // the exit status is what the types decided. Measured on gcc 16.2.1, the same

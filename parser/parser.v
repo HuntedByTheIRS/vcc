@@ -820,9 +820,10 @@ fn (mut p Parser) parse_cast(at tokenize.Token) !ast.Expr {
 	})
 }
 
-// max_size_constant is the largest value the back end writes a constant at,
-// because an integer constant is one four-byte immediate. A size past it is
-// refused rather than written as the half of itself that fits.
+// max_size_constant is the largest size this reader answers with. A size is
+// computed in an int, so a larger one has already overflowed by the time it
+// reaches here, and a program that asks for one is refused rather than handed
+// the low half of it.
 const max_size_constant = 2147483647
 
 // parse_sizeof reads `sizeof` and its operand, which is a type name or an
@@ -832,11 +833,12 @@ const max_size_constant = 2147483647
 // the standard makes it an integer constant expression, so a program that writes
 // one is emitted as the value it computed to and the operand is never evaluated.
 //
-// The constant is an int, where the standard says size_t. size_t is unsigned
-// long on this target and the value model carries one integer width, four bytes:
-// a clause of unsigned long would be a claim that the value in the register is
-// eight bytes wide, which is not something this back end can make true. A size
-// that no int holds is refused by name rather than narrowed.
+// The constant has the type the target gives size_t, which is unsigned long
+// here. 6.5.3.4 makes the result size_t rather than an integer big enough to
+// hold it, and the difference shows wherever a signedness does. Measured on gcc
+// 16.2.1: `sizeof(int) - 5 > 0` is 1, `sizeof(int) - 5 < 0` is 0, and
+// `sizeof(int) - 5` is 18446744073709551615, so four minus five here is what it
+// is in an unsigned 64-bit type and not the -1 an int would give.
 //
 // The operand is not decayed: `sizeof buf` for `char buf[16]` is sixteen, which
 // is the size of the array and not of the address an array's name is worth
@@ -874,13 +876,13 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 		}
 	}
 	if size > max_size_constant {
-		p.error_at(at, 'unsupported: ${spelling} is ${size} bytes, and this compiler writes an integer constant at four bytes')
+		p.error_at(at, 'unsupported: ${spelling} is ${size} bytes, and this compiler answers a size in an int')
 		return error('size past an int')
 	}
 	return ast.Expr(ast.IntLit{
 		value: i64(size)
 		text:  'sizeof(${spelling})'
-		typ:   types.int_type()
+		typ:   types.unsigned_long_type()
 		line:  at.line
 		col:   at.col
 	})
