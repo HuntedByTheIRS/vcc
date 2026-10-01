@@ -759,7 +759,7 @@ fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !as
 		ast.Ident {
 			if operand.typ.kind != .unknown
 				&& operand.typ.kind !in [.int_, .char_, .signed_char, .unsigned_char] {
-				p.error_at(op, 'unsupported: ${op.text} on ${operand.name}, which is ${operand.typ.describe()}, and this compiler implements ++ and -- on an integer name only')
+				p.error_at(op, 'unsupported: ${op.text} on ${operand.name}, which is ${operand.typ.describe()}, and this compiler steps an int or a char name only')
 				return error('operand is not an integer name')
 			}
 			return ast.Expr(ast.IncDec{

@@ -1361,10 +1361,18 @@ fn test_an_increment_refuses_a_name_that_is_not_an_integer() {
 	pointer := parsed('int main(void) { int *p; p++; return 0; }')
 	assert pointer.diagnostics.len == 1
 	assert pointer.diagnostics[0].msg.contains('which is int *')
-	assert pointer.diagnostics[0].msg.contains('on an integer name only')
+	assert pointer.diagnostics[0].msg.contains('steps an int or a char name only')
 	floating := parsed('int main(void) { double d = 0.0; d--; return 0; }')
 	assert floating.diagnostics.len == 1
 	assert floating.diagnostics[0].msg.contains('which is double')
+	// A 128-bit name is an integer type and still not one the step of one fits:
+	// this back end has one int width and stores the wider type as an object, so
+	// the message names what it does step rather than calling the operand a
+	// non-integer.
+	wide := parsed('int main(void) { __int128 x = 5; x++; return 0; }')
+	assert wide.diagnostics.len == 1
+	assert wide.diagnostics[0].msg.contains('which is __int128')
+	assert wide.diagnostics[0].msg.contains('steps an int or a char name only')
 	// A char is an integer the back end steps at its own byte, so it is read
 	// and not refused.
 	character := parsed('int main(void) { char c = 0; c++; return c; }')
