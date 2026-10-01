@@ -55,9 +55,10 @@ pub:
 	// is silent until something asks for it.
 	invalid bool
 	// extension is the name of the -fvcc-exts= extension that brings the
-	// construct down to a mode before `since`, when there is one. Nothing is
-	// brought down yet: the flag parses the names and honors none of them, so
-	// every row here is empty.
+	// construct down to a mode before `since`, when there is one. The names
+	// these rows carry are the whole list of extensions this compiler offers:
+	// extension_names() below reads them off the rows, and extensions/ builds
+	// the flag's interface on that rather than on a list of its own.
 	extension string
 	// pedantic is the phrase a pedantic message is built from: the name of the
 	// standard the selected mode asks about, the word `forbids`, and this.
@@ -135,7 +136,7 @@ pub const features = [
 		spellings: ['typeof']
 		since:     .c23
 		gnu:       true
-		extension: ''
+		extension: 'typeof'
 		invalid:   true
 		pedantic:  'the typeof specifier'
 		status:    .implemented
@@ -191,7 +192,7 @@ pub const features = [
 		spellings: []
 		since:     .c23
 		gnu:       false
-		extension: ''
+		extension: 'auto'
 		pedantic:  'the auto type specifier'
 		status:    .unimplemented
 	},
@@ -199,7 +200,7 @@ pub const features = [
 		spellings: ['_Generic']
 		since:     .c11
 		gnu:       false
-		extension: ''
+		extension: 'generic'
 		pedantic:  'the _Generic selection'
 		status:    .unimplemented
 	},
@@ -218,7 +219,7 @@ pub const features = [
 		spellings: ['_Static_assert']
 		since:     .c11
 		gnu:       false
-		extension: ''
+		extension: 'static-assert'
 		pedantic:  'the _Static_assert declaration'
 		status:    .unimplemented
 	},
@@ -353,6 +354,27 @@ pub const features = [
 	},
 ]
 
+// extension_names is the set of -fvcc-exts= names this table carries: the
+// extension strings of the feature rows, no name written twice and the list in
+// alphabetical order, so that what a caller prints does not move when a row is
+// added elsewhere in the table. It is the whole list of extensions the compiler
+// offers, and extensions/ reads it here rather than keeping a second list that
+// can drift from the rows.
+pub fn extension_names() []string {
+	mut out := []string{}
+	for feature in features {
+		if feature.extension == '' {
+			continue
+		}
+		if out.contains(feature.extension) {
+			continue
+		}
+		out << feature.extension
+	}
+	out.sort()
+	return out
+}
+
 // replaces_trigraphs answers phase 1's question for the selected mode: whether a
 // `??x` is replaced by the one character it names, on the raw bytes and before
 // anything reads the text.
@@ -484,8 +506,18 @@ fn allowed(feature Feature, question Question) bool {
 	if feature.gnu && question.mode.is_gnu() {
 		return true
 	}
-	if feature.extension != '' && question.extensions.contains(feature.extension) {
-		return true
+	return brought_down(feature, question.extensions)
+}
+
+// brought_down answers the question the extension column is for: whether an
+// extension the command line named brings this row's construct down to the
+// selected mode. Every row is answered, and the answer is a fact about the row
+// rather than the outcome of a lookup that can come back empty: a row that
+// names no extension is brought down by no name, and a name the table does not
+// carry is not a name any row can have written.
+fn brought_down(feature Feature, named []string) bool {
+	if feature.extension == '' {
+		return false
 	}
-	return false
+	return named.contains(feature.extension)
 }

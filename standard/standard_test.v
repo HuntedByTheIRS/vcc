@@ -105,13 +105,22 @@ fn test_the_table_carries_a_row_for_each_construct() {
 	}
 }
 
-fn test_nothing_is_brought_down_by_an_extension_yet() {
-	// The flag parses names and honors none of them, so no row may claim an
-	// extension: the day one does, that is the day the flag changes what the
-	// compiler accepts.
+fn test_the_rows_name_the_extensions_that_bring_them_down() {
+	// The old shape asserted that no row named an extension, because the flag
+	// parsed names and honored none of them. The rows now carry the names, and
+	// these four are the whole list the compiler offers the flag.
+	mut named := []string{}
 	for feature in features {
-		assert feature.extension == ''
+		if feature.extension == '' {
+			continue
+		}
+		assert feature.since != .none, '${feature.extension} brings a construct down to a mode before the standard that has it'
+		assert feature.pedantic != '', '${feature.extension} has no phrase to bring down'
+		named << feature.extension
 	}
+	named.sort()
+	assert named == ['auto', 'generic', 'static-assert', 'typeof']
+	assert extension_names() == named
 }
 
 fn test_a_row_is_reachable_by_its_spelling() {
