@@ -124,6 +124,25 @@ fn test_a_call_through_a_function_pointer_is_the_address_it_holds() {
 	os.rm(binary) or {}
 }
 
+fn test_a_designator_naming_a_declared_function_is_its_address() {
+	// A function the file only declares has its code somewhere the image is not,
+	// so a designator naming it is a symbol the loader resolves: 6.3.2.1 makes it
+	// the pointer to that function whether or not the file wrote the body. The
+	// address is read out of the same slot a call to that function goes through,
+	// so a pointer to it, an address taken with `&`, and a call through either
+	// are one value. getpid is the callee because its answer is its own pid and
+	// the program asks for the same one twice; there is no argument to pass, so
+	// nothing here leans on how an argument travels.
+	source := scratch('declared_designator.c')
+	binary := scratch('declared_designator')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int getpid(void);\nint same(int (*f)(void), int (*g)(void)) { return f == g; }\nint main(void) {\n    int (*p)(void) = getpid;\n    int (*q)(void) = &getpid;\n    if (p != q) { return 1; }\n    if (p == 0) { return 2; }\n    if (!same(p, getpid)) { return 3; }\n    return p() == getpid() ? 0 : 4;\n}\n')
+	// gcc 16.2.1 with -std=c99 exits 0 from the same program.
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_a_static_function_nothing_names_is_not_read() {
 	// The shape <bits/byteswap.h> and <bits/uintn-identity.h> have, which main.c
 	// reaches through <stdio.h> and <stdlib.h>: a helper nothing calls, written

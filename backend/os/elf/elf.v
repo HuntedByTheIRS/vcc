@@ -382,6 +382,16 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 				}
 				replacement = target.address_of(register, disp)
 			}
+			.import_address {
+				// The address of a function the loader resolves is read out of
+				// the slot the loader writes it into, the same slot a call to
+				// that function goes through. The layout has settled where the
+				// slot is, so the instruction reads its value into a register.
+				register := target.reg(fixup.register) or {
+					return error('no register named ${fixup.register} to compute an address into')
+				}
+				replacement = target.load_slot_value(register, disp)
+			}
 			.jump_local {
 				replacement = target.jump(disp)
 			}
@@ -407,7 +417,7 @@ fn referent_of(program image.Program, sections Sections, fixup image.Fixup) !int
 				return error('no code for ${fixup.name}')
 			})
 		}
-		.call_import {
+		.call_import, .import_address {
 			for i, name in program.imports {
 				if name == fixup.name {
 					return sections.got + i * 8

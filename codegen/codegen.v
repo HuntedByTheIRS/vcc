@@ -3506,11 +3506,11 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 					e.load_indirect_value(register, register, object.unsigned, object.width)!
 					return
 				}
-				if expr.name in e.program.defined {
+				if e.is_function_name(expr.name) {
 					// 6.3.2.1: a function designator used where a value is
 					// wanted is the pointer to the function, so a name that is
-					// a function this file defines is worth where its code
-					// begins.
+					// a function this unit names, defined here or declared
+					// elsewhere, is worth the address of that function.
 					e.emit_function_address(expr.name, expr.line, expr.col) or {
 						return error('no function address')
 					}
@@ -3824,7 +3824,7 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
 			return
 		}
-		if name in e.program.defined {
+		if e.is_function_name(name) {
 			// `&f` is the same value a bare `f` is worth where a value is
 			// wanted: 6.3.2.1 does not give a function designator an address
 			// operator of its own.
@@ -5815,7 +5815,7 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 					}
 					return if object.width < 4 { 4 } else { object.width }
 				}
-				if expr.name in e.program.defined {
+				if e.is_function_name(expr.name) {
 					// 6.3.2.1: a function designator used as a value is the
 					// pointer to the function, which is the machine's word.
 					return e.target.word_size
@@ -6023,19 +6023,43 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 	}
 }
 
-// emit_function_address leaves the address of a function this file defines in the
-// accumulator. 6.3.2.1 makes a function designator used as a value the pointer to
-// that function, so `int (*p)(void) = f;` and `p = &f;` both reach this: what a
-// value of a function type is worth is where the function's code begins. The
-// address is a reference the layout fills in, because where the code begins is not
-// known while it is written.
+// emit_function_address leaves the address of a function in the accumulator. 6.3.2.1
+// makes a function designator used as a value the pointer to that function, so
+// `int (*p)(void) = f;` and `p = &f;` both reach this: what a value of a function
+// type is worth is where the function's code begins. A function this file defines
+// has its code here, so the address is a reference the layout fills in. One the
+// file only declares has its code somewhere the image is not, so its address is a
+// symbol the loader resolves: it is read out of the slot the loader fills, the same
+// slot a call to that function goes through, and in an object the reference is left
+// for the linker the way a call to a declared function is. The address is not known
+// while it is written, so it is filled in either way.
 fn (mut e Emitter) emit_function_address(name string, line int, col int) !void {
-	if name !in e.program.defined {
-		e.diagnostics << problem(line, col, 'unsupported: the address of ${name} is not implemented, and only a function this file defines has one this back end can take')
+	register := e.accumulator(line, col)!
+	if name in e.program.defined {
+		e.reference(e.target.address_of(register, 0), .function_address, name, e.target.name_of(register))
+		return
+	}
+	if name !in e.returns {
+		e.diagnostics << problem(line, col, 'unsupported: the address of ${name} is not implemented, and only a function this unit declares has one this back end can take')
 		return error('no function address')
 	}
-	register := e.accumulator(line, col)!
-	e.reference(e.target.address_of(register, 0), .function_address, name, e.target.name_of(register))
+	e.import_symbol(name)
+	if e.compile_only {
+		// An object has no slots and no loader: it leaves the reference for the
+		// linker to route, which is what a call to a symbol means in a
+		// relocatable file.
+		e.reference(e.target.address_of(register, 0), .import_address, name, e.target.name_of(register))
+	} else {
+		e.reference(e.target.load_slot_value(register, 0), .import_address, name, e.target.name_of(register))
+	}
+}
+
+// is_function_name says whether a name is a function this unit names, whether it
+// defines the function or only declares it. 6.3.2.1 makes either one, written
+// where a value is wanted, the pointer to that function, so both are worth where a
+// value is wanted; only where the address comes from differs.
+fn (e Emitter) is_function_name(name string) bool {
+	return name in e.program.defined || name in e.returns
 }
 
 // emit_callee_value leaves the address a call goes to in the accumulator. It is
@@ -6050,7 +6074,9 @@ fn (mut e Emitter) emit_callee_value(callee ast.Expr, depth int) !void {
 		}
 	}
 	if callee is ast.Ident {
-		if callee.name in e.program.defined {
+		// A local of the same name is the object it names, so the designator is
+		// read as a function only when nothing in scope holds that name.
+		if e.lookup(callee.name) == none && e.is_function_name(callee.name) {
 			return e.emit_function_address(callee.name, callee.line, callee.col)
 		}
 	}
