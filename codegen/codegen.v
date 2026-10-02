@@ -4923,6 +4923,15 @@ fn (e Emitter) comparison_is_unsigned(step ast.Binary) bool {
 fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 	e.emit_expr_at(unary.expr, depth + 1)!
 	address := e.accumulator(unary.line, unary.col)!
+	if unary.typ.is_array() {
+		// `*p` where p points at an array is the array, and an array's value is
+		// the address of its first element: the elements are at the address and
+		// are not read here. Measured on gcc 16.2.1: `int (*row)[3] = &arr;
+		// (*row)[1]` reads arr[1], and reading the array's bytes into a register
+		// instead leaves a small number where an address was expected, so a
+		// subscript of it reads through that number.
+		return
+	}
 	if unary.typ.kind == .double {
 		double_register := e.float_accumulator(unary.line, unary.col)!
 		e.append(e.target.load_double_indirect(address, double_register)!)

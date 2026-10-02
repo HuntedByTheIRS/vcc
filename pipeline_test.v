@@ -154,6 +154,22 @@ fn test_a_pointer_return_declared_and_never_defined_stays_a_named_symbol() {
 	os.rm(binary) or {}
 }
 
+// `*p` where p points at an array is the array, and an array's value is the
+// address of its first element rather than the bytes at it. A reader that loads
+// the array's bytes into a register leaves a small number where an address was
+// wanted, and a subscript of that number reads through it: the shape is reached
+// both by an object and by a pointer-to-array return. Measured, the previous
+// behaviour took the machine down on the second subscript; gcc 16.2.1 exits 0
+// from the program below and from the same program written with `*row`.
+fn test_a_dereference_of_a_pointer_to_an_array_is_the_element_address() {
+	source := scratch('pointer_to_array_deref.c')
+	binary := scratch('pointer_to_array_deref')
+	exit_status := compile_and_run([source, '-o', binary], 'static int arr[3] = {7, 8, 9};\nstatic int (*get_row(void))[3] { return &arr; }\nint main(void) {\n    int (*row)[3] = &arr;\n    if ((*row)[1] != 8) { return 1; }\n    if ((*get_row())[2] != 9) { return 2; }\n    int *p = *row;\n    if (p[0] != 7) { return 3; }\n    return 0;\n}\n')
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_a_designator_naming_a_declared_function_is_its_address() {
 	// A function the file only declares has its code somewhere the image is not,
 	// so a designator naming it is a symbol the loader resolves: 6.3.2.1 makes it
