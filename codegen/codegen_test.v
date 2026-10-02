@@ -346,10 +346,10 @@ fn test_a_cast_converts_between_the_classes_the_back_end_carries() {
 fn test_a_cast_with_no_conversion_behind_it_is_reported() {
 	// A conversion to a type this back end has no register for is refused by
 	// name rather than written as a value of the wrong width.
-	unsupported := emit(translation_unit('int main() { int x = 3; return (short)x; }'),
+	unsupported := emit(translation_unit('int main() { int x = 3; double d = (long double)x; return 0; }'),
 		Options{})
 	assert unsupported.diagnostics.len == 1
-	assert unsupported.diagnostics[0].msg.contains('short')
+	assert unsupported.diagnostics[0].msg.contains('long double')
 	assert unsupported.bytes.len == 0
 	// A floating type and an address are not converted into one another, and
 	// that is said rather than emitted as a pointer whose bits are a double.
@@ -358,6 +358,24 @@ fn test_a_cast_with_no_conversion_behind_it_is_reported() {
 	assert wrong_class.diagnostics.len == 1
 	assert wrong_class.diagnostics[0].msg.contains('char *')
 	assert wrong_class.bytes.len == 0
+}
+
+// The narrow integer types are values a register holds. A read widens the value to
+// the int the promotion makes it, with the value's sign kept or with zero above it
+// when the type is unsigned, and a store writes the low byte or the low two bytes
+// of the register. A conversion to `_Bool` makes the value 0 or 1 and a conversion
+// to a narrower type cuts the value to that width with the sign the type has. The
+// reads of a global and of an array element go through an address rather than a
+// frame slot, which is the other path a wide value is read by. Measured on gcc
+// 16.2.1, this program exits 11, one for each comparison that is true: the two
+// reads that would be wrong if the sign were taken, the two that would be wrong if
+// zero were not, the global and the element read the same way, the `_Bool` that is
+// 1 whatever was stored in it, and the three narrowings.
+fn test_the_narrow_integer_types_hold_their_values() {
+	emitted := emit(translation_unit('static unsigned char gb[3] = {200, 100, 255};\nstatic unsigned short gus = 40000;\nint main(void) { unsigned char uc = 200; signed char sc = -56; short s = -300; unsigned short us = 40000; _Bool b = 42; return (uc == 200) + (sc == -56) + (s == -300) + (us == 40000) + (b == 1) + ((unsigned short)-1 == 65535) + ((short)70000 == 4464) + ((unsigned char)-1 == 255) + (gb[0] == 200) + (gb[2] == 255) + (gus == 40000); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 11
 }
 
 fn test_a_constant_expression_is_folded() {

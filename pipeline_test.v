@@ -1392,12 +1392,12 @@ fn test_a_typedef_of_a_pointer_reads_through_it() {
 // image has to hold. The refusal is at the declaration, so an object nothing uses
 // is refused too rather than dropped quietly.
 fn test_a_typedef_of_a_type_with_no_form_is_refused_by_that_type() {
-	program := 'typedef short Small;\nSmall x;\nint main(void) { return 0; }\n'
+	program := 'typedef long double Wide;\nWide x;\nint main(void) { return 0; }\n'
 	lexed := tokenize.lex(program)
 	assert lexed.diagnostics.len == 0
 	parsed := parser.parse(lexed.tokens)
 	assert parsed.diagnostics.len == 1
-	assert parsed.diagnostics[0].msg == 'unsupported type short'
+	assert parsed.diagnostics[0].msg == 'unsupported type long'
 	assert parsed.diagnostics[0].line == 2
 }
 
@@ -1592,6 +1592,25 @@ fn test_a_step_runs_as_a_statement_a_loop_step_a_value_and_a_global() {
 	global := compile_and_run([source, '-o', binary],
 		'int g = 3; int main(void) { int a = g++; int b = ++g; return a * 10 + b; }\n')
 	assert global == 35
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The narrow integer types are types a whole program holds: each is a value in a
+// register, widened on the way in and cut to its own width on the way out, and a
+// `_Bool` is 0 or 1 whatever was stored into it. A value of one stored at the top
+// level and an element of an array of one are read through an address rather than
+// out of a frame slot, which is the other path a value is read by. The program is
+// run, so what is checked is the bytes. Measured on gcc 16.2.1, this exits 11: one
+// for each comparison that is true, the ones a sign taken where zero belongs or a
+// zero where a sign belongs would answer differently, and the ones a conversion
+// that did not cut to the width would too.
+fn test_the_narrow_integer_types_run() {
+	source := scratch('narrow_int.c')
+	binary := scratch('narrow_int')
+	program := 'static unsigned char gb[3] = {200, 100, 255};\nstatic unsigned short gus = 40000;\nint main(void) { unsigned char uc = 200; signed char sc = -56; short s = -300; unsigned short us = 40000; _Bool b = 42; return (uc == 200) + (sc == -56) + (s == -300) + (us == 40000) + (b == 1) + ((unsigned short)-1 == 65535) + ((short)70000 == 4464) + ((unsigned char)-1 == 255) + (gb[0] == 200) + (gb[2] == 255) + (gus == 40000); }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 11
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }

@@ -1271,7 +1271,7 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr) !
 	// its own width, and any other value has to have it already. A char object
 	// is the exception, since the language stores an int in a char by taking
 	// its low byte.
-	if e.constant(expr) == none && value_width != width && !(width == 1 && value_width == 4) {
+	if e.constant(expr) == none && value_width != width && !(width < 4 && value_width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored through an address of ${unary.typ.describe()}, which holds ${width}')
 		return error('width mismatch')
 	}
@@ -1635,7 +1635,7 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr)
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 		return error('unknown width')
 	}
-	if value_width != width && !(width == 1 && value_width == 4) {
+	if value_width != width && !(width < 4 && value_width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into the member ${member_name}, which holds ${width}')
 		return error('width mismatch')
 	}
@@ -1740,7 +1740,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				return
 			}
 			if width := e.width_of(expr) {
-				if width != object.width && !(object.width == 1 && width == 4) {
+				if width != object.width && !(object.width < 4 && width == 4) {
 					e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${stmt.target}, which holds ${object.width}')
 					return error('width mismatch')
 				}
@@ -1815,7 +1815,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 		return error('unknown width')
 	}
-	if width != slot.width && !(slot.width == 1 && width == 4) {
+	if width != slot.width && !(slot.width < 4 && width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${slot.width}')
 		return error('width mismatch')
 	}
@@ -1864,7 +1864,7 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 		return error('unknown width')
 	}
-	if value_width != width && !(width == 1 && value_width == 4) {
+	if value_width != width && !(width < 4 && value_width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into an element of ${width}')
 		return error('width mismatch')
 	}
@@ -3233,7 +3233,7 @@ fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !voi
 			e.diagnostics << problem(line, col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 			return error('unknown width')
 		}
-		if width != slot.width && !(slot.width == 1 && width == 4) {
+		if width != slot.width && !(slot.width < 4 && width == 4) {
 			e.diagnostics << problem(line, col, 'unsupported: a value of ${width} bytes is stored into a slot of ${slot.width}')
 			return error('width mismatch')
 		}
@@ -3385,7 +3385,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 						e.append(e.target.load_double_indirect(register, double_register)!)
 						return
 					}
-					e.append(e.target.load_indirect(register, register, object.width)!)
+					e.load_indirect_value(register, register, object.unsigned, object.width)!
 					return
 				}
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a constant and is not a local of this function')
@@ -3456,7 +3456,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.append(e.target.load_double_indirect(register, double_register)!)
 				return
 			}
-			e.append(e.target.load_indirect(register, register, width)!)
+			e.load_indirect_value(register, register, e.written_is_unsigned(expr.spelling), width)!
 		}
 		ast.StrLit {
 			// A string is the address of its bytes: the image holds the bytes
@@ -3564,7 +3564,7 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 			e.append(e.target.load_double_indirect(register, double_register)!)
 			return
 		}
-		e.append(e.target.load_indirect(register, register, slot.width)!)
+		e.load_indirect_value(register, register, slot.unsigned, slot.width)!
 		return
 	}
 	// A top-level array: its storage is in the image, so the address of an
@@ -3593,7 +3593,7 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 		e.append(e.target.load_double_indirect(register, double_register)!)
 		return
 	}
-	e.append(e.target.load_indirect(register, register, object.width)!)
+	e.load_indirect_value(register, register, object.unsigned, object.width)!
 }
 
 // emit_general_index reads one element whose base is not a name the reader kept
@@ -3621,7 +3621,7 @@ fn (mut e Emitter) emit_general_index(expr ast.Index, depth int) !void {
 		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${expr.typ.describe()} is not a value this back end reads')
 		return error('unsupported element type')
 	}
-	e.append(e.target.load_indirect(address, address, width)!)
+	e.load_indirect_value(address, address, expr.typ.kind.is_unsigned(), width)!
 }
 
 // emit_element_address leaves in the accumulator the address of the element
@@ -3884,7 +3884,7 @@ fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
 		e.store_accumulator(address, expr.line, expr.col)!
 		address_register := e.scratch(expr.line, expr.col)!
 		e.load_argument(address, address_register, e.target.word_size, expr.line, expr.col)!
-		e.append(e.target.load_indirect(address_register, register, object.width)!)
+		e.load_indirect_value(address_register, register, object.unsigned, object.width)!
 		old := if expr.postfix { e.value_slot(depth + 1) } else { Slot{} }
 		if expr.postfix {
 			e.store_accumulator(old, expr.line, expr.col)!
@@ -4147,6 +4147,22 @@ fn (e Emitter) storage_width(t types.Type) ?int {
 	}
 }
 
+// load_indirect_value reads a value of the given width through an address in a
+// register. A one- or two-byte value is widened on the way in, and which bits go
+// above it is the type's signedness: an unsigned character type or an unsigned
+// short takes zeros there and anything else takes the value's sign. A store into
+// one is the same instruction either way, because the bytes written are the low
+// ones of the value in both cases. The value's register is separate from the
+// address's because one caller keeps the address in a register while the value
+// lands in the accumulator.
+fn (mut e Emitter) load_indirect_value(address backend.Register, destination backend.Register, unsigned bool, width int) !void {
+	if unsigned && width < 4 {
+		e.append(e.target.load_indirect_unsigned(address, destination, width)!)
+		return
+	}
+	e.append(e.target.load_indirect(address, destination, width)!)
+}
+
 // eight_byte_integer says whether a type is one of the four 64-bit integer types,
 // which is the question a value of eight bytes has to be asked before it is
 // treated as a pointer: a pointer is eight bytes too, and the machine's word is
@@ -4201,7 +4217,7 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 		e.diagnostics << problem(unary.line, unary.col, 'unsupported: * reads through an address of ${unary.typ.describe()}, and this back end reads ints, chars, doubles and pointers only')
 		return error('unsupported pointed-at type')
 	}
-	e.append(e.target.load_indirect(address, address, width)!)
+	e.load_indirect_value(address, address, unary.typ.kind.is_unsigned(), width)!
 }
 
 // emit_binary writes a binary operation. The left spine of an operator chain is
@@ -5652,7 +5668,7 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			// promotion every char gets and the same answer an element of a char
 			// array is sized at.
 			width := e.type_width(expr.spelling) or { return none }
-			return if width == 1 { 4 } else { width }
+			return if width < 4 { 4 } else { width }
 		}
 		ast.Ident {
 			slot := e.lookup(expr.name) or {
@@ -5663,7 +5679,7 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 					if object.count > 0 {
 						return e.target.word_size
 					}
-					return if object.width == 1 { 4 } else { object.width }
+					return if object.width < 4 { 4 } else { object.width }
 				}
 				return none
 			}
@@ -5673,7 +5689,7 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			// of the value is the width of the read rather than of the slot.
 			if slot.count > 0 {
 				e.target.word_size
-			} else if slot.width == 1 {
+			} else if slot.width < 4 {
 				4
 			} else {
 				slot.width
@@ -5694,7 +5710,7 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 				return e.target.word_size
 			}
 			width := e.storage_width(expr.typ) or { return none }
-			if width == 1 {
+			if width < 4 {
 				4
 			} else {
 				width
@@ -6627,6 +6643,7 @@ fn (e Emitter) global_shape(name string) ?image.GlobalSlot {
 				count:    if global.count > 0 { global.count } else { 0 }
 				floating: e.writes_a_double(global.typ)
 				single:   e.writes_a_float(global.typ)
+				unsigned: e.written_is_unsigned(global.typ)
 			}
 		}
 	}
@@ -6757,10 +6774,11 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		space := if object.count > 0 { object.count * object.bytes } else { object.bytes }
 		e.program.globals_blob << []u8{len: space, init: u8(0)}
 		slot := image.GlobalSlot{
-			offset: offset
-			width:  object.bytes
-			count:  object.count
-			object: true
+			offset:   offset
+			width:    object.bytes
+			count:    object.count
+			object:   true
+			unsigned: e.written_is_unsigned(object.typ)
 		}
 		e.program.globals[name] = slot
 		return slot
@@ -6808,6 +6826,7 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		count:    shape.count
 		floating: shape.floating
 		single:   shape.single
+		unsigned: shape.unsigned
 	}
 	e.program.globals[name] = slot
 	return slot
@@ -6879,7 +6898,7 @@ fn (mut e Emitter) convert_for_global(expr ast.Expr, object image.GlobalSlot, un
 		return e.convert_to_int(expr, unsigned_target, line, col)
 	}
 	if width := e.width_of(expr) {
-		if width != object.width && !(object.width == 1 && width == 4) {
+		if width != object.width && !(object.width < 4 && width == 4) {
 			e.diagnostics << problem(line, col, 'unsupported: a value of ${width} bytes is stored into an object that holds ${object.width}')
 			return error('width mismatch')
 		}
