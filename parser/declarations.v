@@ -3440,21 +3440,33 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			}
 		} else {
 			d := p.parse_declarator(depth + 1)!
-			resolved := p.declared_type(spec.clause, d)
+			// A parameter declared with an array type has the array type
+			// adjusted to a pointer to its element (C99 6.7.5.3p7): `int a[]`
+			// and `int a[10]` are `int *`, `char *argv[]` is `char **`, and
+			// `int a[3][4]` is a pointer to an array of four ints. The written
+			// type gains the star the adjustment adds, which is the spelling a
+			// parameter of the same pointer type written directly would carry;
+			// the adjusted type the tree keeps is what the elements are read
+			// through.
+			stars := if d.is_array() { d.pointer_count() + 1 } else { d.pointer_count() }
 			params.params << ast.Param{
 				name:     d.name
-				typ:      p.spelling_of(spec, d.pointer_count())
-				resolved: resolved
+				typ:      p.spelling_of(spec, stars)
+				resolved: types.adjust_parameter(p.declared_type(spec.clause, d))
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
 			// The order of the questions is the order a reader asks them: what
-			// keeps this parameter from being named at all, then the shapes the
-			// tree has no form for, then the types the emitter does.
+			// keeps this parameter from being named at all, then the types the
+			// emitter does. An array parameter is asked about its element, not
+			// about the pointer it adjusts to. 6.7.5.2p1 makes a void element
+			// and an incomplete element each a constraint violation, so
+			// `void a[]` and `struct S a[]` with no body for S are refused
+			// where `void *a` and `struct S *a` are not.
 			if d.name.len == 0 {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
-			} else if d.is_array() {
-				params.note_problem('unsupported: array parameters are not implemented', d.array_at())
+			} else if d.is_array() && d.pointer_count() == 0 && spec.clause.kind == .void_ {
+				params.note_problem('a constraint violation: ${d.name} is declared as an array of void, and 6.7.5.2p1 makes the element type of an array an object type', spec.start)
 			} else if !p.parameter_type_is_known(spec, d.pointer_count()) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.
