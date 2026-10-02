@@ -205,7 +205,12 @@ fn test_qualifiers_containment_is_the_assignment_question() {
 	assert !const_q.contains(volatile_const)
 }
 
-fn test_an_aggregate_is_the_same_type_by_its_tag_and_the_members_under_it() {
+fn test_an_aggregate_is_the_same_type_by_its_tag() {
+	// A tag is the identity of a struct or a union: the members are a property
+	// of the tagged type and not a second half of its identity. Two readings of
+	// one tag are one type, so the same tag with a different member list is the
+	// same type too; a redefinition in one scope is a different question, and it
+	// is reported where the second declaration is read.
 	members := [
 		Member{
 			name: 'a'
@@ -215,14 +220,30 @@ fn test_an_aggregate_is_the_same_type_by_its_tag_and_the_members_under_it() {
 	s := struct_type('S', members)
 	assert s.same(struct_type('S', [
 		Member{
-			name: 'a'
-			typ:  int_type()
+			name: 'b'
+			typ:  char_type()
 		},
 	]))
-	// The same tag with different members is not the same type, and the two
-	// cannot both be declared in one scope: the declaration that read the second
-	// one reports the redefinition.
-	assert !s.same(struct_type('S', [
+	// A tag read while it was still incomplete and the type its body leaves
+	// behind are one type: `struct S *p;` read before `struct S { int a; };`
+	// takes a copy with no members, and that copy is the type the body defines.
+	// This is the reading a pointer assigned across the two needs, and it is
+	// why the members are read through the tag rather than out of the copy.
+	incomplete := incomplete_tag(Kind.struct_, 'S')
+	assert incomplete.same(s)
+	assert s.same(incomplete)
+	assert incomplete.is_aggregate()
+	// A tag that is never completed stays incomplete, which is what keeps an
+	// object of it from being laid out and a size asked of it from being
+	// answered.
+	assert !incomplete.is_complete()
+	// Two different tags are two different types, identical members or not.
+	assert !s.same(struct_type('T', members))
+	assert !s.same(union_type('S', members))
+	// An aggregate written without a tag has no name to be identified by, so
+	// its members are what tells it from another.
+	assert struct_type('', members).same(struct_type('', members))
+	assert !struct_type('', members).same(struct_type('', [
 		Member{
 			name: 'b'
 			typ:  char_type()
@@ -232,8 +253,6 @@ fn test_an_aggregate_is_the_same_type_by_its_tag_and_the_members_under_it() {
 	assert union_type('U', members).describe() == 'union U'
 	assert enum_type('E').describe() == 'enum E'
 	assert struct_type('', []).describe() == 'struct <anonymous>'
-	assert !s.same(struct_type('T', members))
-	assert !s.same(union_type('S', members))
 	assert s.is_aggregate() && s.is_complete()
 }
 

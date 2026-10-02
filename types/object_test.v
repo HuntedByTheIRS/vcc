@@ -290,6 +290,13 @@ fn test_a_type_with_no_size_has_no_answer() {
 	assert representation.size_of(opaque_type('struct _IO_FILE')) == none
 	assert representation.align_of(opaque_type('struct _IO_FILE')) == none
 	assert representation.layout(opaque_type('struct _IO_FILE')) == none
+	// A tag whose body was never read is incomplete with an empty member list,
+	// which is not the same as a struct of no members: there is no layout to
+	// answer, and answering zero would be a size for a type nothing can size.
+	undeclared := incomplete_tag(Kind.struct_, 'undeclared')
+	assert representation.size_of(undeclared) == none
+	assert representation.align_of(undeclared) == none
+	assert representation.layout(undeclared) == none
 	// A struct with an incomplete member has no layout of its own.
 	holder := struct_type('holder', [member('f', opaque_type('struct _IO_FILE'))])
 	assert representation.size_of(holder) == none

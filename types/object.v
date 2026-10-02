@@ -127,6 +127,16 @@ pub fn (r Representation) layout(t Type) ?Layout {
 			align: align
 		}
 	}
+	if !t.is_complete() {
+		// A tag that was declared and never defined has no members to lay out
+		// and no size to round up, so there is no answer to give. Answering
+		// zero would be a silent wrong size for a type nothing can size, and
+		// it is the size `sizeof` reads: measured, gcc 16.2.1 refuses
+		// `struct S; sizeof(struct S);` with `invalid application of 'sizeof'
+		// to an incomplete type`, and this compiler laid it out as zero bytes
+		// and emitted a program that exited 0.
+		return none
+	}
 	if t.kind == .union_ {
 		return r.union_layout(t)
 	}
