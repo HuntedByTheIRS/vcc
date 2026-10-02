@@ -354,9 +354,17 @@ pub fn (t Type) returns() ?Type {
 
 // same says whether two types are the same type rather than two spellings of
 // one: the kind, the qualifiers, the shape each is derived from, the members of
-// an aggregate and the parameters of a function. Two structs with the same tag
-// and the same members are the same type; the same tag with different members is
-// not, and the two cannot both be declared in one scope anyway.
+// an aggregate and the parameters of a function.
+//
+// A struct or a union written with a tag is identified by that tag. Its members
+// are a property of the tagged type, not a second half of its identity, so two
+// readings of one tag are one type even when the first was taken before the body
+// that completed it. Comparing member lists here is what made the `struct S` in
+// `struct S *p;` read before `struct S { int a; };` a different type from the
+// `struct S` the body defines, which is why the assignment of one to the other
+// was refused with the same type named on both sides. An aggregate written
+// without a tag has no name to be identified by, so its members are what tells
+// it from another and they are compared.
 pub fn (t Type) same(other Type) bool {
 	if t.kind != other.kind || t.quals != other.quals || t.tag != other.tag {
 		return false
@@ -365,14 +373,19 @@ pub fn (t Type) same(other Type) bool {
 		|| t.prototyped != other.prototyped {
 		return false
 	}
-	if t.members.len != other.members.len || t.params.len != other.params.len {
-		return false
-	}
-	for i, member in t.members {
-		if member.name != other.members[i].name || member.bits != other.members[i].bits
-			|| !member.typ.same(other.members[i].typ) {
+	if !(t.kind in [.struct_, .union_] && t.tag != '') {
+		if t.members.len != other.members.len {
 			return false
 		}
+		for i, member in t.members {
+			if member.name != other.members[i].name || member.bits != other.members[i].bits
+				|| !member.typ.same(other.members[i].typ) {
+				return false
+			}
+		}
+	}
+	if t.params.len != other.params.len {
+		return false
 	}
 	for i, param in t.params {
 		if !param.typ.same(other.params[i].typ) {

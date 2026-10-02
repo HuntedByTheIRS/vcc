@@ -682,26 +682,31 @@ fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path
 	}
 	name := p.next()
 	written := if path == '' { name.text } else { '${path}.${name.text}' }
-	if aggregate.kind !in [types.Kind.struct_, .union_] {
-		p.error_at(dot, 'unsupported: ${base}${if path == '' { '' } else { '.' + path }} is declared ${aggregate.describe()}, and a member is read from an object whose type has members')
+	// The members belong to the tag, so an aggregate read before its body was
+	// completed is asked for the tag's current type before its members are
+	// searched. The pointee in `struct S *p;` read before `struct S { int a; };`
+	// holds the tag and no members, and the members are read from the tag.
+	tagged := p.tagged_type(aggregate)
+	if tagged.kind !in [types.Kind.struct_, .union_] {
+		p.error_at(dot, 'unsupported: ${base}${if path == '' { '' } else { '.' + path }} is declared ${tagged.describe()}, and a member is read from an object whose type has members')
 		return error('not an aggregate')
 	}
 	mut at := -1
-	for i, member in aggregate.members {
+	for i, member in tagged.members {
 		if member.name == name.text {
 			at = i
 			break
 		}
 	}
 	if at < 0 {
-		p.error_at(name, 'unsupported: ${aggregate.describe()} has no member called ${name.text}')
+		p.error_at(name, 'unsupported: ${tagged.describe()} has no member called ${name.text}')
 		return error('unknown member')
 	}
-	layout := p.representation.layout(aggregate) or {
-		p.error_at(name, 'unsupported: the members of ${aggregate.describe()} are not a layout this compiler knows, so the member ${name.text} cannot be read')
+	layout := p.representation.layout(tagged) or {
+		p.error_at(name, 'unsupported: the members of ${tagged.describe()} are not a layout this compiler knows, so the member ${name.text} cannot be read')
 		return error('no layout')
 	}
-	member := aggregate.members[at]
+	member := tagged.members[at]
 	return ast.Field{
 		name:            base
 		index:           index
@@ -713,6 +718,29 @@ fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path
 		line:            dot.line
 		col:             dot.col
 	}
+}
+
+// tagged_type is the aggregate a type names as the tag namespace holds it now,
+// and the type itself when it names no tag or the tag is not in scope.
+//
+// A struct or a union is identified by its tag, and its members belong to the tag
+// rather than to the reading of it a declaration took. A type read before the body
+// that completed its tag carries no members of its own: the pointee of
+// `struct S *p;` read before `struct S { int a; };` is one, and so is the `next`
+// member of a self-referential struct, whose body names the tag while the body is
+// being read. Asking the tag namespace for the tag answers the completed type,
+// which is where those members are. A type that is already complete is answered as
+// it is: its members are the tag's, and a lookup could only find the tag of some
+// other scope wearing the same name.
+fn (p Parser) tagged_type(aggregate types.Type) types.Type {
+	if aggregate.kind !in [types.Kind.struct_, .union_] || aggregate.tag == ''
+		|| aggregate.is_complete() {
+		return aggregate
+	}
+	// A tag is declared under the keyword and the tag as they were written, which
+	// is an unqualified aggregate's description; the qualifiers a type carries are
+	// not part of the name, so `const struct S` asks the same tag as `struct S`.
+	return p.scopes.lookup_tag(types.unqualified(aggregate).describe()) or { aggregate }
 }
 
 // aggregate_bytes is how many bytes of storage an object of this type takes when

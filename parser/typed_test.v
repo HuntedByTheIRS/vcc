@@ -582,6 +582,58 @@ fn test_an_object_of_an_incomplete_tag_is_refused_by_the_tag() {
 	assert result.diagnostics[0].line == 2
 }
 
+// A pointer to a struct read before the body that completed the tag is the same
+// type as a pointer to the completed struct. The prototype names `struct S *`
+// while the tag is incomplete and the definition names the same type after the
+// body completed it, so the two declarations of `f` describe one function type
+// and the call passes `struct S *` where `struct S *` is wanted. Measured, gcc
+// 16.2.1 compiles and runs this under `-std=c99 -pedantic-errors`.
+fn test_a_pointer_to_a_tag_read_before_its_body_is_compatible_with_one_read_after() {
+	result := checked('struct S;\nint f(struct S *q);\nstruct S { int a; } v;\nint f(struct S *q) { return q->a; }\nint main(void) { return f(&v); }')
+	mut described := false
+	for decl in result.unit.decls {
+		if decl.resolved.describe() == 'int (struct S *)' {
+			described = true
+		}
+	}
+	assert described
+}
+
+// The members of a struct belong to its tag, so a member read through a pointer
+// whose pointee was read before the body completed the tag is read from the tag.
+// The pointer object at the top level is refused for a reason of its own, which
+// is the one diagnostic here; the assignment and the member read are not
+// refused, and the member is typed from the tag's own list.
+fn test_a_member_is_read_from_the_tag_completed_after_the_pointer_was_read() {
+	result := parsed('struct S;\nstruct S *p;\nstruct S { int a; } v;\nint main(void) { p = &v; return p->a; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'unsupported: p is a pointer, and a pointer defined at the top level is storage this compiler does not lay out yet'
+	body := result.unit.decls[0].body
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	read := returned as ast.Field
+	assert read.member == 'a'
+	assert read.through_pointer
+	assert read.typ.same(types.int_type())
+}
+
+// A tag that is never completed stays incomplete, so a member read through a
+// pointer to it is still refused: there is no member list to find one in, and
+// the refusal names the member. This is what keeps reading the members through
+// the tag from being the same as making every struct complete.
+fn test_a_member_of_a_tag_that_is_never_completed_is_still_refused() {
+	result := parsed('struct S;\nstruct S *p;\nint main(void) { return p->a; }')
+	mut refused_by_name := false
+	for diagnostic in result.diagnostics {
+		if diagnostic.msg == 'unsupported: struct S has no member called a' {
+			refused_by_name = true
+		}
+	}
+	assert refused_by_name
+}
+
 // An object defined at the top level is storage in the image, which is laid out
 // by a path that has no room for an aggregate yet. Refusing it where it is
 // written is what keeps an object nothing uses from being dropped silently.
