@@ -448,8 +448,22 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_expression(expr.expr, mut reported)
 		}
 		ast.Binary {
-			p.check_undeclared_expression(expr.left, mut reported)
-			p.check_undeclared_expression(expr.right, mut reported)
+			// An operator chain is one node deep in the grammar however many
+			// terms it has, so the left spine is walked with a loop and only
+			// genuinely nested expressions recurse: a chain of a few thousand
+			// terms is a size generated code reaches, and a call per term would
+			// take the stack out on it.
+			mut spine := []ast.Binary{}
+			mut node := ast.Expr(expr)
+			for node is ast.Binary {
+				step := node as ast.Binary
+				spine << step
+				node = step.left
+			}
+			p.check_undeclared_expression(node, mut reported)
+			for i := spine.len - 1; i >= 0; i-- {
+				p.check_undeclared_expression(spine[i].right, mut reported)
+			}
 		}
 		ast.IncDec {
 			// The name the operator steps is a use of it: `++missing;` names
@@ -1149,10 +1163,25 @@ fn (p Parser) unresolved_name(expr ast.Expr) ?ast.Ident {
 			return p.unresolved_name(expr.expr)
 		}
 		ast.Binary {
-			if found := p.unresolved_name(expr.left) {
+			// An operator chain is one node deep in the grammar however many
+			// terms it has, so the left spine is walked with a loop and only
+			// genuinely nested expressions recurse.
+			mut spine := []ast.Binary{}
+			mut node := ast.Expr(expr)
+			for node is ast.Binary {
+				step := node as ast.Binary
+				spine << step
+				node = step.left
+			}
+			if found := p.unresolved_name(node) {
 				return found
 			}
-			return p.unresolved_name(expr.right)
+			for i := spine.len - 1; i >= 0; i-- {
+				if found := p.unresolved_name(spine[i].right) {
+					return found
+				}
+			}
+			return none
 		}
 		ast.Conditional {
 			if found := p.unresolved_name(expr.cond) {
@@ -1975,14 +2004,16 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 		return none
 	}
 	if expr is ast.Binary {
-		left := p.constant_value(expr.left) or { return none }
 		// `&&` and `||` are operators 6.6p3 leaves in a constant expression, and
 		// the operand the result does not need is not evaluated. Measured on gcc
 		// 16.2.1 under `-std=c99`, `int x[1 || f()]` and `int x[0 && n]` are
 		// accepted at file scope while `int x[2 && f()]` is `variably modified`,
 		// so the right operand is read only when the left one leaves the answer
-		// open.
+		// open. They keep their recursion for the same reason: which side is
+		// evaluated depends on the other one, so the two operands are not folded
+		// in a fixed order.
 		if expr.op == '&&' {
+			left := p.constant_value(expr.left) or { return none }
 			if left == 0 {
 				return i64(0)
 			}
@@ -1990,78 +2021,34 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 			return if right != 0 { i64(1) } else { i64(0) }
 		}
 		if expr.op == '||' {
+			left := p.constant_value(expr.left) or { return none }
 			if left != 0 {
 				return i64(1)
 			}
 			right := p.constant_value(expr.right) or { return none }
 			return if right != 0 { i64(1) } else { i64(0) }
 		}
-		right := p.constant_value(expr.right) or { return none }
-		match expr.op {
-			'+' {
-				return left + right
+		// An operator chain is one node deep in the grammar however many terms it
+		// has, so the left spine is walked with a loop and only genuinely nested
+		// expressions recurse: a chain of a few thousand terms is a size generated
+		// code reaches, and a call per term would take the stack out on it.
+		mut spine := []ast.Binary{}
+		mut node := ast.Expr(expr)
+		for node is ast.Binary {
+			step := node as ast.Binary
+			if step.op == '&&' || step.op == '||' {
+				break
 			}
-			'-' {
-				return left - right
-			}
-			'*' {
-				return left * right
-			}
-			'/' {
-				if right == 0 {
-					return none
-				}
-				return left / right
-			}
-			'%' {
-				if right == 0 {
-					return none
-				}
-				return left % right
-			}
-			'<<' {
-				if right < 0 || right >= 64 {
-					return none
-				}
-				return left << right
-			}
-			'>>' {
-				if right < 0 || right >= 64 {
-					return none
-				}
-				return left >> right
-			}
-			'<' {
-				return if left < right { i64(1) } else { i64(0) }
-			}
-			'>' {
-				return if left > right { i64(1) } else { i64(0) }
-			}
-			'<=' {
-				return if left <= right { i64(1) } else { i64(0) }
-			}
-			'>=' {
-				return if left >= right { i64(1) } else { i64(0) }
-			}
-			'==' {
-				return if left == right { i64(1) } else { i64(0) }
-			}
-			'!=' {
-				return if left != right { i64(1) } else { i64(0) }
-			}
-			'&' {
-				return left & right
-			}
-			'^' {
-				return left ^ right
-			}
-			'|' {
-				return left | right
-			}
-			else {
-				return none
-			}
+			spine << step
+			node = step.left
 		}
+		mut value := p.constant_value(node) or { return none }
+		for i := spine.len - 1; i >= 0; i-- {
+			step := spine[i]
+			right := p.constant_value(step.right) or { return none }
+			value = apply_constant_step(step.op, value, right) or { return none }
+		}
+		return value
 	}
 	if expr is ast.Conditional {
 		// 6.6p3 leaves the conditional operator in a constant expression and
@@ -2082,6 +2069,63 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 		return p.constant_value(expr.else_expr) or { return none }
 	}
 	return none
+}
+
+// apply_constant_step is the arithmetic constant_value folds one binary step
+// with. It is the match the binary arm used to hold inline, moved out so the
+// left-spine loop and the callers answer the same value for an operator.
+fn apply_constant_step(op string, left i64, right i64) ?i64 {
+	return match op {
+		'+' { left + right }
+		'-' { left - right }
+		'*' { left * right }
+		'/' {
+			if right == 0 {
+				return none
+			}
+			left / right
+		}
+		'%' {
+			if right == 0 {
+				return none
+			}
+			left % right
+		}
+		'<<' {
+			if right < 0 || right >= 64 {
+				return none
+			}
+			left << right
+		}
+		'>>' {
+			if right < 0 || right >= 64 {
+				return none
+			}
+			left >> right
+		}
+		'<' {
+			if left < right { i64(1) } else { i64(0) }
+		}
+		'>' {
+			if left > right { i64(1) } else { i64(0) }
+		}
+		'<=' {
+			if left <= right { i64(1) } else { i64(0) }
+		}
+		'>=' {
+			if left >= right { i64(1) } else { i64(0) }
+		}
+		'==' {
+			if left == right { i64(1) } else { i64(0) }
+		}
+		'!=' {
+			if left != right { i64(1) } else { i64(0) }
+		}
+		'&' { left & right }
+		'^' { left ^ right }
+		'|' { left | right }
+		else { none }
+	}
 }
 
 // floating_operand is the value of a floating constant written as the operand of
