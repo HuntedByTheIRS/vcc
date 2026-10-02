@@ -256,15 +256,14 @@ fn test_a_store_through_an_address_writes_the_object_the_pointer_points_at() {
 }
 
 // The width of the store is the width of what the pointer points at. A char
-// object takes one byte, so the ints declared on either side of it are left
-// where they were and only the nine that was written is read back; a double
-// takes eight, written by the instruction that moves one. Measured with gcc
-// 16.2.1, the two programs exit 11 and 6.
+// object takes one byte, so the bytes beside the one written keep their values
+// and the program can tell; a double takes eight, written by the instruction
+// that moves one. Measured with gcc 16.2.1, the two programs exit 1 and 6.
 fn test_a_store_through_an_address_writes_the_width_of_what_it_points_at() {
-	char_store := emit(translation_unit('int main() { int before = 111; char c = 5; int after = 222; char *cp = &c; *cp = 9; return c + (before == 111) + (after == 222); }'),
+	char_store := emit(translation_unit('int main() { char s[4]; s[0] = 1; s[1] = 2; s[2] = 3; s[3] = 4; char *cp = s; *cp = 9; return s[0] == 9 && s[1] == 2 && s[2] == 3 && s[3] == 4; }'),
 		Options{})
 	assert char_store.diagnostics.len == 0
-	assert run_image(char_store.bytes) == 11
+	assert run_image(char_store.bytes) == 1
 	double_store := emit(translation_unit('int main() { double d = 0.0; double *dp = &d; *dp = 1.5; return (int)(d * 4); }'),
 		Options{})
 	assert double_store.diagnostics.len == 0
@@ -294,17 +293,18 @@ fn test_a_store_through_a_pointer_to_a_pointer_writes_where_it_points() {
 // The value converts to the pointed-at type the way it does into a name: a
 // double stored through an address of int is the integer the conversion makes,
 // and a negative int constant stored through an address of long is sign-widened
-// into the whole word rather than written as its unsigned reading. Measured with
-// gcc 16.2.1, the two programs exit 3 and 251.
+// into the whole word, which the comparison reads back a word at a time rather
+// than through the status byte. Measured with gcc 16.2.1, the two programs exit
+// 3 and 1.
 fn test_a_store_through_an_address_converts_to_what_it_points_at() {
 	converted := emit(translation_unit('int main() { int x = 0; int *p = &x; double d = 3.7; *p = d; return x; }'),
 		Options{})
 	assert converted.diagnostics.len == 0
 	assert run_image(converted.bytes) == 3
-	wide := emit(translation_unit('int main() { long x = 0; long *lp = &x; *lp = -5; return (int)x; }'),
+	wide := emit(translation_unit('int main() { long x = 0; long *lp = &x; *lp = -5; return x == -5L; }'),
 		Options{})
 	assert wide.diagnostics.len == 0
-	assert run_image(wide.bytes) == 251
+	assert run_image(wide.bytes) == 1
 }
 
 // A pointer stored through an address of pointer is written at the machine's
