@@ -210,6 +210,86 @@ fn test_a_file_scope_list_too_long_for_the_object_is_refused() {
 	assert scalars.unit.globals.len == 0
 }
 
+// 6.7.8p14 lets an array of character type be initialized by a string literal,
+// and an array whose brackets wrote no size is the literal including its
+// terminating zero. Measured on gcc 16.2.1 under `-std=gnu99`, a program whose
+// `char s[] = "abc";` is at file scope and that returns `sizeof s` exits 4 and
+// reads `abc`, and one whose `char s[8] = "abc";` returns `sizeof s` exits 8.
+fn test_a_file_scope_char_array_takes_a_string_literal() {
+	deduced := declarations_of('char s[] = "abc";')
+	assert deduced.diagnostics.len == 0
+	global := deduced.unit.globals[0]
+	assert global.count == 4
+	assert global.inits.len == 4
+	assert global.inits[0] == 97 && global.inits[1] == 98 && global.inits[2] == 99
+	assert global.inits[3] == 0
+	// A written size is used, and the elements after the terminator stay the
+	// zeros the storage starts as.
+	sized := declarations_of('char s[8] = "abc";')
+	assert sized.diagnostics.len == 0
+	assert sized.unit.globals[0].count == 8
+	assert sized.unit.globals[0].inits.len == 4
+	// A bound exactly the characters keeps no terminating zero, which gcc
+	// accepts: `char s[3] = "abc";` exits zero.
+	exact := declarations_of('char s[3] = "abc";')
+	assert exact.diagnostics.len == 0
+	assert exact.unit.globals[0].count == 3
+	assert exact.unit.globals[0].inits.len == 3
+	// Adjacent literals are one literal (6.4.5p5).
+	joined := declarations_of('char s[] = "ab" "cd";')
+	assert joined.diagnostics.len == 0
+	assert joined.unit.globals[0].count == 5
+	assert joined.unit.globals[0].inits[2] == 99
+}
+
+// A wide literal initializes an array of this target's wchar_t, an int: four
+// elements of four bytes, which is what gcc 16.2.1 lays out for
+// `wchar_t w[] = L"abc";`.
+fn test_a_file_scope_wide_array_takes_a_wide_literal() {
+	result := declarations_of('typedef int wchar_t;\nwchar_t w[] = L"abc";')
+	assert result.diagnostics.len == 0
+	global := result.unit.globals[0]
+	assert global.count == 4
+	assert global.inits.len == 4
+	assert global.inits[0] == 97 && global.inits[3] == 0
+	// The wide literal's characters are four little-endian bytes each.
+	escaped := declarations_of('typedef int wchar_t;\nwchar_t w[] = L"\\xe9";')
+	assert escaped.diagnostics.len == 0
+	assert escaped.unit.globals[0].inits[0] == 233
+}
+
+// A bound that was written is used and never filled in from the literal:
+// `char s[0] = "abc";` holds none and writes four, which gcc 16.2.1 reports as
+// `initializer-string for array of 'char' is too long (4 chars into 0
+// available)`, and `char s[2] = "abc";` is the same violation into two. A bound
+// that is not an integer constant expression stays the file-scope refusal it
+// already was, because a literal does not settle the size of an object whose
+// storage the image has to hold.
+fn test_a_written_bound_is_not_filled_in_from_a_string_literal() {
+	zero := declarations_of('char s[0] = "abc";')
+	assert zero.diagnostics.len == 1
+	assert zero.diagnostics[0].msg.contains('holds 0 elements and its initializer writes 4')
+	assert zero.unit.globals.len == 0
+	too_long := declarations_of('char s[2] = "abc";')
+	assert too_long.diagnostics.len == 1
+	assert too_long.diagnostics[0].msg.contains('holds 2 elements and its initializer writes 4')
+	assert too_long.unit.globals.len == 0
+	variable := declarations_of('int n = 3;\nchar s[n] = "abc";')
+	assert variable.diagnostics.len == 1
+	assert variable.diagnostics[0].msg.contains('is not an integer constant expression')
+}
+
+// A literal whose element type is not the array's is not this initializer:
+// measured on gcc 16.2.1, `int a[] = "xy";` is `cannot initialize array of 'int'
+// from a string literal with type array of 'char'`. This compiler reports the
+// declaration as one whose initializer is not a number, which is the refusal it
+// already had for the shape.
+fn test_a_narrow_literal_does_not_initialize_an_int_array() {
+	result := declarations_of('int a[] = "xy";')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
+}
+
 // A shape the reader does not implement is refused by name: a nested list, a
 // designator, an element that is not a written number, and an empty pair of
 // braces. Measured on gcc 16.2.1, `int a[] = {};` under `-std=gnu99` is `ISO C

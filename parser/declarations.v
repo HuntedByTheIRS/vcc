@@ -642,6 +642,11 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut data_stars := 0
 	mut data_count := 0
 	mut data_clause := types.Type{}
+	// data_complete is the type of an array whose size its initializer gave it,
+	// which the declarator could not: the brackets wrote none, and the string
+	// literal after them is what says how many. It is set once the initializer
+	// has been read, and the name is completed with it after it is declared.
+	mut data_complete := ?types.Type(none)
 	mut data_init := ?i64(none)
 	// data_init_float is the same initializer when it was written as a floating
 	// constant. The two are kept apart while the declaration is read because the
@@ -813,6 +818,34 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						}
 					}
 					literal_refused = true
+				} else if p.peek().kind == .string && d.is_array() {
+					// 6.7.8p14: an array of character type may be
+					// initialized by a string literal. The elements become
+					// the same constants a brace list writes, so the image
+					// lays them out along the path a brace-initialized
+					// array already takes. A literal whose element type is
+					// not the array's is not this initializer, and the
+					// report below names the declaration.
+					if literal := p.read_array_string_literal() {
+						declared := p.declared_type(spec.clause, d)
+						if array_takes_string(d, declared, literal) {
+							written := p.file_scope_string_initializer(d, declared, data_name,
+								literal)
+							if written.ok {
+								data_inits = written.inits
+								data_count = written.count
+								data_complete = written.complete
+							} else {
+								// The literal was too long for the size that
+								// was written; it has been named at its own
+								// location and nothing is laid out.
+								data_problem = true
+								literal_refused = true
+							}
+						}
+					} else {
+						literal_refused = true
+					}
 				} else {
 					constant := p.file_scope_constant()
 					data_init = constant.integer
@@ -932,10 +965,18 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		// and the reason neither of these needs a diagnostic of its own.
 		init, init_float := initializer_for(data_type, data_init, data_init_float)
 		p.declare_name(data_name, data_clause, data_at, true)
+		if completed := data_complete {
+			// The name was declared with the size-less array its declarator
+			// wrote, and the string literal that followed is what gives it a
+			// size: the symbol is completed here so a later `sizeof` answers
+			// with the size the initializer fixed rather than with the brackets
+			// that wrote none.
+			p.scopes.complete_type(data_name, completed)
+		}
 		p.globals << ast.Global{
 			name:        data_name
 			typ:         data_type
-			resolved:    data_clause
+			resolved:    if completed := data_complete { completed } else { data_clause }
 			count:       data_count
 			init:        init
 			init_float:  init_float
@@ -2269,6 +2310,148 @@ fn (s ArraySuffix) count_as_step() int {
 		return unreadable_bound
 	}
 	return int(s.count)
+}
+
+// array_takes_string says whether a string literal initializes the array a
+// declarator declared: an array of character type by an ordinary literal and an
+// array of this target's wchar_t, an int, by a wide one. Measured on gcc 16.2.1,
+// `signed char a[] = "x"` and `unsigned char a[] = "x"` are accepted while
+// `int a[] = "x"` and `unsigned int a[] = L"x"` are not, so the element type has
+// to be the literal's own.
+fn array_takes_string(d Declarator, declared types.Type, literal ast.StrLit) bool {
+	if !d.is_array() {
+		return false
+	}
+	element := declared.element() or { return false }
+	return element_takes_literal(element, literal.unit)
+}
+
+// element_takes_literal is the element type a string literal of this width
+// initializes: an ordinary literal an array of character type - char, signed
+// char or unsigned char - and a wide one an array of wchar_t, which this target
+// gives as an int.
+fn element_takes_literal(element types.Type, unit int) bool {
+	if unit == 4 {
+		return element.kind == .int_
+	}
+	return element.kind in [.char_, .signed_char, .unsigned_char]
+}
+
+// read_array_string_literal reads the string literal at the cursor as one object:
+// a run of adjacent literals is one literal (6.4.5p5), which is what
+// `char s[] = "one" "two";` relies on. Every piece has to be of the literal's own
+// width, and a piece that cannot be read is named where it is written and answers
+// none.
+fn (mut p Parser) read_array_string_literal() ?ast.StrLit {
+	token := p.next()
+	first := parse_string_literal(token.text) or {
+		p.error_at(token, err.msg())
+		return none
+	}
+	mut value := first.value
+	mut characters := first.count
+	for p.peek().kind == .string {
+		next := p.next()
+		piece := parse_string_literal(next.text) or {
+			p.error_at(next, err.msg())
+			return none
+		}
+		if piece.unit != first.unit {
+			p.error_at(next, 'unsupported: adjacent string literals of different widths, ${token.text} and ${next.text}')
+			return none
+		}
+		value += piece.value
+		characters += piece.count
+	}
+	return ast.StrLit{
+		value: value
+		text:  token.text
+		unit:  first.unit
+		typ:   string_literal_type(token.text, StringLiteral{
+			value: value
+			unit:  first.unit
+			count: characters
+		})
+		line:  token.line
+		col:   token.col
+	}
+}
+
+// string_elements is the elements a string literal writes into an array: one per
+// character, and the terminator the literal does not write as the last of them. A
+// wide literal's value holds four little-endian bytes a character and a narrow
+// one's holds one byte a character, so how a character is read off the literal is
+// what its unit says.
+fn string_elements(literal ast.StrLit) []i64 {
+	mut values := []i64{}
+	if literal.unit == 4 {
+		mut i := 0
+		for i + 3 < literal.value.len {
+			mut value := u64(0)
+			for k in 0 .. 4 {
+				value |= u64(literal.value[i + k]) << (8 * k)
+			}
+			values << i64(value)
+			i += 4
+		}
+	} else {
+		for byte in literal.value.bytes() {
+			values << i64(byte)
+		}
+	}
+	values << 0
+	return values
+}
+
+// ArrayString is what a string literal that initializes a file-scope array
+// writes: the element constants, how many elements the array turned out to have,
+// and the type the name is completed with. ok is false when the literal or its
+// size was refused, and the declaration is then not laid out.
+struct ArrayString {
+	inits    []i64
+	count    int
+	complete types.Type
+	ok       bool
+}
+
+// file_scope_string_initializer reads the string literal that initializes a
+// file-scope array and answers the elements it writes. 6.7.8p14 lets an array of
+// character type be initialized by a string literal: each character initializes
+// one element, and the terminating zero the literal does not write is an element
+// when the array has room for it.
+//
+// An array whose brackets wrote no size is exactly the literal including its
+// terminator. A written bound is used instead, and a literal too long for it is
+// the constraint violation gcc 16.2.1 refuses as `initializer-string for array of
+// 'char' is too long`: `char s[2] = "abc";` holds two and writes four, and
+// `char s[0] = "abc";` is the same refusal into none, because a bound was written
+// and the size is not taken from the literal. A bound exactly the characters
+// keeps no terminating zero, which gcc accepts and this accepts too.
+fn (mut p Parser) file_scope_string_initializer(d Declarator, declared types.Type,
+	name string, literal ast.StrLit) ArrayString {
+	values := string_elements(literal)
+	characters := values.len - 1
+	element := declared.element() or { declared }
+	if d.array_sized() {
+		written := d.array_count()
+		if written < characters {
+			p.error_span(literal.line, literal.col, 'a constraint violation: ${name} holds ${written} elements and its initializer writes ${values.len} characters')
+			return ArrayString{}
+		}
+		limit := if written < values.len { written } else { values.len }
+		return ArrayString{
+			inits:    values[..limit]
+			count:    written
+			complete: types.array_of(element, written)
+			ok:       true
+		}
+	}
+	return ArrayString{
+		inits:    values
+		count:    values.len
+		complete: types.array_of(element, values.len)
+		ok:       true
+	}
 }
 
 // parse_array_suffix reads `[ ... ]`. A bound written in the brackets is an
