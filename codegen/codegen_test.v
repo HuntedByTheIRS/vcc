@@ -2233,6 +2233,28 @@ fn test_a_double_is_passed_and_returned_in_the_floating_registers() {
 	assert run_image(emitted.bytes) == 26
 }
 
+// A float argument to a function this file does not define travels as the
+// prototype says: a scalar single in the low half of the floating register, not
+// a double. The callee has to be a real one for the argument to be read back, so
+// the fixture calls a library function with a float parameter and a float result
+// and links the library. A compiler that widens the argument to a double hands
+// over the low 32 bits of the double's encoding, which is zero for 6.25f, and
+// the function then answers 0.0f rather than 2.5f. The same-file call is beside
+// it as the constraint: it was passing a float before this and has to keep doing
+// so. Measured with gcc 16.2.1, both programs exit 0.
+fn test_a_float_argument_is_passed_as_a_float_to_a_declared_callee() {
+	external := emit(translation_unit('extern float sqrtf(float); int main() { return sqrtf(6.25f) == 2.5f ? 0 : 1; }'),
+		Options{
+			libraries: ['m']
+		})
+	assert external.diagnostics.len == 0
+	assert run_image(external.bytes) == 0
+	in_file := emit(translation_unit('float half(float x) { return x / 2.0f; } int main() { return half(5.0f) == 2.5f ? 0 : 1; }'),
+		Options{})
+	assert in_file.diagnostics.len == 0
+	assert run_image(in_file.bytes) == 0
+}
+
 fn test_a_double_comparison_answers_the_int_a_branch_reads() {
 	// A comparison of two doubles reads the flags the floating compare leaves,
 	// which are not the integer ones: the sign of a double lives in the top bit of
