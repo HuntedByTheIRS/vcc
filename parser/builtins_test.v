@@ -175,15 +175,40 @@ fn test_offsetof_refuses_a_member_the_type_does_not_have() {
 	assert result.diagnostics[0].msg == 'unsupported: struct P has no member called b'
 }
 
-// va_arg needs the call side of variadics to exist first, and it does not: a
-// variadic definition is refused by name already, and `va_list` is a type with
-// no form here. The builtin is refused by name rather than reported as a name
-// nothing declares, which would suggest a declaration would make it work.
-fn test_va_arg_is_refused_by_name() {
-	result := builtin_read('int main(void) { return __builtin_va_arg(0, int); }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('__builtin_va_arg reads an argument from a variadic call')
-	assert result.diagnostics[0].msg.contains('a variadic definition is not implemented')
+// The four argument-list operations are calls the reader builds itself, and the
+// node a `va_arg` builds carries the type of the argument it reads: a walk
+// through a list holds no type, so this node is the only place that says whether
+// the next argument is an int, a long long or a double.
+fn test_va_arg_reads_a_call_carrying_the_type_of_the_argument() {
+	result := builtin_read('typedef __builtin_va_list va_list;\nint main(void) { va_list ap; return __builtin_va_arg(ap, int); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	call := expr as ast.Call
+	assert call.name == '__builtin_va_arg'
+	assert call.args.len == 1
+	assert (call.args[0] as ast.Ident).name == 'ap'
+	assert call.typ.kind == .int_
+}
+
+// A `va_list` is written by the operation that fills it in, so the list has to
+// be a name: a spelling with nowhere to write is refused rather than read as a
+// value that would be stepped and thrown away.
+fn test_va_start_writes_the_name_it_is_given() {
+	good := builtin_read('typedef __builtin_va_list va_list;\nint main(void) { va_list ap; __builtin_va_start(ap, 0); return 0; }')
+	assert good.diagnostics.len == 0
+	refused := builtin_read('typedef __builtin_va_list va_list;\nint main(void) { __builtin_va_start(0, 0); return 0; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('writes the argument list it is given')
+}
+
+fn test_va_end_and_va_copy_read_their_lists() {
+	result := builtin_read('typedef __builtin_va_list va_list;\nint main(void) { va_list ap, snapshot; __builtin_va_start(ap, 0); __builtin_va_copy(snapshot, ap); __builtin_va_end(snapshot); return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert (body[2].expr or { ast.Expr(ast.IntLit{}) }) is ast.Call
 }
 
 // A deep chain of one builtin inside another is a file attacking the reader, and

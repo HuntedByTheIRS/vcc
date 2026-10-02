@@ -362,7 +362,13 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
 		}
 		ast.Call {
-			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			// A call to one of the argument-list operations is not a name the
+			// unit has to declare: the reader built the call itself, from a
+			// spelling in the compiler's own namespace, and there is no
+			// declaration any program could write for it.
+			if expr.name !in argument_list_names {
+				p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			}
 			for argument in expr.args {
 				p.check_undeclared_expression(argument, mut reported)
 			}

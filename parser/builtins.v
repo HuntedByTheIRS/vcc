@@ -16,7 +16,8 @@ import types
 // builtin whose answer would be a guess is refused by name here rather than
 // filled in with a value this compiler has not computed.
 const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr',
-	'__builtin_offsetof', '__builtin_va_arg']
+	'__builtin_offsetof', '__builtin_va_arg', '__builtin_va_start', '__builtin_va_end',
+	'__builtin_va_copy']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -53,6 +54,15 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_va_arg' {
 			return p.parse_va_arg(at)
+		}
+		'__builtin_va_start' {
+			return p.parse_va_start(at)
+		}
+		'__builtin_va_end' {
+			return p.parse_va_end(at)
+		}
+		'__builtin_va_copy' {
+			return p.parse_va_copy(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -235,26 +245,122 @@ fn (mut p Parser) parse_member_offset(declared types.Type) !int {
 	return total
 }
 
-// parse_va_arg refuses `__builtin_va_arg(ap, type)`, which is what stdarg.h's
-// `va_arg` expands to. Reading an argument out of a variadic call needs the call
-// side of variadics to exist first - a definition with `...`, the frame that
-// holds the unnamed arguments, and the registers a walk through them reads - and
-// none of that is in the tree: `a variadic definition is not implemented` is
-// what this compiler already says at every such definition, and `va_list` itself
-// is a type it has no form for. The arguments are read so the tokens are
-// consumed and one construct produces one diagnostic, and the refusal names the
-// builtin rather than reporting it as a name nothing declares, which would
-// suggest a declaration would make it work.
+// The four operations over an argument list, which is one object and not four:
+// `va_start` fills a list in from the save area the prologue wrote, `va_arg`
+// reads one argument out of it and steps it, `va_copy` copies it, and `va_end`
+// finishes with it.
+//
+// They are read as calls with the reserved names below, so the tree carries one
+// shape for them and the back end answers each name with the sequence of
+// instructions the calling convention asks for. `__builtin_va_arg` carries the
+// type of the argument it reads in the node's own `typ`, which is where a
+// reader of the tree expects an expression's type to be.
+//
+// The list an operation is given is a name in every program that uses one:
+// `va_start` and `va_copy` write the list's own storage, and a spelling that is
+// not a name has nowhere to be written. The last named parameter a `va_start`
+// names is read for its tokens and thrown away, because where the walk starts is
+// a property of the enclosing declaration and not of that expression.
+
+// argument_list_names are the four spellings, kept in one place so the check for
+// a name nothing declares skips exactly the calls this reader builds.
+const argument_list_names = ['__builtin_va_start', '__builtin_va_arg', '__builtin_va_end',
+	'__builtin_va_copy']
+
+// list_argument reads the argument list one of the four is given. It has to be
+// a name: it is written by `va_start` and `va_copy`, and a list the reader
+// cannot find again has nowhere to put either.
+fn (mut p Parser) list_argument(at tokenize.Token, spelling string) !ast.Expr {
+	list := p.parse_expression()!
+	if list !is ast.Ident {
+		p.error_at(at, 'unsupported: ${spelling} writes the argument list it is given, and ${describe_operand(list)} is not one this compiler can write through')
+		return error('not an argument list name')
+	}
+	return ast.Expr(list)
+}
+
+fn (mut p Parser) parse_va_start(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	list := p.list_argument(at, '__builtin_va_start')!
+	if !p.expect_punct(',') {
+		p.error_at(at, 'unsupported: __builtin_va_start takes the argument list and the last named parameter')
+		return error('expected the last named parameter')
+	}
+	// The last named parameter is read and dropped: the offsets the walk starts
+	// at are the enclosing declaration's and not this expression's.
+	_ := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_va_start')
+		return error('unclosed __builtin_va_start')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_va_start'
+		args: [list]
+		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_va_arg reads `__builtin_va_arg(ap, type)`, which is what stdarg.h's
+// `va_arg` expands to. The type is the type of the argument being read, and the
+// node carries it: a walk through a list holds no type, so this is the only
+// place that says whether the next argument is an int, a long long or a double,
+// and the back end reads it from here.
 fn (mut p Parser) parse_va_arg(at tokenize.Token) !ast.Expr {
 	p.next() // (
-	_ := p.parse_expression()!
+	list := p.list_argument(at, '__builtin_va_arg')!
 	if !p.expect_punct(',') {
+		p.error_at(at, 'unsupported: __builtin_va_arg takes the argument list and the type of the argument')
 		return error('expected the type of the argument')
 	}
-	_ := p.parse_builtin_type(at)!
+	read := p.parse_builtin_type(at)!
 	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_va_arg')
 		return error('unclosed __builtin_va_arg')
 	}
-	p.error_at(at, 'unsupported: __builtin_va_arg reads an argument from a variadic call, and a variadic definition is not implemented')
-	return error('no variadic definition')
+	return ast.Expr(ast.Call{
+		name: '__builtin_va_arg'
+		args: [list]
+		typ:  read.typ
+		line: at.line
+		col:  at.col
+	})
+}
+
+fn (mut p Parser) parse_va_end(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	list := p.list_argument(at, '__builtin_va_end')!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_va_end')
+		return error('unclosed __builtin_va_end')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_va_end'
+		args: [list]
+		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+fn (mut p Parser) parse_va_copy(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	destination := p.list_argument(at, '__builtin_va_copy')!
+	if !p.expect_punct(',') {
+		p.error_at(at, 'unsupported: __builtin_va_copy takes the list being written and the one being read')
+		return error('expected the source list')
+	}
+	source := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_va_copy')
+		return error('unclosed __builtin_va_copy')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_va_copy'
+		args: [destination, source]
+		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
 }
