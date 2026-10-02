@@ -1099,7 +1099,14 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 		return e.convert_to_single(expr, line, col)
 	}
 	if e.floating_of(expr) {
-		e.convert_to_int(expr, e.written_is_unsigned(e.returning), line, col)!
+		// The return type is written rather than resolved here, so its width is
+		// read off the same spelling the signedness is read off. A floating
+		// expression returned from a 64-bit integer function converts at that
+		// width: reading it as an int and widening the result answers the wrong
+		// number, which is what lane-uconv64 was there to fix.
+		returning := types.from_words(e.returning.split(' ')) or { types.Type{} }
+		e.convert_to_int(expr, e.written_is_unsigned(e.returning), e.storage_width(returning) or { 0 },
+			line, col)!
 	} else if e.returns_eight_byte_integer() {
 		// A function whose return type is a 64-bit integer leaves the whole
 		// register as its value, so a narrower expression is widened into it the
@@ -1323,7 +1330,7 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr) !
 		// store moves the integer the conversion produced and not the bits of
 		// the double. The pointed-at type is the destination and it is resolved
 		// here, so its signedness is read off it rather than off a spelling.
-		e.convert_to_int(expr, unary.typ.kind.is_unsigned(), stmt.line, stmt.col)!
+		e.convert_to_int(expr, unary.typ.kind.is_unsigned(), width, stmt.line, stmt.col)!
 		value := e.accumulator(stmt.line, stmt.col)!
 		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 		e.append(e.target.store_indirect(address_register, value, width)!)
@@ -1692,7 +1699,7 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr)
 		return
 	}
 	if e.floating_of(expr) {
-		e.convert_to_int(expr, e.written_is_unsigned(member.spelling), stmt.line, stmt.col)!
+		e.convert_to_int(expr, e.written_is_unsigned(member.spelling), width, stmt.line, stmt.col)!
 		value := e.accumulator(stmt.line, stmt.col)!
 		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 		e.append(e.target.store_indirect(address_register, value, width)!)
@@ -1817,7 +1824,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				return
 			}
 			if e.floating_of(expr) {
-				e.convert_to_int(expr, e.written_is_unsigned(e.global_written(stmt.target)), stmt.line, stmt.col)!
+				e.convert_to_int(expr, e.written_is_unsigned(e.global_written(stmt.target)), object.width, stmt.line, stmt.col)!
 				value := e.accumulator(stmt.line, stmt.col)!
 				e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 				e.append(e.target.store_indirect(address_register, value, object.width)!)
@@ -1894,7 +1901,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		return
 	}
 	if e.floating_of(expr) {
-		e.convert_to_int(expr, slot.unsigned, stmt.line, stmt.col)!
+		e.convert_to_int(expr, slot.unsigned, slot.width, stmt.line, stmt.col)!
 		value := e.accumulator(stmt.line, stmt.col)!
 		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 		e.append(e.target.store_indirect(address_register, value, slot.width)!)
@@ -1946,7 +1953,7 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 	if e.floating_of(expr) {
 		// The element's type is the destination, and it is resolved here, so
 		// its signedness is read off it.
-		e.convert_to_int(expr, index.typ.kind.is_unsigned(), stmt.line, stmt.col)!
+		e.convert_to_int(expr, index.typ.kind.is_unsigned(), width, stmt.line, stmt.col)!
 		value := e.accumulator(stmt.line, stmt.col)!
 		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 		e.append(e.target.store_indirect(address_register, value, width)!)
@@ -3125,12 +3132,29 @@ fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
 	}
 	integer := e.accumulator(line, col)!
 	double_register := e.float_accumulator(line, col)!
-	if expr.typ.kind.is_unsigned() && (e.storage_width(expr.typ) or { 0 }) == 4 {
+	width := e.storage_width(expr.typ) or { 0 }
+	if width == 8 {
+		if expr.typ.kind.is_unsigned() {
+			// An eight-byte unsigned value fills the whole register, so there
+			// is no upper half to clear and the four-byte fix does not carry.
+			// The value is split at 2^63, which is a sequence the machine
+			// composes and which needs a second register for the shifted word.
+			scratch := e.scratch(line, col)!
+			e.append(e.target.unsigned_word_to_double(double_register, integer, scratch)!)
+			return
+		}
+		// An eight-byte signed value converts at eight bytes. The four-byte
+		// conversion would read the low half and call the top bit of it a
+		// sign, which a long or a long long is not a four-byte value for.
+		e.append(e.target.signed_word_to_double(double_register, integer)!)
+		return
+	}
+	if expr.typ.kind.is_unsigned() && width == 4 {
 		// A four-byte unsigned value can be at or above 2^31, which is where the
 		// signed conversion reads the top bit as a sign. A narrower unsigned type
-		// is already below that boundary, and a source eight bytes wide needs a
-		// conditional this back end has not got, so only the four-byte case takes
-		// the zero-extending conversion.
+		// is already below that boundary, and a source eight bytes wide is the
+		// range split above, so only the four-byte case takes the zero-extending
+		// conversion.
 		e.append(e.target.unsigned_int_to_double(double_register, integer)!)
 		return
 	}
@@ -3162,25 +3186,51 @@ fn (mut e Emitter) convert_to_single(expr ast.Expr, line int, col int) !void {
 }
 
 // convert_to_int is the other direction: the floating value in the
-// floating-point accumulator is truncated towards zero into the int in the
+// floating-point accumulator is truncated towards zero into the integer in the
 // general one, which is what the language defines an integer conversion from a
 // floating type to do. The instruction that does it is a different one at each
-// width, so the value's own width is what decides which is written. A value out
-// of range is not reported, because the conversion's result is undefined for one
-// and the instruction's answer is what every compiler on this machine gives.
+// width of the destination, so the destination's width chooses which is written.
+// A value out of range is not reported, because the language leaves the result of
+// the conversion undefined for one: the answer is the instruction's. The one place
+// that is not gcc's answer is an unsigned destination whose value is at or above
+// 2^64, where the bit the target operation puts back is the one already set; the
+// machine operation says what that leaves.
 //
 // The destination's signedness is a parameter rather than something this can read
-// off the double: an unsigned four-byte destination can hold values at and above
-// 2^31, which the signed four-byte truncation saturates, while a signed one has no
-// such values and its conversion is the one the machine has.
-fn (mut e Emitter) convert_to_int(expr ast.Expr, unsigned_target bool, line int, col int) !void {
+// off the double: an unsigned destination can hold values at and above the
+// boundary where the signed truncation saturates, which is 2^31 for a four-byte
+// one and 2^63 for an eight-byte one, while a signed destination has no such
+// values and its conversion is the one the machine has.
+fn (mut e Emitter) convert_to_int(expr ast.Expr, unsigned_target bool, target_width int, line int, col int) !void {
 	if !e.floating_of(expr) {
 		return
 	}
 	float_register := e.float_accumulator(line, col)!
 	integer := e.accumulator(line, col)!
 	if e.single_of(expr) {
-		e.append(e.target.float_to_int(integer, float_register)!)
+		if target_width == 8 {
+			// A float widens to a double exactly, and the truncation at eight
+			// bytes is the double's: the four-byte truncation alone saturates
+			// at 2^31, which a float at 3e9 is above.
+			e.append(e.target.float_to_double(float_register, float_register)!)
+		} else {
+			e.append(e.target.float_to_int(integer, float_register)!)
+			return
+		}
+	}
+	if target_width == 8 {
+		if unsigned_target {
+			// An eight-byte unsigned destination holds values at and above
+			// 2^63, which the signed truncation saturates, so the value is
+			// split at that boundary. It is the machine's operation and it
+			// takes a general register for 2^63 and a double register to hold
+			// it in.
+			scratch := e.scratch(line, col)!
+			float_scratch := e.float_scratch(line, col)!
+			e.append(e.target.double_to_unsigned_word(integer, float_register, scratch, float_scratch)!)
+			return
+		}
+		e.append(e.target.double_to_signed_word(integer, float_register)!)
 		return
 	}
 	e.append(e.target.double_to_int(integer, float_register)!)
@@ -3353,7 +3403,7 @@ fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !voi
 		return
 	}
 	if floating {
-		e.convert_to_int(expr, slot.unsigned, line, col)!
+		e.convert_to_int(expr, slot.unsigned, slot.width, line, col)!
 		e.store_accumulator(slot, line, col)!
 		return
 	}
@@ -4191,14 +4241,13 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 			return error('double to a pointer')
 		}
 		if e.eight_byte_integer(target) {
-			// The one instruction here that converts a double to an integer
-			// leaves a value of four bytes, so a conversion to a 64-bit type is
-			// a different conversion and is refused by name rather than answered
-			// with four bytes of a value eight bytes wide.
-			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and the conversion this back end has writes a value of four bytes')
-			return error('double to a 64-bit integer')
+			// The conversion is made at the destination's width, so a 64-bit
+			// integer target is the eight-byte truncation and nothing here
+			// widens a value that is already whole.
+			e.convert_to_int(cast.expr, target.kind.is_unsigned(), e.target.word_size, cast.line, cast.col)!
+			return
 		}
-		e.convert_to_int(cast.expr, target.kind.is_unsigned(), cast.line, cast.col)!
+		e.convert_to_int(cast.expr, target.kind.is_unsigned(), e.storage_width(target) or { 0 }, cast.line, cast.col)!
 	}
 	register := e.accumulator(cast.line, cast.col)!
 	// The width of the value in the register now, which decides whether a
@@ -6290,8 +6339,12 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		e.emit_expr_at(arg, depth + i + 1)!
 		// A double handed to a parameter that is not one is truncated to the
 		// integer the parameter holds, which is the conversion the language
-		// defines between the two classes.
-		e.convert_to_int(arg, e.argument_is_unsigned(call, i, arg), line, col)!
+		// defines between the two classes. The parameter's own width is what
+		// that truncation is made at, and a call to something this file does
+		// not define has no parameter to read it from, so the argument's own
+		// width is the answer there.
+		parameter_width := if i < widths.len { widths[i] } else { e.width_of(arg) or { 4 } }
+		e.convert_to_int(arg, e.argument_is_unsigned(call, i, arg), parameter_width, line, col)!
 		if e.parameter_wants_a_word(widths, i, arg) {
 			// The parameter is a 64-bit integer and the argument is narrower, so
 			// the value is widened into the whole register before it is parked:
@@ -7129,7 +7182,7 @@ fn (mut e Emitter) convert_for_global(expr ast.Expr, object image.GlobalSlot, un
 		return e.convert_to_double(expr, line, col)
 	}
 	if e.floating_of(expr) {
-		return e.convert_to_int(expr, unsigned_target, line, col)
+		return e.convert_to_int(expr, unsigned_target, object.width, line, col)
 	}
 	if width := e.width_of(expr) {
 		if width != object.width && !(object.width < 4 && width == 4) {
