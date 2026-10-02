@@ -746,6 +746,13 @@ pub fn (t Target) double_to_int(dst Register, src Register) ![]u8 {
 	return x86_64.double_to_int(t.describe(dst), t.describe(src))
 }
 
+// unsigned_int_to_double converts an unsigned four-byte integer to a double. The
+// signed conversion reads the top bit as a sign, so the source reaches this one
+// zero-extended instead.
+pub fn (t Target) unsigned_int_to_double(dst Register, src Register) ![]u8 {
+	return x86_64.unsigned_int_to_double(t.describe(dst), t.describe(src))
+}
+
 // The same conversion for an unsigned four-byte integer: the signed instruction
 // reads its top bit as a sign, so the destination has to be converted at a width
 // every unsigned four-byte value fits in.

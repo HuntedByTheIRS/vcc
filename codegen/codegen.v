@@ -2186,6 +2186,15 @@ fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
 	}
 	integer := e.accumulator(line, col)!
 	double_register := e.float_accumulator(line, col)!
+	if expr.typ.kind.is_unsigned() && (e.storage_width(expr.typ) or { 0 }) == 4 {
+		// A four-byte unsigned value can be at or above 2^31, which is where the
+		// signed conversion reads the top bit as a sign. A narrower unsigned type
+		// is already below that boundary, and a source eight bytes wide needs a
+		// conditional this back end has not got, so only the four-byte case takes
+		// the zero-extending conversion.
+		e.append(e.target.unsigned_int_to_double(double_register, integer)!)
+		return
+	}
 	e.append(e.target.int_to_double(double_register, integer)!)
 }
 

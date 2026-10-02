@@ -1553,6 +1553,27 @@ fn test_a_scalar_in_braces_and_a_list_of_doubles_hold_what_they_wrote() {
 	os.rm(binary) or {}
 }
 
+// An unsigned integer converts to a double with its value kept. gcc 16.2.1 answers
+// every one of these programs with 0; before the unsigned conversion existed this
+// back end answered 1 for all of them, because `cvtsi2sd xmm, r/m32` sign-extends
+// its source. The values sit on both sides of 2^31 and at the top of the range, so
+// a fix that special-cased 3000000000 would fail the rest.
+fn test_an_unsigned_integer_converts_to_a_double() {
+	cases := [
+		'unsigned int u = 3000000000u; double d = (double)u; return d == 3000000000.0 ? 0 : 1;',
+		'unsigned int u = 2147483648u; double d = (double)u; return d == 2147483648.0 ? 0 : 1;',
+		'unsigned int u = 4294967295u; double d = (double)u; return d == 4294967295.0 ? 0 : 1;',
+	]
+	for index, body in cases {
+		source := scratch('uconv_source_${index}.c')
+		binary := scratch('uconv_source_${index}')
+		exit_status := compile_and_run([source, '-o', binary], 'int main(void) { ${body} }\n')
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 // A double converts to an unsigned integer with its value kept. gcc 16.2.1 answers
 // each of these with 0; before the unsigned conversion existed this back end
 // answered 1 for all of them, because `cvttsd2si r32, xmm` saturates at 2^31.

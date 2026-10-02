@@ -211,6 +211,27 @@ pub fn int_to_double(dst Register, src Register) ![]u8 {
 	return double_conversion(double_int_convert, dst, src)
 }
 
+// unsigned_int_to_double converts a four-byte unsigned integer to a double. The
+// signed conversion sign-extends its source, so 3000000000u reaches it as
+// -1294967296 and the double is not the value the program wrote. An unsigned
+// source arrives with zeros above it instead: the four-byte move clears the upper
+// half of the whole register (writing a 32-bit register zeroes the 32 bits above
+// it), and the eight-byte form of the conversion then reads the value that is
+// there. Measured on gcc 16.2.1 at -O0, `(double)u` for an unsigned int is a
+// 32-bit load into eax followed by `cvtsi2sdq %rax, %xmm0`; the `js` gcc writes
+// before it never branches, because the load already cleared the upper half.
+pub fn unsigned_int_to_double(dst Register, src Register) ![]u8 {
+	if dst.width != 16 {
+		return error('${name}: an integer is converted into a double register, and ${dst.name} is not one')
+	}
+	if src.width != 4 {
+		return error('${name}: a double comes from a four-byte integer, and ${src.name} is not one')
+	}
+	mut out := mov_reg32(src, src)!
+	out << double_conversion_widened(double_int_convert, dst, src)
+	return out
+}
+
 pub fn double_to_int(dst Register, src Register) ![]u8 {
 	if dst.width != 4 {
 		return error('${name}: a double is truncated into a four-byte integer, and ${dst.name} is not one')
