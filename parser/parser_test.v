@@ -1563,6 +1563,31 @@ fn test_a_long_chain_of_conditionals_is_refused_rather_than_run_out_of_stack() {
 	assert result.diagnostics[0].msg.contains('nested more than')
 }
 
+// The other three spellings the expression grammar recurses through. A call's
+// argument list and a subscript's index are expressions written inside another,
+// and a sizeof operand is a unary one, and none of the three raised the count
+// that bounds parenthesised nesting. Each chain was followed until the stack ran
+// out - measured on an 8 MB stack, a chain of twenty thousand of any of them
+// took signal 11 - so each is read through a counted reader now and is refused
+// with a diagnostic instead of a crash.
+fn test_a_long_chain_of_calls_is_refused_rather_than_run_out_of_stack() {
+	result := parsed('int main(void) { return ${'f('.repeat(10000)}1${')'.repeat(10000)}; }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('nested more than')
+}
+
+fn test_a_long_chain_of_subscripts_is_refused_rather_than_run_out_of_stack() {
+	result := parsed('int a[1]; int main(void) { return ${'a['.repeat(10000)}0${']'.repeat(10000)}; }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('nested more than')
+}
+
+fn test_a_long_chain_of_sizeof_is_refused_rather_than_run_out_of_stack() {
+	result := parsed('int x; int main(void) { return ${'sizeof '.repeat(10000)}x; }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('nested more than')
+}
+
 // A switch is a statement whose controlling expression the case labels inside
 // its body are matched against. The labels are statements of their own, so a run
 // of them over one statement is a run of statements: `case 0: case 1: x = 1;`
