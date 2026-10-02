@@ -1470,14 +1470,17 @@ fn (p Parser) is_null_constant(expr ast.Expr) bool {
 
 // constant_value is the value of an integer constant expression this reader
 // evaluates while it reads: a literal, a literal with a sign in front of it, a
-// cast of one to an integer type, and the arithmetic of two values. The five
-// arithmetic operators are the ones it folds, which is the arithmetic the bounds
-// a real header writes reach for: measured with `vcc -E`, glibc's `stdio.h`
-// declares `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]` and
-// `sys/select.h` declares `char data[1024 / (8 * (int) sizeof (__fd_mask))]`.
-// `sizeof` is an operator the expression reader turns into its value, so the
-// arithmetic arrives here as integer constants and the cast is the one node kind
-// the folder was missing.
+// cast of one to an integer type, the arithmetic of two values, and the
+// conditional operator. The set is 6.6's rather than the shapes a header happens
+// to write: 6.6p3 excludes assignment, increment, decrement, a function call and
+// a comma from a constant expression and leaves the conditional and the rest of
+// the operators in, so `1 ? 2 : 3` is an integer constant expression and gcc
+// 16.2.1 accepts `int x[1 ? 2 : 3];` at file scope under `-std=c99`. The
+// arithmetic is what the bounds a real header writes reach for: measured with
+// `vcc -E`, glibc's `stdio.h` declares `char _unused2[12 * sizeof (int) - 5 *
+// sizeof (void *)]` and `sys/select.h` declares `char data[1024 / (8 * (int)
+// sizeof (__fd_mask))]`. `sizeof` is an operator the expression reader turns into
+// its value, so the arithmetic arrives here as integer constants.
 //
 // An expression that is not one of those answers none, which says that this is not
 // a constant expression the compiler can evaluate - not that it has no value. A
@@ -1542,6 +1545,24 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 				return none
 			}
 		}
+	}
+	if expr is ast.Conditional {
+		// 6.6p3 leaves the conditional operator in a constant expression and
+		// 6.5.15 evaluates one arm, so only the arm the condition selects has to
+		// be constant. Measured on gcc 16.2.1 under `-std=c99`, `int x[1 ? 2 :
+		// n]` and `int x[1 ? 2 : f()]` are accepted at file scope with n a
+		// variable and f a function, while `int x[1 ? 2 : 3.5]` is refused as
+		// `size of array has non-integer type`: the expression's own type has to
+		// be an integer type, and the arm that does not run does not have to be
+		// constant.
+		if !expr.typ.kind.is_integer() {
+			return none
+		}
+		condition := p.constant_value(expr.cond) or { return none }
+		if condition != 0 {
+			return p.constant_value(expr.then_expr) or { return none }
+		}
+		return p.constant_value(expr.else_expr) or { return none }
 	}
 	return none
 }

@@ -630,3 +630,31 @@ fn test_a_non_constant_bound_at_file_scope_is_a_constraint_violation() {
 	assert body.diagnostics.len == 1
 	assert body.diagnostics[0].msg.contains('an array declaration in a body needs a size')
 }
+
+// The conditional operator is an operator 6.6p3 leaves in a constant expression,
+// so a bound written with one is an integer constant expression and the object is
+// the size the arm the condition selects names. Measured on gcc 16.2.1 under
+// `-std=c99`, `int x[1 ? 2 : 3];` is two ints, `int x[0 ? 2 : 7];` is seven, and
+// `int x[1 ? 2 : n]` is two with n a variable because 6.5.15 does not evaluate
+// the arm it does not take. The whole expression still has to have an integer
+// type: `int x[1 ? 2 : 3.5];` is refused by gcc as `size of array has non-integer
+// type`, and the fold answers none for it here as well.
+fn test_a_conditional_bound_is_an_integer_constant_expression() {
+	taken := declarations_of('int x[1 ? 2 : 3];')
+	assert taken.diagnostics.len == 0
+	assert taken.unit.globals.len == 1
+	assert taken.unit.globals[0].count == 2
+	perhaps := declarations_of('int x[0 ? 2 : 7];')
+	assert perhaps.diagnostics.len == 0
+	assert perhaps.unit.globals[0].count == 7
+	// The arm that does not run does not have to be a constant: this is the
+	// short-circuit 6.5.15 makes and gcc confirms, so the count is the then arm.
+	short := declarations_of('int n = 4;\nint x[1 ? 5 : n];')
+	assert short.diagnostics.len == 0
+	assert short.unit.globals[1].count == 5
+	// An arm of a floating type makes the conditional a double, which no array
+	// size is: the fold answers none and the file-scope check refuses the bound.
+	floating := declarations_of('int x[1 ? 2 : 3.5];')
+	assert floating.diagnostics.len == 1
+	assert floating.diagnostics[0].msg.contains('is not an integer constant expression')
+}
