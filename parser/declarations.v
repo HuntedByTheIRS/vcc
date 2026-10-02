@@ -3458,10 +3458,16 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			}
 			// The order of the questions is the order a reader asks them: what
 			// keeps this parameter from being named at all, then the types the
-			// emitter does.
+			// emitter does. An array parameter is asked about its element, not
+			// about the pointer it adjusts to. 6.7.5.2p1 makes a void element
+			// and an incomplete element each a constraint violation, so
+			// `void a[]` and `struct S a[]` with no body for S are refused
+			// where `void *a` and `struct S *a` are not.
 			if d.name.len == 0 {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
-			} else if !p.parameter_type_is_known(spec, stars) {
+			} else if d.is_array() && d.pointer_count() == 0 && spec.clause.kind == .void_ {
+				params.note_problem('a constraint violation: ${d.name} is declared as an array of void, and 6.7.5.2p1 makes the element type of an array an object type', spec.start)
+			} else if !p.parameter_type_is_known(spec, d.pointer_count()) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.
 				params.note_problem('unsupported type ${p.parameter_spelling(spec)}', spec.start)

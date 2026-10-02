@@ -965,6 +965,22 @@ fn test_an_array_parameter_and_a_pointer_parameter_are_one_type() {
 	assert result.diagnostics.len == 0
 }
 
+// 6.7.5.2p1 makes the element type of an array an object type, so a parameter
+// that is an array of void is refused where a `void *` parameter is not.
+fn test_an_array_parameter_of_void_is_refused() {
+	result := declarations_of('int f(void a[]) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('array of void')
+}
+
+// An array parameter's element has to be complete too, which a pointer to the
+// same tag does not: `struct S *a` is a parameter this reader can name.
+fn test_an_array_parameter_of_an_incomplete_tag_is_refused() {
+	result := declarations_of('struct S; int f(struct S a[]) { return a == 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('unsupported type struct S')
+}
+
 fn test_a_parameter_of_a_definition_needs_a_name() {
 	result := declarations_of('int f(int) { return 0; }')
 	assert result.diagnostics.len == 1
