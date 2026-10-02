@@ -238,9 +238,9 @@ fn test_a_static_function_nothing_names_is_stepped_over() {
 	assert late.unit.decls.len == 1
 	// A definition a call can reach is read as it always was, and its
 	// unsupported type is refused where it is written.
-	reached := parsed('static unsigned short int id (unsigned short int x) { return x; }\nint main() { return id(1); }')
+	reached := parsed('static long double id (long double x) { return x; }\nint main() { return id(1); }')
 	assert reached.diagnostics.len == 1
-	assert reached.diagnostics[0].msg.contains('unsigned')
+	assert reached.diagnostics[0].msg.contains('long double')
 }
 
 fn test_a_read_through_an_address_is_typed_as_what_it_points_at() {
@@ -874,19 +874,21 @@ fn test_a_member_of_something_without_members_is_refused() {
 }
 
 fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type() {
-	// The name is not what is asked about, the type it names is: `Small` is a
-	// `short` here, and a `short` is a type this compiler has no width for. The
-	// refusal names `short` rather than `Small`, and it happens at the
-	// declaration, which is where the object is defined and not only where
-	// something uses it.
-	wider := parsed('typedef short Small;\nSmall x;')
+	// The name is not what is asked about, the type it names is: `Wide` is a
+	// `long double` here, and a `long double` is a type this compiler has no
+	// width for. The refusal names the type rather than `Wide`, and it happens
+	// at the declaration, which is where the object is defined and not only
+	// where something uses it.
+	wider := parsed('typedef long double Wide;\nWide x;')
 	assert wider.diagnostics.len == 1
-	assert wider.diagnostics[0].msg == 'unsupported type short'
+	assert wider.diagnostics[0].msg == 'unsupported type long'
 	assert wider.diagnostics[0].line == 2
-	// A parameter is the same question, asked where the call's frame is laid out.
-	parameter := parsed('typedef short Small;\nint f(Small b) { return 0; }')
+	// A parameter is the same question, asked where the call's frame is laid
+	// out, and a parameter is the one place a type of several words is spelled
+	// in full.
+	parameter := parsed('typedef long double Wide;\nint f(Wide b) { return 0; }')
 	assert parameter.diagnostics.len == 1
-	assert parameter.diagnostics[0].msg.contains('unsupported type short')
+	assert parameter.diagnostics[0].msg.contains('unsupported type long double')
 }
 
 fn test_a_float_definition_is_read_and_a_long_double_one_is_refused_by_name() {
@@ -946,12 +948,13 @@ fn test_a_complex_type_is_refused_by_name() {
 fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
 	// The wording for a definition of an object: the emitter stops at the first
 	// word of the type, and that is the message the compiler has published. The
-	// 64-bit integer spellings are not that case any more, so the type here is
-	// one that is still two words with no form: `short` is not a width this back
-	// end has, and the message names the word in front of it.
-	wider := parsed('unsigned short h(void) { return 0; }')
+	// narrow integer spellings, `short` among them, are not that case any more,
+	// so the type here is one that is still two words with no form: `long
+	// double` is not a width this back end has, and the message names the word
+	// in front of it.
+	wider := parsed('long double h;')
 	assert wider.diagnostics.len == 1
-	assert wider.diagnostics[0].msg == 'unsupported type unsigned'
+	assert wider.diagnostics[0].msg == 'unsupported type long'
 	assert wider.diagnostics[0].line == 1
 }
 

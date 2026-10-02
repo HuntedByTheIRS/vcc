@@ -75,11 +75,14 @@ mut:
 // and computes at that width for the 128-bit pair, so a value of one of them is
 // the width it already has. `float` is here because the emitter has the
 // four-byte instructions for one, which are the eight-byte ones with the other
-// prefix. `unsigned` and `unsigned int` are one type, and so are the three ways
-// of writing each of the long types, which is why the spellings are listed and
-// not the kinds: the check is against what the file wrote.
-const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long long', 'unsigned',
-	'unsigned int', 'unsigned long', 'unsigned long long']
+// prefix. `short` and `_Bool` are here because the emitter loads and stores the
+// one- and two-byte values they name. `unsigned` and `unsigned int` are one type,
+// and so are the three ways of writing each of the long types, which is why the
+// spellings are listed and not the kinds: the check is against what the file
+// wrote. A spelling of more than one word is not here, because the words name a
+// kind that emitted_kinds answers.
+const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long long', 'signed',
+	'unsigned', 'unsigned int', 'unsigned long', 'unsigned long long', 'short', '_Bool']
 
 // emitted_kinds are the kinds those spellings name, which is the question a
 // spelling cannot answer on its own: `unsigned`, `unsigned int` and `unsigned
@@ -87,8 +90,9 @@ const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long
 // more spellings of a kind already listed, and a typedef resolves to a spelling
 // that may be any of them. A type is one the emitter has a form for when the words
 // name one of these.
-const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .char_, .double, .float, .long,
-	.unsigned_long, .long_long, .unsigned_long_long]
+const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .bool_, .char_, .signed_char,
+	.unsigned_char, .short, .unsigned_short, .double, .float, .long, .unsigned_long, .long_long,
+	.unsigned_long_long]
 
 // max_expression_depth bounds how deep one expression nests: the parenthesised
 // kind, the prefix kind and the cast kind all write one expression inside
