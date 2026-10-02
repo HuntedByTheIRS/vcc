@@ -168,9 +168,9 @@ struct Emitter {
 mut:
 	program     image.Program
 	diagnostics []tokenize.Diagnostic
-	// signatures is the width of each parameter of every function the file
-	// defines, so that a call in the file hands each argument over at the width
-	// the definition expects.
+	// signatures is the width of each parameter of every function whose
+	// parameter list this file declares, definition or not, so that a call
+	// hands each argument over at the width the declaration expects.
 	signatures map[string][]int
 	// float_params says, for the same functions, which parameters are doubles.
 	// The width cannot answer that on its own: a double is eight bytes and so is
@@ -424,11 +424,15 @@ fn (mut e Emitter) build() ![]u8 {
 			}
 		}
 	}
-	// The names and the parameter widths come first so that a call binds to a
-	// definition wherever in the file it is written. The width is the one the
-	// definition gives the parameter, which is what a call in the same file has
-	// to hand over; a definition with a parameter this back end cannot size is
-	// left out of the table, because its own emission is where that is reported.
+	// The names and the parameter classifications come first so that a call
+	// binds to a prototype wherever in the file it is written. The width and the
+	// class are the ones the declaration gives the parameter, and a call reads
+	// them whether or not this file wrote the body: C converts an argument to the
+	// visible parameter type, so a float parameter takes the argument as a float
+	// at a definition and at a declaration alike, and default argument promotion
+	// answers only when no prototype is in scope. A declaration with a parameter
+	// this back end cannot size is left out of the table, because its own
+	// emission is where that is reported.
 	for decl in e.unit.decls {
 		e.returns[decl.name] = decl.ret
 		ret_class := e.class_of(decl.ret_type)
@@ -443,6 +447,13 @@ fn (mut e Emitter) build() ![]u8 {
 		}
 		if decl.defined {
 			e.program.defined[decl.name] = true
+		}
+		// A definition and a prototype are both a parameter list this back end
+		// can read, so both fill the same tables. Only a body written here makes
+		// the name one the image defines. A declaration with no parameters is
+		// `(void)` or an old-style no-prototype list, and neither classifies an
+		// argument, so it is left out and a call through it promotes instead.
+		if decl.defined || decl.params.len > 0 {
 			mut widths := []int{}
 			mut classes := []bool{}
 			mut singles := []bool{}
@@ -6364,9 +6375,11 @@ fn (mut e Emitter) copy_stack_object(object Slot, at int, line int, col int) !vo
 	}
 }
 
-// argument_is_double says whether an argument is handed over as a double. A
-// function this file defines says so itself, parameter by parameter; a library
-// function has no prototype here, so the argument's own type is the answer.
+// argument_is_double says whether an argument is handed over as a double. The
+// declaration's parameter list says so itself, parameter by parameter, whether
+// or not this file wrote the body; a call through a declaration with no
+// parameters has no parameter type to consult, so the argument's own type is
+// the answer.
 fn (e Emitter) argument_is_double(call ast.Call, position int, arg ast.Expr) bool {
 	if classes := e.float_params[call.name] {
 		if position < classes.len {
@@ -6377,12 +6390,13 @@ fn (e Emitter) argument_is_double(call ast.Call, position int, arg ast.Expr) boo
 }
 
 // argument_is_single says whether an argument is handed over as a float rather
-// than a double. A function this file defines says so itself, parameter by
-// parameter. A library function has no prototype here, and a float argument to
-// one is promoted to a double, which is the default argument promotion the
-// language defines for a call whose parameter types are not known: so the
-// fallback is false rather than the argument's own type, and `printf("%f", f)`
-// hands over the double printf reads.
+// than a double. The declaration's parameter list says so itself, parameter by
+// parameter, whether or not this file wrote the body. A call through a
+// declaration with no parameters has no parameter type to consult, and a float
+// argument to one is promoted to a double, which is the default argument
+// promotion the language defines for a call whose parameter types are not known:
+// so the fallback is false rather than the argument's own type, and
+// `printf("%f", f)` hands over the double printf reads.
 //
 // The argument is not asked because the answer is not the argument's to give:
 // whether the value is a float before the call is not whether it is one at the
@@ -6397,9 +6411,11 @@ fn (e Emitter) argument_is_single(name string, position int) bool {
 }
 
 // argument_is_unsigned says whether an argument is handed to an unsigned integer
-// parameter. A function this file defines says so itself, parameter by parameter;
-// a library function has no prototype here, so the argument's own type is the
-// answer, which is the same fallback argument_is_double makes.
+// parameter. The declaration's parameter list says so itself, parameter by
+// parameter, whether or not this file wrote the body; a call through a
+// declaration with no parameters has no parameter type to consult, so the
+// argument's own type is the answer, which is the same fallback
+// argument_is_double makes.
 fn (e Emitter) argument_is_unsigned(call ast.Call, position int, arg ast.Expr) bool {
 	if unsigneds := e.unsigned_params[call.name] {
 		if position < unsigneds.len {
