@@ -176,10 +176,11 @@ fn param(name string, typ string) ast.Param {
 
 fn function_in_file(name string, params []ast.Param, body []ast.Stmt) ast.FnDecl {
 	return ast.FnDecl{
-		name:   name
-		ret:    'int'
-		params: params
-		body:   body
+		name:    name
+		ret:     'int'
+		params:  params
+		defined: true
+		body:    body
 	}
 }
 
@@ -198,9 +199,10 @@ fn program(body []ast.Stmt) ast.TranslationUnit {
 	return ast.TranslationUnit{
 		decls: [
 			ast.FnDecl{
-				name: 'main'
-				ret:  'int'
-				body: body
+				name:    'main'
+				ret:     'int'
+				defined: true
+				body:    body
 			},
 		]
 	}
@@ -459,14 +461,16 @@ fn test_a_call_to_a_function_in_the_file_binds_to_the_definition() {
 	unit := ast.TranslationUnit{
 		decls: [
 			ast.FnDecl{
-				name: 'main'
-				ret:  'int'
-				body: [call_statement('helper', []ast.Expr{}), return_statement(5)]
+				name:    'main'
+				ret:     'int'
+				defined: true
+				body:    [call_statement('helper', []ast.Expr{}), return_statement(5)]
 			},
 			ast.FnDecl{
-				name: 'helper'
-				ret:  'int'
-				body: [
+				name:    'helper'
+				ret:     'int'
+				defined: true
+				body:    [
 					call_statement('puts', [string_argument('from the helper')])
 					return_statement(0),
 				]
@@ -626,13 +630,14 @@ fn test_a_non_constant_return_is_reported_with_the_name() {
 // a call can be made at all.
 fn test_a_call_can_be_the_value_of_an_expression() {
 	helper := ast.FnDecl{
-		name:   'twice'
-		ret:    'int'
-		params: [ast.Param{
+		name:    'twice'
+		ret:     'int'
+		params:  [ast.Param{
 			name: 'x'
 			typ:  'int'
 		}]
-		body:   [ast.Stmt{
+		defined: true
+		body:    [ast.Stmt{
 			kind: .return_stmt
 			expr: binary_node('+', name_node('x'), name_node('x'))
 		}]
@@ -658,13 +663,14 @@ fn test_a_call_can_be_the_value_of_an_expression() {
 // the outer call hand over a value the inner one overwrote.
 fn test_a_call_can_be_the_argument_of_another_call() {
 	helper := ast.FnDecl{
-		name:   'twice'
-		ret:    'int'
-		params: [ast.Param{
+		name:    'twice'
+		ret:     'int'
+		params:  [ast.Param{
 			name: 'x'
 			typ:  'int'
 		}]
-		body:   [ast.Stmt{
+		defined: true
+		body:    [ast.Stmt{
 			kind: .return_stmt
 			expr: binary_node('+', name_node('x'), name_node('x'))
 		}]
@@ -788,14 +794,16 @@ fn test_a_helper_with_another_return_type_is_reported() {
 	unit := ast.TranslationUnit{
 		decls: [
 			ast.FnDecl{
-				name: 'main'
-				ret:  'int'
-				body: [call_statement('helper', []ast.Expr{}), return_statement(0)]
+				name:    'main'
+				ret:     'int'
+				defined: true
+				body:    [call_statement('helper', []ast.Expr{}), return_statement(0)]
 			},
 			ast.FnDecl{
-				name: 'helper'
-				ret:  'char'
-				body: [return_statement(0)]
+				name:    'helper'
+				ret:     'char'
+				defined: true
+				body:    [return_statement(0)]
 			},
 		]
 	}
@@ -1684,9 +1692,9 @@ fn test_a_char_local_is_a_byte_that_widens_when_it_is_read() {
 // so a char whose value is negative is handed over as the number it is.
 fn test_a_char_parameter_keeps_its_value_and_its_sign() {
 	helper := ast.FnDecl{
-		name:   'addc'
-		ret:    'int'
-		params: [
+		name:    'addc'
+		ret:     'int'
+		params:  [
 			ast.Param{
 				name: 'a'
 				typ:  'char'
@@ -1696,7 +1704,8 @@ fn test_a_char_parameter_keeps_its_value_and_its_sign() {
 				typ:  'char'
 			},
 		]
-		body:   [ast.Stmt{
+		defined: true
+		body:    [ast.Stmt{
 			kind: .return_stmt
 			expr: binary_node('+', name_node('a'), name_node('b'))
 		}]
