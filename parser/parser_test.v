@@ -654,6 +654,91 @@ fn test_a_compound_assignment_is_the_assignment_it_means() {
 	assert binary.right is ast.IntLit
 }
 
+// A parenthesised expression is a primary-expression, and 6.5.16 and 6.5.17 put
+// the assignment and the comma at the top of the expression grammar, so
+// `(a = 1)` is a well-formed expression worth 1. The reader for it reads an
+// assignment expression, which is the shape this test reads back.
+fn test_a_parenthesised_assignment_expression_is_read_as_an_assignment() {
+	result := parsed('int main() { int a = 0; return (a = 1) == 1; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	cmp := expr as ast.Binary
+	assert cmp.op == '=='
+	assign := cmp.left as ast.Assign
+	assert assign.op == '='
+	assert (assign.target as ast.Ident).name == 'a'
+	assert (assign.value as ast.IntLit).value == 1
+}
+
+// 6.5.17 makes the comma left associative and worth the value of its right
+// operand, so `(a = 1, b = 2, a + b)` writes 1, writes 2, and is worth 3. The
+// tree reads a chain of commas as a nest with the sum on the right.
+fn test_a_comma_expression_is_left_associative_and_worth_its_right_operand() {
+	result := parsed('int main() { int a = 0; int b = 0; return (a = 1, b = 2, a + b) == 3; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[2].expr or {
+		assert false
+		return
+	}
+	cmp := expr as ast.Binary
+	assert cmp.op == '=='
+	comma := cmp.left as ast.Comma
+	assert comma.typ.kind == .int_
+	sum := comma.right as ast.Binary
+	assert sum.op == '+'
+	outer := comma.left as ast.Comma
+	assert (outer.left as ast.Assign).op == '='
+	assert (outer.right as ast.Assign).op == '='
+}
+
+// 6.5.16 gives the assignment the value of its left operand after the store, and
+// the operator is right associative, so `(a = b = 3)` writes 3 into b and then b
+// into a and is worth 3. The tree nests the second assignment inside the first.
+fn test_an_assignment_expression_is_right_associative() {
+	result := parsed('int main() { int a = 0; int b = 0; return (a = b = 3) == 3; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[2].expr or {
+		assert false
+		return
+	}
+	assign := (expr as ast.Binary).left as ast.Assign
+	assert (assign.target as ast.Ident).name == 'a'
+	inner := assign.value as ast.Assign
+	assert (inner.target as ast.Ident).name == 'b'
+	assert (inner.value as ast.IntLit).value == 3
+}
+
+// A compound spelling is read as the assignment it means, the way the statement
+// reader reads it: `(a <<= 1)` is `a = a << 1`, so the value the node carries is
+// the sum and the spelling is kept beside it.
+fn test_a_compound_assignment_expression_is_the_assignment_it_means() {
+	result := parsed('int main() { int a = 1; return (a <<= 1) == 2; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assign := (expr as ast.Binary).left as ast.Assign
+	assert assign.op == '<<='
+	assert (assign.target as ast.Ident).name == 'a'
+	sum := assign.value as ast.Binary
+	assert sum.op == '<<'
+	assert (sum.left as ast.Ident).name == 'a'
+	assert (sum.right as ast.IntLit).value == 1
+}
+
+// An assignment writes to a place, so a value that is not one is refused at the
+// operator, the same way gcc refuses it with `lvalue required as left operand of
+// assignment`.
+fn test_an_assignment_expression_refuses_a_target_that_is_not_a_place() {
+	result := parsed('int main() { return (1 = 2); }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('left operand of =')
+}
+
 // `*p = 5` writes through the address p holds, so the tree keeps the
 // dereference as the target and has no name for it: the address is what the
 // store needs, and the expression the dereference reads through is where it

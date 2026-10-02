@@ -269,5 +269,17 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			dump_expression(expr.then_expr, depth + 1, mut out)
 			dump_expression(expr.else_expr, depth + 1, mut out)
 		}
+		ast.Assign {
+			// The target is printed before the value, which is the order they
+			// are written in and the order the store runs them in.
+			out << '${indent}assign ${expr.op} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			dump_expression(expr.target, depth + 1, mut out)
+			dump_expression(expr.value, depth + 1, mut out)
+		}
+		ast.Comma {
+			out << '${indent}comma at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			dump_expression(expr.left, depth + 1, mut out)
+			dump_expression(expr.right, depth + 1, mut out)
+		}
 	}
 }

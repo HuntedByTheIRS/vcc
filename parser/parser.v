@@ -464,6 +464,16 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_expression(expr.else_expr, mut reported)
 		}
 		ast.IntLit, ast.StrLit, ast.FloatLit {}
+		ast.Assign {
+			// The target is a use of what it names, and the value is an
+			// expression of its own: both sides are walked.
+			p.check_undeclared_expression(expr.target, mut reported)
+			p.check_undeclared_expression(expr.value, mut reported)
+		}
+		ast.Comma {
+			p.check_undeclared_expression(expr.left, mut reported)
+			p.check_undeclared_expression(expr.right, mut reported)
+		}
 	}
 }
 
@@ -514,6 +524,137 @@ fn (mut p Parser) parse_expression() !ast.Expr {
 		return condition
 	}
 	return p.parse_conditional(condition)
+}
+
+// parse_parenthesized_expression reads the expression one level inside
+// parentheses. 6.5.16 and 6.5.17 put the assignment and the comma at the top of
+// the expression grammar, above every operator the precedence climb carries, so
+// the tokens inside `( ... )` are a full expression: `(a = 1, b = 2, a + b)` is
+// one expression worth 3, and that is what this reader answers with.
+//
+// The two readers below are reached only from here. Everywhere else in this tree
+// an assignment is a statement and a comma separates, so `if (a = 1)` and the
+// commas of an argument list keep the reading they had.
+fn (mut p Parser) parse_parenthesized_expression() !ast.Expr {
+	return p.parse_comma_expression()
+}
+
+// parse_comma_expression reads an assignment expression and, while a comma
+// follows, another one. 6.5.17 makes the comma left associative and worth the
+// value of its right operand, so the operands on its left are evaluated for what
+// they do: `(a = 1, b = 2, a + b)` writes 1, writes 2 and is worth 3.
+fn (mut p Parser) parse_comma_expression() !ast.Expr {
+	mut left := p.parse_assignment_expression()!
+	for p.at_punct(',') {
+		t := p.next()
+		right := p.parse_assignment_expression()!
+		left = ast.Expr(ast.Comma{
+			left:  left
+			right: right
+			typ:   p.value_type(right)
+			line:  t.line
+			col:   t.col
+		})
+	}
+	return left
+}
+
+// parse_assignment_expression reads an expression and, where an assignment
+// operator follows it, the assignment that operator writes. 6.5.16 makes an
+// assignment an expression, and the expression is worth the value written after
+// the conversion the store makes, which is the type of the object written. The
+// operator is right associative, which is why the value is read by this same
+// reader: `(a = b = 3)` writes 3 into b and then b into a.
+//
+// The left operand has to be a place. The places this tree writes are the ones
+// the statement reader addresses - a name, an element, a member and a
+// dereference - and anything else is refused by name at the operator.
+//
+// A compound spelling is read as the assignment it means, the way the statement
+// reader reads it: `a <<= 1` is `a = a << 1`, and the sum is built here so the
+// value the node carries is the one written. The spelling is not asked about in
+// the assignment check, because the sum is the node the check would have to ask
+// about and it carries the type the operands gave it.
+fn (mut p Parser) parse_assignment_expression() !ast.Expr {
+	left := p.parse_expression()!
+	op := p.assignment_operator() or { return left }
+	p.next()
+	if !is_a_place(left) {
+		p.error_at(op, 'unsupported: the left operand of ${op.text} is ${describe_operand(left)}, and an assignment writes to a name, an element, a member or a dereference')
+		return error('assignment target')
+	}
+	target_type := p.value_type(left)
+	if op.text == '=' {
+		value := p.parse_assignment_expression()!
+		p.check_assignment(target_type, value, op)
+		return ast.Expr(ast.Assign{
+			op:     op.text
+			target: left
+			value:  value
+			typ:    target_type
+			line:   op.line
+			col:    op.col
+		})
+	}
+	arithmetic := op.text[..op.text.len - 1]
+	if arithmetic !in ['+', '-', '*', '/', '%', '<<', '>>', '&', '|', '^'] {
+		p.error_at(op, 'unsupported: the compound assignment ${op.text} is not implemented')
+		return error('compound assignment')
+	}
+	if !is_a_compound_target(left) {
+		p.error_at(op, 'unsupported: the compound assignment ${op.text} to ${describe_operand(left)} is not implemented')
+		return error('compound assignment target')
+	}
+	right := p.parse_assignment_expression()!
+	operator := tokenize.Token{
+		...op
+		text: arithmetic
+	}
+	value := ast.Expr(ast.Binary{
+		op:    arithmetic
+		left:  left
+		right: right
+		typ:   p.binary_type(operator, left, right)
+		line:  left.line
+		col:   left.col
+	})
+	p.check_assignment(target_type, value, op)
+	return ast.Expr(ast.Assign{
+		op:     op.text
+		target: left
+		value:  value
+		typ:    target_type
+		line:   op.line
+		col:    op.col
+	})
+}
+
+// is_a_place says whether an expression is one an assignment can write: a name,
+// an element, a member or a dereference. They are the shapes the back end has a
+// store for, and the same list the statement reader addresses.
+fn is_a_place(expr ast.Expr) bool {
+	return match expr {
+		ast.Ident, ast.Index, ast.Field { true }
+		ast.Unary { expr.op == '*' }
+		else { false }
+	}
+}
+
+// is_a_compound_target says whether an expression is a place a compound
+// assignment can read twice. A compound spelling means `x = x op value`, and the
+// operand written twice has to be a place the statement reader can also address:
+// a name, or an element whose base is a name. A member and a dereference would
+// be read twice, which is a different program whenever the pointer or the object
+// has a side effect, so those are refused by name rather than read as something
+// the source did not write.
+fn is_a_compound_target(expr ast.Expr) bool {
+	if expr is ast.Ident {
+		return true
+	}
+	if expr is ast.Index {
+		return (expr as ast.Index).base is ast.Ident
+	}
+	return false
 }
 
 // parse_conditional reads a `? then : else` after the condition it selects on.
@@ -898,6 +1039,8 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Binary { 'a value of ${expr.op}' }
 		ast.IncDec { 'a value with ${expr.op} applied to ${expr.name}' }
 		ast.Conditional { 'a conditional value' }
+		ast.Assign { 'a value assigned to ${describe_operand(expr.target)} with ${expr.op}' }
+		ast.Comma { 'a value of ,' }
 	}
 }
 
@@ -1496,7 +1639,7 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 			p.depth--
 			return error('expression nested too deeply')
 		}
-		inner := p.parse_expression() or {
+		inner := p.parse_parenthesized_expression() or {
 			p.depth--
 			return error('expression')
 		}

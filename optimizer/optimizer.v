@@ -447,6 +447,30 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			// there is nothing inside the node to rewrite.
 			return expr
 		}
+		ast.Assign {
+			// Both operands are rewritten, and the clause travels with the
+			// node: what the assignment is worth is the type of the object
+			// written, which is what the reader resolved.
+			return ast.Expr(ast.Assign{
+				op:     expr.op
+				target: rewrite(expr.target, opts, depth + 1)
+				value:  rewrite(expr.value, opts, depth + 1)
+				typ:    expr.typ
+				line:   expr.line
+				col:    expr.col
+			})
+		}
+		ast.Comma {
+			// The left operand is evaluated for what it does and the value is
+			// the right one's, whose type the node carries.
+			return ast.Expr(ast.Comma{
+				left:  rewrite(expr.left, opts, depth + 1)
+				right: rewrite(expr.right, opts, depth + 1)
+				typ:   expr.typ
+				line:  expr.line
+				col:   expr.col
+			})
+		}
 		ast.Conditional {
 			// All three operands are rewritten: a builtin call can sit in the
 			// condition as much as in either arm. The clause travels with the

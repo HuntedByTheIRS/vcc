@@ -2052,6 +2052,25 @@ fn test_a_compound_assignment_on_a_pair_runs() {
 	}
 }
 
+// An assignment and a comma are expressions of the ordinary grammar, worth the
+// value 6.5.16 and 6.5.17 give them, so they run inside a larger expression the
+// way gcc runs them. Each case returns 1 when the value is what the source
+// says it is.
+fn test_an_assignment_and_a_comma_expression_as_a_value_run() {
+	cases := [
+		'int a = 0;\n	return (a = 5) == 5;',
+		'int a = 0; int b = 0;\n	return (a = b = 7) == 7 && a == 7 && b == 7;',
+		'int a = 0; int b = 0;\n	return (a = 1, b = 2, a + b) == 3;',
+		'int a = 1;\n	return (a <<= 1) == 2 && (a >>= 1) == 1;',
+		'int a = 0; int b = (a = 4, a + 1);\n	return b == 5;',
+	]
+	for source in cases {
+		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
 fn test_a_shift_by_a_count_as_wide_as_the_value_is_refused() {
 	cases := [
 		'int main() { int a = 1;\n\treturn a << 32; }',
