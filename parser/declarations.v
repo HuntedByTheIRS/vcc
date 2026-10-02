@@ -933,7 +933,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		// definition's return type is: storage the program has to find room for,
 		// so the answer is the same helper. A prototype can promise anything; a
 		// definition cannot promise a type this back end has no width for.
-		if offender := p.unsupported_type_word(spec) {
+		if offender := p.unsupported_type_word(spec, data_stars) {
 			p.error_at(data_at, 'unsupported type ${offender}')
 			return decls
 		}
@@ -1471,7 +1471,7 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 		p.error_at(spec.start, 'unsupported: ${spec.clause.describe()} is a type this compiler does not emit yet, so a function cannot return it')
 		return
 	}
-	if offender := p.unsupported_type_word(spec) {
+	if offender := p.unsupported_type_word(spec, d.pointer_count()) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
 		return
 	}
@@ -1541,6 +1541,18 @@ fn (p Parser) word_problem(word string) ?string {
 	return word
 }
 
+// incomplete_aggregate says a declaration's clause is a tag with no body, or one
+// whose members this model could not lay out, so the model has no size for an
+// object of it. A pointer to such a type is still a complete object: 6.2.5 lets
+// a pointer name an incomplete type, and the back end sizes a pointer from its
+// star rather than from what it points at.
+fn (p Parser) incomplete_aggregate(spec DeclSpec) bool {
+	if spec.clause.kind !in [types.Kind.struct_, .union_] {
+		return false
+	}
+	return !spec.clause.is_complete() || p.representation.layout(spec.clause) == none
+}
+
 // unsupported_type_word is the word among a declaration's specifiers that keeps
 // the back end from giving an object the type it names, or none when every word
 // is one the emitter has a form for. A definition's return type and a
@@ -1558,7 +1570,7 @@ fn (p Parser) word_problem(word string) ?string {
 // spellings. A type written as two words is named in full where the answer is
 // about the construct rather than about the word: the parameter list names what a
 // parameter was declared with, and a complex type is refused by name below.
-fn (p Parser) unsupported_type_word(spec DeclSpec) ?string {
+fn (p Parser) unsupported_type_word(spec DeclSpec, stars int) ?string {
 	// The words a type is made of, not the storage class in front of them: an
 	// `extern` or a `static` is not a type, and reporting one as an unsupported
 	// type would be reporting the wrong word for the right reason.
@@ -1567,11 +1579,25 @@ fn (p Parser) unsupported_type_word(spec DeclSpec) ?string {
 	// is a tag, and its members are what decide how many bytes the object is. A
 	// tag written with no body leaves the size unknown, so the refusal is the
 	// tag as it was written.
+	//
+	// `stars` is how many pointer steps the declarator wrote, because a pointer
+	// to a type the model cannot size is still one address wide: 6.2.5 lets a
+	// pointer name an incomplete type, and the back end sizes a pointer from the
+	// star and never asks what is under it.
 	if spec.clause.kind in [types.Kind.struct_, .union_] {
 		// A tag that was declared and never defined is not complete, so there is
 		// no size to give an object of it: the refusal names the tag as it was
-		// written, and it happens here rather than where the object is used.
-		if !spec.clause.is_complete() || p.representation.layout(spec.clause) == none {
+		// written, and it happens here rather than where the object is used. A
+		// pointer to it is a complete object and there is nothing to refuse:
+		// `FILE *f;` reaches here when FILE is `typedef struct _IO_FILE FILE;`
+		// and the struct's body is written after the typedef, and measured, gcc
+		// 16.2.1 compiles that program and it exits 0. An object of the tag with
+		// no star stays refused, which is what gcc does too ("storage size of 'x'
+		// isn't known").
+		if p.incomplete_aggregate(spec) {
+			if stars > 0 {
+				return none
+			}
 			return spec.type_words.join(' ')
 		}
 		return none
@@ -2387,7 +2413,7 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
 			} else if d.is_array() {
 				params.note_problem('unsupported: array parameters are not implemented', d.array_at())
-			} else if !p.parameter_type_is_known(spec) {
+			} else if !p.parameter_type_is_known(spec, d.pointer_count()) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.
 				params.note_problem('unsupported type ${p.parameter_spelling(spec)}', spec.start)
@@ -2419,12 +2445,18 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 // rather than about the word, because that type has a width and the model is
 // where the width is: the spelling joins two words, and `unsigned __int128` is
 // not a word this reader has.
-fn (p Parser) parameter_type_is_known(spec DeclSpec) bool {
+fn (p Parser) parameter_type_is_known(spec DeclSpec, stars int) bool {
 	// An object of an aggregate type is one a definition can be handed by value:
 	// the layout says how many bytes it is and what class its first eightbyte
 	// has, which is what the caller and the callee each have to agree on. A tag
-	// with no body has neither, so it is not one.
+	// with no body has neither, so it is not one. A pointer to such a tag is
+	// still a parameter this reader can name: the parameter is one address
+	// whatever the tag turns out to be, which is the same answer a declaration
+	// of a pointer to the tag gets.
 	if spec.clause.kind in [types.Kind.struct_, .union_] {
+		if stars > 0 {
+			return true
+		}
 		return spec.clause.is_complete() && p.representation.layout(spec.clause) != none
 	}
 	// A 128-bit integer is a type the model knows the width of, sixteen bytes,

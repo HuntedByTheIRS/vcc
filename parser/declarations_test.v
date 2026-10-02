@@ -619,6 +619,27 @@ fn test_a_parameter_of_a_definition_needs_a_name() {
 	assert result.diagnostics[0].msg.contains('needs a name')
 }
 
+// A parameter that is a pointer to a tag with no body is a parameter this reader
+// can name: the parameter is one address, and the callee needs no size for what
+// it points at. Measured, gcc 16.2.1 compiles a definition of `int f(struct S
+// *p)` where S has no body anywhere in the file, and refuses `int f(struct S p)`
+// ("parameter has incomplete type"), which is the same split a declaration of an
+// object gets.
+fn test_a_pointer_parameter_to_a_tag_with_no_body_is_accepted() {
+	result := declarations_of('struct S; int f(struct S *p) { return p == 0; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params.len == 1
+	assert params[0].name == 'p'
+	assert params[0].typ == 'struct S *'
+}
+
+fn test_an_object_parameter_of_a_tag_with_no_body_is_reported() {
+	result := declarations_of('struct S; int f(struct S p) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('unsupported type struct S')
+}
+
 fn test_a_declaration_with_no_declarator_is_reported() {
 	result := declarations_of('typedef;')
 	assert result.diagnostics.len == 1
