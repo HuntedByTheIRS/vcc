@@ -391,10 +391,17 @@ pub:
 pub struct Call {
 pub:
 	name string
-	args []Expr
-	typ  types.Type
-	line int
-	col  int
+	// callee is what a call calls when that is not a bare name: `(*fp)(1, 2)`,
+	// `table[0](3, 4)`, and a name that holds a function pointer are all one
+	// expression whose value is the address being called. It is none for a call
+	// written to a name, which is what a function definition or an undeclared
+	// library function is called by, and some(expression) otherwise. A call with
+	// a callee is an indirect call: the expression's value is the address.
+	callee ?Expr
+	args   []Expr
+	typ    types.Type
+	line   int
+	col    int
 }
 
 // IncDec is `++x`, `--x`, `x++` or `x--` written where a value is expected. The
