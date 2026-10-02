@@ -658,6 +658,13 @@ fn is_an_int_value(value i64) bool {
 // that stopped through the exit syscall instead would print nothing whenever its
 // output is a pipe or a file.
 fn (mut e Emitter) emit_start() !void {
+	// The kernel's argument vector is read off the stack before the stack is
+	// put on the boundary a call wants, because the layout is written against
+	// the stack pointer the kernel left and the alignment would move it. An
+	// entry function that declares no parameters simply does not read the
+	// registers; one that declares `char **envp` finds the kernel's
+	// environment in the third.
+	e.append(e.target.loader_arguments()!)
 	// The stack is put on the boundary a call wants before anything is called.
 	// A process starts on whatever stack the kernel left, and every frame below
 	// this point assumes the convention holds, so the one instruction is what
