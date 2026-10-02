@@ -605,6 +605,43 @@ fn test_a_long_variable_chain_is_emitted_and_runs() {
 	assert run_image(emitted.bytes) == int(expected)
 }
 
+// An operator chain is one node deep in the grammar however many terms it has,
+// so the nesting limit does not see it and it is counted against its own bound.
+// What a chain of this size gets is a diagnostic that names the construct and
+// where it starts, not a signal: gcc compiles the same file, and refusing it is
+// a smaller lie than running the stack out or walking it term by term.
+fn test_a_chain_past_the_emit_bound_is_refused_by_name() {
+	mut source := 'int main(void) { int x = 1; int y = 0'
+	for _ in 0 .. max_emit_chain + 1 {
+		source += ' + x'
+	}
+	source += '; return y; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('chain of ${max_emit_chain + 1} operators')
+	assert emitted.diagnostics[0].msg.contains('more than the ${max_emit_chain}')
+	// The location is the operand the chain starts from, which is the `0`.
+	assert emitted.diagnostics[0].line == 1
+	assert emitted.diagnostics[0].col == 37
+	// A chain is not the nesting it is not: the message says what it is.
+	assert !emitted.diagnostics[0].msg.contains('nested')
+}
+
+// The chain at the bound is still emitted and runs, so the count is what draws
+// the line and not one term short of it.
+fn test_a_chain_at_the_emit_bound_is_emitted() {
+	mut source := 'int main(void) { int x = 1; int y = 0'
+	mut expected := i64(0)
+	for _ in 0 .. max_emit_chain {
+		source += ' + x'
+		expected = (expected + 1) & 0xff
+	}
+	source += '; return y; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == int(expected)
+}
+
 // A division by zero is refused where a constant expression is required and
 // nowhere else, which is what C99 6.6 says and what gcc 16.2.1 does: it compiles
 // a division by zero in a program, and only a constant context makes it complain.

@@ -291,6 +291,17 @@ const frame_alignment = 16
 // this is a tree that would take the stack out rather than one a program writes.
 const max_emit_depth = 200
 
+// max_emit_chain is how many terms one operator chain may carry before it is
+// reported. A chain is not nesting: `a + b + c ...` is one node deep in the
+// grammar however many terms it has, the parser reads it left to right, and the
+// emitter walks its left spine with a loop, so max_emit_depth does not see it and
+// the stack does not either. What is left is the work: the emitter asks the width
+// of everything below a term once per term, so a chain of n terms costs about
+// n*n/2 classifier steps, and a chain is counted rather than walked past this.
+// The count is chosen above the two thousand terms the benchmark's workload and
+// the long-chain tests use, so nothing the tree compiles today is refused.
+const max_emit_chain = 4096
+
 // wide_bytes is the size of a 128-bit integer as an object. It is the number the
 // type model carries for both of the 128-bit kinds, and the number the machine's
 // sixteen bytes are cut into when one is copied, so it is written once here and
@@ -4967,11 +4978,23 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		if step.op == '&&' || step.op == '||' {
 			break
 		}
+		spine << step
+		node = step.left
+	}
+	// The chain is counted before a term of it is classified. A chain is one node
+	// deep in the grammar however many terms it has, so max_emit_depth does not
+	// see it, and asking the width of the part below a term is work that grows
+	// with the chain. A chain past max_emit_chain is reported here, at the operand
+	// it starts from, rather than walked and classified term by term.
+	if spine.len > max_emit_chain {
+		start := spine[spine.len - 1].left
+		e.diagnostics << problem(expr_line(start), expr_col(start), 'unsupported: this expression is a chain of ${spine.len} operators, more than the ${max_emit_chain} this back end emits')
+		return error('operator chain too long')
+	}
+	for step in spine {
 		if !e.is_pointer_step(step) {
 			e.check_int_operands(step)!
 		}
-		spine << step
-		node = step.left
 	}
 	e.emit_value(node, depth + 1)!
 	for i := spine.len - 1; i >= 0; i-- {
@@ -5575,7 +5598,7 @@ fn (e Emitter) converted_width(t types.Type) ?int {
 // the tree, and asking the width of the part below each term is what used to take
 // the stack out at about two thousand terms. Measured on an 8 MB stack, a chain of
 // three thousand `+ x` terms took signal 11 here while the same chain of constants
-// folded.
+// folded; the loop is what makes the count max_emit_chain checks reachable.
 fn (e Emitter) width_of(expr ast.Expr) ?int {
 	return e.width_of_at(expr, 0)
 }
