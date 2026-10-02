@@ -754,6 +754,22 @@ fn test_an_expression_statement_that_is_not_a_call_is_reported() {
 	assert emitted.bytes.len == 0
 }
 
+// A void expression in a statement is evaluated for its side effects and its
+// value thrown away, which is where a conversion to void and a read through an
+// address of void are legal. Measured on gcc 16.2.1, which compiles and runs
+// all three under both -std=c99 -pedantic-errors and -std=gnu99 and exits 7.
+fn test_a_void_expression_statement_compiles_and_runs() {
+	for source in [
+		'int main(void) { int x = 3; (void)x; (void)(x + 1); return 7; }',
+		'int main(void) { int x = 3; void *p = &x; *(void *)p; return 7; }',
+		'int main(void) { int x = 3; __extension__ *(void *)&x; return 7; }',
+	] {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 7
+	}
+}
+
 fn test_a_file_without_main_says_so() {
 	emitted := emit(translation_unit('int other() { return 1; }'), Options{})
 	assert emitted.diagnostics.len == 1

@@ -10,6 +10,23 @@ import types
 // reported where it was written. Which of them a run of tokens is, is a question
 // about the first token and the one after it, and it is asked here.
 
+// statement_keywords are the statements this compiler does not implement. They
+// are named so that `switch (x)` is reported as an unsupported statement rather
+// than as an expression that went wrong at its first parenthesis.
+const statement_keywords = ['switch', 'case', 'default', 'goto']
+
+// starts_a_statement_declaration says whether the statement at the cursor
+// declares an object. __extension__ is the one word that can open either a
+// declaration or an expression - glibc writes it in front of both - so a
+// leading run of the marker is skipped and the word after it decides.
+fn (p Parser) starts_a_statement_declaration() bool {
+	mut i := p.pos
+	for i < p.tokens.len && p.tokens[i].kind == .identifier && p.tokens[i].text == '__extension__' {
+		i++
+	}
+	return p.starts_declaration(p.tokens[i])
+}
+
 // parse_statement reads one statement. A statement that opens with a word the
 // language reserves is read by the reader that word names, and the dispatch
 // below is the whole table: C's statements begin with a keyword or with an
@@ -81,7 +98,9 @@ fn (mut p Parser) parse_statement() ![]ast.Stmt {
 	// A statement that starts with a type name declares an object. Storage in
 	// the frame is what the tree calls a var_decl, and one statement names one
 	// object, so a declaration of several declarators is several statements.
-	if p.starts_declaration(t) {
+	// __extension__ is the one word that can open either a declaration or an
+	// expression, so the marker is skipped before the question is asked.
+	if p.starts_a_statement_declaration() {
 		return p.parse_local_declaration()
 	}
 	// Anything else is an assignment or an expression evaluated for what it

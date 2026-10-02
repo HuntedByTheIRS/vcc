@@ -845,8 +845,10 @@ fn (mut p Parser) unary_type(op tokenize.Token, operand ast.Expr) types.Type {
 // deref_type is the type of the value at an address: 6.5.3.2 makes `*p` a value
 // of the type p points at, and an array's name is the address of its first
 // element, so `*a` for `char a[4]` is a char. A value that is not an address has
-// no value at it, and one that points at void has none either: both are refused
-// here by name rather than read at the width of something else.
+// no value at it, so the operand is refused by name rather than read at the width
+// of something else. A pointer to void is the one pointer whose read is a void
+// expression rather than a refusal: 6.3.2.2 says that expression has no value,
+// and the places it may appear are the places a value is thrown away.
 fn (mut p Parser) deref_type(op tokenize.Token, operand ast.Expr) types.Type {
 	if p.is_unresolved(operand) {
 		return types.Type{}
@@ -858,12 +860,7 @@ fn (mut p Parser) deref_type(op tokenize.Token, operand ast.Expr) types.Type {
 		p.error_at(op, 'unsupported: * reads through an address, and this operand is ${operand.typ.describe()}')
 		return types.Type{}
 	}
-	pointed_at := operand.typ.pointee() or { types.Type{} }
-	if pointed_at.kind == .void_ {
-		p.error_at(op, 'unsupported: * reads through an address of void, which has no value at it')
-		return types.Type{}
-	}
-	return pointed_at
+	return operand.typ.pointee() or { types.Type{} }
 }
 
 // is_unresolved says whether an expression's clause is the one the model could
@@ -884,13 +881,23 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	if t.kind == .identifier && t.text == 'sizeof' {
 		return p.parse_sizeof(t)
 	}
+	// `__extension__` marks the expression after it as an extension and is worth
+	// nothing itself. glibc writes it inside tgmath.h to keep a strict mode quiet
+	// about the statement expressions the macros use. The name is in the reserved
+	// namespace, so no dialect may refuse it: the tree reads it here the way it
+	// already reads it in front of a declaration, and no features.v row gates it
+	// because a reserved spelling carries nothing for the dialect check to report.
+	if t.kind == .identifier && t.text == '__extension__' {
+		p.next()
+		return p.parse_prefix_operand(t)!
+	}
 	// A conversion is written as a type name in parentheses, and it is read here
 	// because that is where it binds: `(char *)p + 1` adds one to the address and
 	// not to the char, and `*(int *)p` reads through the pointer rather than
 	// multiplying. Which of the two a `(` opens - a type name or an expression -
 	// is the token after it: a specifier word or a name this file declared as a
 	// type is a conversion, and a name that is not is a value in parentheses.
-	if t.kind == .punct && t.text == '(' && p.starts_declaration(p.peek_at(1)) {
+	if t.kind == .punct && t.text == '(' && p.starts_type_name(p.peek_at(1)) {
 		return p.parse_cast(t)
 	}
 	// `++` and `--` are prefix operators here: what follows is the operand they
@@ -1119,18 +1126,16 @@ fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !as
 // converts. The operand is a unary expression, which is what the grammar says and
 // why `(char)-x` and `(char)*p` are conversions of a value rather than of a sum.
 //
-// A conversion to `void` is refused here rather than in the back end, because it
-// is the one conversion that produces no value: `(void)f()` is a statement that
-// throws a result away, and this tree has no node for a value that is not one.
+// A conversion to `void` is a void expression, not an error: 6.5.4 lets a cast
+// name void, and 6.3.2.2 says the value of such an expression is discarded. The
+// node carries the void type the way a value conversion carries its type, and a
+// later stage decides from the type whether the expression is in a place that
+// may throw a value away.
 fn (mut p Parser) parse_cast(at tokenize.Token) !ast.Expr {
 	p.next() // (
 	name := p.parse_type_name(1)!
 	if !p.expect_punct(')') {
 		return error('unclosed cast')
-	}
-	if name.typ.kind == .void_ {
-		p.error_at(at, 'unsupported: a conversion to void throws its operand away, and this compiler reads a conversion as a value')
-		return error('a conversion to void')
 	}
 	operand := p.parse_prefix_operand(at)!
 	return ast.Expr(ast.Cast{

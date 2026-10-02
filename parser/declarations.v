@@ -108,6 +108,18 @@ fn (p Parser) starts_declaration(t tokenize.Token) bool {
 	return t.kind == .identifier && (is_specifier_word(t.text) || p.is_type_name(t.text))
 }
 
+// starts_type_name says whether a token can open a type name written as a cast.
+// A cast is a type name and not a declaration, so a storage class never opens
+// one: `extern`, `static` and `__extension__` say what kind of declaration
+// follows and have no place in a conversion. Reading `(__extension__ ...)` as a
+// cast is what made glibc's tgmath.h macros stop at a `sizeof` read as a
+// declarator name, so a type name and a declaration share the type words but
+// not the storage classes.
+fn (p Parser) starts_type_name(t tokenize.Token) bool {
+	return t.kind == .identifier && ((is_specifier_word(t.text) && t.text !in storage_classes)
+		|| p.is_type_name(t.text))
+}
+
 fn is_specifier_word(text string) bool {
 	return text in storage_classes || text in type_qualifiers || text in builtin_types
 		|| text in tag_keywords || text in typeof_words || text in typeof_unqual_words

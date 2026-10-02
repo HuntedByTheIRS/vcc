@@ -1883,8 +1883,35 @@ fn (mut e Emitter) emit_expression_statement(stmt ast.Stmt) !void {
 		e.emit_inc_dec(expr, 0)!
 		return
 	}
+	if expr.typ.is_void() {
+		// A void expression in a statement is evaluated for its side effects and
+		// its (nonexistent) value thrown away, which is what 6.8.3 says of an
+		// expression statement and 6.3.2.2 of a void expression.
+		e.emit_discard(expr, 0)!
+		return
+	}
 	e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an expression statement is emitted when it is a call, and this one is not a call')
 	return error('not a call')
+}
+
+// emit_discard evaluates a void expression for its side effects and throws the
+// value away. A conversion to void and a read through an address of void are
+// the two void expressions this tree has, and both throw what their operand is
+// worth, so the operand is evaluated and nothing is loaded from or converted
+// from it.
+fn (mut e Emitter) emit_discard(expr ast.Expr, depth int) !void {
+	match expr {
+		ast.Cast {
+			e.emit_expr_at(expr.expr, depth + 1)!
+		}
+		ast.Unary {
+			e.emit_expr_at(expr.expr, depth + 1)!
+		}
+		else {
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: a ${expr.typ.describe()} expression in a statement is not one this back end evaluates for its side effects')
+			return error('void expression shape')
+		}
+	}
 }
 
 // emit_if writes a condition and its two branches. The condition is evaluated

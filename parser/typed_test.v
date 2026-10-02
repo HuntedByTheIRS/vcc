@@ -252,14 +252,21 @@ fn test_a_read_through_an_address_is_typed_as_what_it_points_at() {
 	read := returned as ast.Unary
 	assert read.op == '*'
 	assert read.typ.describe() == 'char'
-	// An operand that is not an address has no value at it, and one that points
-	// at void has none either: both are refused by name.
+	// An operand that is not an address has no value at it, so it is refused by
+	// name. A pointer to void is the one pointer whose read is a void expression
+	// rather than a refusal: 6.3.2.2 says that expression has no value, and it
+	// is read with the void type where a value is thrown away.
 	refused := parsed('int main() { int x = 3; return *x; }')
 	assert refused.diagnostics.len == 1
 	assert refused.diagnostics[0].msg.contains('reads through an address')
-	voided := parsed('int main() { void *p = (void *)0; return *p; }')
-	assert voided.diagnostics.len == 1
-	assert voided.diagnostics[0].msg.contains('void')
+	discarded := checked('int main() { void *p = (void *)0; *(void *)p; return 0; }')
+	read_through_void := discarded.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	read_void := read_through_void as ast.Unary
+	assert read_void.op == '*'
+	assert read_void.typ.is_void()
 }
 
 fn test_a_cast_is_read_as_a_conversion_to_the_type_it_names() {
@@ -287,12 +294,47 @@ fn test_a_cast_is_read_as_a_conversion_to_the_type_it_names() {
 	assert second.spelling == 'int'
 	assert second.typ.describe() == 'int'
 	assert (second.expr as ast.Ident).name == 'p'
-	// A conversion to void is refused by name: a conversion is a value here, and
-	// this one has none to be.
-	refused := parsed('int main() { int x = 3; (void)x; return 0; }')
-	assert refused.diagnostics.len == 1
-	assert refused.diagnostics[0].msg.contains('void')
-	assert refused.diagnostics[0].line == 1
+	// A conversion to void is a void expression rather than a refusal: 6.5.4
+	// lets a cast name void, and the node carries the void type the way a value
+	// conversion carries its type.
+	discarded := checked('int main() { int x = 3; (void)x; return 0; }')
+	to_void := discarded.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	cast_to_void := to_void as ast.Cast
+	assert cast_to_void.spelling == 'void'
+	assert cast_to_void.typ.is_void()
+	assert (cast_to_void.expr as ast.Ident).name == 'x'
+}
+
+fn test_an_extension_marker_is_a_prefix_and_not_a_storage_class() {
+	// __extension__ opens a declaration specifier list, and it can prefix an
+	// expression too. A cast never opens with a storage class, so
+	// `(__extension__ 3)` is a parenthesized expression and not a conversion,
+	// and the marker in front of the literal is worth nothing.
+	result := checked('int main() { return (__extension__ 3); }')
+	returned := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (returned as ast.IntLit).value == 3
+}
+
+fn test_an_extension_marker_prefixes_a_statement() {
+	// __extension__ at the start of a statement can prefix an expression, not
+	// only a declaration, so `__extension__ *(void *)&x;` is a void expression
+	// statement and not a declaration that reads void as a name.
+	result := checked('int main() { int x = 3; __extension__ *(void *)&x; return 0; }')
+	body := result.unit.decls[0].body
+	assert body[1].kind == .expr_stmt
+	read_through := body[1].expr or {
+		assert false
+		return
+	}
+	read := read_through as ast.Unary
+	assert read.op == '*'
+	assert read.typ.is_void()
 }
 
 fn test_a_string_literal_is_an_array_of_char_with_room_for_the_terminator() {
