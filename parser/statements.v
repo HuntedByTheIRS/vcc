@@ -1169,13 +1169,21 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 					kind:   .assign
 					target: d.name
 					field:  ast.Field{
-						name:     d.name
-						member:   first.name
-						offset:   0
-						spelling: first.typ.describe()
-						typ:      first.typ
-						line:     d.name_at.line
-						col:      d.name_at.col
+						name:       d.name
+						member:     first.name
+						offset:     0
+						spelling:   first.typ.describe()
+						typ:        first.typ
+						bitfield:   first.bitfield
+						bit_offset: 0
+						bit_width:  first.bits
+						unit_width: if first.bitfield {
+							p.representation.size_of(first.typ) or { 0 }
+						} else {
+							0
+						}
+						line:       d.name_at.line
+						col:        d.name_at.col
 					}
 					expr:   initializer
 					line:   d.name_at.line

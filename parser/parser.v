@@ -827,6 +827,14 @@ fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path
 		offset:          into + layout.offsets[at]
 		spelling:        member.typ.describe()
 		typ:             member.typ
+		bitfield:        member.bitfield
+		bit_offset:      if member.bitfield { layout.bits[at] } else { 0 }
+		bit_width:       member.bits
+		unit_width:      if member.bitfield {
+			p.representation.size_of(member.typ) or { 0 }
+		} else {
+			0
+		}
 		through_pointer: through_pointer
 		line:            dot.line
 		col:             dot.col
