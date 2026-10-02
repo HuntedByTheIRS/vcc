@@ -53,6 +53,11 @@ pub:
 	// register file and four bytes rather than eight, so every read and write of
 	// it is a four-byte one.
 	single bool
+	// unsigned says the object's type is an unsigned integer one, which the
+	// width does not answer: a read of an unsigned char or an unsigned short
+	// takes zero above the value rather than its sign, and a read through an
+	// address cannot ask the slot it came from because there is none.
+	unsigned bool
 }
 
 // Program is what one translation unit became: machine code, the strings it

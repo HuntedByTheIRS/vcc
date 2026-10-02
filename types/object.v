@@ -268,14 +268,16 @@ pub:
 // `printf("%zu", sizeof(long))` on gcc 16.2.1, `long`, `unsigned long`,
 // `long long` and `unsigned long long` are each 8 bytes with an alignment of 8
 // on this target, and the emitter's 64-bit instructions move exactly those eight
-// bytes. The types that are still left out are the ones the back end has no
-// instruction for. Measured before the 64-bit kinds were carried: `int main(void)
+// bytes. Measured before the 64-bit kinds were carried: `int main(void)
 // { return 4294967295 > 2147483647; }` was read as an int comparison and returned
 // 0 where ISO C and gcc return 1, which is why a width the description does not
-// carry is refused by name rather than guessed at with the nearest one. A
-// character constant is an int (6.4.4.4), so no rule here asks for a char's
-// width; the character types are added to the description with the kinds that
-// need them.
+// carry is refused by name rather than guessed at with the nearest one.
+//
+// The character types and `_Bool` are carried, and they left this table only when
+// the back end could move a value of their width: a char and a `_Bool` live in one
+// byte, and the emitter loads and stores each of them at that width. Before that
+// they were missing for the same reason `long double` still is, that a width the
+// back end cannot move is a width the model must not hand out.
 //
 // A double is carried for the same reason the int is: the back end has the
 // instruction for it, so the model can answer a question about its width
@@ -298,21 +300,30 @@ pub fn from_target(target backend.Target) Description {
 	// The width every integer constant is written at, and the unsigned reading
 	// of the same four bytes: `4294967295U` is an unsigned int whose value the
 	// back end holds at that width.
-	// A char is one byte, which the back end already has a form for: a char lives
-	// in one byte of its slot and is an int when it is read. The width is asked
-	// for by the layout of an aggregate with a char member, where a member's
-	// width is what decides the offset of the member after it. Measured on this
-	// target with gcc 16.2.1, `sizeof(char)` is 1 with an alignment of 1.
+	//
+	// The character types and `_Bool` are one byte, which the back end moves now:
+	// it loads and stores a one-byte value with the instructions a char needs,
+	// and a read of one widens it to the int the promotion makes it. The width is
+	// asked for by the layout of an aggregate with a member of one of those
+	// types, where a member's width decides the offset of the member after it.
+	// Measured on this target with gcc 16.2.1: `sizeof(_Bool)`, `sizeof(char)`,
+	// `sizeof(signed char)` and `sizeof(unsigned char)` are each 1 with an
+	// alignment of 1.
+	sizes[Kind.bool_] = 1
+	aligns[Kind.bool_] = 1
 	sizes[Kind.char_] = 1
 	aligns[Kind.char_] = 1
-	// The two-byte integers. Measured on this target with gcc 16.2.1, `short`
-	// and `unsigned short` are each 2 bytes with an alignment of 2. The back end
-	// has no instruction that writes a value of that width, so a declaration of
-	// one is still refused by its spelling in the reader; what is carried here
-	// is the width a layout needs, because a union with a `short` member cannot
-	// be sized without it and `sizeof` of that union is a question the model
-	// answers. The promotion of `unsigned short` is the other question that
-	// needs it, and the model answers that too.
+	// The character types whose spelling carries the sign, and the two-byte
+	// integers. Measured on this target with gcc 16.2.1: `signed char` and
+	// `unsigned char` are each 1 byte with an alignment of 1, and `short` and
+	// `unsigned short` are each 2 bytes with an alignment of 2. The machine moves
+	// a value of either width and a read of one widens it to the int the promotion
+	// makes it, so these widths are what the layout of an aggregate with such a
+	// member and the promotion of an `unsigned short` are asked for from here.
+	sizes[Kind.signed_char] = 1
+	aligns[Kind.signed_char] = 1
+	sizes[Kind.unsigned_char] = 1
+	aligns[Kind.unsigned_char] = 1
 	sizes[Kind.short] = 2
 	aligns[Kind.short] = 2
 	sizes[Kind.unsigned_short] = 2
