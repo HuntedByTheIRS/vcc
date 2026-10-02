@@ -4686,7 +4686,7 @@ fn (mut e Emitter) emit_wide_division(step ast.Binary, left Slot, right Slot, de
 	e.append(e.target.or_word(low, other)!)
 	divisor_is_not_zero := e.label()
 	e.branch(.branch_nonzero, divisor_is_not_zero, step.line, step.col)!
-	e.wide_load_word(right, 0, other, step.line, step.col)
+	e.wide_load_word(right, 0, other, step.line, step.col)!
 	e.append(e.target.move_immediate32(low, 0)!)
 	e.append(e.target.move_immediate32(high, 0)!)
 	e.append(e.target.divide_pair(other)!)
