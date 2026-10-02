@@ -1577,6 +1577,21 @@ fn test_an_element_of_a_size_the_machine_does_not_scale_is_a_multiply_and_an_add
 	assert whole.diagnostics[0].msg.contains('elements of 16 bytes')
 }
 
+// A constant stored into an element is written at the element's width, which is
+// what a store into a local already does: the value is widened into a wider
+// element and narrowed into a narrower one the way the member path does, so an
+// element of an unsigned long holds -5 as its unsigned reading and an element of
+// an unsigned int takes the low four bytes of a wider constant. The element is
+// reached the same way through a pointer, through a two-dimensional subscript
+// and as a member of an array of structs. Measured on gcc 16.2.1, which answers
+// the program below with 6.
+fn test_a_constant_stored_into_an_element_converts_to_the_elements_width() {
+	emitted := emit(translation_unit('unsigned long g[4];\nint main(void) { unsigned long a[4]; a[1] = -5; unsigned long expect = 18446744073709551611UL; unsigned long buf[4]; unsigned long *p = buf; p[1] = -5; unsigned long row[4]; unsigned long *p2[2]; p2[0] = row; p2[0][1] = -5; unsigned int b[4]; b[1] = 0xFFFFFFFFFFFFFFFBUL; struct S { unsigned long y; } s[4]; s[1].y = -5; g[1] = -5; return (a[1] == expect) + (buf[1] == expect) + (row[1] == expect) + (b[1] == 0xFFFFFFFBu) + (s[1].y == expect) + (g[1] == expect); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 6
+}
+
 // A floating target is the one conversion out of a 128-bit object that this back
 // end does not make: the double of that value is a rounding of the whole of it and
 // not the low word, so it is refused rather than answered with the low word as
