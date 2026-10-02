@@ -826,7 +826,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 				e.diagnostics << problem(param.line, param.col, 'unsupported: the parameter ${param.name} is declared ${param.typ}, and the pair it is passed in takes two argument registers at once, which this machine has not got at position ${integers}: the convention passes such a pair in memory, which this back end does not do')
 				return error('128-bit parameter in memory')
 			}
-			object := e.declare(param.name, param.typ, 0, 0, param.line, param.col)!
+			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col)!
 			base := e.frame_pointer(param.line, param.col)!
 			word := e.target.word_size
 			e.append(e.target.store_slot(base, object.offset, registers[0], word)!)
@@ -839,7 +839,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// that many bytes: the value is copied into the slot rather than
 		// converted into it.
 		if class.bytes > 0 {
-			object := e.declare(param.name, param.typ, 0, class.bytes, param.line, param.col)!
+			object := e.declare(param.name, param.typ, 0, class.bytes, 0, param.line, param.col)!
 			stacked_at := 2 * e.target.word_size + stacked * e.target.word_size
 			if class.count > 2 {
 				// An object of more than two eightbytes is passed in memory: the
@@ -898,7 +898,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// A parameter is one value in a register or one on the stack, and an
 		// object of an aggregate type passed by value is neither: its spelling
 		// reaches `type_width` and is refused there by name.
-		slot := e.declare(param.name, param.typ, 0, 0, param.line, param.col)!
+		slot := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col)!
 		// The arguments a sequence ran out for arrive on the stack, and where
 		// they are is the caller's side of the same rule: the first one the
 		// caller pushed is at the return address, so sixteen bytes past the
@@ -1264,7 +1264,8 @@ fn (e Emitter) returns_eight_byte_integer() bool {
 // storage and nothing else, which is what C says it is: the slot is there for
 // whatever the function writes into it next.
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
-	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.line, stmt.col)!
+	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.decl_stride,
+		stmt.line, stmt.col)!
 	// What makes an object an argument list is the type it was declared with,
 	// because that is what says how the four operations over a list may treat it.
 	if abi.is_argument_list(stmt.resolved) {
@@ -1990,8 +1991,14 @@ fn (mut e Emitter) assign_member_bits(stmt ast.Stmt, member ast.Field, expr ast.
 // writes it as the two words an object of the type holds, which is what the declaration
 // and the assignment already do, so the address is computed here and the sixteen-byte
 // instruction is never asked for.
-fn (mut e Emitter) element_address(base backend.Register, index backend.Register, stride int, offset int, wide bool, name string, line int, col int) !void {
-	if stride == wide_bytes && !wide {
+//
+// address_only is set when the caller wants the element's address and not a value in
+// it, which is what an element that is itself an array is: the row of a two- or
+// three-dimensional object. Such a row is addressed like any other stride - a multiply
+// and an add - and the sixteen-byte refusal does not apply, because no sixteen-byte
+// load or store follows.
+fn (mut e Emitter) element_address(base backend.Register, index backend.Register, stride int, offset int, wide bool, address_only bool, name string, line int, col int) !void {
+	if stride == wide_bytes && !wide && !address_only {
 		e.diagnostics << problem(line, col, 'unsupported: ${name} holds elements of ${stride} bytes, and this back end moves one, four or eight bytes in one instruction, so an element of that size is not a value it reads or writes')
 		return error('unsupported element size')
 	}
@@ -2027,7 +2034,8 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			base := e.scratch(stmt.line, stmt.col)!
 			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, e.target.name_of(base))
 			is_wide := !object.object && object.width == wide_bytes
-			e.element_address(base, register, object.width, 0, is_wide, stmt.target, stmt.line,
+			e.element_address(base, register, object.width, 0, is_wide, false, stmt.target,
+				stmt.line,
 				stmt.col)!
 			address := e.value_slot(depth)
 			e.store_accumulator(address, stmt.line, stmt.col)!
@@ -2110,7 +2118,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	e.emit_expr_at(subscript, depth)!
 	base := e.frame_pointer(stmt.line, stmt.col)!
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.element_address(base, register, slot.width, slot.offset, slot.wide, stmt.target,
+	e.element_address(base, register, slot.width, slot.offset, slot.wide, false, stmt.target,
 		stmt.line, stmt.col)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
@@ -2754,7 +2762,7 @@ fn (mut e Emitter) report_undefined_labels() {
 // element after another, and what the name is worth in an expression is the
 // address of the first of them. The block is rounded up to the machine's word
 // like every other slot, so no element straddles the end of it.
-fn (mut e Emitter) declare(name string, written string, count int, bytes int, line int, col int) !Slot {
+fn (mut e Emitter) declare(name string, written string, count int, bytes int, stride int, line int, col int) !Slot {
 	if e.scopes.len > 0 {
 		if name in e.scopes[e.scopes.len - 1] {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared twice in the same block')
@@ -2768,7 +2776,13 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, li
 	// An object of an aggregate type is sized by the layout the reader worked
 	// out rather than by its spelling: `struct S` is a name the back end has no
 	// width for, and the members are what say how many bytes the object is.
-	width := if bytes > 0 {
+	// stride is the size of one element of an array declaration, which for an
+	// array of arrays is the whole row and larger than the scalar spelling: it
+	// is what an index scales by and what the count reserves together. It is
+	// zero for a declaration that is not an array.
+	width := if stride > 0 {
+		stride
+	} else if bytes > 0 {
 		bytes
 	} else if wide {
 		wide_bytes
@@ -4133,8 +4147,17 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 		e.emit_expr_at(expr.index, depth + 1)!
 		base := e.frame_pointer(expr.line, expr.col)!
 		register := e.accumulator(expr.line, expr.col)!
-		e.element_address(base, register, slot.width, slot.offset, slot.wide, name, expr.line,
-			expr.col)!
+		e.element_address(base, register, slot.width, slot.offset, slot.wide,
+			expr.typ.is_array(), name, expr.line, expr.col)!
+		if expr.typ.is_array() {
+			// The element is itself an array, so reading it is not a load: its
+			// value is the address of its first element, which is what
+			// element_address left in the accumulator. Loading the bytes of the
+			// whole row would answer with the first element's value as though
+			// the row were a scalar, and stepping an index by that value is a
+			// wrong address.
+			return
+		}
 		if slot.wide {
 			e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 			return error('128-bit element')
@@ -4169,7 +4192,13 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 	base := e.scratch(expr.line, expr.col)!
 	e.reference(e.target.address_of(base, 0), .global_address, name, e.target.name_of(base))
 	wide := !object.object && object.width == wide_bytes
-	e.element_address(base, register, object.width, 0, wide, name, expr.line, expr.col)!
+	e.element_address(base, register, object.width, 0, wide, expr.typ.is_array(), name, expr.line,
+		expr.col)!
+	if expr.typ.is_array() {
+		// The element is an array, so its value is the address of its first
+		// element, which is what element_address left in the accumulator.
+		return
+	}
 	if wide {
 		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 		return error('128-bit element')
@@ -4232,7 +4261,7 @@ fn (mut e Emitter) emit_element_address(expr ast.Index, depth int) !void {
 		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${expr.typ.describe()} has no size this back end can scale an index by')
 		return error('no element size')
 	}
-	e.element_address(other, index, stride, 0, stride == wide_bytes, 'the element', expr.line, expr.col)!
+	e.element_address(other, index, stride, 0, stride == wide_bytes, expr.typ.is_array(), 'the element', expr.line, expr.col)!
 }
 
 // emit_base_address leaves in the accumulator the address a subscript scales from.
@@ -8003,7 +8032,20 @@ fn (e Emitter) global_shape(name string) ?image.GlobalSlot {
 					count:  global.count
 				}
 			}
-			element := e.type_width(global.typ) or { return none }
+			// The width of one element is the size of the element's own type, which
+			// for an array of arrays is the row and not the scalar at the bottom:
+			// `int a[2][3]` steps by twelve bytes per row, and reading the written
+			// spelling `int` would give four and overlap the rows. A scalar element
+			// resolves to the same answer the spelling does.
+			element := if global.count > 0 {
+				if elem := global.resolved.element() {
+					e.representation.size_of(elem) or { e.type_width(global.typ) or { return none } }
+				} else {
+					e.type_width(global.typ) or { return none }
+				}
+			} else {
+				e.type_width(global.typ) or { return none }
+			}
 			return image.GlobalSlot{
 				offset:   0
 				width:    element

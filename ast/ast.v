@@ -236,7 +236,13 @@ pub:
 	decl_name  string
 	decl_type  string
 	decl_count int
-	resolved   types.Type
+	// decl_stride is the size of one element of an array declaration: what an
+	// index scales by and what the frame reserves a count of. For an array of
+	// arrays it is the whole row, which is the size of the element's own type
+	// and not the scalar at the bottom. It is zero for a declaration that is
+	// not an array, where the back end sizes the value from its spelling.
+	decl_stride int
+	resolved    types.Type
 	// bytes is how many bytes of storage the object is when its type is an
 	// aggregate, and zero for an object the back end sizes from its spelling.
 	// A struct is not the address of anything and has no spelling the back end

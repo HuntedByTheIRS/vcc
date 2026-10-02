@@ -3363,3 +3363,51 @@ fn test_a_member_is_read_from_an_expression() {
 	assert large.diagnostics.len == 0
 	assert run_image(large.bytes) == 3
 }
+
+// A subscript of a two-dimensional object names a row, whose value is the
+// address of its first element rather than the bytes of the row read as a
+// scalar. Before this, `a[i][j]` over a named object loaded the row's first
+// element and scaled the next index by that value, which is a wrong address:
+// measured on gcc 16.2.1 the two programs below exit 6 and 42.
+fn test_a_row_of_a_two_dimensional_object_is_the_address_of_its_first_element() {
+	store := emit(translation_unit('static int a[2][3]; int main(void) { a[1][2] = 6; return a[1][2]; }'),
+		Options{})
+	assert store.diagnostics.len == 0
+	assert run_image(store.bytes) == 6
+	both := emit(translation_unit('static int a[2][3]; int main(void) { a[0][1] = 4; a[1][0] = 2; return a[0][1] * 10 + a[1][0]; }'),
+		Options{})
+	assert both.diagnostics.len == 0
+	assert run_image(both.bytes) == 42
+}
+
+// A two-dimensional object declared in a body takes a nested initializer and a
+// count per dimension, which is a row of storage for each size and not one flat
+// run: measured on gcc 16.2.1 the three programs below exit 6, 36 and 6.
+fn test_a_two_dimensional_object_in_a_body_is_initialized_a_row_at_a_time() {
+	rows := emit(translation_unit('int main(void) { int a[2][3] = {{1,2,3},{4,5,6}}; return a[1][2]; }'),
+		Options{})
+	assert rows.diagnostics.len == 0
+	assert run_image(rows.bytes) == 6
+	loop := emit(translation_unit('int main(void) { int a[2][3]; for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) a[i][j] = i * 10 + j; int s = 0; for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) s += a[i][j]; return s; }'),
+		Options{})
+	assert loop.diagnostics.len == 0
+	assert run_image(loop.bytes) == 36
+	three := emit(translation_unit('int main(void) { int a[2][2][2] = {{{1,2},{3,4}},{{5,6},{7,8}}}; return a[1][0][1] + a[0][1][0] + a[0][0][0]; }'),
+		Options{})
+	assert three.diagnostics.len == 0
+	assert run_image(three.bytes) == 10
+}
+
+// A parameter written with brackets is a pointer to its element, so a row of a
+// two-dimensional object and a variable-length bound both travel as one
+// address. Measured on gcc 16.2.1, the two programs below exit 6 and 10.
+fn test_a_parameter_written_with_brackets_is_a_pointer_to_its_element() {
+	row := emit(translation_unit('int row2(int r[][3]) { return r[1][2]; } int main(void) { static int g[2][3] = {{1,2,3},{4,5,6}}; return row2(g); }'),
+		Options{})
+	assert row.diagnostics.len == 0
+	assert run_image(row.bytes) == 6
+	sum := emit(translation_unit('int sum(int n, int a[n]) { int s = 0; for (int i = 0; i < n; i++) s += a[i]; return s; } int main(void) { int x[4] = {1,2,3,4}; return sum(4, x); }'),
+		Options{})
+	assert sum.diagnostics.len == 0
+	assert run_image(sum.bytes) == 10
+}

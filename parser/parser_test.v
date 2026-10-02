@@ -1596,10 +1596,12 @@ fn test_an_array_declaration_without_a_size_is_reported() {
 	assert result.diagnostics[0].msg.contains('needs a size')
 }
 
-fn test_two_sizes_of_an_array_are_reported() {
+// Two sizes on one declarator are a two-dimensional object rather than a
+// refusal: `int a[2][3]` is two rows of three ints, an array whose element is an
+// array. Measured on gcc 16.2.1, gcc sizes it at 24 with `sizeof a[0]` at 12.
+fn test_two_sizes_of_an_array_declare_a_two_dimensional_object() {
 	result := parsed('int main() { int a[2][3]; return 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('only one size')
+	assert result.diagnostics.len == 0
 }
 
 // A name the tree carries that nothing in the file declares is refused once the
