@@ -6111,8 +6111,15 @@ fn (mut e Emitter) divide_operands(other backend.Register, wide bool, unsigned b
 // right side is evaluated at all, which is what the language promises and what
 // the machine gets for free: a jump skips over the side that is not needed, and
 // the answer as a value of int width is written on both ways out.
+//
+// The operands are scalars. 6.5.13 and 6.5.14 give both operators an operand of
+// scalar type, which is an arithmetic type or a pointer, and each side is asked
+// whether it is zero by emit_test. A pointer's question is its comparison with
+// the null pointer, which is the word-wide test emit_test writes, so a pointer
+// is an operand here rather than an int that did not arrive: gcc 16.2.1 compiles
+// `p && "message"` and `q || "message"` for both a null and a non-null pointer,
+// and the int-operand check this call used to make refused all of them.
 fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
-	e.check_int_operands(binary)!
 	result := e.accumulator(binary.line, binary.col)!
 	settles := e.label()
 	end := e.label()

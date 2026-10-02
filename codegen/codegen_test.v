@@ -1369,6 +1369,30 @@ fn test_and_and_or_do_not_evaluate_the_side_they_do_not_need() {
 	assert run_image(emitted.bytes) == 1
 }
 
+// A pointer is an operand of && and ||: 6.5.13 and 6.5.14 give both operators
+// operands of scalar type, and a pointer's truth value is its comparison with the
+// null pointer. The string literal beside it is a pointer too. Measured with gcc
+// 16.2.1 the program exits 0, and this compiler refused every pointer operand of
+// both operators before.
+fn test_a_pointer_is_an_operand_of_and_and_or() {
+	emitted := emit(translation_unit('int main() { int x = 5; int *p = &x; int *q = 0; return (p && "live") && (q || "live") && !(q && "dead") ? 0 : 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// A pointer on the left of && or || settles the answer the same way an int does,
+// so the right side runs only when the pointer did not decide it. The counter
+// below is 2 under gcc 16.2.1: bump runs after the non-null left of && and after
+// the null left of ||, and the other two calls are skipped. An operator that
+// evaluated both sides would count 4 and this program would exit 14.
+fn test_a_pointer_short_circuit_skips_the_side_it_can_settle() {
+	emitted := emit(translation_unit('int calls = 0; int bump(void) { calls = calls + 1; return 1; } int main() { int x; int *p = &x; int *q = 0; int a = (p && bump()); int b = (q && bump()); int c = (p || bump()); int d = (q || bump()); if (calls != 2) { return 10 + calls; } return (a && !b && c && d) ? 0 : 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 // A tree with a frame produces the same bytes every time it is emitted, which is
 // what the layout being a sequence is for.
 fn test_a_tree_with_a_frame_produces_the_same_bytes() {
