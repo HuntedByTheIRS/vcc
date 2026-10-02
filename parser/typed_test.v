@@ -320,9 +320,53 @@ fn test_an_element_of_an_array_carries_the_element_type() {
 		return
 	}
 	element := returned as ast.Index
-	assert element.name == 'name'
+	base := element.base as ast.Ident
+	assert base.name == 'name'
 	assert element.typ.same(types.char_type())
 	assert (element.index as ast.IntLit).typ.same(types.int_type())
+}
+
+// 6.5.2.1 makes `E1[E2]` mean `*((E1) + (E2))` and addition commutes, so `3[p]`
+// is the element `p[3]` names: the base of the node is the operand whose type is
+// the pointer, whichever order the two were written in, and the index is the
+// other one. Measured on gcc 16.2.1, a program that returns `3[p]` for an `int *p`
+// returns the same element `p[3]` does.
+fn test_a_subscript_of_an_integer_is_the_element_the_pointer_names() {
+	element := subscript_of('int main() { int a[4]; int *p = a; return 3[p]; }')
+	base := element.base as ast.Ident
+	assert base.name == 'p'
+	assert (element.index as ast.IntLit).value == 3
+	assert element.typ.same(types.int_type())
+}
+
+// The element of a pointer has the type the pointer points at, which is what the
+// general base is typed from: `p[1]` for an `int *p` is an int.
+fn test_an_element_of_a_pointer_carries_the_pointed_at_type() {
+	element := subscript_of('int main() { int a[4]; int *p = a; return p[1]; }')
+	base := element.base as ast.Ident
+	assert base.name == 'p'
+	assert (element.index as ast.IntLit).value == 1
+	assert element.typ.same(types.int_type())
+}
+
+// A subscript whose two operands are each neither an array nor a pointer is not
+// an element of anything, and it is refused where the subscript was written by
+// name rather than read as an address.
+fn test_a_subscript_of_two_integers_is_refused_by_name() {
+	result := parsed('int main() { return 3[4]; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('is not an element of one')
+}
+
+// subscript_of reads one program and returns the element of its return statement.
+fn subscript_of(source string) ast.Index {
+	result := checked(source)
+	returned := result.unit.decls[0].body[2].expr or {
+		assert false
+		return ast.Index{}
+	}
+	assert returned is ast.Index
+	return returned as ast.Index
 }
 
 fn test_the_arguments_of_a_call_are_read_against_its_declaration() {

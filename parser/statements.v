@@ -122,6 +122,16 @@ fn (mut p Parser) parse_expression_statement() !ast.Stmt {
 	}
 	t := p.peek()
 	expr := p.parse_expression()!
+	// A statement that parsed as an expression and is followed by the operator
+	// that writes is a write to an element whose base is not a name, which is
+	// what `3[p] = 9` is, or to one whose base is a member, which is what
+	// `s.a[1] = 7` is. The target fields of a statement name an object, so the
+	// element node itself is carried instead. This is read before the
+	// dereference below, because an element is one of the shapes that reader
+	// refuses.
+	if p.peek().kind == .punct && p.peek().text in assignment_operators && expr is ast.Index {
+		return p.parse_subscript_assignment(expr as ast.Index)!
+	}
 	// An assignment whose target is not a name. The expression reader reads
 	// `*p` as the value at an address and stops at the operator, because an
 	// assignment is not one of the binary operators; the operator that follows
@@ -305,6 +315,37 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 	op := p.next() // = or a compound spelling
 	if op.text == '=' {
 		expr := p.parse_expression()!
+		// An element of a pointer is the same subscript an element of an array
+		// is, but the object it is addressed from is a value rather than a place
+		// in the frame, so the target is carried as the element node with the
+		// name as its base. An element of an array keeps the name-and-index
+		// shape it has always had.
+		if subscript := index {
+			declared := p.resolve(t.text)
+			if declared.is_pointer() {
+				element := declared.pointee() or { types.Type{} }
+				base := ast.Expr(ast.Ident{
+					name: t.text
+					typ:  declared
+					line: t.line
+					col:  t.col
+				})
+				p.check_assignment(element, expr, op)
+				return ast.Stmt{
+					kind:      .assign
+					subscript: ast.Expr(ast.Index{
+						base:  base
+						index: subscript
+						typ:   element
+						line:  t.line
+						col:   t.col
+					})
+					expr:      expr
+					line:      t.line
+					col:       t.col
+				}
+			}
+		}
 		p.check_assignment(p.assignment_target_type(t.text, index, field), expr, op)
 		return ast.Stmt{
 			kind:   .assign
@@ -321,6 +362,28 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 		return error('compound assignment to a member')
 	}
 	return p.parse_compound_assignment(t, op, index)
+}
+
+// parse_subscript_assignment reads `E1[E2] = value` where the target's base is
+// not a name the assignment reader can address, which is what `3[p] = 9` is. The
+// element node is carried whole so the back end can compute the address the value
+// is stored through. A compound spelling is refused by name: `E1[E2] += v` reads
+// the element twice and this tree has no shape for that target yet.
+fn (mut p Parser) parse_subscript_assignment(index ast.Index) !ast.Stmt {
+	op := p.next()
+	if op.text != '=' {
+		p.error_at(op, 'unsupported: the compound assignment ${op.text} to an element is not implemented')
+		return error('compound assignment to an element')
+	}
+	value := p.parse_expression()!
+	p.check_assignment(index.typ, value, op)
+	return ast.Stmt{
+		kind:      .assign
+		subscript: ast.Expr(index)
+		expr:      value
+		line:      index.line
+		col:       index.col
+	}
 }
 
 // assignment_target_type is the type an assignment writes through: the type the
@@ -423,7 +486,7 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 	})
 	if subscript := index {
 		left = ast.Expr(ast.Index{
-			name:  target.text
+			base:  ast.Expr(left)
 			index: subscript
 			typ:   target_type
 			line:  target.line

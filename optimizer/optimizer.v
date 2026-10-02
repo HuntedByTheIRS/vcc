@@ -393,10 +393,11 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			return expr
 		}
 		ast.Index {
-			// An element is a place a value is read from, and the expression
-			// that says which element is rewritten like any other.
+			// An element is a place a value is read from, and both the base
+			// and the expression that says which element are rewritten like
+			// any other.
 			return ast.Expr(ast.Index{
-				name:  expr.name
+				base:  rewrite(expr.base, opts, depth + 1)
 				index: rewrite(expr.index, opts, depth + 1)
 				line:  expr.line
 				col:   expr.col

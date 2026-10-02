@@ -1263,7 +1263,8 @@ fn test_an_element_of_an_array_is_read_and_written() {
 	binary := init as ast.Binary
 	assert binary.left is ast.Index
 	element := binary.left as ast.Index
-	assert element.name == 'a'
+	base := element.base as ast.Ident
+	assert base.name == 'a'
 	assert (element.index as ast.IntLit).value == 2
 }
 

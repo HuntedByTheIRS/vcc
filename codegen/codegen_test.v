@@ -1760,7 +1760,7 @@ fn test_an_element_with_a_variable_index_is_the_element_it_reads() {
 		ast.Stmt{
 			kind: .return_stmt
 			expr: binary_node('-', ast.Expr(ast.Index{
-				name:  'a'
+				base:  name_node('a')
 				index: int_argument(2)
 			}), int_argument(30))
 		},

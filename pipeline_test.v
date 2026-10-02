@@ -203,6 +203,110 @@ fn test_sizeof_of_an_array_is_the_whole_array() {
 	os.rm(binary) or {}
 }
 
+// 6.5.2.1 defines `E1[E2]` as `*((E1) + (E2))`, and addition commutes, so the base
+// of a subscript is an expression and not a name: `3[p]` names the same element
+// `p[3]` does, and an element of an integer array can be named from either side.
+// Measured on gcc 16.2.1, the program below returns 12: 4 and 4 and 2 and 2.
+fn test_a_subscript_accepts_an_expression_on_its_left() {
+	source := scratch('subscript_any.c')
+	binary := scratch('subscript_any')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[4] = {1,2,3,4}; int *p = a; return p[3] + 3[p] + *(p+1) + 1[a]; }\n')
+	assert exit_status == 12
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// `p[3]`, `3[p]` and `*(p + 3)` are one lvalue, so a value written through any of
+// them is read back through the others. A reader that read an element but did not
+// compute the same address to store through would pass a value test and fail this
+// one. Measured on gcc 16.2.1, the program returns 9.
+fn test_an_element_written_through_any_base_stores_at_the_same_place() {
+	source := scratch('subscript_store.c')
+	binary := scratch('subscript_store')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[4] = {0}; int *p = a; 3[p] = 9; return p[3]; }\n')
+	assert exit_status == 9
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The base of a subscript is any expression whose value is an address, and an
+// element that is itself an array is the address of its first element, so an
+// element named by another element is reached: `rows[0][2]` is the third int of
+// the array `rows[0]` holds. Measured on gcc 16.2.1, the program returns 9: 3 and
+// 6.
+fn test_an_element_of_an_element_is_read() {
+	source := scratch('subscript_nested.c')
+	binary := scratch('subscript_nested')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[4]; int b[4]; int *rows[2]; a[2] = 3; b[1] = 6; rows[0] = a; rows[1] = b; return rows[0][2] + rows[1][1]; }\n')
+	assert exit_status == 9
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A pointer value and a parenthesised name are bases too: `(*pp)[2]` reads through
+// the pointer `pp` names, and `(a)[1]` is the element `a[1]` is. Measured on gcc
+// 16.2.1, the program returns 9.
+fn test_a_subscript_of_a_dereferenced_pointer_and_of_a_parenthesised_name() {
+	source := scratch('subscript_paths.c')
+	binary := scratch('subscript_paths')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { int g[3]; int *p; int **pp; g[2] = 9; p = g; pp = &p; return (*pp)[2]; }\n')
+	assert exit_status == 9
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The base of a subscript being an expression does not turn an array into a
+// pointer: `sizeof(a)` is still the whole array and `sizeof(a[0])` the element.
+// Measured on gcc 16.2.1, the program returns 44: 40 and 4.
+fn test_sizeof_of_an_array_and_of_an_element_are_unchanged() {
+	source := scratch('subscript_sizeof.c')
+	binary := scratch('subscript_sizeof')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[10]; return sizeof(a) + sizeof(a[0]); }\n')
+	assert exit_status == 44
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// `E1[E2]` is `*((E1) + (E2))`, so an address plus an index, an index plus an
+// address and an address minus an index are the address of the element the index
+// counts to, scaled by the size of one element. Measured on gcc 16.2.1, the
+// program below returns 38: 14 and 13 and 11.
+fn test_an_address_moved_by_an_index_is_an_address() {
+	source := scratch('address_arithmetic.c')
+	binary := scratch('address_arithmetic')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[5]; a[0] = 10; a[1] = 11; a[2] = 12; a[3] = 13; a[4] = 14; int *p = a + 4; return *p + *(p - 1) + *(1 + a); }\n')
+	assert exit_status == 38
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A member that is an array is addressable storage of its own, so the base of a
+// subscript can be a member path: `s.a[1]` is the second int of the array the
+// member holds. Measured on gcc 16.2.1, the program returns 7 and the one after
+// it returns 9.
+fn test_a_member_that_is_an_array_is_subscripted() {
+	source := scratch('member_array.c')
+	binary := scratch('member_array')
+	exit_status := compile_and_run([source, '-o', binary],
+		'struct S { int a[3]; };\nint main(void) { struct S s; s.a[1] = 7; return s.a[1]; }\n')
+	assert exit_status == 7
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	second := scratch('member_array_2.c')
+	second_binary := scratch('member_array_2')
+	second_status := compile_and_run([second, '-o', second_binary],
+		'struct T { int b; int c[4]; };\nint main(void) { struct T t; t.b = 0; t.c[2] = 9; return t.c[2] + t.b; }\n')
+	assert second_status == 9
+	os.rm(second) or {}
+	os.rm(second_binary) or {}
+}
+
 // typeof is read by the parser and answered by the emitter as the type behind
 // it: a program that declares an object through typeof compiles and runs, and
 // the exit status is what the types decided. Measured on gcc 16.2.1, the same
