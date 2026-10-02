@@ -484,6 +484,22 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 				col:       expr.col
 			})
 		}
+		ast.StmtExpr {
+			// The statements run in order and the value is the last
+			// expression statement's, so both halves are rewritten: a builtin
+			// call can sit in either. The clause travels with the node.
+			mut value := ?ast.Expr(none)
+			if present := expr.value {
+				value = rewrite(present, opts, depth + 1)
+			}
+			return ast.Expr(ast.StmtExpr{
+				body:  rewrite_body(expr.body, opts)
+				value: value
+				typ:   expr.typ
+				line:  expr.line
+				col:   expr.col
+			})
+		}
 	}
 }
 

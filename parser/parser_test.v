@@ -694,6 +694,95 @@ fn test_a_comma_expression_is_left_associative_and_worth_its_right_operand() {
 	assert (outer.right as ast.Assign).op == '='
 }
 
+// A GNU statement expression is `({ ... })`: a brace-enclosed compound statement
+// in parentheses, read as a primary expression. Its value is the value of its
+// last statement when that statement is an expression, and the statements before
+// it are the body. gcc refuses a construct whose last statement is not an
+// expression wherever a value is required and accepts it where the value is
+// thrown away, so the reader keeps the two apart rather than guessing at the
+// point of use.
+fn test_a_statement_expression_keeps_its_body_and_its_value_apart() {
+	result := parsed('int main() { int x = ({ int a = 4; a * 2; }); return x; }')
+	assert result.diagnostics.len == 0
+	init := result.unit.decls[0].body[0].init or {
+		assert false
+		return
+	}
+	construct := init as ast.StmtExpr
+	assert construct.body.len == 1
+	assert construct.body[0].kind == .var_decl
+	value := construct.value or {
+		assert false
+		return
+	}
+	assert (value as ast.Binary).op == '*'
+	assert construct.typ.kind == .int_
+}
+
+// An assignment is an expression in C (6.5.16) even though this tree keeps a
+// bare assignment as a statement of its own, so a body whose last statement is
+// an assignment is worth the assignment's value: measured on gcc 16.2.1,
+// `({ a = 5; })` is 5. The reader puts the assignment back together as the
+// expression it is, and the statement stays out of the body so the store happens
+// once.
+fn test_a_statement_expression_ending_in_an_assignment_is_worth_its_value() {
+	result := parsed('int main() { int a = 0; int x = ({ a = 5; }); return x; }')
+	assert result.diagnostics.len == 0
+	init := result.unit.decls[0].body[1].init or {
+		assert false
+		return
+	}
+	construct := init as ast.StmtExpr
+	assert construct.body.len == 0
+	value := construct.value or {
+		assert false
+		return
+	}
+	assign := value as ast.Assign
+	assert assign.op == '='
+	assert (assign.target as ast.Ident).name == 'a'
+	assert (assign.value as ast.IntLit).value == 5
+	assert construct.typ.kind == .int_
+}
+
+// A body whose last statement is not an expression - a declaration, a loop, an
+// if, a block - leaves the construct with no value and the void type. The
+// statements before the last one are still the body and still run.
+fn test_a_statement_expression_whose_last_statement_is_not_an_expression_is_void() {
+	result := parsed('int main() { int x = 0; ({ x = 3; if (x) { x = 4; } }); return x; }')
+	assert result.diagnostics.len == 0
+	raw := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	construct := raw as ast.StmtExpr
+	assert construct.value == none
+	assert construct.typ.kind == .void_
+	assert construct.body.len == 2
+	assert construct.body[0].kind == .assign
+	assert construct.body[1].kind == .if_stmt
+}
+
+// 6.4.2.2 makes `__func__` a static array of char holding the name of the
+// enclosing function, and gcc's `__FUNCTION__` and `__PRETTY_FUNCTION__` are the
+// same name. glibc's assert hands `__PRETTY_FUNCTION__` to __assert_fail under a
+// GNU dialect, so the reader reads the three spellings as the string literal
+// they name.
+fn test_the_function_name_spellings_read_the_enclosing_function_name() {
+	for spelling in ['__func__', '__FUNCTION__', '__PRETTY_FUNCTION__'] {
+		result := parsed('int main() { return ${spelling}[0]; }')
+		assert result.diagnostics.len == 0
+		expr := result.unit.decls[0].body[0].expr or {
+			assert false
+			return
+		}
+		index := expr as ast.Index
+		name := index.base as ast.StrLit
+		assert name.value == 'main'
+		assert name.typ.kind == .array
+	}
+}
+
 // 6.5.16 gives the assignment the value of its left operand after the store, and
 // the operator is right associative, so `(a = b = 3)` writes 3 into b and then b
 // into a and is worth 3. The tree nests the second assignment inside the first.

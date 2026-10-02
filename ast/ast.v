@@ -269,6 +269,31 @@ pub type Expr = Binary
 	| Conditional
 	| Assign
 	| Comma
+	| StmtExpr
+
+// StmtExpr is a GNU statement expression, `({ ... })`: a brace-enclosed
+// compound statement written where a value is wanted, whose value is the value
+// of its last statement when that statement is an expression statement. The
+// construct is gcc's and glibc's own headers write it, so it is read here for
+// the same reason `__extension__` is: the C this compiler has to compile uses
+// it, and gcc's own `assert` expands to one whenever `__GNUC__` is defined.
+//
+// body holds the statements that run for what they do, in the order they were
+// written, and value holds the last statement's expression when there is one:
+// the two are one statement list in the source, split here so the back end
+// emits each half once. A construct whose last statement is not an expression
+// statement has no value and its type is void, which is what `({ int x = 4; })`
+// and `({ if (c) ; })` are; gcc refuses such one where a value is required and
+// accepts it where the value is thrown away, and this tree's emitter does the
+// same by name.
+pub struct StmtExpr {
+pub:
+	body  []Stmt
+	value ?Expr
+	typ   types.Type
+	line  int
+	col   int
+}
 
 // Assign is an assignment used where a value is wanted rather than as a
 // statement: `(x = 1) + 2`, `(a <<= 1)`, and the right operand of the second

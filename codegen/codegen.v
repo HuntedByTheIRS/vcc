@@ -263,6 +263,14 @@ mut:
 	// values is the scratch area, one slot per level of expression nesting,
 	// where a half-finished value waits while the other half is computed.
 	values []Slot
+	// slot_base is where that area starts for the expression being emitted. It
+	// is zero for an ordinary expression, so a depth indexes the list from its
+	// beginning. A statement expression raises it for the length of its body so
+	// the statements inside wait above every slot the expression around the
+	// construct is using: without that, `a + ({ b = 1; b; })` would let the body
+	// write over the slot `a` is waiting in, which is a wrong value rather than
+	// a refused one.
+	slot_base int
 	// wide_left and wide_right are the slots a 128-bit step keeps its two
 	// operands in, one slot per level of nesting and one for each side: a pair is
 	// two words, and two pairs do not fit in the registers a step has while the
@@ -980,6 +988,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// they are sized to.
 	e.frame_used = 0
 	e.values = []Slot{}
+	e.slot_base = 0
 	e.wide_left = []Slot{}
 	e.wide_right = []Slot{}
 	e.wide_scratch = []Slot{}
@@ -2179,6 +2188,13 @@ fn (mut e Emitter) emit_expression_statement(stmt ast.Stmt) !void {
 		e.emit_inc_dec(expr, 0)!
 		return
 	}
+	if expr is ast.StmtExpr {
+		// A statement expression written as a statement is the construct used
+		// for what its body does, which is one of the two ways gcc's assert
+		// writes it: the value, when there is one, is thrown away.
+		e.emit_statement_expression(expr as ast.StmtExpr, false)!
+		return
+	}
 	if expr.typ.is_void() {
 		// A void expression in a statement is evaluated for its side effects and
 		// its (nonexistent) value thrown away, which is what 6.8.3 says of an
@@ -2203,11 +2219,39 @@ fn (mut e Emitter) emit_discard(expr ast.Expr, depth int) !void {
 		ast.Unary {
 			e.emit_expr_at(expr.expr, depth + 1)!
 		}
+		ast.Comma {
+			// Both operands are evaluated for what they do and the value of
+			// the right one is thrown away like the left's.
+			e.emit_effect(expr.left, depth + 1)!
+			e.emit_effect(expr.right, depth + 1)!
+		}
+		ast.StmtExpr {
+			// The statements run for what they do and the construct's value,
+			// when it has one, is thrown away.
+			e.emit_statement_expression(expr, false)!
+		}
+		ast.Call {
+			e.emit_call(expr, depth)!
+		}
+		ast.IncDec {
+			e.emit_inc_dec(expr, depth)!
+		}
 		else {
 			e.diagnostics << problem(expr.line, expr.col, 'unsupported: a ${expr.typ.describe()} expression in a statement is not one this back end evaluates for its side effects')
 			return error('void expression shape')
 		}
 	}
+}
+
+// emit_effect evaluates one operand of a comma for what it does. A void operand
+// is produced by the reader a void statement uses, and a value operand is
+// emitted as itself with its register simply not read, which is what throwing a
+// value away means.
+fn (mut e Emitter) emit_effect(expr ast.Expr, depth int) !void {
+	if expr.typ.is_void() {
+		return e.emit_discard(expr, depth)
+	}
+	e.emit_expr_at(expr, depth)!
 }
 
 // emit_if writes a condition and its two branches. The condition is evaluated
@@ -2837,10 +2881,11 @@ fn (mut e Emitter) reserve(width int) Slot {
 // waits in it can be a pointer, and a four-byte slot would drop the half of it
 // that matters.
 fn (mut e Emitter) value_slot(depth int) Slot {
-	for e.values.len <= depth {
+	level := depth + e.slot_base
+	for e.values.len <= level {
 		e.values << e.reserve(e.target.word_size)
 	}
-	return e.values[depth]
+	return e.values[level]
 }
 
 // push_scope opens a block and pop_scope closes it. Names are found in the
@@ -3205,6 +3250,11 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 			// is the answer.
 			expr.typ.kind != .unknown && expr.typ.is_floating()
 		}
+		ast.StmtExpr {
+			// Worth the value of its last expression statement, whose type
+			// the reader resolved for the node.
+			expr.typ.kind != .unknown && expr.typ.is_floating()
+		}
 		ast.Index {
 			// An element is a floating value when the type the reader gave the
 			// element is one: the element type of the array or the pointee of
@@ -3323,6 +3373,11 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 			// The node's own type is the type of the value it leaves, which
 			// the reader resolved, so it decides this the way it decides
 			// whether the value is floating at all.
+			expr.typ.kind == .float
+		}
+		ast.StmtExpr {
+			// The same question about a statement expression's value, whose
+			// type is the node's own clause.
 			expr.typ.kind == .float
 		}
 		else {
@@ -3915,6 +3970,12 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		ast.Comma {
 			e.emit_comma(expr, depth)!
 		}
+		ast.StmtExpr {
+			// `({ ... })` used as a value: the body runs for what it does and
+			// the last expression statement's value is what the construct is
+			// worth, which is left in the register a value lives in.
+			e.emit_statement_expression(expr, true)!
+		}
 		ast.Call {
 			// A call's value arrives in the register the machine returns
 			// results in, which is the register a value is expected to be in,
@@ -4358,12 +4419,51 @@ fn assignment_statement(assign ast.Assign) ?ast.Stmt {
 // emit_comma writes `E1 , E2`. 6.5.17 sequences the left before the right and
 // makes the expression worth the value of its right operand, so the left is
 // evaluated for what it does and the value it leaves is overwritten by the
-// right. Nothing is loaded from the left: a conversion to void or a call for its
-// effect are the shapes a value is thrown away in, and leaving the register
-// alone is the same thing for every other shape.
+// right. Each operand goes through emit_effect, which is what a value thrown
+// away means: a conversion to void, a call for its effect and a statement
+// expression with no value are the shapes a value is thrown away in, and for
+// every other shape the register is simply not read.
 fn (mut e Emitter) emit_comma(comma ast.Comma, depth int) !void {
-	e.emit_expr_at(comma.left, depth + 1)!
-	e.emit_expr_at(comma.right, depth + 1)!
+	e.emit_effect(comma.left, depth + 1)!
+	e.emit_effect(comma.right, depth + 1)!
+}
+
+// emit_statement_expression writes `({ ... })`, a GNU statement expression: the
+// body's statements in the order they were written, and then the value
+// expression, which is what the construct is worth and is left in the register
+// a value lives in.
+//
+// The body is a scope, so a name it declares does not outlive the construct,
+// and its half-finished values wait above every slot the expression around it
+// is using, so a statement expression can be an operand of an operator without
+// its body writing over the operand that operator is holding.
+//
+// A construct with no value is void, which gcc refuses where a value is
+// required and accepts where the value is thrown away; as_value says which use
+// this is. A value the register cannot hold - an aggregate, or a width this
+// back end has no value of - is refused by name rather than copied through a
+// register that would keep only part of it.
+fn (mut e Emitter) emit_statement_expression(expr ast.StmtExpr, as_value bool) !void {
+	if as_value && expr.typ.is_void() {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: a statement expression used as a value has no value, because its last statement is not an expression statement')
+		return error('statement expression without a value')
+	}
+	if as_value && expr.typ.kind in [.struct_, .union_, .array] {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: a statement expression whose value is ${expr.typ.describe()} is not one this back end returns, and the value of a statement expression has to be a value a register holds')
+		return error('aggregate statement expression value')
+	}
+	saved := e.slot_base
+	e.slot_base = e.values.len
+	// The body is one scope and the value expression is emitted inside it, so
+	// a name the body declares is visible to the expression that is the
+	// construct's value: `({ int a = 4; a; })` reads the `a` it declared.
+	e.push_scope()
+	_ := e.emit_statements(expr.body)!
+	if value := expr.value {
+		e.emit_expr_at(value, 0)!
+	}
+	e.pop_scope()
+	e.slot_base = saved
 }
 
 // emit_inc_dec writes `++x`, `--x`, `x++` or `x--` for the name the node holds,
@@ -6432,6 +6532,11 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 			// reader resolved for the node, which is what the width comes from.
 			e.converted_width(expr.typ)
 		}
+		ast.StmtExpr {
+			// A statement expression is worth its last expression statement's
+			// value, whose type the reader resolved for the node.
+			e.converted_width(expr.typ)
+		}
 	}
 }
 
@@ -8211,6 +8316,7 @@ fn expr_line(expr ast.Expr) int {
 		ast.Conditional { expr.line }
 		ast.Assign { expr.line }
 		ast.Comma { expr.line }
+		ast.StmtExpr { expr.line }
 	}
 }
 
@@ -8230,6 +8336,7 @@ fn expr_col(expr ast.Expr) int {
 		ast.Conditional { expr.col }
 		ast.Assign { expr.col }
 		ast.Comma { expr.col }
+		ast.StmtExpr { expr.col }
 	}
 }
 

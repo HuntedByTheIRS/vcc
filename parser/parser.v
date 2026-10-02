@@ -72,6 +72,13 @@ mut:
 	// is a set of names rather than the scope table because that check is about
 	// the unit and not about which block a name was visible in.
 	declared map[string]bool
+	// current_function is the name of the function whose body is being read, and
+	// empty outside one. The function-name spellings read it: 6.4.2.2 makes
+	// `__func__` a static array holding the name of the enclosing function, and
+	// gcc's `__FUNCTION__` and `__PRETTY_FUNCTION__` are the same name. glibc's
+	// assert hands `__PRETTY_FUNCTION__` to __assert_fail under a GNU dialect,
+	// so the C this compiler has to compile reads one.
+	current_function string
 	// pending_bounds is a file-scope array bound whose expression names something
 	// this reader did not resolve. Its report waits until the whole file has been
 	// read, because whether a name is declared anywhere is a question only the end
@@ -487,6 +494,15 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 		ast.Comma {
 			p.check_undeclared_expression(expr.left, mut reported)
 			p.check_undeclared_expression(expr.right, mut reported)
+		}
+		ast.StmtExpr {
+			// The body is statements and the value is an expression of its
+			// own: both halves can name something, so each is walked the way
+			// it would be at the place it stands.
+			p.check_undeclared_statements(expr.body, mut reported)
+			if value := expr.value {
+				p.check_undeclared_expression(value, mut reported)
+			}
 		}
 	}
 }
@@ -1063,6 +1079,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Conditional { 'a conditional value' }
 		ast.Assign { 'a value assigned to ${describe_operand(expr.target)} with ${expr.op}' }
 		ast.Comma { 'a value of ,' }
+		ast.StmtExpr { 'a statement expression' }
 	}
 }
 
@@ -1635,6 +1652,16 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
+		// The function-name spellings name the function the expression is
+		// written in: `__func__` is C99's (6.4.2.2), and `__FUNCTION__` and
+		// `__PRETTY_FUNCTION__` are gcc's spellings of the same name. What
+		// they are worth is a string holding it, so they are read as the
+		// string literal they describe rather than as a name nothing
+		// declares. glibc's assert passes `__PRETTY_FUNCTION__` to
+		// __assert_fail, which is why the tree reads one.
+		if t.text in ['__func__', '__FUNCTION__', '__PRETTY_FUNCTION__'] {
+			return p.function_name_expression(t)!
+		}
 		// The reserved `__builtin_` spellings are reads of their own and not
 		// calls: their arguments are types as often as expressions, and the
 		// value is settled while the tokens are read. The list is in
@@ -1670,6 +1697,15 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		})
 	}
 	if t.kind == .punct && t.text == '(' {
+		// The token after the parenthesis decides what kind of thing this is:
+		// a specifier word or a declared type names a conversion, a `{` opens
+		// a GNU statement expression, and anything else is a value in
+		// parentheses. A statement expression is not read by the cast reader
+		// even though `{` cannot start a type name, because reading the block
+		// is a different job from reading one expression.
+		if p.peek_at(1).kind == .punct && p.peek_at(1).text == '{' {
+			return p.parse_statement_expression(t)!
+		}
 		p.next()
 		p.depth++
 		if p.depth > max_expression_depth {
@@ -1689,6 +1725,155 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	p.error_at(t, 'unsupported: expected an expression, found ${describe(t)}')
 	return error('expected an expression')
+}
+
+// parse_statement_expression reads `({ ... })`, a GNU statement expression: a
+// brace-enclosed compound statement in parentheses whose value is the value of
+// its last statement when that statement is an expression statement. glibc's
+// `assert` expands to one under the GNU dialects this compiler reads, so the
+// form is here for the reason the tree reads `__extension__`: the C it has to
+// compile writes it.
+//
+// The block is read by the reader a function body uses, so a declaration, a
+// loop, an if and every other statement inside the braces are read as the
+// statements they are. The last expression statement becomes the node's value
+// and the statements before it become its body; a last statement that is not an
+// expression statement - a declaration, a block, a loop - leaves the construct
+// with no value and the void type, which is what gcc answers and what this
+// compiler refuses where a value is required.
+//
+// The parenthesis is consumed here rather than by the caller, so the nesting
+// count covers the whole construct: a chain of statement expressions inside one
+// another is a chain of nested expressions and is bounded like one.
+fn (mut p Parser) parse_statement_expression(open tokenize.Token) !ast.Expr {
+	p.next() // (
+	p.depth++
+	if p.depth > max_expression_depth {
+		p.error_at(open, 'expression is nested more than ${max_expression_depth} levels deep')
+		p.depth--
+		return error('statement expression nested too deeply')
+	}
+	stmts := p.parse_block() or {
+		p.depth--
+		return error('statement expression body')
+	}
+	p.depth--
+	if !p.expect_punct(')') {
+		return error('unclosed statement expression')
+	}
+	// The last statement is the value when it is an expression: C makes an
+	// assignment an expression too, and this tree keeps a bare assignment as a
+	// statement of its own, so `trailing_value` is what tells the two apart.
+	// Every other kind leaves the construct worth nothing. The two halves are
+	// split here so the back end emits each one once: the value is the last
+	// expression and the body is everything before it.
+	mut value := ?ast.Expr(none)
+	if stmts.len > 0 {
+		value = p.trailing_value(stmts[stmts.len - 1])
+	}
+	body := if value != none { stmts[..stmts.len - 1].clone() } else { stmts.clone() }
+	typ := if present := value { p.value_type(present) } else { types.void_type() }
+	return ast.Expr(ast.StmtExpr{
+		body:  body
+		value: value
+		typ:   typ
+		line:  open.line
+		col:   open.col
+	})
+}
+
+// trailing_value is the expression a statement is worth, for the statement kinds
+// that are expressions. An expression statement is one by construction. An
+// assignment is an expression in C (6.5.16) even though this tree keeps a bare
+// assignment as a statement of its own, so the assignment is put back together
+// as the expression it is: `({ a = 5; })` is worth 5, and `({ a += 1; })` is worth
+// the sum, because the compound spelling was already read as `a = a + 1`. Every
+// other statement kind is worth nothing, which is what a declaration, a loop, an
+// if and a block are.
+fn (p Parser) trailing_value(stmt ast.Stmt) ?ast.Expr {
+	match stmt.kind {
+		.expr_stmt {
+			return stmt.expr
+		}
+		.assign {
+			value := stmt.expr or { return none }
+			target := p.assignment_target(stmt) or { return none }
+			return ast.Expr(ast.Assign{
+				target: target
+				value:  value
+				op:     '='
+				typ:    p.value_type(target)
+				line:   stmt.line
+				col:    stmt.col
+			})
+		}
+		else {
+			return none
+		}
+	}
+}
+
+// assignment_target puts back the object an assignment statement writes to, as
+// the expression C says the assignment's left side is. The statement carries the
+// pieces apart - an element node, a dereference, a member, a name with a
+// subscript - and each piece is the expression it stands for, so the whole
+// target is put back the way the expression reader read it when the same
+// assignment is written where a value is wanted.
+fn (p Parser) assignment_target(stmt ast.Stmt) ?ast.Expr {
+	if subscript := stmt.subscript {
+		return subscript
+	}
+	if deref := stmt.deref {
+		return deref
+	}
+	if member := stmt.field {
+		return ast.Expr(member)
+	}
+	if index := stmt.index {
+		base := p.resolve(stmt.target)
+		return ast.Expr(ast.Index{
+			base:  ast.Expr(ast.Ident{
+				name: stmt.target
+				typ:  base
+				line: stmt.line
+				col:  stmt.col
+			})
+			index: index
+			typ:   p.assignment_target_type(stmt.target, stmt.index, none)
+			line:  stmt.line
+			col:   stmt.col
+		})
+	}
+	if stmt.target.len == 0 {
+		return none
+	}
+	return ast.Expr(ast.Ident{
+		name: stmt.target
+		typ:  p.resolve(stmt.target)
+		line: stmt.line
+		col:  stmt.col
+	})
+}
+
+// function_name_expression reads one of the function-name spellings,
+// `__func__`, `__FUNCTION__` or `__PRETTY_FUNCTION__`, as the string it names:
+// the name of the function whose body is being read. 6.4.2.2 makes `__func__` a
+// static array of char holding that name and its terminator, and the two GNU
+// spellings are the same name. A use outside a function body has no function to
+// name, so it is refused by name rather than given an empty string.
+fn (mut p Parser) function_name_expression(at tokenize.Token) !ast.Expr {
+	name := p.current_function
+	if name.len == 0 {
+		p.error_at(at, 'unsupported: ${at.text} is read outside a function body, and it names the function it is written in')
+		return error('function name outside a function')
+	}
+	return ast.Expr(ast.StrLit{
+		value: name
+		text:  '"${name}"'
+		typ:   types.array_of(types.char_type(), name.len + 1)
+		line:  at.line
+		col:   at.col
+	})
 }
 
 fn (mut p Parser) parse_arguments() ![]ast.Expr {
