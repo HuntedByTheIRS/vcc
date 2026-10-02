@@ -124,6 +124,26 @@ pub enum StmtKind {
 	do_while_stmt
 	break_stmt
 	continue_stmt
+	// switch_stmt is `switch (expr) stmt`. The controlling expression selects
+	// which of the case labels written in the body the program jumps to, and
+	// control then runs on through the statements in the order they are
+	// written, so a case with no break before the next one runs into it.
+	switch_stmt
+	// case_stmt is a `case constant:` label. It is a statement of its own so
+	// that a switch's body is the statements written in it and a label is one
+	// of them: the label names the place the statement after it is written at,
+	// and case_value is the integer the switch matches it against.
+	case_stmt
+	// default_stmt is the `default:` label, which is where a switch goes when
+	// no case matches. A switch has at most one.
+	default_stmt
+	// label_stmt is a named label, `name:`, which a goto jumps to. It is a
+	// statement of its own and governs nothing: the statement written after it
+	// is the next statement of the block.
+	label_stmt
+	// goto_stmt is `goto name;`, a jump to the label of that name anywhere in
+	// the same function, forward or backward.
+	goto_stmt
 }
 
 pub struct Stmt {
@@ -172,8 +192,17 @@ pub:
 	// when it was not written.
 	then_body []Stmt
 	else_body []Stmt
-	line      int
-	col       int
+	// label is the name a goto jumps to and the name a label statement
+	// declares. Labels are a namespace of their own: a label named `x` and an
+	// object named `x` in the same function are two different names, and only
+	// the label one is a place to jump to.
+	label string
+	// case_value is the integer constant a case label names, as written. C
+	// converts it to the type of the controlling expression, and that
+	// conversion is made where the label is placed.
+	case_value i64
+	line       int
+	col        int
 }
 
 // Expr is one of the expression shapes the stub understands. A call is parsed
