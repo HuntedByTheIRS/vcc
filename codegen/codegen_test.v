@@ -587,6 +587,24 @@ fn test_a_long_constant_chain_folds() {
 	assert run_image(emitted.bytes) == int(expected)
 }
 
+// A long chain of variable terms used to take the stack out where a chain of
+// constants did not: the width walk recursed once per term, and an 8 MB stack
+// ended at about two thousand terms. Measured on this tree, a chain of 2010
+// `+ x` terms compiled and one of 2020 took signal 11. The walk is a loop now,
+// and the chain below is longer than the one the stack carried.
+fn test_a_long_variable_chain_is_emitted_and_runs() {
+	mut source := 'int main(void) { int x = 1; int y = 0'
+	mut expected := i64(0)
+	for _ in 0 .. 3000 {
+		source += ' + x'
+		expected = (expected + 1) & 0xff
+	}
+	source += '; return y; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == int(expected)
+}
+
 // A division by zero is refused where a constant expression is required and
 // nowhere else, which is what C99 6.6 says and what gcc 16.2.1 does: it compiles
 // a division by zero in a program, and only a constant context makes it complain.
