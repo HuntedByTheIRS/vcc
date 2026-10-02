@@ -363,6 +363,28 @@ fn test_a_brace_initializer_for_a_union_stores_into_its_first_member() {
 	}
 }
 
+// A union defined at the top level with an initializer has its first member
+// written into the image, at the beginning of the object, and the rest of the
+// union is the zeros the storage starts as. The tagged form and a typedef of an
+// anonymous union reach the same storage. Measured on gcc 16.2.1, these programs
+// return 4, 4 and 65.
+fn test_a_file_scope_union_initializer_writes_its_first_member() {
+	programs := [
+		'union U { int i; char c[4]; };\nunion U u = { 0x01020304 };\nint main(void) { return u.c[0]; }\n',
+		'typedef union { int i; char c[4]; } T;\nT u = { 0x01020304 };\nint main(void) { return u.c[0]; }\n',
+		'union U { char c; int i; };\nunion U u = { 65 };\nint main(void) { return u.c; }\n',
+	]
+	expected := [4, 4, 65]
+	for index, program in programs {
+		source := scratch('union_global_init_${index}.c')
+		binary := scratch('union_global_init_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == expected[index]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 // typeof is read by the parser and answered by the emitter as the type behind
 // it: a program that declares an object through typeof compiles and runs, and
 // the exit status is what the types decided. Measured on gcc 16.2.1, the same
