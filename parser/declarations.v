@@ -3447,7 +3447,10 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			// type gains the star the adjustment adds, which is the spelling a
 			// parameter of the same pointer type written directly would carry;
 			// the adjusted type the tree keeps is what the elements are read
-			// through.
+			// through. The bound does not travel with the parameter: a size
+			// or a variable length is not part of the pointer's type, so
+			// `int f(int a[3])`, `int f(int a[n])` and `int f(int *a)` are
+			// one function (6.7.5.3p15).
 			stars := if d.is_array() { d.pointer_count() + 1 } else { d.pointer_count() }
 			params.params << ast.Param{
 				name:     d.name
