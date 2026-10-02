@@ -2037,3 +2037,65 @@ fn test_a_floating_value_asked_as_a_question_is_compared_as_one() {
 		os.rm(binary) or {}
 	}
 }
+
+// An unsigned integer converts to a double with its value kept. gcc 16.2.1 answers
+// every one of these programs with 0; before the unsigned conversion existed this
+// back end answered 1 for all of them, because `cvtsi2sd xmm, r/m32` sign-extends
+// its source. The values sit on both sides of 2^31 and at the top of the range, so
+// a fix that special-cased 3000000000 would fail the rest.
+fn test_an_unsigned_integer_converts_to_a_double() {
+	cases := [
+		'unsigned int u = 3000000000u; double d = (double)u; return d == 3000000000.0 ? 0 : 1;',
+		'unsigned int u = 2147483648u; double d = (double)u; return d == 2147483648.0 ? 0 : 1;',
+		'unsigned int u = 4294967295u; double d = (double)u; return d == 4294967295.0 ? 0 : 1;',
+	]
+	for index, body in cases {
+		source := scratch('uconv_source_${index}.c')
+		binary := scratch('uconv_source_${index}')
+		exit_status := compile_and_run([source, '-o', binary], 'int main(void) { ${body} }\n')
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A double converts to an unsigned integer with its value kept. gcc 16.2.1 answers
+// each of these with 0; before the unsigned conversion existed this back end
+// answered 1 for all of them, because `cvttsd2si r32, xmm` saturates at 2^31.
+fn test_a_double_converts_to_an_unsigned_integer() {
+	cases := [
+		'double d = 3000000000.0; unsigned int u = (unsigned int)d; return u == 3000000000u ? 0 : 1;',
+		'double d = 2147483648.0; unsigned int u = (unsigned int)d; return u == 2147483648u ? 0 : 1;',
+		'double d = 4294967295.0; unsigned int u = (unsigned int)d; return u == 4294967295u ? 0 : 1;',
+	]
+	for index, body in cases {
+		source := scratch('uconv_dest_${index}.c')
+		binary := scratch('uconv_dest_${index}')
+		exit_status := compile_and_run([source, '-o', binary], 'int main(void) { ${body} }\n')
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// The same conversion where a value is stored rather than cast: an unsigned local,
+// an element of an unsigned array, an unsigned member, an unsigned parameter a
+// double is handed to, and a top-level unsigned object. Each would saturate at
+// 2^31 if the conversion were chosen without the destination's signedness.
+fn test_an_unsigned_destination_keeps_its_range_where_a_double_is_stored() {
+	programs := [
+		'int main(void){ double d = 3000000000.0; unsigned int u = 0; u = d; return u == 3000000000u ? 0 : 1; }\n',
+		'int main(void){ double d = 3000000000.0; unsigned int a[2]; a[0] = d; return a[0] == 3000000000u ? 0 : 1; }\n',
+		'struct S { unsigned int u; };\nint main(void){ struct S s; double d = 3000000000.0; s.u = d; return s.u == 3000000000u ? 0 : 1; }\n',
+		'unsigned int got;\nvoid f(unsigned int x){ got = x; }\nint main(void){ double d = 3000000000.0; f(d); return got == 3000000000u ? 0 : 1; }\n',
+		'unsigned int g;\nint main(void){ double d = 3000000000.0; g = d; return g == 3000000000u ? 0 : 1; }\n',
+	]
+	for index, program in programs {
+		source := scratch('uconv_store_${index}.c')
+		binary := scratch('uconv_store_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
