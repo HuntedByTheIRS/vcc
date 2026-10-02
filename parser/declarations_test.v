@@ -889,10 +889,80 @@ fn test_the_argument_list_resolves_from_the_compiler_spelling() {
 	assert body[0].decl_type.contains('__va_list_tag')
 }
 
-fn test_an_array_parameter_of_a_definition_is_reported() {
+// C99 6.7.5.3p7: a parameter written with an array type is adjusted to a
+// pointer to its element. The tree keeps the adjustment, so a `sizeof` in the
+// body and an element read both go through a pointer, and the written type
+// gains the star the adjustment adds.
+fn test_an_array_parameter_is_adjusted_to_a_pointer() {
 	result := declarations_of('int f(char s[10]) { return 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('array parameters')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params.len == 1
+	assert params[0].name == 's'
+	assert params[0].typ == 'char *'
+	assert params[0].resolved.is_pointer()
+	assert params[0].resolved.describe() == 'char *'
+}
+
+fn test_an_array_parameter_of_no_written_size_is_adjusted_the_same_way() {
+	result := declarations_of('int f(int a[]) { return a[0]; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params[0].typ == 'int *'
+	assert params[0].resolved.describe() == 'int *'
+}
+
+// A qualifier on the element is part of the pointee and not of the written
+// spelling, the same way `const char *__s` keeps only the star.
+fn test_a_const_array_parameter_adjusts_to_a_pointer_to_const() {
+	result := declarations_of('int f(const char s[]) { return s[0]; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params[0].typ == 'char *'
+	assert params[0].resolved.is_pointer()
+	assert params[0].resolved.describe() == 'const char *'
+}
+
+// An array of pointers adjusts to a pointer to a pointer.
+fn test_an_array_parameter_of_pointers_adjusts_to_a_pointer_to_a_pointer() {
+	result := declarations_of('int f(char *argv[]) { return 0; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params[0].typ == 'char **'
+	assert params[0].resolved.describe() == 'char **'
+}
+
+// A multidimensional array parameter adjusts to a pointer to its row type, so
+// the body subscripts it twice.
+fn test_a_multidimensional_array_parameter_adjusts_to_a_pointer_to_an_array() {
+	result := declarations_of('int f(int a[3][4]) { return a[0][0]; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params[0].typ == 'int *'
+	assert params[0].resolved.is_pointer()
+	row := params[0].resolved.pointee() or {
+		assert false
+		return
+	}
+	assert row.kind == .array
+	assert row.count == 4
+}
+
+// A `static` bound is a promise about the caller and not part of the type: the
+// parameter is still one pointer.
+fn test_a_static_bound_on_an_array_parameter_does_not_change_the_type() {
+	result := declarations_of('int f(int a[static 10]) { return a[0]; }')
+	assert result.diagnostics.len == 0
+	params := result.unit.decls[0].params
+	assert params[0].typ == 'int *'
+	assert params[0].resolved.describe() == 'int *'
+}
+
+// The adjustment happens at the declaration, so a prototype written `[]` and a
+// definition written `*` are one function (6.7.5.3p15).
+fn test_an_array_parameter_and_a_pointer_parameter_are_one_type() {
+	result := declarations_of('int f(int a[]); int f(int *a) { return 0; }')
+	assert result.diagnostics.len == 0
 }
 
 fn test_a_parameter_of_a_definition_needs_a_name() {

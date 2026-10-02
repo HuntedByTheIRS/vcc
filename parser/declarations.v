@@ -3440,22 +3440,28 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			}
 		} else {
 			d := p.parse_declarator(depth + 1)!
-			resolved := p.declared_type(spec.clause, d)
+			// A parameter declared with an array type has the array type
+			// adjusted to a pointer to its element (C99 6.7.5.3p7): `int a[]`
+			// and `int a[10]` are `int *`, `char *argv[]` is `char **`, and
+			// `int a[3][4]` is a pointer to an array of four ints. The written
+			// type gains the star the adjustment adds, which is the spelling a
+			// parameter of the same pointer type written directly would carry;
+			// the adjusted type the tree keeps is what the elements are read
+			// through.
+			stars := if d.is_array() { d.pointer_count() + 1 } else { d.pointer_count() }
 			params.params << ast.Param{
 				name:     d.name
-				typ:      p.spelling_of(spec, d.pointer_count())
-				resolved: resolved
+				typ:      p.spelling_of(spec, stars)
+				resolved: types.adjust_parameter(p.declared_type(spec.clause, d))
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
 			// The order of the questions is the order a reader asks them: what
-			// keeps this parameter from being named at all, then the shapes the
-			// tree has no form for, then the types the emitter does.
+			// keeps this parameter from being named at all, then the types the
+			// emitter does.
 			if d.name.len == 0 {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
-			} else if d.is_array() {
-				params.note_problem('unsupported: array parameters are not implemented', d.array_at())
-			} else if !p.parameter_type_is_known(spec, d.pointer_count()) {
+			} else if !p.parameter_type_is_known(spec, stars) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.
 				params.note_problem('unsupported type ${p.parameter_spelling(spec)}', spec.start)
