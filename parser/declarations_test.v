@@ -710,3 +710,33 @@ fn test_a_bitwise_relational_or_logical_bound_is_an_integer_constant_expression(
 	assert divided.diagnostics.len == 1
 	assert divided.diagnostics[0].msg.contains('is not an integer constant expression')
 }
+
+// 6.6p6 admits a floating constant to an integer constant expression as the
+// immediate operand of a cast to an integer type, which is the one floating shape
+// an array size may be built from. Measured on gcc 16.2.1 under `-std=c99`, `int
+// x[(int) 3.5];` is three elements and `int x[(char) 300.9];` is 44, because the
+// conversion truncates toward zero and then narrows. A floating constant that is
+// not the operand of a cast is not an operand at all - `int x[1.5];` is `size of
+// array has non-integer type` to gcc - and a cast whose target is not an integer
+// type is refused the same way, so the fold answers none for both.
+fn test_a_floating_constant_as_the_immediate_operand_of_a_cast_is_a_bound() {
+	whole := declarations_of('int x[(int) 3.5];')
+	assert whole.diagnostics.len == 0
+	assert whole.unit.globals[0].count == 3
+	narrowed := declarations_of('int x[(char) 300.9];')
+	assert narrowed.diagnostics.len == 0
+	assert narrowed.unit.globals[0].count == 44
+	// A sign in front of the floating constant is the same operand: `(int) -0.5`
+	// is zero, which gcc gives `int x[(int) -0.5];` too.
+	signed := declarations_of('int x[(int) -0.5 + 4];')
+	assert signed.diagnostics.len == 0
+	assert signed.unit.globals[0].count == 4
+	// Not under a cast: no.
+	loose := declarations_of('int x[1.5];')
+	assert loose.diagnostics.len == 1
+	assert loose.diagnostics[0].msg.contains('is not an integer constant expression')
+	// A cast to a floating type is one 6.6p6 does not allow.
+	target := declarations_of('int x[(double) 3];')
+	assert target.diagnostics.len == 1
+	assert target.diagnostics[0].msg.contains('is not an integer constant expression')
+}

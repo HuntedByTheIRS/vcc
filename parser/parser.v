@@ -1511,18 +1511,27 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 	}
 	if expr is ast.Cast {
 		// 6.6 makes a cast of an integer constant to an integer type an integer
-		// constant expression, and the value is the one the conversion makes:
-		// `(char) 300` is 44 here as it is at run time, because a value that
-		// narrows keeps what the target type can hold.
-		operand := p.constant_value(expr.expr) or { return none }
+		// constant expression, and 6.6p6 allows only that: a cast whose target is
+		// not an integer type answers none, so `(double) 3` is not an operand an
+		// array size may be built from.
 		if !expr.typ.kind.is_integer() {
 			return none
 		}
-		if expr.typ.kind == .bool_ {
-			return if operand != 0 { i64(1) } else { i64(0) }
+		// The value is the one the conversion makes: `(char) 300` is 44 here as it
+		// is at run time, because a value that narrows keeps what the target type
+		// can hold.
+		if operand := p.constant_value(expr.expr) {
+			return p.converted_constant(expr.typ, operand)
 		}
-		size := p.representation.size_of(expr.typ) or { return none }
-		return truncate_integer(operand, size, expr.typ.kind.is_unsigned())
+		// 6.6p6 names the other operand an integer constant expression may have
+		// from a floating constant: one that is the immediate operand of a cast.
+		// `(int) 3.5` is an integer constant expression whose value is three, and
+		// gcc 16.2.1 under `-std=c99` accepts `int x[(int) 3.5];` as three
+		// elements where this folder answered none and the bound was refused.
+		if value := floating_operand(expr.expr) {
+			return p.converted_float_constant(expr.typ, value)
+		}
+		return none
 	}
 	if expr is ast.Binary {
 		left := p.constant_value(expr.left) or { return none }
@@ -1632,6 +1641,53 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 		return p.constant_value(expr.else_expr) or { return none }
 	}
 	return none
+}
+
+// floating_operand is the value of a floating constant written as the operand of
+// a cast, with a sign in front of it allowed: 6.6p6 admits a floating constant to
+// an integer constant expression only as the immediate operand of a cast, and
+// `-3.5` is one constant with a sign on it. It is asked only from the cast arm, so
+// a floating constant anywhere else still has no value this folder will use.
+fn floating_operand(expr ast.Expr) ?f64 {
+	if expr is ast.FloatLit {
+		return expr.value
+	}
+	if expr is ast.Unary {
+		if operand := floating_operand(expr.expr) {
+			if expr.op == '-' {
+				return -operand
+			}
+			if expr.op == '+' {
+				return operand
+			}
+		}
+	}
+	return none
+}
+
+// converted_constant is one integer constant converted to an integer type: a
+// `_Bool` is one for any value that is not zero, a narrowing conversion keeps the
+// low bytes, and a type the target has no size for answers none.
+fn (p Parser) converted_constant(typ types.Type, operand i64) ?i64 {
+	if typ.kind == .bool_ {
+		return if operand != 0 { i64(1) } else { i64(0) }
+	}
+	size := p.representation.size_of(typ) or { return none }
+	return truncate_integer(operand, size, typ.kind.is_unsigned())
+}
+
+// converted_float_constant is a floating constant converted to an integer type,
+// the one floating operand 6.6p6 allows in an integer constant expression. The
+// conversion truncates toward zero, which is what the run-time one does and what
+// gcc 16.2.1 gives under `-std=c99`: `int x[(int) 3.5];` is three elements and
+// `int x[(int) -0.5];` is zero. A value no i64 holds, or a NaN, is not a
+// conversion this reader makes and answers none rather than wrapping to a number
+// that is not the one written.
+fn (p Parser) converted_float_constant(typ types.Type, value f64) ?i64 {
+	if value != value || value >= 9223372036854775808.0 || value < -9223372036854775808.0 {
+		return none
+	}
+	return p.converted_constant(typ, i64(value))
 }
 
 // truncate_integer is a constant converted to an integer type of size bytes: a
