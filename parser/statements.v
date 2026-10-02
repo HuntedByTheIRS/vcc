@@ -1124,26 +1124,37 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		mut union_first := ?types.Member(none)
 		mut struct_brace := ?types.Layout(none)
 		mut struct_values := []BraceElement{}
+		// general_list is a brace list with a nested list, a designator or an
+		// element that is an expression, which is the shape the flat paths do
+		// not place: `fill_brace` walks it against the object's type and
+		// `general_writes` are the stores the declaration makes, one per scalar
+		// subobject the list reached. general_target is the type the walk ran
+		// against, which is the object's own type with the size an array with
+		// empty brackets takes from the list.
+		mut general_list := ?BraceList(none)
+		mut general_writes := []BraceWrite{}
+		mut general_target := declared
 		if p.at_punct('=') {
 			p.next()
 			if p.at_punct('{') {
 				brace = true
-				if d.pointer_count() == 0 && spec.clause.kind == .struct_ {
-					// A struct's brace initializer gives each value to a
-					// member in the order the members were written. A member
-					// that is itself an aggregate or a bitfield is refused by
-					// name in the helper, because a value placed at the wrong
-					// offset is worse than a refusal.
-					if list := p.parse_brace_initializer() {
-						list_ok = true
-						p.refuse_an_address_in_a_body(list)
+				if list := p.parse_brace_initializer(true) {
+					list_ok = true
+					if !list.is_a_flat_number_list() {
+						// A nested list, a designator, or an element that is
+						// an expression: the list is walked against the
+						// object's type and each write becomes the store the
+						// declaration makes at the subobject it reached.
+						general_list = list
+					} else if d.pointer_count() == 0 && spec.clause.kind == .struct_ {
+						// A struct's brace initializer gives each value to a
+						// member in the order the members were written. A member
+						// that is itself an aggregate or a bitfield is refused by
+						// name in the helper, because a value placed at the wrong
+						// offset is worse than a refusal.
 						struct_values = list.elements.clone()
 						struct_brace = p.struct_brace_members(spec.clause, list, d.name)
-					}
-				} else if list := p.parse_brace_initializer() {
-					list_ok = true
-					p.refuse_an_address_in_a_body(list)
-					if !d.is_array() {
+					} else if !d.is_array() {
 						// One scalar in braces. A list of more values has no
 						// room in one object (6.7.8p2, measured on gcc
 						// 16.2.1: `int x = {1, 2};` is `excess elements in
@@ -1255,6 +1266,26 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		mut count := if d.array_count() > 0 { d.array_count() } else { elements.len }
 		if from_string && d.array_sized() {
 			count = d.array_count()
+		}
+		if list := general_list {
+			// A nested list, a designator or an expression: the size of an array
+			// with empty brackets is the highest subobject the list reaches, and
+			// the list is walked against the type of the object it initializes.
+			// An element the walk never reaches is one more than the object
+			// holds, which is the excess gcc 16.2.1 reports as `excess elements
+			// in array initializer`.
+			general_target = declared
+			if d.is_array() && d.array_count() <= 0 {
+				named := brace_array_count(list.elements)
+				if named > 0 {
+					count = named
+					general_target = types.array_of(declared.element() or { declared }, named)
+				}
+			}
+			reached := p.fill_brace(general_target, list.elements, 0, 0, mut general_writes)
+			if reached < list.elements.len {
+				p.error_at(list.at, 'a constraint violation: ${d.name} is initialized with ${list.elements.len} elements and its type holds ${reached}')
+			}
 		}
 		// A union's initializer is the store into its first member written
 		// below, and a struct's is the stores into its members, so the
@@ -1373,13 +1404,65 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			element := declared.element() or { spec.clause }
 			p.scopes.complete_type(d.name, types.array_of(element, count))
 		}
+		if list := general_list {
+			// The same answer for a list that named the size: the highest
+			// subobject it reaches is the array the name turned out to be.
+			if d.is_array() && !d.array_sized() && count > 0 {
+				element := declared.element() or { spec.clause }
+				p.scopes.complete_type(d.name, types.array_of(element, count))
+			}
+		}
+		if list := general_list {
+			// The stores a nested or designated list makes, one per scalar
+			// subobject, at the byte the walk gave it. The frame slot starts as
+			// whatever was there, so every scalar subobject the object holds is
+			// stored zero first and the values the list wrote are stored over
+			// them: the subobjects the list did not reach are the zeros C says
+			// the rest of the object holds (6.7.8p21).
+			//
+			// How a store is written is a question about the object's storage:
+			// an object of an aggregate type has a byte to write at, and an
+			// array whose elements are scalars is written one element at a
+			// time, scaled by the width of one element.
+			object_bytes := p.aggregate_bytes(declared)
+			array := general_target.kind == .array
+			element := if array { general_target.element() or { declared } } else { declared }
+			element_width := p.representation.size_of(element) or { 0 }
+			if array && object_bytes == 0 && element.kind in [types.Kind.array, .struct_, .union_] {
+				// The frame sizes an array of scalars from the spelling and the
+				// count, and an array whose element is itself an aggregate has
+				// no width that answers: there is nowhere to put the values.
+				p.error_at(d.name_at, 'unsupported: ${d.name} is an array whose element is an object of the type ${element.describe()}, and storage for one in a body is not implemented')
+			} else {
+				mut leaves := []BraceWrite{}
+				p.collect_leaves(general_target, 0, mut leaves)
+				for leaf in leaves {
+					stmts << store_a_brace_write(d.name, d.name_at, leaf, zero_initializer(d.name_at),
+						array, object_bytes, element_width)
+				}
+				for write in general_writes {
+					// A leaf is an expression when the list wrote one and a
+					// written constant otherwise; the constant is the int
+					// literal a written number already reads as.
+					value := if expression := write.element.expr {
+						expression
+					} else if number := write.element.number {
+						p.constant_expr(number)
+					} else {
+						zero_initializer(d.name_at)
+					}
+					stmts << store_a_brace_write(d.name, d.name_at, write, value, array, object_bytes,
+						element_width)
+				}
+			}
+		}
 		// A list for an array is the stores the initialization makes at the
 		// point of the declaration: one per value the list wrote, and a zero for
 		// each the list did not, because the rest of a partly initialized array
 		// is the zeros C says it holds. The frame slot starts as whatever was
 		// there, so the unwritten elements have to be written. A string literal
 		// writes its own elements the same way.
-		if ((brace && list_ok) || from_string) && d.is_array() {
+		if ((brace && list_ok) || from_string) && d.is_array() && general_list == none {
 			for i in 0 .. count {
 				value := if i < elements.len {
 					elements[i]
@@ -1421,6 +1504,71 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		return stmts
 	}
 	return stmts
+}
+
+// zero_initializer is the constant zero a body's initializer stores into a
+// subobject the list did not reach. Its type is int, which every member wider
+// than an int extends and every narrower one takes the low bytes of.
+fn zero_initializer(at tokenize.Token) ast.Expr {
+	return ast.Expr(ast.IntLit{
+		value: 0
+		text:  '0'
+		typ:   types.int_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// store_a_brace_write is the store a body's initializer makes for one scalar
+// subobject: the value written at the byte the walk gave it. How a store is
+// written follows the object's storage. An object of an aggregate type is
+// written at the byte the subobject starts at, which is what `field` carries. An
+// array whose elements are scalars is written one element at a time, so the
+// subobject is the element at its index and the index scales by the width of one
+// element. A scalar object is the one value, written into the name.
+fn store_a_brace_write(name string, at tokenize.Token, write BraceWrite, value ast.Expr, array bool, object_bytes int, element_width int) ast.Stmt {
+	if object_bytes == 0 && array {
+		index := if element_width > 0 { write.offset / element_width } else { 0 }
+		return ast.Stmt{
+			kind:   .assign
+			target: name
+			index:  ast.Expr(ast.IntLit{
+				value: i64(index)
+				text:  '${index}'
+				typ:   types.int_type()
+				line:  at.line
+				col:   at.col
+			})
+			expr:   value
+			line:   at.line
+			col:    at.col
+		}
+	}
+	if object_bytes == 0 {
+		return ast.Stmt{
+			kind:   .assign
+			target: name
+			expr:   value
+			line:   at.line
+			col:    at.col
+		}
+	}
+	return ast.Stmt{
+		kind:   .assign
+		target: name
+		field:  ast.Field{
+			name:     name
+			member:   write.spelling
+			offset:   write.offset
+			spelling: write.spelling
+			typ:      write.typ
+			line:     at.line
+			col:      at.col
+		}
+		expr:   value
+		line:   at.line
+		col:    at.col
+	}
 }
 
 // parse_return_statement reads `return;` or `return expr;`.

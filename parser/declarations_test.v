@@ -335,18 +335,12 @@ fn test_a_written_zero_bound_is_zero_for_a_string_initializer() {
 	assert body.unit.decls[0].body[0].decl_count == 0
 }
 
-// A shape the reader does not implement is refused by name: a nested list, a
-// designator, an element that does not begin with a written number or an
-// address, and an empty pair of braces. Measured on gcc 16.2.1, `int a[] = {};`
-// under `-std=gnu99` is `ISO C forbids empty initializer braces before C23` and
-// `zero or negative size array`.
+// A shape the reader does not implement is refused by name: an element that
+// begins with neither a written number nor an address, and an empty pair of
+// braces. Measured on gcc 16.2.1, `int a[] = {};` under `-std=gnu99` is
+// `ISO C forbids empty initializer braces before C23` and `zero or negative
+// size array`.
 fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
-	nested := declarations_of('static int a[2][2] = {{1, 2}, {3, 4}};')
-	assert nested.diagnostics.len == 1
-	assert nested.diagnostics[0].msg.contains('nested brace initializer')
-	designated := declarations_of('int a[3] = {[1] = 5};')
-	assert designated.diagnostics.len == 1
-	assert designated.diagnostics[0].msg.contains('designator')
 	// A name is read as an address, which is what a pointer's initializer is, so
 	// on an object that holds no address the element is named for that: gcc
 	// 16.2.1 rejects `int a[2] = {name};` as an undeclared name, and this reader
@@ -355,13 +349,44 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	assert addressed.diagnostics.len == 1
 	assert addressed.diagnostics[0].msg.contains('does not hold addresses')
 	// The element that is neither a written number nor an address is a
-	// parenthesized constant, which gcc 16.2.1 accepts and this reader does not.
+	// parenthesized constant, which gcc 16.2.1 accepts and this file-scope
+	// reader does not: a body's list is the stores a declaration makes and takes
+	// one, a file-scope list is a constant the image holds and does not.
 	element := declarations_of('int a[2] = {(1)};')
 	assert element.diagnostics.len == 1
 	assert element.diagnostics[0].msg.contains('written number')
 	empty := declarations_of('int a[] = {};')
 	assert empty.diagnostics.len == 1
 	assert empty.diagnostics[0].msg.contains('empty brace initializer')
+}
+
+// A file-scope list with a nested list or a designator initializes the
+// subobject it names, and each entry carries the byte that subobject starts at.
+// Measured on gcc 16.2.1, `static int a[2][2] = {{1, 2}, {3, 4}};` reads 1, 2, 3
+// and 4 at the four ints of the object, and `{[2] = 3, [0] = 1}` writes an int[4]
+// whose elements 0 and 2 are 1 and 3 and whose others are zero.
+fn test_a_file_scope_nested_or_designated_list_writes_the_subobject_it_names() {
+	nested := declarations_of('static int a[2][2] = {{1, 2}, {3, 4}};')
+	assert nested.diagnostics.len == 0
+	assert nested.unit.globals.len == 1
+	nested_entries := nested.unit.globals[0].member_inits
+	assert nested_entries.len == 4
+	mut offsets := []int{}
+	mut values := []i64{}
+	for entry in nested_entries {
+		offsets << entry.offset
+		values << (entry.init or { -1 })
+	}
+	assert offsets == [0, 4, 8, 12]
+	assert values == [1, 2, 3, 4]
+	designated := declarations_of('static int a[4] = {[2] = 3, [0] = 1};')
+	assert designated.diagnostics.len == 0
+	entries := designated.unit.globals[0].member_inits
+	assert entries.len == 2
+	assert entries[0].offset == 8
+	assert (entries[0].init or { -1 }) == 3
+	assert entries[1].offset == 0
+	assert (entries[1].init or { -1 }) == 1
 }
 
 // A struct's brace initializer at file scope gives each value to a member in the
@@ -519,36 +544,95 @@ fn test_a_body_scalar_in_braces_is_the_number_in_them() {
 	assert (value as ast.IntLit).value == 5
 }
 
-// The refusals are the same in a body: a nested list, a designator, an element
-// that does not begin with a written number or an address, and a list too long
-// for the array. Each is one diagnostic that names the construct, and the
-// declaration after the list is still read where it starts.
-fn test_a_body_brace_initializer_shape_that_is_not_implemented_is_named() {
-	nested := declarations_of('int main(void) { int a[2] = {{1}, {2}}; return 0; }')
-	assert nested.diagnostics.len == 1
-	assert nested.diagnostics[0].msg.contains('nested brace initializer')
-	designated := declarations_of('int main(void) { int a[3] = {[1] = 5}; return 0; }')
-	assert designated.diagnostics.len == 1
-	assert designated.diagnostics[0].msg.contains('designator')
-	// A name is read as an address now, so the element that is neither a written
-	// number nor an address is a parenthesized constant, which gcc 16.2.1
-	// accepts and this reader does not.
-	element := declarations_of('int main(void) { int a[2] = {(1)}; return 0; }')
-	assert element.diagnostics.len == 1
-	assert element.diagnostics[0].msg.contains('written number')
+// The shapes a body's list takes now: a nested brace, a designator and an
+// element that is an expression are all walked against the object's type, and
+// each write becomes the store the declaration makes at the subobject it
+// reached. The subobjects the list did not reach are stored zero first, because
+// the frame slot is whatever was there and the rest of the object is the zeros C
+// says it holds (6.7.8p21). A list too long for the array is still one
+// diagnostic that names the constraint and the declaration after it is read.
+// Measured on gcc 16.2.1, `struct P p = {.b = 2, .a = 1};` reads 1 and 2 for p.a
+// and p.b, and `int a[6] = {[4] = 40, [0] = 1, [2] = 20};` reads
+// 1, 0, 20, 0, 40, 0.
+fn test_a_body_nested_or_designated_list_stores_the_subobject_it_names() {
+	result := declarations_of('struct P { int a; int b; };\nint main(void) { struct P p = {.b = 2, .a = 1}; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	mut offsets := []int{}
+	mut values := []i64{}
+	for stmt in body {
+		if stmt.kind != .assign {
+			continue
+		}
+		field := stmt.field or { continue }
+		expr := stmt.expr or { continue }
+		if expr is ast.IntLit {
+			offsets << field.offset
+			values << (expr as ast.IntLit).value
+		}
+	}
+	// A zero for each of the two members, then the two values the list wrote, at
+	// the offsets the designators named.
+	assert offsets == [0, 4, 4, 0]
+	assert values == [0, 0, 2, 1]
+	designated := declarations_of('int main(void) { int a[6] = {[4] = 40, [0] = 1, [2] = 20}; return 0; }')
+	assert designated.diagnostics.len == 0
+	assert designated.unit.decls[0].body[0].decl_count == 6
 	excess := declarations_of('int main(void) { int a[2] = {1, 2, 3}; return 0; }')
 	assert excess.diagnostics.len == 1
 	assert excess.diagnostics[0].msg.contains('holds 2 elements')
 }
 
-// A pointer array in a body is a list of addresses, and storage in a frame is
-// initialized by stores: a store writes a constant, and an address is a
-// reference the layout resolves rather than bytes a store can write. So the
-// list is refused by name rather than written as numbers.
-fn test_a_body_list_of_addresses_is_refused() {
+// A pointer array in a body takes the same list as any other: an element is an
+// expression the declaration stores, so `&v` and a string literal reach a member
+// of pointer type the way any other expression does. Measured on gcc 16.2.1,
+// `int v = 1; int *p[2] = {&v, 0};` reads 1 for `*p[0]` and 0 for p[1].
+fn test_a_body_list_of_addresses_becomes_the_stores_of_the_elements() {
 	result := declarations_of('int main(void) { int v = 1; int *p[2] = {&v, 0}; return 0; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].body[1].decl_count == 2
+	mut assigns := 0
+	for stmt in result.unit.decls[0].body {
+		if stmt.kind == .assign {
+			assigns++
+		}
+	}
+	// Two zero stores for the two pointer elements, then the two values.
+	assert assigns == 4
+}
+
+// An address of a *part* of an object is refused by name rather than stored.
+// Measured on the binary built from this tree's base commit, `int *p[1]; p[0] =
+// &a[1];` reads back the address of `a` rather than of `a[1]`, because the store
+// an element of an array takes does not place the byte the part starts at. gcc
+// 16.2.1 accepts the program, and a wrong address is worse than a refusal, so the
+// shape is one the refusal names along with the object it is a part of.
+fn test_a_body_list_that_addresses_a_part_of_an_object_is_refused() {
+	result := declarations_of('static int a[2] = {1, 2};\nint main(void) { int *p[2] = {&a[0], &a[1]}; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('an address in a brace initializer inside a body is not implemented')
+	assert result.diagnostics[0].line == 2
+	assert result.diagnostics[0].col == 32
+	assert result.diagnostics[0].msg.contains('the address of a part of a is not implemented')
+}
+
+// An element that begins with a written constant and is longer than one is the
+// expression the store takes rather than the constant: `{1 + 1}` is one element
+// whose value is two, which gcc 16.2.1 accepts. What ends an element is the comma
+// or the closing brace, so anything else after the constant makes the element an
+// expression.
+fn test_a_body_list_element_that_is_a_constant_expression_is_read() {
+	result := declarations_of('int main(void) { int a[2] = {1 + 1, 3}; return 0; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].body[0].decl_count == 2
+	mut assigns := 0
+	for stmt in result.unit.decls[0].body {
+		if stmt.kind == .assign {
+			assigns++
+		}
+	}
+	// The two elements are stores, and the zero each element starts as is stored
+	// first.
+	assert assigns == 4
 }
 
 // A struct's brace initializer in a body is the stores the members make at the

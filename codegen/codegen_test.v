@@ -382,21 +382,16 @@ fn test_a_member_of_a_top_level_struct_holds_an_address() {
 	assert run_image(imported.bytes) == 3
 }
 
-// A local table whose elements are addresses is not a shape this reader places:
-// storage in a frame is initialized by stores, and a store writes a constant.
-// It is refused by name rather than stored as a zero, and the message names the
-// construct rather than a token inside it.
-fn test_an_address_table_inside_a_body_is_refused_by_name() {
-	// The reader refuses the shape before the emitter is handed it: storage in
-	// a frame is initialized by stores, and a store writes a constant.
-	parsed := translation_unit_refused('int main(void) { const char *const names[] = {"a", "b"}; return names[0][0]; }')
-	mut refused := false
-	for diagnostic in parsed.diagnostics {
-		if diagnostic.msg.contains('an address in a brace initializer inside a body is not implemented') {
-			refused = true
-		}
-	}
-	assert refused
+// A local table whose elements are addresses is the stores the declaration makes:
+// storage in a frame is initialized by stores, and an address is a value a store
+// writes, so the shape is placed rather than refused. Measured on gcc 16.2.1,
+// the program below exits 195, the values of the first byte of `"a"` and of the
+// first byte of `"b"` added.
+fn test_an_address_table_inside_a_body_becomes_the_stores_of_the_elements() {
+	emitted := emit(translation_unit('int main(void) { const char *const names[] = {"a", "b"}; return names[0][0] + names[1][0]; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 195
 }
 
 // A member of a table's element type that does not hold an address is refused by

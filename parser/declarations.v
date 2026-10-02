@@ -701,6 +701,17 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// not reach are the zeros the storage starts as.
 	mut data_struct_brace := false
 	mut data_member_inits := []ast.MemberInit{}
+	// data_resolved is the type a nested or designated list was walked against,
+	// which is the object's own type with the array sizes applied: `spec.clause`
+	// is the base the declarator was written from, and the walk needs the array
+	// a write's offset is inside.
+	mut data_resolved := ?types.Type(none)
+	// data_bytes is the number of bytes one element of the object takes when a
+	// nested or designated list was walked against its type, and zero when the
+	// object's width is the one its spelling answers. An array whose elements
+	// are aggregates has no width a spelling answers, so the walk is what says
+	// how far an index reaches.
+	mut data_bytes := 0
 	// data_string says the initializer was a string literal that was read, which
 	// is a declaration with storage even when the array it initializes holds no
 	// element: `char s[0] = "";` writes none, and the report for an initializer
@@ -854,8 +865,21 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					// A pointer's list is read by the arm below, which
 					// knows the elements are addresses.
 					data_brace = true
-					if list := p.parse_brace_initializer() {
-						if !data_array {
+					if list := p.parse_brace_initializer(false) {
+						if !list.is_a_flat_list() {
+							// A nested list or a designator: the list is
+							// walked against the object's type and each write
+							// lands at the byte its subobject starts at.
+							if general := p.file_scope_general_initializer(spec, d, list, data_name) {
+								data_member_inits = general.members
+								data_bytes = general.bytes
+								data_count = general.count
+								data_resolved = general.resolved
+								data_struct_brace = true
+							} else {
+								data_problem = true
+							}
+						} else if !data_array {
 							// A union takes one value for its first member
 							// and a struct one value per member; a scalar
 							// takes the one value in the braces.
@@ -1077,21 +1101,20 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.error_at(data_at, 'unsupported type ${offender}')
 			return decls
 		}
-		if data_stars == 0 && spec.clause.kind in [types.Kind.struct_, .union_] {
+		if data_stars == 0 && (spec.clause.kind in [types.Kind.struct_, .union_] || data_bytes > 0) {
 			if data_problem {
 				// The list was refused for its size and has already been
 				// named: there is nothing to lay out.
 				return decls
 			}
 			if data_brace && !data_union_first && !data_struct_brace {
-				// A brace initializer for an object of a struct type is a list
-				// of lists: a member may itself be an aggregate, and the
-				// designators and the nesting are not shapes this reader has.
-				// A union's one value initializes its first member and a
-				// struct's values initialize its members, both written into the
-				// image below. Measured before this was refused, a file-scope
-				// `struct S s = {5, 6};` laid the object out as zeros and the
-				// program read 0 where gcc 16.2.1 reads 56.
+				// A brace initializer for an object of an aggregate type that
+				// the reader refused: a union's one value initializes its
+				// first member and a struct's values initialize its members,
+				// both written into the image below. Measured before the
+				// members were written, a file-scope `struct S s = {5, 6};`
+				// laid the object out as zeros and the program read 0 where
+				// gcc 16.2.1 reads 56.
 				p.error_at(data_at, 'unsupported: ${data_name} is an object of the type ${spec.clause.describe()}, and a brace initializer for one is not implemented')
 				return decls
 			}
@@ -1101,7 +1124,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// many zeroed bytes. A union's first member is the one thing a
 			// definition writes into that storage; with no initializer it is
 			// the zeros the storage starts as.
-			bytes := p.aggregate_bytes(spec.clause)
+			//
+			// A list with a nested brace or a designator decided that size
+			// itself, because the type it was walked against may be an array
+			// whose element is an aggregate and has no width a spelling
+			// answers. `data_bytes` is that answer and is zero for a plain
+			// struct, which asks the layout the way it always did.
+			bytes := if data_bytes > 0 { data_bytes } else { p.aggregate_bytes(spec.clause) }
 			if bytes == 0 {
 				p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${spec.clause.describe()}, and its layout is not one this compiler knows')
 				return decls
@@ -1115,7 +1144,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.globals << ast.Global{
 				name:         data_name
 				typ:          data_type
-				resolved:     spec.clause
+				resolved:     data_resolved or { spec.clause }
 				count:        data_count
 				bytes:        bytes
 				init:         data_init
@@ -1454,14 +1483,29 @@ fn (p Parser) is_parenthesized_constant() bool {
 	return after.kind == .punct && (after.text == ',' || after.text == ';')
 }
 
-// BraceElement is one element of a brace initializer: a written number with its
-// sign, or an address. At most one of the two is set, and which one is what tells
-// a caller whether the element is a constant written into the storage or a
-// reference the layout resolves. A struct whose members mix a scalar and a
-// pointer needs both in one list.
+// BraceDesignator is one designator in front of an element of a brace
+// initializer: `.name` picks a member of a struct, `[n]` an element of an array,
+// and a run of them descends through subobjects, `.chain[1]` picking member
+// `chain` and then element 1 of it. Exactly one of `member` and `index` is set.
+struct BraceDesignator {
+	member ?string
+	index  ?int
+	at     tokenize.Token
+}
+
+// BraceElement is one element of a brace initializer. At most one of number,
+// address and expr is set: a file-scope list writes a written number with its
+// sign or an address, which is what the image holds, and a body's list writes an
+// expression, which is what a store takes. `list` is the element's own brace
+// list when it is one, `{{1, 2}}` for a member that is itself an aggregate, and
+// `designators` are the designators written in front of it, empty for an element
+// that names its subobject by position.
 struct BraceElement {
-	number  ?NumberConstant
-	address ?ast.AddressInit
+	number      ?NumberConstant
+	address     ?ast.AddressInit
+	expr        ?ast.Expr
+	list        ?BraceList
+	designators []BraceDesignator
 }
 
 // BraceList is a brace initializer as the reader read it: the elements in the
@@ -1473,19 +1517,28 @@ struct BraceList {
 }
 
 // parse_brace_initializer reads `{ v, v, ... }`, the list of values that
-// initializes an object. One element is one written number with its sign or a
+// initializes an object. One element is a written number with its sign or a
 // character constant, which 6.4.4.4 gives the value of the character and the
-// type int, or an address, which is what an element of a pointer's type is: a
-// function designator, `&name`, or a string literal.
+// type int; an address, which is what an element of a pointer's type is: a
+// function designator, `&name`, or a string literal; or a brace list of its own,
+// which is what an element that is itself an aggregate is. An element may be
+// preceded by designators, `.name` or `[n]`, which name the subobject it
+// initializes instead of leaving it to the position.
+//
+// `body` says the list initializes storage in a frame rather than an object in
+// the image, which decides how a leaf is read. A frame is written by stores, so
+// an element there is any expression a store can take, and a parenthesized
+// constant or `(void *)0` is an element a body has and a file-scope list does
+// not: the image holds constants and addresses, and those are what that reader
+// accepts.
 //
 // A shape this reader does not read is refused by name and at its own location
 // rather than read as a shorter list, because a list that wrote three values and
 // was read as one would write a wrong table, and a wrong value in a table is
-// worse than a refusal. Refused here: a nested list, `{{...}}`; a designator,
-// `{.x = 1}` or `{[2] = 1}`; an element that is neither a number nor an address,
-// which is every other expression, `{1 + 2}` included; and an empty pair of
-// braces, which gives an array no size to be.
-fn (mut p Parser) parse_brace_initializer() !BraceList {
+// worse than a refusal. Refused here: a file-scope element that is neither a
+// written constant nor an address, and an empty pair of braces, which gives an
+// array no size to be.
+fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 	open := p.next() // {
 	if p.at_punct('}') {
 		p.next()
@@ -1504,45 +1557,90 @@ fn (mut p Parser) parse_brace_initializer() !BraceList {
 			p.error_at(open, 'unsupported: unterminated { opened at ${open.line}:${open.col}')
 			return error('unterminated brace initializer')
 		}
-		if t.kind == .punct && t.text == '{' {
-			p.error_at(t, 'unsupported: a nested brace initializer is not implemented')
-			p.skip_balanced(open) or {}
-			return error('nested brace initializer')
-		}
-		if t.kind == .punct && (t.text == '.' || t.text == '[') {
-			p.error_at(t, 'unsupported: a designator in a brace initializer is not implemented')
+		designators := p.brace_designators() or {
 			p.skip_balanced(open) or {}
 			return error('brace designator')
 		}
-		before := p.diagnostics.len
-		// Only a token that can start an address takes the address path: a name,
-		// a string literal, or the ampersand in front of one. Everything else is
-		// read the way a constant was always read, so a character constant and a
-		// number keep the one path they had.
-		if t.kind == .identifier || t.kind == .string || (t.kind == .punct && t.text == '&') {
-			if address := p.file_scope_address() {
-				elements << BraceElement{
-					address: address
-				}
-			} else {
-				// The address was refused and named inside the reader.
+		if designators.len > 0 && !p.expect_punct('=') {
+			p.skip_balanced(open) or {}
+			return error('brace designator')
+		}
+		if p.at_punct('{') {
+			list := p.parse_brace_initializer(body) or {
+				p.skip_balanced(open) or {}
+				return error('nested brace initializer')
+			}
+			elements << BraceElement{
+				list:        list
+				designators: designators
+			}
+		} else if p.starts_a_written_constant() {
+			before := p.pos
+			constant := p.number_constant() or {
 				p.skip_balanced(open) or {}
 				return error('brace element')
 			}
-		} else {
-			constant := p.number_constant() or {
-				// A literal the reader refused has already been named at the
-				// literal; this is the report for an element that is not a
-				// number at all.
-				if p.diagnostics.len == before {
-					p.error_at(t, 'unsupported: an element of a brace initializer is a written number or an address, found ${describe(t)}')
+			if body && !p.at_punct(',') && !p.at_punct('}') {
+				// The constant is the first operand of an expression rather than
+				// the whole element: `{1 + 1}` is one element whose value is two,
+				// which gcc 16.2.1 accepts. What ends an element is the comma or
+				// the closing brace, so any other token after the constant means
+				// the element is longer than it and is read as an expression.
+				p.pos = before
+				expr := p.parse_expression() or {
+					p.skip_balanced(open) or {}
+					return error('brace element')
 				}
+				elements << BraceElement{
+					expr:        expr
+					designators: designators
+				}
+			} else {
+				elements << BraceElement{
+					number:      constant
+					designators: designators
+				}
+			}
+		} else if !body && (t.kind == .identifier || t.kind == .string || (t.kind == .punct && t.text == '&')) {
+			// Only a token that can start an address takes the address path: a
+			// name, a string literal, or the ampersand in front of one.
+			if address := p.file_scope_address() {
+				elements << BraceElement{
+					address:     address
+					designators: designators
+				}
+			} else {
+				p.skip_balanced(open) or {}
+				return error('brace element')
+			}
+		} else if body {
+			// The element a store takes: a name, a call, `&x`, a string
+			// literal, or a parenthesized constant this reader has no arm for.
+			expr := p.parse_expression() or {
+				p.skip_balanced(open) or {}
+				return error('brace element')
+			}
+			// The address of a *part* of an object is refused by name. gcc 16.2.1
+			// accepts `int a[2]; int *p[2] = {&a[0], &a[1]};`, and the store this
+			// reader makes for one element of an array does not yet place the
+			// byte the part starts at: measured on the binary built from this
+			// tree's base commit, `int *p[1]; p[0] = &a[1];` reads back the
+			// address of `a` rather than of `a[1]`. A wrong address is worse than
+			// a refusal, so the shape is named here. The address of the whole
+			// object, `&x`, is one the store places.
+			if part := address_of_a_part(expr) {
+				p.error_span(part.line, part.col, 'unsupported: the address of a part of ${part.name} is not implemented, and the address of the whole object is not what it names')
 				p.skip_balanced(open) or {}
 				return error('brace element')
 			}
 			elements << BraceElement{
-				number: constant
+				expr:        expr
+				designators: designators
 			}
+		} else {
+			p.error_at(t, 'unsupported: an element of a brace initializer is a written number or an address, found ${describe(t)}')
+			p.skip_balanced(open) or {}
+			return error('brace element')
 		}
 		if p.at_punct(',') {
 			p.next()
@@ -1559,6 +1657,129 @@ fn (mut p Parser) parse_brace_initializer() !BraceList {
 		p.skip_balanced(open) or {}
 		return error('brace list')
 	}
+}
+
+// AddressOfAPart is the name an address of a part of an object names together
+// with the place the name is written. A diagnostic about the shape points at the
+// name rather than at the ampersand in front of it, which is the token that looks
+// like an ordinary address and not like the part being addressed.
+struct AddressOfAPart {
+	name string
+	line int
+	col  int
+}
+
+// address_of_a_part is what an address of a part of an object names, and none
+// when the expression is not one: `&name[i]` and `&name.a` address a part of an
+// object, and `&name` addresses the whole thing, which is a value an element
+// store places. The name is empty for a part reached through something other than
+// a name, which has no name to point at.
+fn address_of_a_part(expr ast.Expr) ?AddressOfAPart {
+	if expr is ast.Unary {
+		if expr.op == '&' {
+			inner := expr.expr
+			if inner is ast.Index {
+				if inner.base is ast.Ident {
+					return AddressOfAPart{
+						name: inner.base.name
+						line: inner.base.line
+						col:  inner.base.col
+					}
+				}
+				return AddressOfAPart{
+					line: inner.line
+					col:  inner.col
+				}
+			}
+			if inner is ast.Field {
+				return AddressOfAPart{
+					name: inner.name
+					line: inner.line
+					col:  inner.col
+				}
+			}
+		}
+	}
+	return none
+}
+
+// starts_a_written_constant answers whether the next token begins a written
+// number or character constant, sign included. It reads no token, so a false
+// answer leaves the parser where it was and the element is read by another path.
+fn (p Parser) starts_a_written_constant() bool {
+	t := p.peek()
+	if t.kind == .number || t.kind == .character {
+		return true
+	}
+	if t.kind == .punct && (t.text == '-' || t.text == '+') {
+		after := p.peek_at(1)
+		return after.kind == .number || after.kind == .character
+	}
+	return false
+}
+
+// brace_designators reads the run of designators in front of an element and
+// answers with an empty list when the element has none. A designator is `.name`
+// or `[constant]`, and a run of them is one list because they all name the one
+// subobject the element initializes.
+fn (mut p Parser) brace_designators() ?[]BraceDesignator {
+	mut designators := []BraceDesignator{}
+	for p.at_punct('.') || p.at_punct('[') {
+		at := p.next()
+		if at.text == '.' {
+			name := p.peek()
+			if name.kind != .identifier {
+				p.error_at(at, 'unsupported: a designator names a member with an identifier, found ${describe(name)}')
+				return none
+			}
+			p.next()
+			designators << BraceDesignator{
+				member: name.text
+				at:     at
+			}
+			continue
+		}
+		index := p.brace_designator_index() or { return none }
+		if !p.expect_punct(']') {
+			return none
+		}
+		designators << BraceDesignator{
+			index: index
+			at:    at
+		}
+	}
+	return designators
+}
+
+// brace_designator_index reads the element an array designator names, which is
+// an integer constant expression: a written constant is read as one, and
+// anything else is read as an expression and folded the way a bound is. A shape
+// the folder cannot evaluate is refused by name rather than read as an index of
+// a guessed value.
+fn (mut p Parser) brace_designator_index() ?int {
+	at := p.peek()
+	saved := p.pos
+	saved_diagnostics := p.diagnostics.len
+	if p.starts_a_written_constant() {
+		if constant := p.number_constant() {
+			if value := constant.number.integer {
+				return int(value)
+			}
+		}
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+	}
+	expr := p.parse_expression() or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		p.error_at(at, 'unsupported: an array designator names an element with an integer constant, found ${describe(at)}')
+		return none
+	}
+	value := p.constant_value(expr) or {
+		p.error_at(at, 'unsupported: an array designator names an element with an integer constant, found ${describe(at)}')
+		return none
+	}
+	return int(value)
 }
 
 // parse_address_initializer reads `{ a, a, ... }` where every element initializes
@@ -1637,20 +1858,382 @@ fn (mut p Parser) parse_address_initializer() ![]ast.AddressInit {
 	}
 }
 
-// refuse_an_address_in_a_body reports, once, that a brace list inside a body
-// writes an address. Storage in a frame is initialized by stores, and a store
-// writes a constant; an address is a reference the image's layout resolves, which
-// a body's store is not. It is refused by name rather than stored as a zero,
-// because a zero is a value the declaration did not write. The shape is the one
-// a file-scope object has, where the layout can resolve the reference; it is not
-// one this reader places inside a body.
-fn (mut p Parser) refuse_an_address_in_a_body(list BraceList) {
+// BraceWrite is one scalar subobject a brace initializer wrote: the byte it
+// starts at inside the object, the width of its type, the type's spelling, and
+// the element that wrote it. A designator and a nested list both arrive here:
+// where a value goes is decided while the list is walked, and what is left is
+// one write per scalar subobject.
+struct BraceWrite {
+	offset   int
+	width    int
+	spelling string
+	typ      types.Type
+	element  BraceElement
+}
+
+// is_a_flat_list says the list is one level of elements with no designator and
+// no nested list, which is the shape the readers that predate designators place.
+// Every other list is walked by `fill_brace`.
+fn (list BraceList) is_a_flat_list() bool {
 	for element in list.elements {
-		if element.address != none {
-			p.error_at(list.at, 'unsupported: an address in a brace initializer inside a body is not implemented')
-			return
+		if element.list != none || element.designators.len > 0 {
+			return false
 		}
 	}
+	return true
+}
+
+// is_a_flat_number_list says every element is a written number, which is what a
+// body's list has to be for the stores the flat path emits. A body list whose
+// element is an expression is walked by `fill_brace` even when it is flat.
+fn (list BraceList) is_a_flat_number_list() bool {
+	for element in list.elements {
+		if element.list != none || element.designators.len > 0 || element.number == none {
+			return false
+		}
+	}
+	return true
+}
+
+// brace_array_count is how many elements a list gives an array declared with
+// empty brackets: the highest subobject it reaches, one past the last index a
+// designator names and one past each element written by position.
+fn brace_array_count(items []BraceElement) int {
+	mut index := 0
+	mut count := 0
+	for item in items {
+		if item.designators.len > 0 {
+			if named := item.designators[0].index {
+				index = named
+			}
+		}
+		if index + 1 > count {
+			count = index + 1
+		}
+		index++
+	}
+	return count
+}
+
+// member_index is the position of the named member in an aggregate, and none
+// when the aggregate has no member of that name.
+fn member_index(typ types.Type, name string) ?int {
+	for i, member in typ.members {
+		if member.name == name {
+			return i
+		}
+	}
+	return none
+}
+
+// fill_brace walks a brace list against the type it initializes and appends the
+// writes it makes, one per scalar subobject, in the order it reaches them. It is
+// 6.7.8 read as a walk: an element initializes the next subobject of the current
+// level unless a designator names one, a nested list initializes the subobject
+// as a whole, and an element that reaches an aggregate initializes it without
+// its own braces. `start` is the first element to read and the answer is the
+// first one left, so a caller can tell a list that wrote more than the object
+// holds.
+fn (mut p Parser) fill_brace(typ types.Type, items []BraceElement, start int, base int, mut writes []BraceWrite) int {
+	match typ.kind {
+		.array {
+			element := typ.element() or { return start }
+			stride := p.representation.size_of(element) or { return start }
+			count := typ.count
+			mut index := 0
+			mut i := start
+			for i < items.len {
+				item := items[i]
+				if item.designators.len > 0 {
+					named := item.designators[0].index or {
+						p.error_at(item.designators[0].at, 'unsupported: an array is initialized by position or by an index, and a member designator names no element')
+						return items.len
+					}
+					index = named
+					if index < 0 || (count > 0 && index >= count) {
+						p.error_at(item.designators[0].at, 'a constraint violation: the designator [${index}] is outside ${typ.describe()}')
+						return items.len
+					}
+					i = p.fill_designated(element, item.designators[1..], items, i, base + index * stride, mut writes)
+					index++
+					continue
+				}
+				if count > 0 && index >= count {
+					return i
+				}
+				i = p.fill_one(element, items, i, base + index * stride, mut writes)
+				index++
+			}
+			return i
+		}
+		.struct_ {
+			layout := p.representation.layout(typ) or { return start }
+			mut member := 0
+			mut i := start
+			for i < items.len {
+				item := items[i]
+				if item.designators.len > 0 {
+					named := item.designators[0].member or {
+						p.error_at(item.designators[0].at, 'unsupported: a struct is initialized by position or by a member name, and an index designates no member')
+						return items.len
+					}
+					found := member_index(typ, named) or {
+						p.error_at(item.designators[0].at, 'a constraint violation: ${typ.describe()} has no member named ${named}')
+						return items.len
+					}
+					member = found
+					i = p.fill_designated(typ.members[member].typ, item.designators[1..], items, i, base + layout.offsets[member], mut writes)
+					member++
+					continue
+				}
+				if member >= typ.members.len {
+					return i
+				}
+				i = p.fill_one(typ.members[member].typ, items, i, base + layout.offsets[member], mut writes)
+				member++
+			}
+			return i
+		}
+		.union_ {
+			if typ.members.len == 0 || start >= items.len {
+				return start
+			}
+			layout := p.representation.layout(typ) or { return start }
+			item := items[start]
+			mut member := 0
+			mut rest := []BraceDesignator{}
+			if item.designators.len > 0 {
+				named := item.designators[0].member or {
+					p.error_at(item.designators[0].at, 'unsupported: a union is initialized by position or by a member name, and an index designates no member')
+					return items.len
+				}
+				member = member_index(typ, named) or {
+					p.error_at(item.designators[0].at, 'a constraint violation: ${typ.describe()} has no member named ${named}')
+					return items.len
+				}
+				rest = item.designators[1..]
+			}
+			return p.fill_designated(typ.members[member].typ, rest, items, start, base + layout.offsets[member], mut writes)
+		}
+		else {
+			if start >= items.len {
+				return start
+			}
+			p.write_brace_leaf(typ, base, items[start], mut writes)
+			return start + 1
+		}
+	}
+}
+
+// fill_one initializes one subobject from the element at `start`: the element's
+// own list when it has one, an aggregate walked element by element when the
+// element is a value that reaches one, and a leaf otherwise. It answers the
+// first element left.
+fn (mut p Parser) fill_one(typ types.Type, items []BraceElement, start int, base int, mut writes []BraceWrite) int {
+	item := items[start]
+	if list := item.list {
+		p.fill_brace(typ, list.elements, 0, base, mut writes)
+		return start + 1
+	}
+	if typ.kind in [types.Kind.array, .struct_, .union_] {
+		// Brace elision: the elements that follow initialize the aggregate's own
+		// subobjects, which is the shape `struct S s = {1, 2, 3};` has for a
+		// struct whose first member is a struct.
+		return p.fill_brace(typ, items, start, base, mut writes)
+	}
+	p.write_brace_leaf(typ, base, item, mut writes)
+	return start + 1
+}
+
+// fill_designated applies the designators that follow the one a caller already
+// read at its own level, and then initializes the subobject they name. It is the
+// `[1]` of a `.chain[1]`, or empty for a designator that named the subobject
+// itself.
+fn (mut p Parser) fill_designated(typ types.Type, designators []BraceDesignator, items []BraceElement, start int, base int, mut writes []BraceWrite) int {
+	if designators.len == 0 {
+		return p.fill_one(typ, items, start, base, mut writes)
+	}
+	designator := designators[0]
+	rest := designators[1..]
+	match typ.kind {
+		.array {
+			element := typ.element() or { return start }
+			stride := p.representation.size_of(element) or { return start }
+			index := designator.index or {
+				p.error_at(designator.at, 'unsupported: an array is initialized by position or by an index, and a member designator names no element')
+				return items.len
+			}
+			if index < 0 || (typ.count > 0 && index >= typ.count) {
+				p.error_at(designator.at, 'a constraint violation: the designator [${index}] is outside ${typ.describe()}')
+				return items.len
+			}
+			return p.fill_designated(element, rest, items, start, base + index * stride, mut writes)
+		}
+		.struct_ {
+			layout := p.representation.layout(typ) or { return start }
+			named := designator.member or {
+				p.error_at(designator.at, 'unsupported: a struct is initialized by position or by a member name, and an index designates no member')
+				return items.len
+			}
+			member := member_index(typ, named) or {
+				p.error_at(designator.at, 'a constraint violation: ${typ.describe()} has no member named ${named}')
+				return items.len
+			}
+			return p.fill_designated(typ.members[member].typ, rest, items, start, base + layout.offsets[member], mut writes)
+		}
+		.union_ {
+			layout := p.representation.layout(typ) or { return start }
+			named := designator.member or {
+				p.error_at(designator.at, 'unsupported: a union is initialized by position or by a member name, and an index designates no member')
+				return items.len
+			}
+			member := member_index(typ, named) or {
+				p.error_at(designator.at, 'a constraint violation: ${typ.describe()} has no member named ${named}')
+				return items.len
+			}
+			return p.fill_designated(typ.members[member].typ, rest, items, start, base + layout.offsets[member], mut writes)
+		}
+		else {
+			p.error_at(designator.at, 'unsupported: a designator names a subobject of an object with members, and ${typ.describe()} has none')
+			return items.len
+		}
+	}
+}
+
+// write_brace_leaf appends the one write an element makes for a scalar subobject
+// of the given type at the given byte.
+fn (mut p Parser) write_brace_leaf(typ types.Type, base int, element BraceElement, mut writes []BraceWrite) {
+	writes << BraceWrite{
+		offset:   base
+		width:    p.representation.size_of(typ) or { 0 }
+		spelling: typ.describe()
+		typ:      typ
+		element:  element
+	}
+}
+
+// collect_leaves is every scalar subobject of an object type, in the order a
+// walk reaches them, which is what a body's initializer stores zero into before
+// it writes the values: the frame slot starts as whatever was there, and the
+// subobjects a list did not reach are the zeros C says the rest of the object
+// holds (6.7.8p21). A union contributes every member, because a member starts at
+// the beginning of the union and zeroing each of them covers the bytes whichever
+// one a later read looks at.
+fn (mut p Parser) collect_leaves(typ types.Type, base int, mut leaves []BraceWrite) {
+	match typ.kind {
+		.array {
+			element := typ.element() or { return }
+			stride := p.representation.size_of(element) or { return }
+			for index in 0 .. typ.count {
+				p.collect_leaves(element, base + index * stride, mut leaves)
+			}
+		}
+		.struct_ {
+			layout := p.representation.layout(typ) or { return }
+			for i, member in typ.members {
+				p.collect_leaves(member.typ, base + layout.offsets[i], mut leaves)
+			}
+		}
+		.union_ {
+			layout := p.representation.layout(typ) or { return }
+			for i, member in typ.members {
+				p.collect_leaves(member.typ, base + layout.offsets[i], mut leaves)
+			}
+		}
+		else {
+			leaves << BraceWrite{
+				offset:   base
+				width:    p.representation.size_of(typ) or { 0 }
+				spelling: typ.describe()
+				typ:      typ
+			}
+		}
+	}
+}
+
+// BraceGeneral is a nested or designated list at file scope as the object it
+// initializes: the writes the list made, the bytes one element of the object
+// takes, how many elements an array has, and the type the walk ran against. The
+// count and the type are the two facts the walk answers that the declarator did
+// not: an array with empty brackets takes its size from the list.
+struct BraceGeneral {
+	members  []ast.MemberInit
+	bytes    int
+	count    int
+	resolved types.Type
+}
+
+// file_scope_general_initializer walks a nested or designated list against the
+// type of the object it initializes and answers with the writes the image holds.
+// A shape the walk cannot place - an object that is a scalar, a type without a
+// layout, a list that reaches past the object - is refused by name and none is
+// answered, so the declaration is not laid out with a table it cannot trust.
+fn (mut p Parser) file_scope_general_initializer(spec DeclSpec, d Declarator, list BraceList, name string) ?BraceGeneral {
+	declared := p.declared_type(spec.clause, d)
+	array := d.is_array()
+	if !array && spec.clause.kind !in [types.Kind.struct_, .union_] {
+		p.error_at(list.at, 'unsupported: ${name} is a scalar, and a nested or designated list initializes an object with subobjects')
+		return none
+	}
+	mut target := declared
+	mut count := d.array_count()
+	if array && count == 0 {
+		// Empty brackets: the size is the highest subobject the list reaches.
+		count = brace_array_count(list.elements)
+		if count > 0 {
+			element := declared.element() or { return none }
+			target = types.array_of(element, count)
+		}
+	}
+	element := if array { target.element() or { return none } } else { target }
+	bytes := p.representation.size_of(element) or {
+		p.error_at(list.at, 'unsupported: the layout of ${target.describe()} is not one this compiler knows')
+		return none
+	}
+	mut writes := []BraceWrite{}
+	end := p.fill_brace(target, list.elements, 0, 0, mut writes)
+	if end < list.elements.len {
+		p.error_at(list.at, 'a constraint violation: ${name} is initialized with more elements than its type holds')
+		return none
+	}
+	return BraceGeneral{
+		members:  p.brace_writes_to_members(writes)
+		bytes:    bytes
+		count:    count
+		resolved: target
+	}
+}
+
+// brace_writes_to_members turns the writes a list made into the entries a
+// file-scope initializer carries: the byte the subobject starts at inside the
+// object, its width and its spelling, and the constant or the address written
+// into it. The class is the subobject's own type, because a value written into a
+// member is converted the way a store into the member converts it.
+fn (mut p Parser) brace_writes_to_members(writes []BraceWrite) []ast.MemberInit {
+	mut members := []ast.MemberInit{cap: writes.len}
+	for write in writes {
+		element := write.element
+		if address := element.address {
+			members << ast.MemberInit{
+				offset:   write.offset
+				width:    write.width
+				spelling: write.spelling
+				address:  address
+			}
+			continue
+		}
+		number := element.number or { continue }
+		init, init_float := initializer_for(write.spelling, number.number.integer,
+			number.number.floating)
+		members << ast.MemberInit{
+			offset:     write.offset
+			width:      write.width
+			spelling:   write.spelling
+			init:       init
+			init_float: init_float
+		}
+	}
+	return members
 }
 
 // constant_expr is one constant of a brace list as the expression the tree
