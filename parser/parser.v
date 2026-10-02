@@ -2,6 +2,7 @@ module parser
 
 import ast
 import backend
+import backend.abi
 import tokenize
 import types
 
@@ -156,6 +157,7 @@ pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 		representation: representation_of(target)
 		declared:       map[string]bool{}
 	}
+	p.declare_argument_list()
 	unit := p.parse_unit()
 	// A file-scope bound that named something the scope did not have is answered
 	// now, because the whole file has been read and whether the name is declared
@@ -170,6 +172,25 @@ pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 		unit:        unit
 		diagnostics: p.diagnostics
 	}
+}
+
+// declare_argument_list puts the type a header's `__builtin_va_list` names into
+// the file scope before anything is read.
+//
+// `<stdarg.h>` declares it as a typedef of a compiler's own spelling, and the
+// two typedefs a program sees - `__gnuc_va_list` and `va_list` - resolve
+// through it, so a `va_list` in a program is this type written out. The type is
+// the argument list the calling convention walks, which is a fact about the
+// target, so it comes from `backend/abi` and is not spelled here.
+fn (mut p Parser) declare_argument_list() {
+	p.declared['__builtin_va_list'] = true
+	p.scopes.declare_at_file_scope(types.Symbol{
+		name:    '__builtin_va_list'
+		typ:     abi.argument_list_type()
+		storage: types.Storage.typedef_
+		line:    1
+		col:     1
+	})
 }
 
 // representation_of is what the description says about the C types: the width of a
@@ -401,7 +422,13 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 				// are inside the expression the call is written to.
 				p.check_undeclared_expression(callee, mut reported)
 			} else {
-				p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+				// A call to one of the argument-list operations is not a name the
+				// unit has to declare: the reader built the call itself, from a
+				// spelling in the compiler's own namespace, and there is no
+				// declaration any program could write for it.
+				if expr.name !in argument_list_names {
+					p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+				}
 			}
 			for argument in expr.args {
 				p.check_undeclared_expression(argument, mut reported)
@@ -1428,6 +1455,14 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
+		// The reserved `__builtin_` spellings are reads of their own and not
+		// calls: their arguments are types as often as expressions, and the
+		// value is settled while the tokens are read. The list is in
+		// builtins.v, where each one's reader is.
+		if t.text in builtin_expression_names && p.at_punct('(') {
+			return p.parse_builtin_expression(t)!
+		}
+
 		if p.at_punct('.') || p.at_punct('->') {
 			return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'), ?ast.Expr(none))!)
 		}

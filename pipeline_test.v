@@ -2467,3 +2467,245 @@ fn test_an_unsigned_destination_keeps_its_range_where_a_double_is_stored() {
 		os.rm(binary) or {}
 	}
 }
+
+// A variadic definition is a definition: the prologue writes every argument
+// register into a save area, and the four operations over the argument list read
+// and step that area. These run, because a definition that compiles and sums the
+// wrong arguments is the failure this feature can have, and only a run shows it.
+//
+// The sources are written with the compiler's own spellings rather than with
+// stdarg.h's, because the preprocessor is not in this path; each one is what a
+// header's `va_start`, `va_arg`, `va_copy` and `va_end` expand to. Every answer
+// here was checked against gcc 16.2.1 under -std=gnu99 on the same source.
+fn test_a_variadic_definition_sums_what_it_is_given() {
+	source := scratch('variadic_sum.c')
+	binary := scratch('variadic_sum')
+	program := 'int sum(int count, ...)
+{
+	__builtin_va_list ap;
+	int total = 0;
+	int i;
+	__builtin_va_start(ap, count);
+	for (i = 0; i < count; ++i)
+		total += __builtin_va_arg(ap, int);
+	__builtin_va_end(ap);
+	return total;
+}
+long long sum_long(int count, ...)
+{
+	__builtin_va_list ap;
+	long long total = 0;
+	int i;
+	__builtin_va_start(ap, count);
+	for (i = 0; i < count; ++i)
+		total += __builtin_va_arg(ap, long long);
+	__builtin_va_end(ap);
+	return total;
+}
+double sum_double(int count, ...)
+{
+	__builtin_va_list ap;
+	double total = 0;
+	int i;
+	__builtin_va_start(ap, count);
+	for (i = 0; i < count; ++i)
+		total += __builtin_va_arg(ap, double);
+	__builtin_va_end(ap);
+	return total;
+}
+int main(void)
+{
+	if (sum(0) != 0) return 1;
+	if (sum(1, 7) != 7) return 2;
+	if (sum(3, 1, 2, 3) != 6) return 3;
+	if (sum(9, 1, 2, 3, 4, 5, 6, 7, 8, 9) != 45) return 4;
+	if (sum_long(0) != 0) return 5;
+	if (sum_long(3, 1, 2, 3) != 6) return 6;
+	if (sum_double(0) != 0.0) return 7;
+	if (sum_double(3, 0.5, 1.5, 2.5) != 4.5) return 8;
+	return 0;
+}
+'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	assert exit_status == 0
+}
+
+// More unnamed arguments than there are argument registers: the first ones arrive
+// in registers and the rest on the caller's stack, and a walk that starts in the
+// wrong place reads the wrong word. Six named parameters fill the general file,
+// so all three unnamed ones are on the stack, at the first word past the return
+// address and the saved frame pointer.
+fn test_the_general_arguments_run_out_of_registers() {
+	source := scratch('variadic_stack.c')
+	binary := scratch('variadic_stack')
+	program := 'int take(int a, int b, int c, int d, int e, int f, ...)
+{
+	__builtin_va_list ap;
+	int total = 0;
+	__builtin_va_start(ap, f);
+	total += __builtin_va_arg(ap, int);
+	total += __builtin_va_arg(ap, int);
+	total += __builtin_va_arg(ap, int);
+	__builtin_va_end(ap);
+	return total;
+}
+int main(void)
+{
+	/* The body reads exactly the three unnamed arguments it is given: a read
+	 * past the last one is a read of the caller stack, which is not a thing
+	 * this test can have an answer for. */
+	return take(1, 2, 3, 4, 5, 6, 7, 8, 9) == 24 ? 0 : 1;
+}
+'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	assert exit_status == 0
+}
+
+// A vector argument after one that went on the stack. The general file is full,
+// so the two ints are on the stack, and the two doubles are in the first vector
+// registers: a save area that writes only the general file, or only the registers
+// it saw used, answers zero for the doubles here.
+fn test_a_vector_argument_after_one_that_went_on_the_stack() {
+	source := scratch('variadic_mixed.c')
+	binary := scratch('variadic_mixed')
+	program := 'int mixed(int a, int b, int c, int d, int e, int f, ...)
+{
+	__builtin_va_list ap;
+	int total = a + b + c + d + e + f;
+	double halves = 0;
+	__builtin_va_start(ap, f);
+	total += __builtin_va_arg(ap, int);
+	total += __builtin_va_arg(ap, int);
+	halves += __builtin_va_arg(ap, double);
+	halves += __builtin_va_arg(ap, double);
+	__builtin_va_end(ap);
+	return total + (int)(halves * 10);
+}
+int main(void)
+{
+	return mixed(1, 2, 3, 4, 5, 6, 7, 8, 1.5, 2.5) == 76 ? 0 : 1;
+}
+'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	assert exit_status == 0
+}
+
+// A copy of an argument list walks on its own: the same unnamed arguments are
+// read twice, once through each list. Nine arguments with one named parameter put
+// four of them on the stack, so the copy is a copy of a walk that has already
+// stepped out of both files.
+fn test_a_copy_of_an_argument_list_walks_on_its_own() {
+	source := scratch('variadic_copy.c')
+	binary := scratch('variadic_copy')
+	program := 'int twice(int count, ...)
+{
+	__builtin_va_list ap;
+	__builtin_va_list snapshot;
+	int total = 0;
+	int i;
+	__builtin_va_start(ap, count);
+	__builtin_va_copy(snapshot, ap);
+	for (i = 0; i < count; ++i)
+		total += __builtin_va_arg(ap, int);
+	for (i = 0; i < count; ++i)
+		total += __builtin_va_arg(snapshot, int);
+	__builtin_va_end(snapshot);
+	__builtin_va_end(ap);
+	return total;
+}
+int main(void)
+{
+	if (twice(0) != 0) return 1;
+	if (twice(1, 5) != 10) return 2;
+	if (twice(3, 1, 2, 3) != 12) return 3;
+	if (twice(9, 1, 2, 3, 4, 5, 6, 7, 8, 9) != 90) return 4;
+	return 0;
+}
+'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	assert exit_status == 0
+}
+
+// There are no unnamed arguments in a function whose parameter list does not end
+// in an ellipsis, so there is no list to fill in and the operation is refused by
+// name rather than answered with a walk over nothing.
+fn test_an_argument_list_operation_outside_a_variadic_function_is_refused() {
+	source := scratch('variadic_refused.c')
+	binary := scratch('variadic_refused')
+	program := 'int main(void)
+{
+	__builtin_va_list ap;
+	__builtin_va_start(ap, ap);
+	return 0;
+}
+'
+	emitted := compile([source, '-o', binary], program)
+	os.rm(source) or {}
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('__builtin_va_start')
+}
+
+// A function that is handed an argument list is not a variadic definition, but
+// its parameter is a list all the same: a function that formats or sums on behalf
+// of a variadic one walks the list it was handed. The list is not storage this
+// function filled in, so it is the declared type that says what the walk may
+// read, and the walk steps the caller's tag rather than a copy of it.
+fn test_a_function_handed_an_argument_list_walks_it() {
+	source := scratch('variadic_handed.c')
+	binary := scratch('variadic_handed')
+	program := 'int sum_list(int count, __builtin_va_list ap)
+{
+	int total = 0;
+	int i;
+	for (i = 0; i < count; ++i)
+		total += __builtin_va_arg(ap, int);
+	return total;
+}
+int sum(int count, ...)
+{
+	__builtin_va_list ap;
+	__builtin_va_start(ap, count);
+	return sum_list(count, ap);
+}
+int main(void)
+{
+	if (sum(0) != 0) return 1;
+	if (sum(3, 1, 2, 3) != 6) return 2;
+	if (sum(9, 1, 2, 3, 4, 5, 6, 7, 8, 9) != 45) return 3;
+	return 0;
+}
+'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	assert exit_status == 0
+}
+
+// An object that is not an argument list holds something that is not a tag, so a
+// walk through it reads that something as though it were one: `va_arg(x, int)` on
+// an int takes the value of x for the address of a tag and reads a list out of
+// wherever it points. gcc 16.2.1 refuses this and so does this back end, at the
+// operation rather than by writing a program that reads a wrong address.
+fn test_a_walk_of_an_object_that_is_not_an_argument_list_is_refused() {
+	source := scratch('variadic_not_a_list.c')
+	binary := scratch('variadic_not_a_list')
+	program := 'int main(void)
+{
+	int x = 0;
+	return __builtin_va_arg(x, int);
+}
+'
+	emitted := compile([source, '-o', binary], program)
+	os.rm(source) or {}
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('__builtin_va_arg')
+	assert emitted.diagnostics[0].msg.contains('not an argument list')
+}

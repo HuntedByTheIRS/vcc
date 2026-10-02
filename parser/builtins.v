@@ -1,0 +1,366 @@
+module parser
+
+import ast
+import tokenize
+import types
+
+// The GCC builtins this reader answers while it reads, which are the ones a
+// C library's headers reach for rather than the ones a program writes by hand.
+// They are in the reserved namespace, so no dialect refuses them and no row in
+// `standard/features.v` gates them: a name with two leading underscores carries
+// nothing for the dialect check to report.
+//
+// Each one is folded where it is written, the way `sizeof` is: the question it
+// asks is one the reader can answer from the declaration it was handed, and the
+// value it is worth is an integer constant expression with no run-time part. A
+// builtin whose answer would be a guess is refused by name here rather than
+// filled in with a value this compiler has not computed.
+const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr',
+	'__builtin_offsetof', '__builtin_va_arg', '__builtin_va_start', '__builtin_va_end',
+	'__builtin_va_copy']
+
+// parse_builtin_expression reads one of them. The name has been read and the
+// cursor is at its opening parenthesis.
+//
+// A builtin nests through its own arguments, so the count that bounds
+// parenthesised nesting and conditional chains bounds this one too: without it,
+// `__builtin_choose_expr(1, __builtin_choose_expr(1, ...`, written once per
+// level, follows the chain until the stack runs out.
+fn (mut p Parser) parse_builtin_expression(at tokenize.Token) !ast.Expr {
+	p.depth++
+	if p.depth > max_expression_depth {
+		p.depth--
+		p.error_at(at, 'expression is nested more than ${max_expression_depth} levels deep')
+		return error('expression nested too deeply')
+	}
+	expr := p.read_builtin_expression(at) or {
+		p.depth--
+		return error('the builtin ${at.text}')
+	}
+	p.depth--
+	return expr
+}
+
+fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
+	match at.text {
+		'__builtin_types_compatible_p' {
+			return p.parse_types_compatible(at)
+		}
+		'__builtin_choose_expr' {
+			return p.parse_choose_expr(at)
+		}
+		'__builtin_offsetof' {
+			return p.parse_offsetof(at)
+		}
+		'__builtin_va_arg' {
+			return p.parse_va_arg(at)
+		}
+		'__builtin_va_start' {
+			return p.parse_va_start(at)
+		}
+		'__builtin_va_end' {
+			return p.parse_va_end(at)
+		}
+		'__builtin_va_copy' {
+			return p.parse_va_copy(at)
+		}
+		else {
+			return error('not a builtin this reader knows')
+		}
+	}
+}
+
+// parse_types_compatible answers `__builtin_types_compatible_p(type1, type2)`,
+// which glibc's math.h uses to dispatch a type-generic macro on the type of its
+// argument: `isnan(x)` becomes a chain of these asking whether the type of x is
+// `float`, then `double`, then `long double`.
+//
+// The answer is 1 when the two types are the same type and 0 when they are not,
+// and it has the type int because that is what gcc gives it. gcc ignores
+// top-level qualifiers when it asks, so `__builtin_types_compatible_p(const int,
+// int)` is 1 while `(__builtin_types_compatible_p(const int *, int *))` is 0;
+// measured on gcc 16.2.1, along with `(char, signed char)` and `(enum E, int)`,
+// which are both 0 because those are different types.
+//
+// The answer is a value, so neither direction may be guessed: a type this
+// compiler did not resolve is refused by name rather than answered 0.
+fn (mut p Parser) parse_types_compatible(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	left := p.parse_builtin_type(at)!
+	if !p.expect_punct(',') {
+		return error('expected the second type')
+	}
+	right := p.parse_builtin_type(at)!
+	if !p.expect_punct(')') {
+		return error('unclosed __builtin_types_compatible_p')
+	}
+	same := types.unqualified(left.typ).same(types.unqualified(right.typ))
+	return ast.Expr(ast.IntLit{
+		value: if same { 1 } else { 0 }
+		text:  '__builtin_types_compatible_p(${left.spelling}, ${right.spelling})'
+		typ:   types.int_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// parse_choose_expr answers `__builtin_choose_expr(cond, then, else)`, which is
+// the other half of the same dispatch: the first argument is a constant, and the
+// expression is worth whichever of the two others that constant selects.
+//
+// gcc reads both operands and only evaluates the selected one, so both are read
+// here too and the second is thrown away with the tree it built. The value has
+// the type of the arm chosen, which is why `sizeof(__builtin_choose_expr(1,
+// (char)1, (long)1))` is 1: the selected expression is what stands in the tree.
+//
+// The condition has to be an integer constant expression, which is the
+// constraint gcc states; one this reader cannot evaluate is refused by name.
+fn (mut p Parser) parse_choose_expr(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	condition := p.parse_expression()!
+	if !p.expect_punct(',') {
+		return error('expected the selected expression')
+	}
+	chosen := p.parse_expression()!
+	if !p.expect_punct(',') {
+		return error('expected the other expression')
+	}
+	other := p.parse_expression()!
+	if !p.expect_punct(')') {
+		return error('unclosed __builtin_choose_expr')
+	}
+	value := p.constant_value(condition) or {
+		p.error_at(at, 'unsupported: __builtin_choose_expr selects on a constant, and the first argument is not one this compiler can read')
+		return error('condition is not a constant')
+	}
+	if value != 0 {
+		return chosen
+	}
+	return other
+}
+
+// parse_builtin_type reads one type-name argument of a builtin. The words a type
+// name opens with are the words a declaration opens with, so the token has to be
+// one of those: an identifier that names no type would otherwise be read as the
+// name of an object and refused with a message about names rather than about the
+// type that is missing.
+fn (mut p Parser) parse_builtin_type(at tokenize.Token) !TypeName {
+	if !p.starts_declaration(p.peek()) {
+		p.error_at(p.peek(), 'unsupported: ${at.text} asks for a type name, and ${describe(p.peek())} is not a type this compiler knows')
+		return error('not a type name')
+	}
+	name := p.parse_type_name(0)!
+	if name.typ.kind == .unknown {
+		p.error_at(p.peek(), 'unsupported: ${at.text} asks about ${name.spelling}, and this compiler did not resolve that type')
+		return error('unresolved type')
+	}
+	return name
+}
+
+// parse_offsetof answers `__builtin_offsetof(type, member)`, which is what
+// stddef.h's `offsetof` expands to. The answer is where the model's own layout
+// puts the member and how big it is, not a number worked out from the spelling:
+// the same `layout` the reader asks when it builds a `Field`, so an offsetof and
+// the field it names cannot disagree.
+//
+// The value has the type size_t, which is what offsetof yields, so it is written
+// as the constant `sizeof` writes and not as an int.
+fn (mut p Parser) parse_offsetof(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	start := p.parse_builtin_type(at)!
+	if !p.expect_punct(',') {
+		return error('expected the member path')
+	}
+	offset := p.parse_member_offset(start.typ)!
+	if !p.expect_punct(')') {
+		return error('unclosed __builtin_offsetof')
+	}
+	return ast.Expr(ast.IntLit{
+		value: i64(offset)
+		text:  '__builtin_offsetof(${start.spelling})'
+		typ:   types.unsigned_long_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// parse_member_offset walks a member path in the type it was given and answers
+// where the last member of it sits, in bytes. It is the walk a `Field` makes, and
+// it reads the offset from the model's layout for the same reason: an offsetof
+// that disagreed with the field it names would be a wrong constant in a program
+// that is full of them.
+//
+// The path is dots, `point.y` and `inner`. An array subscript is part of the
+// designator gcc allows (`chain[1].a`) and is not read here, so it is refused by
+// name rather than skipped; a bitfield has no address to take and gcc refuses
+// `offsetof` of one, so it is refused here too.
+fn (mut p Parser) parse_member_offset(declared types.Type) !int {
+	if p.peek().kind != .identifier {
+		p.error_at(p.peek(), 'unsupported: __builtin_offsetof reads a member, and ${describe(p.peek())} is not a member name')
+		return error('member name')
+	}
+	mut current := declared
+	mut total := 0
+	mut path := ''
+	for {
+		name := p.next()
+		path = if path == '' { name.text } else { '${path}.${name.text}' }
+		aggregate := p.tagged_type(current)
+		if aggregate.kind !in [types.Kind.struct_, .union_] {
+			p.error_at(name, 'unsupported: __builtin_offsetof reads ${path} from ${aggregate.describe()}, and a member is read from an object whose type has members')
+			return error('not an aggregate')
+		}
+		mut at := -1
+		for i, member in aggregate.members {
+			if member.name == name.text {
+				at = i
+				break
+			}
+		}
+		if at < 0 {
+			p.error_at(name, 'unsupported: ${aggregate.describe()} has no member called ${name.text}')
+			return error('unknown member')
+		}
+		member := aggregate.members[at]
+		if member.bitfield {
+			p.error_at(name, 'unsupported: ${path} is a bitfield, and a bitfield sits in bits inside a unit rather than at a byte offset')
+			return error('bitfield')
+		}
+		layout := p.representation.layout(aggregate) or {
+			p.error_at(name, 'unsupported: the members of ${aggregate.describe()} are not a layout this compiler knows, so the offset of ${path} cannot be read')
+			return error('no layout')
+		}
+		total += layout.offsets[at]
+		current = member.typ
+		if p.at_punct('.') {
+			p.next()
+			continue
+		}
+		break
+	}
+	if p.at_punct('[') {
+		p.error_at(p.peek(), 'unsupported: __builtin_offsetof reads ${path}[...], and this compiler answers a path of members only')
+		return error('array designator')
+	}
+	return total
+}
+
+// The four operations over an argument list, which is one object and not four:
+// `va_start` fills a list in from the save area the prologue wrote, `va_arg`
+// reads one argument out of it and steps it, `va_copy` copies it, and `va_end`
+// finishes with it.
+//
+// They are read as calls with the reserved names below, so the tree carries one
+// shape for them and the back end answers each name with the sequence of
+// instructions the calling convention asks for. `__builtin_va_arg` carries the
+// type of the argument it reads in the node's own `typ`, which is where a
+// reader of the tree expects an expression's type to be.
+//
+// The list an operation is given is a name in every program that uses one:
+// `va_start` and `va_copy` write the list's own storage, and a spelling that is
+// not a name has nowhere to be written. The last named parameter a `va_start`
+// names is read for its tokens and thrown away, because where the walk starts is
+// a property of the enclosing declaration and not of that expression.
+
+// argument_list_names are the four spellings, kept in one place so the check for
+// a name nothing declares skips exactly the calls this reader builds.
+const argument_list_names = ['__builtin_va_start', '__builtin_va_arg', '__builtin_va_end',
+	'__builtin_va_copy']
+
+// list_argument reads the argument list one of the four is given. It has to be
+// a name: it is written by `va_start` and `va_copy`, and a list the reader
+// cannot find again has nowhere to put either.
+fn (mut p Parser) list_argument(at tokenize.Token, spelling string) !ast.Expr {
+	list := p.parse_expression()!
+	if list !is ast.Ident {
+		p.error_at(at, 'unsupported: ${spelling} writes the argument list it is given, and ${describe_operand(list)} is not one this compiler can write through')
+		return error('not an argument list name')
+	}
+	return ast.Expr(list)
+}
+
+fn (mut p Parser) parse_va_start(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	list := p.list_argument(at, '__builtin_va_start')!
+	if !p.expect_punct(',') {
+		p.error_at(at, 'unsupported: __builtin_va_start takes the argument list and the last named parameter')
+		return error('expected the last named parameter')
+	}
+	// The last named parameter is read and dropped: the offsets the walk starts
+	// at are the enclosing declaration's and not this expression's.
+	_ := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_va_start')
+		return error('unclosed __builtin_va_start')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_va_start'
+		args: [list]
+		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_va_arg reads `__builtin_va_arg(ap, type)`, which is what stdarg.h's
+// `va_arg` expands to. The type is the type of the argument being read, and the
+// node carries it: a walk through a list holds no type, so this is the only
+// place that says whether the next argument is an int, a long long or a double,
+// and the back end reads it from here.
+fn (mut p Parser) parse_va_arg(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	list := p.list_argument(at, '__builtin_va_arg')!
+	if !p.expect_punct(',') {
+		p.error_at(at, 'unsupported: __builtin_va_arg takes the argument list and the type of the argument')
+		return error('expected the type of the argument')
+	}
+	read := p.parse_builtin_type(at)!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_va_arg')
+		return error('unclosed __builtin_va_arg')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_va_arg'
+		args: [list]
+		typ:  read.typ
+		line: at.line
+		col:  at.col
+	})
+}
+
+fn (mut p Parser) parse_va_end(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	list := p.list_argument(at, '__builtin_va_end')!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_va_end')
+		return error('unclosed __builtin_va_end')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_va_end'
+		args: [list]
+		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+fn (mut p Parser) parse_va_copy(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	destination := p.list_argument(at, '__builtin_va_copy')!
+	if !p.expect_punct(',') {
+		p.error_at(at, 'unsupported: __builtin_va_copy takes the list being written and the one being read')
+		return error('expected the source list')
+	}
+	source := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_va_copy')
+		return error('unclosed __builtin_va_copy')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_va_copy'
+		args: [destination, source]
+		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
+}

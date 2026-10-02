@@ -487,10 +487,30 @@ fn test_a_prototype_keeps_the_parameters_it_promises() {
 	assert params[0].typ == 'char *'
 }
 
-fn test_a_variadic_definition_is_reported() {
+// A definition whose parameter list ends in an ellipsis is a definition like any
+// other: which arguments arrived in registers and which on the stack is what the
+// save area records, and the reader carries the ellipsis on the declaration so
+// that the back end can lay one out. Nothing here refuses it.
+fn test_a_variadic_definition_is_read() {
 	result := declarations_of('int f(int a, ...) { return a; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('variadic')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].resolved.variadic
+	assert result.unit.decls[0].params.len == 1
+}
+
+// `<stdarg.h>` declares the compiler's own spelling of the argument list and
+// typedefs the name a program writes from it, so a `va_list` in a program is
+// the calling convention's argument list written out. It resolves to a pointer,
+// which is what makes a declaration of one a single word of storage and what
+// lets a `va_list` be handed to a library function as the address of the tag.
+fn test_the_argument_list_resolves_from_the_compiler_spelling() {
+	result := declarations_of('typedef __builtin_va_list va_list; int f(int a) { va_list ap; return a; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 2
+	assert body[0].kind == .var_decl
+	assert body[0].decl_type.contains('*')
+	assert body[0].decl_type.contains('__va_list_tag')
 }
 
 fn test_an_array_parameter_of_a_definition_is_reported() {

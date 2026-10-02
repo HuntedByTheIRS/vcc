@@ -165,3 +165,63 @@ fn test_a_pair_that_does_not_fit_is_not_split() {
 	spent := pair_places(target, true, true, 0, 7)
 	assert !spent.registers
 }
+
+// The save area and the argument list, against the layout the model gives the
+// type the header names. The numbers the emitter reads are the ones this file
+// states, and the type a header's `__builtin_va_list` resolves to is built from
+// the same description; this test is what keeps the two from drifting apart.
+
+fn test_the_argument_list_offsets_agree_with_the_type() {
+	list := argument_list()
+	layout := measured.representation().layout(argument_list_tag()) or {
+		assert false
+		return
+	}
+	assert layout.offsets.len == 4
+	assert layout.offsets[0] == list.gp_offset_at
+	assert layout.offsets[1] == list.fp_offset_at
+	assert layout.offsets[2] == list.overflow_at
+	assert layout.offsets[3] == list.area_at
+	assert layout.size == list.bytes
+}
+
+fn test_a_named_parameter_moves_the_start_of_a_walk() {
+	area := register_area()
+	// Nothing named: both walks start at the front of their own file.
+	assert gp_start(0) == area.gp_at
+	assert fp_start(0) == area.fp_at
+	// The second general parameter starts the walk one word in; the second
+	// vector parameter starts it one register in, which is sixteen bytes.
+	assert gp_start(2) == area.gp_at + 2 * area.gp_stride
+	assert fp_start(2) == area.fp_at + 2 * area.fp_stride
+}
+
+// A function with as many named parameters as the machine has registers has
+// none left for the unnamed ones, and the walk starts at the limit so that every
+// one of them is read from the overflow area.
+fn test_a_walk_with_no_registers_left_reads_memory() {
+	assert gp_start(general_argument_registers) == gp_limit()
+	assert gp_start(general_argument_registers + 3) == gp_limit()
+	assert fp_start(vector_argument_registers) == fp_limit()
+}
+
+// The two limits are measured, not derived from a taste: gcc 16.2.1 on this
+// machine writes six general registers and eight vector ones, which is 48 bytes
+// of general registers followed by 128 bytes of vector ones, and the save area
+// is 176 bytes.
+fn test_the_limits_are_the_ones_the_convention_gives() {
+	area := register_area()
+	assert gp_limit() == 48
+	assert fp_limit() == 176
+	assert area.bytes == 176
+	assert area.fp_at == 48
+}
+
+// A header writes `typedef __builtin_va_list __gnuc_va_list;` and the reader
+// sizes a declaration from the spelling, which is the resolved type written
+// out. A pointer spelling is what makes a `va_list` one word in a frame.
+fn test_the_argument_list_type_is_a_pointer() {
+	spelling := argument_list_type().describe()
+	assert spelling.contains('*')
+	assert spelling.contains('__va_list_tag')
+}

@@ -235,6 +235,26 @@ mut:
 	// saved_return is the frame slot a function keeps the address its caller named
 	// for its own result in, for a function that returns such an object.
 	saved_return Slot
+	// variadic says the function being emitted is one whose parameter list ends
+	// in an ellipsis. named_gp and named_fp are how many of its named parameters
+	// arrived in each argument register file, and named_stacked how many words of
+	// them went on the stack: together they are where a walk through the unnamed
+	// arguments starts, in the registers and in memory.
+	variadic      bool
+	named_gp      int
+	named_fp      int
+	named_stacked int
+	// save_area is where the prologue of a variadic function wrote the argument
+	// registers, and none for a function that wrote none. A walk through the
+	// arguments reads the registers out of it.
+	save_area ?Slot
+	// argument_lists are the objects of this function whose declared type is an
+	// argument list: the ones a `va_list` declaration made, and the parameters a
+	// function was handed one in. The four operations over a list are applied to
+	// one of these and refused elsewhere, because an object that is not a list
+	// holds something that is not a tag, and a walk through it reads that
+	// something as though it were.
+	argument_lists []string
 	// stack_pushed is how many bytes the call being emitted has pushed for the
 	// arguments its registers ran out for, and zero when it pushed none. The
 	// caller gives those bytes back once the call returns, so the frame is where
@@ -702,6 +722,34 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	frame_at := e.program.text.len + e.target.frame_immediate_offset()
 	e.append(e.target.frame_reserve(0))
 	e.push_scope()
+	// The numbers a walk through the unnamed arguments starts from are this
+	// function's and not the last one's, so they are reset here whatever the
+	// declaration turns out to be.
+	e.variadic = decl.resolved.variadic
+	e.named_gp = 0
+	e.named_fp = 0
+	e.named_stacked = 0
+	e.save_area = none
+	e.argument_lists = []
+	// A function that is handed an argument list is not a variadic definition,
+	// but its parameter is a list all the same: `void f(va_list ap)` may walk it,
+	// which is how a function that formats its arguments on behalf of a variadic
+	// one is written.
+	for param in decl.params {
+		if abi.is_argument_list(param.resolved) {
+			e.argument_lists << param.name
+		}
+	}
+	if e.variadic {
+		// A variadic callee is handed arguments it cannot name, and no
+		// instruction says where they went: the convention puts each one in a
+		// register until that file runs out and on the stack after that. Writing
+		// every argument register into a save area costs a few instructions on
+		// entry and is what makes a walk through the arguments possible at all.
+		// The registers are written before the parameters are stored, because
+		// storing one uses the result register.
+		e.save_area = e.save_argument_registers(decl)!
+	}
 	if ret_class.count > 2 {
 		// A function that hands an object of more than two eightbytes back is given
 		// the address to put it at in the first general register, and keeps it in the
@@ -870,6 +918,14 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		e.append(e.target.load_slot(base, at, register, slot.width)!)
 		e.store_register(slot, register, param.line, param.col)!
 		stacked++
+	}
+	// Where a walk through the unnamed arguments starts: past the named ones in
+	// each register file, and past the words of the named ones that went on the
+	// stack. The counts the loop kept are exactly that.
+	if e.variadic {
+		e.named_gp = integers
+		e.named_fp = doubles
+		e.named_stacked = stacked
 	}
 	returned := e.emit_statements(decl.body)!
 	// Every label a goto in this function named has to be a label this function
@@ -1181,6 +1237,11 @@ fn (e Emitter) returns_eight_byte_integer() bool {
 // whatever the function writes into it next.
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.line, stmt.col)!
+	// What makes an object an argument list is the type it was declared with,
+	// because that is what says how the four operations over a list may treat it.
+	if abi.is_argument_list(stmt.resolved) {
+		e.argument_lists << stmt.decl_name
+	}
 	init := stmt.init or { return }
 	if slot.wide {
 		// A 128-bit object declared with a value takes one of three things: a copy
@@ -3024,7 +3085,15 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 		ast.Call {
 			// A call that hands an object back hands its bytes over in the
 			// register its class names, so the floating class is the same answer
-			// as a function that returns a double or a float.
+			// as a function that returns a double or a float. The clause the
+			// reader resolved is the answer where there is one, which is what
+			// types a call this emitter has no name for: a call the reader built
+			// itself from the compiler's own spellings is not a call to a
+			// function the program declares, and its clause is the only thing
+			// that says whether the value it hands over is a floating one.
+			if expr.typ.kind != .unknown {
+				return expr.typ.is_floating()
+			}
 			e.returns[expr.name] == 'double' || e.returns[expr.name] == 'float'
 				|| e.return_classes[expr.name].first_floating
 		}
@@ -3086,6 +3155,11 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 			e.writes_a_float(expr.spelling)
 		}
 		ast.Call {
+			// The same question at four bytes, and the reader's clause is the
+			// answer where it has one.
+			if expr.typ.kind != .unknown {
+				return expr.typ.kind == .float
+			}
 			e.returns[expr.name] == 'float'
 		}
 		ast.Conditional {
@@ -6117,6 +6191,267 @@ fn (mut e Emitter) emit_callee_value(callee ast.Expr, depth int) !void {
 	return e.emit_expr_at(callee, depth)
 }
 
+// The four operations over an argument list are not calls to a name: the reader
+// built them from spellings in the compiler's own namespace, and the answer for
+// each is a sequence of instructions rather than a symbol the loader would look
+// for. They are answered here, before the call path, because that path would
+// otherwise write a call to a name the image does not hold.
+//
+// Each of them is the calling convention's, read out of `backend/abi`: where the
+// register files start, which register carries which argument, and where the
+// arguments that did not fit in a register are. Nothing here decides any of it.
+
+// the_argument_list answers the slot of the object a name denotes when that
+// object is an argument list, and refuses the name when it is not.
+//
+// An object that is not a list holds something that is not a tag, and every one
+// of the four operations would read that something as though it were one: a
+// `va_arg(int x, int)` would take the value of x for the address of a tag and
+// read a walk out of whatever it happens to point at. gcc 16.2.1 refuses every
+// one of these, and so does this.
+fn (mut e Emitter) the_argument_list(name string, operation string, line int, col int) ?Slot {
+	slot := e.lookup(name) or {
+		e.diagnostics << problem(line, col, 'unsupported: ${operation} names ${name}, and this function declares no object of that name')
+		return none
+	}
+	if name !in e.argument_lists {
+		e.diagnostics << problem(line, col, 'unsupported: ${operation} names ${name}, and ${name} is not an argument list: only an object declared with the argument-list type, which is what a `va_list` declaration makes, is one')
+		return none
+	}
+	return slot
+}
+
+// save_argument_registers writes every argument register the caller may have
+// filled into a save area in this frame, and answers the slot the area is.
+//
+// The vector registers are written at eight bytes each rather than at their own
+// width: a variadic argument of a floating type is a double, which arrives in the
+// low half of the register, and a sixteen-byte move would need the area on a
+// sixteen-byte boundary, which a frame slot does not promise.
+fn (mut e Emitter) save_argument_registers(decl ast.FnDecl) !Slot {
+	area := abi.register_area()
+	slot := e.reserve(area.bytes)
+	base := e.frame_pointer(decl.line, decl.col)!
+	for i in 0 .. area.gp_count {
+		register := e.target.arg_reg(i) or {
+			e.diagnostics << problem(decl.line, decl.col, 'internal: ${e.target.name} has not got the general argument register ${i + 1}, which the variadic save area writes')
+			return error('no argument register')
+		}
+		e.append(e.target.store_slot(base, i32(slot.offset + i * area.gp_stride), register, e.target.word_size)!)
+	}
+	for i in 0 .. area.fp_count {
+		register := e.target.float_arg_reg(i) or {
+			e.diagnostics << problem(decl.line, decl.col, 'internal: ${e.target.name} has not got the vector argument register ${i + 1}, which the variadic save area writes')
+			return error('no vector argument register')
+		}
+		e.append(e.target.store_double_slot(base, i32(slot.offset + area.fp_at + i * area.fp_stride), register)!)
+	}
+	return slot
+}
+
+// emit_va_start fills in the argument list a program declared, out of the save
+// area the prologue wrote.
+//
+// The list is the tag the convention walks: where each register file has got to,
+// where the arguments that went on the stack start, and where the registers were
+// saved. Three of the four are known here without looking at anything at run
+// time, because this is a property of the function being emitted: the counts of
+// its named parameters say where each file has got to, and how many words of
+// them the caller put on the stack says where the first unnamed word is. Only the
+// save area is the frame's own address, which the prologue wrote down as a slot.
+fn (mut e Emitter) emit_va_start(call ast.Call) !void {
+	line := call.line
+	col := call.col
+	if !e.variadic {
+		e.diagnostics << problem(line, col, 'unsupported: __builtin_va_start fills in an argument list, and a function whose parameter list ends in an ellipsis is the only one that has unnamed arguments')
+		return error('no unnamed arguments')
+	}
+	area := e.save_area or {
+		e.diagnostics << problem(line, col, 'internal: the variadic save area of this function was not written by its prologue')
+		return error('no save area')
+	}
+	list := abi.argument_list()
+	name := (call.args[0] as ast.Ident).name
+	destination := e.the_argument_list(name, '__builtin_va_start', line, col) or {
+		return error('no argument list')
+	}
+	base := e.frame_pointer(line, col)!
+	slot := e.reserve(list.bytes)
+	work := e.accumulator(line, col)!
+	pointer := e.scratch(line, col)!
+	// Where a walk through each register file starts, which is past the named
+	// parameters that arrived in it.
+	e.append(e.target.move_immediate32(work, u32(abi.gp_start(e.named_gp)))!)
+	e.append(e.target.address_of_slot(base, i32(slot.offset + list.gp_offset_at), pointer))
+	e.append(e.target.store_indirect(pointer, work, 4)!)
+	e.append(e.target.move_immediate32(work, u32(abi.fp_start(e.named_fp)))!)
+	e.append(e.target.address_of_slot(base, i32(slot.offset + list.fp_offset_at), pointer))
+	e.append(e.target.store_indirect(pointer, work, 4)!)
+	// The first word of the caller's stack past the named arguments. The return
+	// address and the frame pointer are the two words between the frame pointer
+	// and that first word, which is why the two are in the sum.
+	e.append(e.target.address_of_slot(base, i32(2 * e.target.word_size + e.named_stacked * e.target.word_size), work))
+	e.append(e.target.address_of_slot(base, i32(slot.offset + list.overflow_at), pointer))
+	e.append(e.target.store_indirect(pointer, work, 8)!)
+	// The registers the prologue saved.
+	e.append(e.target.address_of_slot(base, area.offset, work))
+	e.append(e.target.address_of_slot(base, i32(slot.offset + list.area_at), pointer))
+	e.append(e.target.store_indirect(pointer, work, 8)!)
+	// The list the program named points at the tag just filled in.
+	e.append(e.target.address_of_slot(base, slot.offset, work))
+	e.store_register(destination, work, line, col)!
+}
+
+// emit_va_arg reads the next argument out of a list and steps the list past it.
+//
+// The list holds two cursors, one per register file, and an address past the
+// arguments that did not fit in a register. An argument of a floating type comes
+// out of the vector file and one of every other type out of the general file; a
+// cursor that has reached the end of its file sends the read to the address
+// instead, which is where the caller put the arguments the registers ran out for.
+// The cursor is advanced after every read, so the next call reads the argument
+// after this one; that step is what a copy of the list is for, and what makes the
+// two copies independent.
+fn (mut e Emitter) emit_va_arg(call ast.Call) !void {
+	line := call.line
+	col := call.col
+	if call.typ.kind !in [types.Kind.int_, .unsigned_int, .long, .unsigned_long, .long_long,
+		.unsigned_long_long, .pointer, .double] {
+		e.diagnostics << problem(line, col, 'unsupported: __builtin_va_arg reads ${call.typ.describe()} out of an argument list, and an int, a 64-bit integer, a pointer and a double are the arguments this back end reads')
+		return error('unsupported argument type')
+	}
+	list := abi.argument_list()
+	area := abi.register_area()
+	floating := call.typ.kind == .double
+	width := if floating { e.target.word_size } else { e.storage_width(call.typ) or { 0 } }
+	name := (call.args[0] as ast.Ident).name
+	source := e.the_argument_list(name, '__builtin_va_arg', line, col) or {
+		return error('no argument list')
+	}
+	base := e.frame_pointer(line, col)!
+	work := e.accumulator(line, col)!
+	pointer := e.scratch(line, col)!
+	cursor := e.remainder(line, col)!
+	// The list keeps its place in the frame, so the read and the step both go
+	// through the address the name holds rather than through a copy of the tag.
+	e.append(e.target.load_slot(base, source.offset, pointer, e.target.word_size)!)
+	// Is there a register of this file left? A cursor below the limit means yes;
+	// at the limit the walk reads the caller's stack instead.
+	e.append(e.target.move_register64(work, pointer)!)
+	e.append(e.target.add_immediate(work, i32(if floating {
+		list.fp_offset_at
+	} else {
+		list.gp_offset_at
+	})))
+	e.append(e.target.load_indirect(work, cursor, 4)!)
+	e.append(e.target.move_immediate32(work, u32(if floating {
+		abi.fp_limit()
+	} else {
+		abi.gp_limit()
+	}))!)
+	e.append(e.target.compare_unsigned('<', cursor, work)!)
+	e.append(e.target.test(cursor)!)
+	stacked := e.label()
+	e.branch(.branch_zero, stacked, line, col)!
+	// A register carries it: the argument is at the save area plus the cursor,
+	// which is where the prologue wrote the register it arrived in.
+	e.append(e.target.move_register64(work, pointer)!)
+	e.append(e.target.add_immediate(work, i32(if floating {
+		list.fp_offset_at
+	} else {
+		list.gp_offset_at
+	})))
+	e.append(e.target.load_indirect(work, cursor, 4)!)
+	e.append(e.target.move_register64(work, pointer)!)
+	e.append(e.target.add_immediate(work, i32(list.area_at)))
+	e.append(e.target.load_indirect(work, work, 8)!)
+	e.append(e.target.add_reg64(work, cursor))
+	e.append(e.target.add_immediate(cursor, i32(if floating {
+		area.fp_stride
+	} else {
+		area.gp_stride
+	})))
+	e.append(e.target.add_immediate(pointer, i32(if floating {
+		list.fp_offset_at
+	} else {
+		list.gp_offset_at
+	})))
+	e.append(e.target.store_indirect(pointer, cursor, 4)!)
+	if floating {
+		register := e.float_accumulator(line, col)!
+		e.append(e.target.load_double_indirect(work, register)!)
+	} else {
+		e.append(e.target.load_indirect(work, work, width)!)
+	}
+	done := e.label()
+	e.jump(done)!
+	e.place(stacked)
+	// The registers had none left: the argument is the word the overflow address
+	// names, and the address moves past it.
+	e.append(e.target.move_register64(cursor, pointer)!)
+	e.append(e.target.add_immediate(cursor, i32(list.overflow_at)))
+	e.append(e.target.load_indirect(cursor, work, 8)!)
+	e.append(e.target.move_register64(cursor, work)!)
+	e.append(e.target.add_immediate(cursor, i32(e.target.word_size)))
+	e.append(e.target.add_immediate(pointer, i32(list.overflow_at)))
+	e.append(e.target.store_indirect(pointer, cursor, 8)!)
+	if floating {
+		register := e.float_accumulator(line, col)!
+		e.append(e.target.load_double_indirect(work, register)!)
+	} else {
+		e.append(e.target.load_indirect(work, work, width)!)
+	}
+	e.place(done)
+}
+
+// emit_va_copy copies one argument list into another.
+//
+// The copy gets a tag of its own and the source's tag is written into it, rather
+// than the destination being pointed at the source's tag: after the copy the two
+// lists walk independently, and stepping one past an argument must not move the
+// other. The source is read before the destination's slot is written, because
+// evaluating it may call a function and a call is free to use every register the
+// copy is about to use.
+fn (mut e Emitter) emit_va_copy(call ast.Call) !void {
+	line := call.line
+	col := call.col
+	list := abi.argument_list()
+	name := (call.args[0] as ast.Ident).name
+	destination := e.the_argument_list(name, '__builtin_va_copy', line, col) or {
+		return error('no argument list')
+	}
+	e.emit_expr_at(call.args[1], 1)!
+	source := e.accumulator(line, col)!
+	pointer := e.scratch(line, col)!
+	work := e.remainder(line, col)!
+	e.append(e.target.move_register64(pointer, source)!)
+	copied := e.reserve(list.bytes)
+	base := e.frame_pointer(line, col)!
+	e.append(e.target.address_of_slot(base, copied.offset, work))
+	mut at := 0
+	for at < list.bytes {
+		if at > 0 {
+			e.append(e.target.add_immediate(pointer, i32(e.target.word_size)))
+			e.append(e.target.add_immediate(work, i32(e.target.word_size)))
+		}
+		e.append(e.target.load_indirect(pointer, source, 8)!)
+		e.append(e.target.store_indirect(work, source, 8)!)
+		at += 8
+	}
+	e.append(e.target.address_of_slot(base, copied.offset, work))
+	e.store_register(destination, work, line, col)!
+}
+
+// emit_va_end finishes with an argument list. On this convention there is
+// nothing to give back: the list is storage in the frame and the save area is
+// the frame's, so the operation is the end of the walk and no instruction.
+fn (mut e Emitter) emit_va_end(call ast.Call) !void {
+	if call.args.len != 1 {
+		e.diagnostics << problem(call.line, call.col, 'internal: __builtin_va_end takes one argument list')
+		return error('wrong arity')
+	}
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -6135,6 +6470,24 @@ fn (mut e Emitter) emit_callee_value(callee ast.Expr, depth int) !void {
 // function in the same translation unit binds to that definition; every other
 // name is a symbol the loader resolves before the program starts.
 fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
+	// The four argument-list operations are answered before anything else: they
+	// reach the emitter as calls, and the path below would write a call to a
+	// name no image holds.
+	match call.name {
+		'__builtin_va_start' {
+			return e.emit_va_start(call)
+		}
+		'__builtin_va_arg' {
+			return e.emit_va_arg(call)
+		}
+		'__builtin_va_copy' {
+			return e.emit_va_copy(call)
+		}
+		'__builtin_va_end' {
+			return e.emit_va_end(call)
+		}
+		else {}
+	}
 	mut places := []ArgPlace{cap: call.args.len}
 	// A call written to an expression calls the address that expression is
 	// worth. The address is computed before anything else and waits in a slot of
