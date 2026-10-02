@@ -16,7 +16,7 @@ import types
 // builtin whose answer would be a guess is refused by name here rather than
 // filled in with a value this compiler has not computed.
 const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr',
-	'__builtin_offsetof']
+	'__builtin_offsetof', '__builtin_va_arg']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -50,6 +50,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_offsetof' {
 			return p.parse_offsetof(at)
+		}
+		'__builtin_va_arg' {
+			return p.parse_va_arg(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -230,4 +233,28 @@ fn (mut p Parser) parse_member_offset(declared types.Type) !int {
 		return error('array designator')
 	}
 	return total
+}
+
+// parse_va_arg refuses `__builtin_va_arg(ap, type)`, which is what stdarg.h's
+// `va_arg` expands to. Reading an argument out of a variadic call needs the call
+// side of variadics to exist first - a definition with `...`, the frame that
+// holds the unnamed arguments, and the registers a walk through them reads - and
+// none of that is in the tree: `a variadic definition is not implemented` is
+// what this compiler already says at every such definition, and `va_list` itself
+// is a type it has no form for. The arguments are read so the tokens are
+// consumed and one construct produces one diagnostic, and the refusal names the
+// builtin rather than reporting it as a name nothing declares, which would
+// suggest a declaration would make it work.
+fn (mut p Parser) parse_va_arg(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	_ := p.parse_expression()!
+	if !p.expect_punct(',') {
+		return error('expected the type of the argument')
+	}
+	_ := p.parse_builtin_type(at)!
+	if !p.expect_punct(')') {
+		return error('unclosed __builtin_va_arg')
+	}
+	p.error_at(at, 'unsupported: __builtin_va_arg reads an argument from a variadic call, and a variadic definition is not implemented')
+	return error('no variadic definition')
 }

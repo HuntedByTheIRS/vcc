@@ -175,6 +175,17 @@ fn test_offsetof_refuses_a_member_the_type_does_not_have() {
 	assert result.diagnostics[0].msg == 'unsupported: struct P has no member called b'
 }
 
+// va_arg needs the call side of variadics to exist first, and it does not: a
+// variadic definition is refused by name already, and `va_list` is a type with
+// no form here. The builtin is refused by name rather than reported as a name
+// nothing declares, which would suggest a declaration would make it work.
+fn test_va_arg_is_refused_by_name() {
+	result := builtin_read('int main(void) { return __builtin_va_arg(0, int); }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('__builtin_va_arg reads an argument from a variadic call')
+	assert result.diagnostics[0].msg.contains('a variadic definition is not implemented')
+}
+
 // A deep chain of one builtin inside another is a file attacking the reader, and
 // the answer is a diagnostic rather than a stack overflow.
 fn test_a_deep_chain_of_choose_expr_is_refused_rather_than_followed() {
