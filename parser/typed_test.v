@@ -488,6 +488,75 @@ fn test_a_call_to_a_name_that_is_not_a_function_is_refused() {
 	assert missing.diagnostics[0].msg.contains('nothing in this file declares it')
 }
 
+// 6.5.2.2: a call is written to an expression and not only to a name. The postfix
+// loop reads a call after whatever came before it, so a dereferenced pointer, a
+// parameter that holds a function pointer, and an element of a table are all calls
+// whose callee is an expression; a name that is a function is the one shape that
+// still carries a name. Anything that is not a function or a pointer to one is
+// refused where the call is written.
+fn test_a_call_is_read_after_any_postfix_expression() {
+	// Through a dereferenced pointer: the callee is the dereference, not a name.
+	deref := checked('int h(int (*fp)(int, int)) { return (*fp)(1, 2); }')
+	deref_returned := deref.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert deref_returned is ast.Call
+	deref_call := deref_returned as ast.Call
+	assert deref_call.name == ''
+	if callee := deref_call.callee {
+		assert callee is ast.Unary
+	} else {
+		assert false
+	}
+	// Through a name that holds a function pointer, which is an object rather
+	// than the function itself.
+	named := checked('int g(int (*fp)(int, int)) { return fp(1, 2); }')
+	named_returned := named.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert named_returned is ast.Call
+	named_call := named_returned as ast.Call
+	assert named_call.name == ''
+	if callee := named_call.callee {
+		assert callee is ast.Ident
+	} else {
+		assert false
+	}
+	// Through an element of a table.
+	table := checked('int t(void) { int (*t[2])(int, int); return t[0](3, 4); }')
+	table_returned := table.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert table_returned is ast.Call
+	table_call := table_returned as ast.Call
+	assert table_call.name == ''
+	if callee := table_call.callee {
+		assert callee is ast.Index
+	} else {
+		assert false
+	}
+	// A name that is a function is called directly, so it is the one call that
+	// still carries the name the back end resolves.
+	direct := checked('int f(void) { return 0; } int main(void) { return f(); }')
+	direct_returned := direct.unit.decls[1].body[0].expr or {
+		assert false
+		return
+	}
+	assert direct_returned is ast.Call
+	direct_call := direct_returned as ast.Call
+	assert direct_call.name == 'f'
+	assert direct_call.callee == none
+	// An expression that is not a function or a pointer to one is refused at the
+	// call, and the message names what it was.
+	refused := parsed('int main(void) { int x = 1; int *p = &x; return p[0](1); }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('what a call calls has to be a function or a pointer to a function')
+	assert refused.diagnostics[0].msg.contains('this is int')
+}
+
 // 6.3.2.3 asks for the value of an integer constant expression and not for the way
 // it is spelled, so the question is asked of the value. Measured, gcc 16.2.1 under
 // `-std=c99` accepts `h(1 - 1)` for a parameter of type `int (*)(void)`, which this

@@ -5815,6 +5815,18 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 // name is a symbol the loader resolves before the program starts.
 fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	mut places := []ArgPlace{cap: call.args.len}
+	// A call written to an expression calls the address that expression is
+	// worth. The address is computed before anything else and waits in a slot of
+	// its own, because the register it is computed into is the same one every
+	// argument is loaded through, and the argument registers are loaded last.
+	mut indirect := false
+	mut callee_slot := Slot{}
+	if expression := call.callee {
+		callee_slot = e.value_slot(depth + call.args.len)
+		e.emit_expr_at(expression, depth + call.args.len + 1)!
+		e.store_accumulator(callee_slot, call.line, call.col)!
+		indirect = true
+	}
 	// A call to a function that hands an object of more than two eightbytes back is
 	// given the address of this frame's storage for it in the first general register,
 	// so the arguments written in the call start one register later.
@@ -6158,6 +6170,17 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		width := e.passed_width(call, widths, i, arg, place.floating)!
 		e.load_argument(slot, register, width, line, col)!
+	}
+	if indirect {
+		// The address is read back into the accumulator after the argument
+		// registers are loaded, because loading them is the last thing that
+		// could disturb it and the accumulator carries no argument of this
+		// convention. The call then goes to the address rather than to a name.
+		e.load_accumulator(callee_slot, call.line, call.col)!
+		register := e.accumulator(call.line, call.col)!
+		e.append(e.target.call_register(register)!)
+		e.release_call_stack()
+		return
 	}
 	if call.name in e.program.defined {
 		e.reference(e.target.call_near(0), .call_local, call.name, '')
