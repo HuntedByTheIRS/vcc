@@ -403,6 +403,76 @@ fn test_a_store_into_a_bool_makes_the_value_zero_or_one() {
 	assert run_image(emitted.bytes) == 5
 }
 
+// A store into a bitfield writes only that member's bits. Two bitfields in one
+// storage unit used to clobber each other, because the member store wrote the
+// whole unit: the second store overwrote the first. Measured on gcc 16.2.1, this
+// program returns 2, so the read-modify-write leaves s.a at 5 after s.b is set.
+fn test_a_bitfield_store_writes_only_its_own_bits() {
+	emitted := emit(translation_unit('struct S { unsigned int a : 4; unsigned int b : 4; };\nint main(void) { struct S s; s.a = 5; s.b = 3; return (s.a == 5) + (s.b == 3); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 2
+}
+
+// The shape the defect was reported with: a negative store into the signed
+// neighbour used to leave the whole unit at -3, and reading the first field came
+// back as 253 rather than 5. gcc 16.2.1 returns 2 here.
+fn test_a_bitfield_store_keeps_the_bits_of_the_field_next_to_it() {
+	emitted := emit(translation_unit('struct S { signed int a : 4; signed int b : 4; };\nint main(void) { struct S s; s.a = 5; s.b = -3; return (s.a == 5) + (s.b == -3); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 2
+}
+
+// The widths a file writes and the two signednesses. Each field is read back as
+// its own bits: a 1-bit field, an 8-bit one, a 16-bit one, and one that does not
+// fit beside its neighbour and starts a new unit. gcc 16.2.1 returns 4.
+fn test_a_bitfield_read_is_taken_from_its_own_bits() {
+	emitted := emit(translation_unit('struct W { unsigned int a : 1; unsigned int b : 8; unsigned int c : 16; unsigned int d : 31; };\nint main(void) { struct W w; w.a = 1; w.b = 200; w.c = 40000; w.d = 5; return (w.a == 1) + (w.b == 200) + (w.c == 40000) + (w.d == 5); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
+}
+
+// The plain members on either side of a bitfield group are in their own units and
+// their bytes survive a store into the bitfields. gcc 16.2.1 returns 4.
+fn test_a_bitfield_store_keeps_the_plain_members_next_to_it() {
+	emitted := emit(translation_unit('struct S { unsigned int head; unsigned int a : 3; unsigned int b : 3; unsigned int tail; };\nint main(void) { struct S s; s.head = 7; s.tail = 9; s.a = 5; s.b = 3; return (s.head == 7) + (s.tail == 9) + (s.a == 5) + (s.b == 3); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
+}
+
+// The corpus shape: an unsigned field, a signed field, a `_Bool` field and a
+// zero-width unnamed field that starts a new unit for the last one. gcc 16.2.1
+// returns 4, and so does this.
+fn test_a_bitfield_group_with_a_bool_and_a_zero_width_field() {
+	emitted := emit(translation_unit('struct B { unsigned int a : 3; signed int b : 5; _Bool c : 1; unsigned int : 0; unsigned int d : 2; };\nint main(void) { struct B bf; bf.a = 5u; bf.b = -3; bf.c = 1; bf.d = 1u; return (bf.a == 5u) + (bf.b == -3) + (bf.c == 1u) + (bf.d == 1u); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
+}
+
+// A field wider than four bytes is refused by name rather than written with a
+// clear mask this back end cannot express. The refusal says which unit it is.
+fn test_a_store_into_a_bitfield_wider_than_four_bytes_is_refused() {
+	emitted := emit(translation_unit('struct S { unsigned long a : 4; unsigned long b : 4; };\nint main(void) { struct S s; s.a = 5; return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('storage unit')
+	assert emitted.bytes.len == 0
+}
+
+// A bitfield has no address of its own, so taking one is refused by name. gcc
+// 16.2.1 refuses the same program with `cannot take address of bit-field`.
+fn test_the_address_of_a_bitfield_is_refused() {
+	emitted := emit(translation_unit('struct S { unsigned int a : 4; };\nint main(void) { struct S s; unsigned int *p = &s.a; return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('bitfield')
+	assert emitted.bytes.len == 0
+}
+
 fn test_a_constant_expression_is_folded() {
 	emitted := emit(translation_unit('int main() { return 6 * 7; }'), Options{})
 	assert emitted.diagnostics.len == 0

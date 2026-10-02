@@ -450,6 +450,13 @@ pub fn (t Target) add_immediate(dst Register, value i32) []u8 {
 	return x86_64.add_immediate(t.describe(dst), value)
 }
 
+// and_immediate masks a register with a constant. It is what cuts a value down to
+// the width of the field it is being stored into, and what clears those bits in
+// the storage unit the field shares before the value's bits are put in.
+pub fn (t Target) and_immediate(dst Register, value i32) ![]u8 {
+	return x86_64.and_immediate(t.describe(dst), value)
+}
+
 // add_reg64 and imul_immediate are the two steps that reach an element whose
 // stride the scaled address cannot write: multiply the index by the stride, add
 // the array's address.

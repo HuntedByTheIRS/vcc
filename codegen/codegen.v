@@ -1750,6 +1750,10 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 	e.emit_expr_at(expr, depth + 1)!
 	address_register := e.scratch(stmt.line, stmt.col)!
 	member_name := '${member.name}.${member.member}'
+	if member.bitfield {
+		return e.assign_member_bits(stmt, member, expr, address, address_register, width,
+			member_name)
+	}
 	if e.writes_a_float(member.spelling) {
 		if !e.floating_of(expr) && e.is_a_pointer(expr) {
 			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored in the member ${member_name}, which holds a float, and there is no conversion between them')
@@ -1807,6 +1811,66 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 	value := e.accumulator(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 	e.append(e.target.store_indirect(address_register, value, width)!)
+}
+
+// assign_member_bits writes a value into one bitfield member without touching the
+// other members that share its storage unit. A whole-unit store is what the plain
+// member store is and it is wrong here: two bitfields in one unit would clobber
+// each other, which is a silent wrong value. Instead the unit is read, the
+// field's bits are cleared, the value's bits are moved up into their place and
+// ORed in, and the whole unit is written back. The address of the unit was parked
+// before the value was computed, so a value that calls a function cannot lose it.
+//
+// The value is converted to the member's declared type the way any integer store
+// into that type is, because what the field holds is a value of that type cut to
+// the field's width; a `_Bool` field is made 0 or 1 first, which is the rule for
+// every store into one. A storage unit wider than four bytes is refused by name:
+// the field's clear mask is written as a four-byte immediate, and the eight-byte
+// case would need a width this instruction does not carry, so it is named rather
+// than written wrong.
+fn (mut e Emitter) assign_member_bits(stmt ast.Stmt, member ast.Field, expr ast.Expr, address Slot, address_register backend.Register, width int, member_name string) !void {
+	if member.unit_width <= 0 || member.unit_width > 4 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the bitfield ${member_name} lies in a ${member.unit_width}-byte storage unit, and this back end writes a bitfield only in a unit of four bytes or fewer')
+		return error('unsupported bitfield unit')
+	}
+	if e.floating_of(expr) {
+		e.convert_to_int(expr, e.written_is_unsigned(member.spelling), width, stmt.line, stmt.col)!
+	} else {
+		value_width := e.width_of(expr) or {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
+			return error('unknown width')
+		}
+		if e.constant(expr) == none && value_width != width && !(width < 4 && value_width == 4) {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into the member ${member_name}, which holds ${width}')
+			return error('width mismatch')
+		}
+		e.normalize_a_bool_store(e.declares_a_bool(member.spelling), value_width == 8, stmt.line,
+			stmt.col)!
+	}
+	register := e.accumulator(stmt.line, stmt.col)!
+	unit_bits := member.unit_width * 8
+	// Cut the value to the field's width, then move it up to where the field
+	// sits, so what is ORed into the unit is exactly the field's bits and
+	// nothing above them.
+	if member.bit_width < unit_bits {
+		e.append(e.target.and_immediate(register, i32((u64(1) << member.bit_width) - 1))!)
+	}
+	if member.bit_offset > 0 {
+		e.append(e.target.shift_left_word(register, u8(member.bit_offset))!)
+	}
+	// Read the unit, clear the field's bits, OR the value's bits in, and write
+	// the unit back. A field that fills the unit has nothing to clear, so the
+	// clear mask is zero and the value is written as it stands.
+	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+	unit := e.remainder(stmt.line, stmt.col)!
+	e.append(e.target.load_indirect_unsigned(address_register, unit, member.unit_width)!)
+	mut clear := i32(0)
+	if member.bit_width < unit_bits {
+		clear = i32(~(((u32(1) << member.bit_width) - 1) << member.bit_offset))
+	}
+	e.append(e.target.and_immediate(unit, clear)!)
+	e.append(e.target.or_word(unit, register)!)
+	e.append(e.target.store_indirect(address_register, unit, member.unit_width)!)
 }
 
 // element_address leaves the address of one element of an array in the index
@@ -3790,6 +3854,9 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.append(e.target.load_double_indirect(register, double_register)!)
 				return
 			}
+			if expr.bitfield {
+				return e.load_bitfield(register, expr, width)
+			}
 			e.load_indirect_value(register, register, e.written_is_unsigned(expr.spelling), width)!
 		}
 		ast.StrLit {
@@ -4044,6 +4111,15 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 		}
 	}
 	if unary.expr is ast.Field {
+		if unary.expr.bitfield {
+			// A bitfield is not an object with an address of its own: it is a
+			// run of bits inside a storage unit it shares, so `&s.a` has no
+			// byte to give. gcc refuses it too, and a refusal by name is what
+			// keeps this from handing back the unit's address as though it
+			// were the field's.
+			e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of the bitfield ${unary.expr.name}.${unary.expr.member} is taken, and a bitfield does not have an address of its own')
+			return error('address of a bitfield')
+		}
 		// The member's address is the object's address plus the byte the layout
 		// put the member at, which is the same computation a member read makes
 		// and stops short of the read.
@@ -4582,6 +4658,37 @@ fn (mut e Emitter) load_indirect_value(address backend.Register, destination bac
 		return
 	}
 	e.append(e.target.load_indirect(address, destination, width)!)
+}
+
+// load_bitfield reads a bitfield member's own bits out of the storage unit it
+// shares with the members around it. The unit is read at its full width and the
+// field is shifted down to the bottom of the register, then extended back to the
+// width of the register: a signed field keeps its sign, and an unsigned one is
+// filled with zero. The shift pair that extends it also clears the bits above the
+// field, so no separate mask is needed, and that is what makes the read agree
+// with gcc for a field narrower than its storage unit. The unit is read zero-
+// filled because the field's bits are then cut out of the low end of it: reading
+// it with its sign would put ones above the unit that no mask below the field
+// could tell from the field's own sign.
+fn (mut e Emitter) load_bitfield(register backend.Register, field ast.Field, width int) !void {
+	unit := if field.unit_width > 0 { field.unit_width } else { width }
+	if unit <= 0 || unit > 8 {
+		e.diagnostics << problem(field.line, field.col, 'unsupported: the bitfield ${field.name}.${field.member} lies in a storage unit this back end has no load for')
+		return error('unsupported bitfield unit')
+	}
+	e.append(e.target.load_indirect_unsigned(register, register, unit)!)
+	if field.bit_offset > 0 {
+		e.append(e.target.shift_right_word(register, u8(field.bit_offset))!)
+	}
+	if field.bit_width > 0 && field.bit_width < 64 {
+		extend := u8(64 - field.bit_width)
+		e.append(e.target.shift_left_word(register, extend)!)
+		if e.written_is_unsigned(field.spelling) {
+			e.append(e.target.shift_right_word(register, extend)!)
+		} else {
+			e.append(e.target.shift_right_arithmetic(register, extend)!)
+		}
+	}
 }
 
 // eight_byte_integer says whether a type is one of the four 64-bit integer types,
