@@ -64,6 +64,12 @@ pub struct Scope {
 pub mut:
 	symbols map[string]Symbol
 	tags    map[string]Type
+	// constants are the enumeration constants this scope declares, which are
+	// names that stand for a value and not for an object: a use of one is the
+	// number the enum gave it, and there is no storage behind it to read. They
+	// live beside the symbols for the same reason the symbols do, because an
+	// inner enum hides an outer constant and gives it back when its block ends.
+	constants map[string]i64
 }
 
 // Table is the scopes a file is inside of, outermost first, so the file scope is
@@ -79,8 +85,9 @@ pub mut:
 pub fn new_table() Table {
 	return Table{
 		scopes: [Scope{
-			symbols: map[string]Symbol{}
-			tags:    map[string]Type{}
+			symbols:   map[string]Symbol{}
+			tags:      map[string]Type{}
+			constants: map[string]i64{}
 		}]
 	}
 }
@@ -89,8 +96,9 @@ pub fn new_table() Table {
 // never closed.
 pub fn (mut t Table) enter() {
 	t.scopes << Scope{
-		symbols: map[string]Symbol{}
-		tags:    map[string]Type{}
+		symbols:   map[string]Symbol{}
+		tags:      map[string]Type{}
+		constants: map[string]i64{}
 	}
 }
 
@@ -126,6 +134,28 @@ pub fn (t Table) lookup(name string) ?Symbol {
 // redeclaration asks.
 pub fn (t Table) lookup_here(name string) ?Symbol {
 	return t.scopes[t.scopes.len - 1].symbols[name] or { return none }
+}
+
+// declare_constant records an enumeration constant in the innermost scope. It is
+// written beside the symbol the enumerator is also given, because the value and
+// not only the name is what a use of it has to find: `enum { N = 4 };` declares N
+// as an int and as the number four, and only the number is what `int x[N]` reads.
+pub fn (mut t Table) declare_constant(name string, value i64) {
+	t.scopes[t.scopes.len - 1].constants[name] = value
+}
+
+// lookup_constant finds an enumeration constant, innermost scope first, and
+// answers the value the enum gave it. A constant whose value is zero is found
+// like any other, so the presence of the name is what is asked rather than
+// whether the number is true.
+pub fn (t Table) lookup_constant(name string) ?i64 {
+	for index := t.scopes.len - 1; index >= 0; index-- {
+		scope := t.scopes[index]
+		if name in scope.constants {
+			return scope.constants[name]
+		}
+	}
+	return none
 }
 
 // declare records a declaration in the innermost scope and answers with the

@@ -1652,6 +1652,14 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
+		// An enumeration constant stands for a number and not for an object: a
+		// use of it is the value the enum gave it, which is what makes it an
+		// integer constant expression an array bound or a case label can be
+		// built from. It is asked before the name is resolved, because there is
+		// no storage behind the name to read.
+		if value := p.scopes.lookup_constant(t.text) {
+			return integer_constant(value, t.text, t)
+		}
 		// The function-name spellings name the function the expression is
 		// written in: `__func__` is C99's (6.4.2.2), and `__FUNCTION__` and
 		// `__PRETTY_FUNCTION__` are gcc's spellings of the same name. What

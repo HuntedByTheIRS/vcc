@@ -1084,18 +1084,24 @@ fn test_a_floating_constant_as_the_immediate_operand_of_a_cast_is_a_bound() {
 }
 
 // A file-scope bound that names something the file declares nowhere is that
-// name's failure and not the object's. This reader does not declare enumeration
-// constants, so `enum { N = 4 }; int x[N];` fails because N has no declaration;
-// reporting the bound as not an integer constant expression would name a cause
-// the compiler cannot show, and a wrong cause is worse than a narrower message.
-// Whether the name is declared is asked once the whole file has been read, so a
-// name declared after the bound still gets the object's own report.
+// name's failure and not the object's. An enumeration constant is not such a
+// name - it is a value the enum gives it, so `enum { N = 4 }; int x[N];` is a
+// bound of four and says nothing at all - and the undeclared name has to be one
+// the file never gives a value to. Reporting the bound as not an integer constant
+// expression would name a cause the compiler cannot show, and a wrong cause is
+// worse than a narrower message. Whether the name is declared is asked once the
+// whole file has been read, so a name declared after the bound still gets the
+// object's own report.
 fn test_a_bound_that_names_an_undeclared_name_is_reported_as_that_name() {
-	missing := declarations_of('enum { N = 4 };\nint x[N];')
+	missing := declarations_of('int y;\nint x[nowhere];')
 	assert missing.diagnostics.len == 1
-	assert missing.diagnostics[0].msg.contains('N is used here and nothing in this file declares it')
+	assert missing.diagnostics[0].msg.contains('nowhere is used here and nothing in this file declares it')
 	assert !missing.diagnostics[0].msg.contains('is not an integer constant expression')
 	assert missing.diagnostics[0].line == 2
+	// An enumeration constant is a constant, so a bound that names one is the
+	// object's to answer for and there is nothing to report.
+	constant := declarations_of('enum { N = 4 };\nint x[N];')
+	assert constant.diagnostics.len == 0
 	// A name the file declares later is a bound that is not constant, and the
 	// report says that, because the question is asked with the whole file read.
 	later := declarations_of('int x[n];\nint n = 4;')
