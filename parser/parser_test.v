@@ -621,6 +621,18 @@ fn test_a_compound_assignment_is_the_assignment_it_means() {
 	assert binary.right is ast.IntLit
 }
 
+// A parenthesised expression is a primary-expression, and 6.5.16 and 6.5.17 put
+// the assignment and the comma at the top of the expression grammar, so
+// `(a = 1)` is a well-formed expression worth 1. The parenthesised-expression
+// reader reads only the binary and conditional operators, so it stops at the
+// `=` and refuses it as the wrong token where the parenthesis closes. This test
+// pins that refusal where it happens.
+fn test_a_parenthesised_assignment_expression_is_refused() {
+	result := parsed('int main() { int a = 0; return (a = 1) == 1; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains("expected ), found '='")
+}
+
 // `*p = 5` writes through the address p holds, so the tree keeps the
 // dereference as the target and has no name for it: the address is what the
 // store needs, and the expression the dereference reads through is where it
