@@ -3858,14 +3858,13 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 			e.emit_wide_step(step, depth)!
 			continue
 		}
-		if step.op == '/' || step.op == '%' {
-			if divisor := e.constant(step.right) {
-				if divisor == 0 {
-					e.diagnostics << problem(step.line, step.col, 'division by zero')
-					return error('division by zero')
-				}
-			}
-		}
+		// A division by a constant zero is not refused here. C99 6.6 makes it an
+		// error only where a constant expression is required, and this is not
+		// such a place: measured against gcc 16.2.1, `x / 0`,
+		// `1 ? 2 : (x / 0)` and `1 ? 2 : (1/0)` all compile there, with a
+		// warning at most, while this emitter refused all three. A division that
+		// runs is undefined behaviour, which is not the same thing as a
+		// diagnostic, and the two conditional arms above are not even evaluated.
 		// The left value waits in the frame while the right one is computed: the
 		// right side can call a function, and a call is free to use the
 		// accumulator and the scratch register both. The slot is at this level of
