@@ -1844,14 +1844,21 @@ fn (mut p Parser) struct_member_inits(aggregate types.Type, list BraceList, layo
 
 // check_definition reports what keeps a definition from being emitted. A
 // prototype can promise anything, because nothing is emitted for it; a
-// definition is code, and this back end takes three return types and parameters
+// definition is code, and this back end takes the return types and parameters
 // it can name.
 fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	if d.name.len == 0 {
 		p.error_at(spec.start, 'unsupported: a function definition needs a name')
 		return
 	}
-	if spec.clause.is_complex() || spec.clause.kind == .long_double {
+	// A return type with a star is one address wide whatever it points at, so
+	// the base type is asked the same question a local of pointer type is: the
+	// emitter sizes the value from the star and never lays out what is under it.
+	// The complex and long double clause below is about a value the emitter has
+	// to give a form to, so it is asked only of a return type that is not a
+	// pointer, and a pointer to one of those types takes the same answer a
+	// pointer object takes.
+	if d.pointer_count() == 0 && (spec.clause.is_complex() || spec.clause.kind == .long_double) {
 		// A type the model knows and the emitter has no form for is a different
 		// answer from a type whose first word is not one the emitter reads:
 		// `long double` and `double _Complex` are each one type, and the refusal
@@ -1861,10 +1868,6 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	}
 	if offender := p.unsupported_type_word(spec, d.pointer_count()) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
-		return
-	}
-	if d.pointer_count() > 0 {
-		p.error_at(d.star_at(), 'unsupported: pointer return types are not implemented')
 		return
 	}
 	if d.param_problem.len > 0 {

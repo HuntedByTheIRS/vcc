@@ -838,6 +838,52 @@ fn test_an_object_parameter_of_a_tag_with_no_body_is_reported() {
 	assert result.diagnostics[0].msg.contains('unsupported type struct S')
 }
 
+// A definition whose return type is a pointer is a definition like any other.
+// The value goes back in the register an int comes back in, and what the pointer
+// points at is not laid out at the return, so the reader keeps the type instead
+// of refusing it. Measured on gcc 16.2.1, which compiles and runs every program
+// below.
+fn test_a_definition_may_return_a_pointer() {
+	scalar := declarations_of('char *f(void) { return 0; }')
+	assert scalar.diagnostics.len == 0
+	assert scalar.unit.decls[0].ret == 'char *'
+	assert scalar.unit.decls[0].ret_type.describe() == 'char *'
+
+	// The qualifier the type was written with is in the resolved type; the
+	// spelling the return conversion reads is the type words with the stars, so
+	// the qualifier is not in `ret`.
+	qualified := declarations_of('const char *f(void) { return 0; }')
+	assert qualified.diagnostics.len == 0
+	assert qualified.unit.decls[0].ret == 'char *'
+	assert qualified.unit.decls[0].ret_type.describe() == 'const char *'
+
+	voidp := declarations_of('void *f(void) { return 0; }')
+	assert voidp.diagnostics.len == 0
+	assert voidp.unit.decls[0].ret_type.describe() == 'void *'
+
+	// The 12-level declarator the corpus writes: a function returning a pointer
+	// to an array of three ints. The stars the spelling carries are the name's
+	// own, and the array is what the pointer points at.
+	array := declarations_of('int (*f(void))[3] { return 0; }')
+	assert array.diagnostics.len == 0
+	assert array.unit.decls[0].ret == 'int *'
+	assert array.unit.decls[0].ret_type.describe() == 'int[3]*'
+}
+
+// The pointer return rule does not reach inside the star. A pointer to a type
+// the emitter has no form for is still one address wide, so it is refused the
+// same way a pointer object's declaration is: by naming the word. A bare long
+// double is the other side, because the value itself is what has no form.
+fn test_a_pointer_to_a_type_the_emitter_has_no_form_for_is_refused_by_name() {
+	pointer := declarations_of('long double *f(void) { return 0; }')
+	assert pointer.diagnostics.len == 1
+	assert pointer.diagnostics[0].msg.contains('unsupported type long')
+
+	value := declarations_of('long double f(void) { return 0; }')
+	assert value.diagnostics.len == 1
+	assert value.diagnostics[0].msg.contains('long double is a type this compiler does not emit yet')
+}
+
 fn test_a_declaration_with_no_declarator_is_reported() {
 	result := declarations_of('typedef;')
 	assert result.diagnostics.len == 1
