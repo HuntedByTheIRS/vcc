@@ -358,6 +358,24 @@ fn test_a_cast_converts_between_the_classes_the_back_end_carries() {
 	assert run_image(signed.bytes) == 1
 }
 
+// A pointer converted to a 64-bit integer and back is the same address, and the
+// high word is the part a back end that narrows the conversion loses. Measured
+// with gcc 16.2.1: `(long)(int *)0x100000000L` is 0x100000000, so this program
+// exits 1, and one that narrows the cast to a pointer answers 0.
+fn test_a_pointer_round_trips_through_a_64_bit_integer() {
+	emitted := emit(translation_unit('int main() { long v = 1; v <<= 32; int *p = (int *)v; long w = (long)p; return (int)(w >> 32); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+	// The same conversion on a real object, where the address is the one the
+	// machine gave the object: a pointer stored in a long and read back still
+	// points at the object it did, so writing through it writes there.
+	object := emit(translation_unit('int main() { int x = 0; int *p = &x; long w = (long)p; int *q = (int *)w; *q = 5; return x; }'),
+		Options{})
+	assert object.diagnostics.len == 0
+	assert run_image(object.bytes) == 5
+}
+
 fn test_a_cast_with_no_conversion_behind_it_is_reported() {
 	// A conversion to a type this back end has no register for is refused by
 	// name rather than written as a value of the wrong width.

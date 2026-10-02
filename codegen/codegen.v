@@ -4717,9 +4717,24 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 	}
 	if target.kind == .pointer {
 		if !e.is_a_pointer(cast.expr) {
-			// An int is four bytes and an address is eight: the value is
-			// widened into the whole register with its sign kept.
-			e.append(e.target.sign_extend_word(register, register)!)
+			if source == 8 {
+				// An address is eight bytes and so is this value in the
+				// register: a long, an unsigned long or a long long that holds
+				// an address is left as it is. Narrowing it to four bytes and
+				// widening the low word back would answer an address the value
+				// never was, and the high word is exactly what the round trip
+				// is asked to keep.
+			} else if source == 4 {
+				// An int is four bytes and an address is eight: the value is
+				// widened into the whole register with its sign kept.
+				e.append(e.target.sign_extend_word(register, register)!)
+			} else {
+				// A source this back end cannot size is not a value an address
+				// is made of, and answering with a plausible one would be a
+				// wrong address rather than a refusal.
+				e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and the value has no width here to widen into an address')
+				return error('no width for the address')
+			}
 		}
 		return
 	}
