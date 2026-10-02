@@ -351,6 +351,59 @@ fn test_a_body_list_gives_an_empty_bracket_array_its_size() {
 	assert decl.decl_count == 3
 }
 
+// The same initializer in a body is the stores the declaration makes where it is
+// written, and the name is completed from the literal so a later `sizeof`
+// answers with the size the literal fixed. Measured on gcc 16.2.1, a program
+// whose `char s[] = "abc";` is a local and that returns `sizeof s` exits 4.
+fn test_a_body_char_array_takes_a_string_literal() {
+	result := declarations_of('int main(void) { char s[] = "abc"; return sizeof s; }')
+	assert result.diagnostics.len == 0
+	decl := result.unit.decls[0].body[0]
+	assert decl.kind == .var_decl
+	assert decl.decl_count == 4
+	// One store per element the literal writes, the terminator last.
+	mut assigns := 0
+	for stmt in result.unit.decls[0].body {
+		if stmt.kind == .assign {
+			assigns++
+		}
+	}
+	assert assigns == 4
+	last := result.unit.decls[0].body[4]
+	value := last.expr or {
+		assert false
+		return
+	}
+	assert value is ast.IntLit
+	if value is ast.IntLit {
+		assert value.value == 0
+	}
+	// A written size is used, and the elements after the terminator stay zero.
+	sized := declarations_of('int main(void) { char s[8] = "abc"; return 0; }')
+	assert sized.diagnostics.len == 0
+	assert sized.unit.decls[0].body[0].decl_count == 8
+}
+
+// A wide literal in a body owns four-byte elements the same way it does at file
+// scope: `wchar_t w[] = L"abc";` is four of them.
+fn test_a_body_wide_array_takes_a_wide_literal() {
+	result := declarations_of('typedef int wchar_t;\nint main(void) { wchar_t w[] = L"abc"; return sizeof w; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].body[0].decl_count == 4
+}
+
+// A written bound in a body is used and not filled in from the literal:
+// `char s[0] = "abc";` and `char s[2] = "abc";` are the constraint violation gcc
+// 16.2.1 reports as `initializer-string for array of 'char' is too long`.
+fn test_a_body_written_bound_is_not_filled_in_from_a_string_literal() {
+	zero := declarations_of('int main(void) { char s[0] = "abc"; return 0; }')
+	assert zero.diagnostics.len == 1
+	assert zero.diagnostics[0].msg.contains('holds 0 elements and its initializer writes 4')
+	too_long := declarations_of('int main(void) { char s[2] = "abc"; return 0; }')
+	assert too_long.diagnostics.len == 1
+	assert too_long.diagnostics[0].msg.contains('holds 2 elements and its initializer writes 4')
+}
+
 // A scalar in braces in a body is the number in them: measured, `int x = {5};`
 // returns 5 when the program reads x.
 fn test_a_body_scalar_in_braces_is_the_number_in_them() {

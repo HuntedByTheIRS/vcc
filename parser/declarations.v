@@ -2403,6 +2403,23 @@ fn string_elements(literal ast.StrLit) []i64 {
 	return values
 }
 
+// string_elements_at is the elements string_elements answers, written as the
+// integer constants a brace list writes, at the position of the declaration that
+// holds them. A literal and a list then reach the back end as one thing.
+fn string_elements_at(literal ast.StrLit, at tokenize.Token) []ast.Expr {
+	mut elements := []ast.Expr{}
+	for value in string_elements(literal) {
+		elements << ast.Expr(ast.IntLit{
+			value: value
+			text:  '${value}'
+			typ:   types.int_type()
+			line:  at.line
+			col:   at.col
+		})
+	}
+	return elements
+}
+
 // ArrayString is what a string literal that initializes a file-scope array
 // writes: the element constants, how many elements the array turned out to have,
 // and the type the name is completed with. ok is false when the literal or its
