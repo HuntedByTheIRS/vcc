@@ -745,6 +745,51 @@ fn test_a_member_of_a_union_is_at_the_beginning_of_it() {
 	assert member.spelling == 'char'
 }
 
+// A member read from an expression rather than a name keeps the object in the
+// Field's base: the object of the second `->` in `p->next->v` is the first
+// member, which is a value rather than a place in the frame.
+fn test_a_member_read_from_an_expression_keeps_the_object_as_its_base() {
+	decl := first('struct N { int v; struct N *next; };\nint main() { struct N a; struct N *p = &a; return p->next->v; }')
+	body := decl.body
+	returned := body[2].expr or {
+		assert false
+		return
+	}
+	outer := returned as ast.Field
+	assert outer.member == 'v'
+	assert outer.through_pointer
+	base := outer.base or {
+		assert false
+		return
+	}
+	inner := base as ast.Field
+	assert inner.name == 'p'
+	assert inner.member == 'next'
+	assert inner.through_pointer
+	assert inner.base == none
+}
+
+// A member of an element whose object is not a name carries the element as its
+// base, which is the shape `r.chain[i].v` has: the element is the object the
+// member is read from, and its address is the one the back end computes.
+fn test_a_member_of_an_element_of_an_expression_carries_the_element() {
+	result := checked('struct C { int v; };\nstruct Row { struct C chain[2]; };\nint main() { struct Row r; int i = 1; return r.chain[i].v; }')
+	body := result.unit.decls[0].body
+	returned := body[2].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.member == 'v'
+	assert member.typ.same(types.int_type())
+	base := member.base or {
+		assert false
+		return
+	}
+	element := base as ast.Index
+	assert element.typ.kind == types.Kind.struct_
+}
+
 // A member written into is the same offset read the other way, and the statement
 // carries the member rather than a name: `s.c = 5` writes four bytes into the
 // object at four, where a plain name would write a slot of its own.

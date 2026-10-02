@@ -446,7 +446,13 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_expression(expr.index, mut reported)
 		}
 		ast.Field {
-			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			// A member of an expression carries the object's own names inside
+			// the base; a member of a name is a use of that name.
+			if base := expr.base {
+				p.check_undeclared_expression(base, mut reported)
+			} else {
+				p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			}
 		}
 		ast.Unary {
 			p.check_undeclared_expression(expr.expr, mut reported)
@@ -936,9 +942,37 @@ fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through
 		}
 		aggregate = pointed_at
 	}
-	mut member := p.parse_member(base, aggregate, 0, '', through_pointer, index)!
+	mut member := p.parse_member(base, ?ast.Expr(none), aggregate, 0, '', through_pointer, index)!
 	for p.at_punct('.') {
-		member = p.parse_member(base, member.typ, member.offset, member.member, false, index)!
+		member = p.parse_member(base, ?ast.Expr(none), member.typ, member.offset, member.member, false, index)!
+	}
+	return member
+}
+
+// parse_general_member_path reads a member access whose object is an expression
+// rather than a name: `f()->m`, `(p)->m`, `a->b->c`, `arr[i].m`. The object's own
+// type decides which member can be read and where the layout put it, exactly as
+// it does for a name, and the object is kept in the Field's base so the back end
+// can compute its address. The dots that follow the first access add up into the
+// same Field the way they do for a name, because a member of a member is inside
+// the same object.
+fn (mut p Parser) parse_general_member_path(object ast.Expr, through_pointer bool, at tokenize.Token) !ast.Field {
+	object_desc := describe_operand(object)
+	mut aggregate := object.typ
+	if through_pointer {
+		// The object is a pointer and the member belongs to what it points at.
+		// A value that is not a pointer has no object to be read through, and
+		// saying so here keeps the value from being read as an address that
+		// means something else.
+		aggregate = aggregate.pointee() or {
+			p.error_at(at, 'unsupported: ${object_desc} is read through ->, and it is declared ${aggregate.describe()} rather than a pointer')
+			return error('not a pointer')
+		}
+	}
+	mut member := p.parse_member(object_desc, object, aggregate, 0, '', through_pointer, ?ast.Expr(none))!
+	for p.at_punct('.') {
+		member = p.parse_member(object_desc, object, member.typ, member.offset, member.member, false,
+			?ast.Expr(none))!
 	}
 	return member
 }
@@ -958,7 +992,7 @@ fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through
 // diagnostic names the whole path. A member of a member is one object read further
 // in, because a member of an object is inside the object, and a name written at the
 // end of a path is one Field and not a chain of reads.
-fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path string, through_pointer bool, index ?ast.Expr) !ast.Field {
+fn (mut p Parser) parse_member(base string, object ?ast.Expr, aggregate types.Type, into int, path string, through_pointer bool, index ?ast.Expr) !ast.Field {
 	dot := p.next() // .
 	if p.peek().kind != .identifier {
 		p.error_at(p.peek(), 'unsupported: expected a member name after ., found ${describe(p.peek())}')
@@ -993,6 +1027,7 @@ fn (mut p Parser) parse_member(base string, aggregate types.Type, into int, path
 	member := tagged.members[at]
 	return ast.Field{
 		name:            base
+		base:            object
 		index:           index
 		member:          written
 		offset:          into + layout.offsets[at]
@@ -1362,36 +1397,70 @@ fn (mut p Parser) parse_postfix() !ast.Expr {
 			expr = p.parse_subscript(expr)!
 			continue
 		}
+		// A member access binds to whatever comes before it the way a call and
+		// a subscript do, so it is read here and after any base: a name, a
+		// call's result, a chained arrow, a parenthesised pointer, or an
+		// element of an array. An object named by a name keeps the
+		// name-and-offset shape the reader has always built, and every other
+		// object is held in the Field's base so the back end can compute its
+		// address.
+		if t.kind == .punct && (t.text == '.' || t.text == '->') {
+			expr = p.parse_member_on(expr, t.text == '->', t)!
+			continue
+		}
+		break
+	}
+	return expr
+}
+
+// parse_member_on reads one member access, `.name` or `->name`, on whatever the
+// object is. An object named by a name is read by the name-and-offset reader,
+// which also takes the whole chain of dots that follows; an element whose base
+// is a name keeps the name-and-index shape `s[i].a` has always had; and every
+// other object goes through the general reader, which holds the object in the
+// Field's base.
+fn (mut p Parser) parse_member_on(object ast.Expr, through_pointer bool, at tokenize.Token) !ast.Expr {
+	if object is ast.Ident {
+		named := object as ast.Ident
+		named_at := tokenize.Token{
+			kind: .identifier
+			text: named.name
+			line: named.line
+			col:  named.col
+		}
+		return ast.Expr(p.parse_member_path(named.name, named_at, through_pointer, ?ast.Expr(none))!)
+	}
+	if object is ast.Index {
 		// A member of an element: `s[i].a` reads the member from the element
 		// the index names, so the Field carries the index and the member is
-		// read from that element. A member is read from an object with a place
-		// in the frame or in the image, so the object has to be a name; an
-		// element of anything else is refused here by name.
-		if t.kind == .punct && (t.text == '.' || t.text == '->') && expr is ast.Index {
-			at := expr as ast.Index
-			if at.base is ast.Ident {
-				name := (at.base as ast.Ident).name
-				base_at := tokenize.Token{
-					kind: .identifier
-					text: name
-					line: at.base.line
-					col:  at.base.col
-				}
-				expr = ast.Expr(p.parse_member_path(name, base_at, t.text == '->', at.index)!)
-				continue
+		// read from that element. A base that is a name keeps that
+		// name-and-index shape.
+		element := object as ast.Index
+		if element.base is ast.Ident {
+			base := element.base as ast.Ident
+			base_at := tokenize.Token{
+				kind: .identifier
+				text: base.name
+				line: base.line
+				col:  base.col
 			}
-			// A member path is named as it was written even when the array
-			// member's address was taken: the object is what the reader sees.
-			mut object := describe_operand(at.base)
-			if at.base is ast.Unary {
-				addressed := at.base as ast.Unary
-				if addressed.op == '&' && addressed.expr is ast.Field {
-					path := addressed.expr as ast.Field
-					object = '${path.name}.${path.member}[...]'
-				}
-			}
-			p.error_at(t, 'unsupported: a member is read from an element, and the object is ${object} rather than a name')
-			return error('member of an element')
+			return ast.Expr(p.parse_member_path(base.name, base_at, through_pointer, element.index)!)
+		}
+	}
+	return ast.Expr(p.parse_general_member_path(object, through_pointer, at)!)
+}
+
+// parse_member_chain reads the member accesses that follow an object, left to
+// right, until the token no longer opens one. It is what continues a path the
+// name-and-offset reader stopped in the middle of, because a step through a
+// pointer member is an object of its own rather than a byte inside the name.
+fn (mut p Parser) parse_member_chain(object ast.Expr) !ast.Expr {
+	mut expr := object
+	for {
+		t := p.peek()
+		if t.kind == .punct && (t.text == '.' || t.text == '->') {
+			expr = p.parse_member_on(expr, t.text == '->', t)!
+			continue
 		}
 		break
 	}

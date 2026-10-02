@@ -3345,3 +3345,26 @@ fn test_a_long_chain_of_conditionals_compiles_and_runs() {
 	assert emitted.diagnostics.len == 0
 	assert run_image(emitted.bytes) == 1
 }
+
+// A member is read from any expression the reader can build, not only a name: a
+// chained arrow through a linked list, an element of an array of structs, and
+// the object a call hands back by value. Measured on gcc 16.2.1, the four
+// programs below return 0, 0, 42 and 3.
+fn test_a_member_is_read_from_an_expression() {
+	list := emit(translation_unit('struct N { int v; struct N *next; }; int main(void) { struct N a; struct N b; struct N c; a.v = 1; b.v = 2; c.v = 3; a.next = &b; b.next = &c; c.next = 0; struct N *p = &a; if (p->next->v != 2) return 1; if (p->next->next->v != 3) return 2; if (p->next->next->next != 0) return 3; p->next->v = 20; if (b.v != 20) return 4; return 0; }'),
+		Options{})
+	assert list.diagnostics.len == 0
+	assert run_image(list.bytes) == 0
+	element := emit(translation_unit('struct C { int v; }; struct Row { struct C chain[2]; }; int main(void) { struct Row r; r.chain[0].v = 3; r.chain[1].v = 4; int i = 1; if (r.chain[i].v != 4) return 1; r.chain[i].v = 44; if (r.chain[1].v != 44) return 2; return 0; }'),
+		Options{})
+	assert element.diagnostics.len == 0
+	assert run_image(element.bytes) == 0
+	small := emit(translation_unit('struct P { int x; int y; }; struct P mk(void) { struct P p; p.x = 42; p.y = 7; return p; } int main(void) { return mk().x; }'),
+		Options{})
+	assert small.diagnostics.len == 0
+	assert run_image(small.bytes) == 42
+	large := emit(translation_unit('struct Big { int a; int b; int c; int d; int e; int f; }; struct Big mk(void) { struct Big x; x.a = 1; x.b = 2; x.c = 3; x.d = 4; x.e = 5; x.f = 6; return x; } int main(void) { return mk().c; }'),
+		Options{})
+	assert large.diagnostics.len == 0
+	assert run_image(large.bytes) == 3
+}
