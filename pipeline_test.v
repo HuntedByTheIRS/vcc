@@ -307,6 +307,38 @@ fn test_a_member_that_is_an_array_is_subscripted() {
 	os.rm(second_binary) or {}
 }
 
+// A union is one object its members share: every member starts at the beginning
+// of the object, so the address of any member is the address of the union, and
+// the size is the largest member's. A member is written and read at its own
+// width; a constant stored into an eight-byte member is written at the member's
+// width and widened into the whole register, which is what `u.ll = 0` then
+// `u.i = 0x01020304` then reading `u.bytes[0]` shows. Measured on gcc 16.2.1,
+// the same program returns 127.
+fn test_a_union_member_is_read_at_the_beginning_of_the_object() {
+	source := scratch('union_members.c')
+	binary := scratch('union_members')
+	exit_status := compile_and_run([source, '-o', binary],
+		"union U { char c; int i; long long ll; double d; char bytes[8]; };\nint main(void) { union U u; int score = 0; u.ll = 0; u.i = 0x01020304; if ((void *)&u.i == (void *)&u) score += 1; if ((void *)&u.c == (void *)&u) score += 2; if (sizeof(union U) == 8) score += 4; if (u.i == 0x01020304) score += 8; if (u.bytes[0] == 4) score += 16; u.d = 1.0; if (u.d == 1.0) score += 32; u.c = 'z'; if (u.c == 'z') score += 64; return score; }\n")
+	assert exit_status == 127
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A constant stored into a member is written at the width of the member, and a
+// member eight bytes wide takes it widened into the whole register, which is
+// what a store into a name of that width does. `s.ll = 0` is the case: without
+// the widening the store would move eight bytes built from a four-byte value.
+// Measured on gcc 16.2.1, the same program returns 104.
+fn test_a_constant_stored_into_a_wider_member_is_widened() {
+	source := scratch('member_widen.c')
+	binary := scratch('member_widen')
+	exit_status := compile_and_run([source, '-o', binary],
+		"struct S { long long ll; char c; };\nint main(void) { struct S s; s.ll = 0; s.ll = 7; s.c = 'a'; return (int)s.ll + s.c; }\n")
+	assert exit_status == 104
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // typeof is read by the parser and answered by the emitter as the type behind
 // it: a program that declares an object through typeof compiles and runs, and
 // the exit status is what the types decided. Measured on gcc 16.2.1, the same

@@ -1630,9 +1630,21 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr)
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 		return error('unknown width')
 	}
-	if value_width != width && !(width == 1 && value_width == 4) {
+	// A store into a member is a store through the member's address, so it takes
+	// the width rule such a store takes: a constant says nothing about its own
+	// width and is written at the member's, and any other value has to already
+	// have it. A char member is the exception, because the language stores an
+	// int in a char by taking its low byte.
+	if e.constant(expr) == none && value_width != width && !(width == 1 && value_width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into the member ${member_name}, which holds ${width}')
 		return error('width mismatch')
+	}
+	if width == 8 && value_width != 8 {
+		// A value narrower than the member is widened into the whole register
+		// before it is written, the way a store into a name of that width does:
+		// the store moves eight bytes, so an int whose upper half the load
+		// cleared would otherwise be written as its unsigned reading.
+		e.extend_operand_to_word(expr, stmt.line, stmt.col)!
 	}
 	value := e.accumulator(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
