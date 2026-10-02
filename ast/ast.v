@@ -322,6 +322,16 @@ pub:
 	offset   int
 	spelling string
 	typ      types.Type
+	// bitfield says the member is a bitfield: the value it holds is the bit_width
+	// bits starting at bit_offset inside the storage unit at offset, and a store
+	// into it has to leave the unit's other bits alone. unit_width is the size in
+	// bytes of that storage unit, which is the width of the member's declared
+	// type. A member that is not a bitfield leaves these false and zero, which is
+	// what every read and write that does not ask about bits gets.
+	bitfield   bool
+	bit_offset int
+	bit_width  int
+	unit_width int
 	// through_pointer says the name holds a pointer and not the object itself,
 	// which is what `->` writes: `p->a` reads the member from the object `p`
 	// points at, so the address comes from the pointer's value rather than from
