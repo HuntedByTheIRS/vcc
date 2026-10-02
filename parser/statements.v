@@ -443,7 +443,7 @@ fn (p Parser) assignment_target_type(name string, index ?ast.Expr, field ?ast.Fi
 // A source whose target and value disagree that way is refused at the operators
 // it is written with, which is the next milestone's arithmetic.
 fn (mut p Parser) check_assignment(to types.Type, value ast.Expr, at tokenize.Token) {
-	problem := types.assignment_problem(to, p.value_type(value), is_null_constant(value)) or {
+	problem := types.assignment_problem(to, p.value_type(value), p.is_null_constant(value)) or {
 		return
 	}
 	p.error_at(at, problem)
@@ -455,7 +455,7 @@ fn (mut p Parser) check_assignment(to types.Type, value ast.Expr, at tokenize.To
 // *' from 'int' makes pointer from integer without a cast` under `gcc -std=c99
 // -pedantic-errors`, where this compiler used to accept it.
 fn (mut p Parser) check_initializer(to types.Type, init ast.Expr) {
-	problem := types.assignment_problem(to, p.value_type(init), is_null_constant(init)) or {
+	problem := types.assignment_problem(to, p.value_type(init), p.is_null_constant(init)) or {
 		return
 	}
 	p.error_span(init.line, init.col, problem)

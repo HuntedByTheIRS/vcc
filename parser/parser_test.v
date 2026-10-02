@@ -1678,3 +1678,20 @@ fn test_a_label_and_an_object_of_the_same_name_are_two_names() {
 	assert (operand as ast.Ident).name == 'label'
 	assert (operand as ast.Ident).typ.kind == .int_
 }
+
+// A cast of an integer constant to an integer type is an integer constant
+// expression (6.6), so the folder evaluates one and a pointer is initialized with
+// the zero it names. Measured on gcc 16.2.1 under `-std=c99`, `f((int)0)` for a
+// parameter of type `int (*)(void)` compiles and runs, and this compiler refused
+// both spellings at the cast because the folder had no arm for the node. The
+// header bound that needs the arm is glibc's `sys/select.h`, which asks for
+// `1024 / (8 * (int) sizeof (__fd_mask))`.
+fn test_a_cast_of_a_constant_is_an_integer_constant_expression() {
+	zero := parsed('int f(int (*g)(void));\nint main(void) { return f((int)0); }')
+	assert zero.diagnostics.len == 0
+	// The cast is folded and not merely accepted: `(int)1` is the value one, and
+	// one is not the integer that initializes a pointer.
+	one := parsed('int f(int (*g)(void));\nint main(void) { return f((int)1); }')
+	assert one.diagnostics.len == 1
+	assert one.diagnostics[0].msg.contains('integer constant of value zero')
+}
