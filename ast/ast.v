@@ -246,6 +246,47 @@ pub type Expr = Binary
 	| Field
 	| IncDec
 	| Conditional
+	| Assign
+	| Comma
+
+// Assign is an assignment used where a value is wanted rather than as a
+// statement: `(x = 1) + 2`, `(a <<= 1)`, and the right operand of the second
+// `=` in `(a = b = 3)`. 6.5.16 makes an assignment an expression of the
+// ordinary grammar, so it stands wherever any other expression does; this tree
+// reads the statement form as `Stmt` of kind `assign`, because that is where it
+// is written in almost every line of C, and this node for the places the value
+// is used.
+//
+// op is the operator as written (`=` or one of the compound spellings) and is
+// kept so a reader of the tree sees what was written; the value written is
+// already the one the operator means, because a compound spelling is expanded
+// where it is read. target is the lvalue the value is written into and value is
+// what is written. typ is the type of the object written, which is what the
+// expression is worth after the conversion the store makes.
+pub struct Assign {
+pub:
+	op     string
+	target Expr
+	value  Expr
+	typ    types.Type
+	line   int
+	col    int
+}
+
+// Comma is the comma operator, `E1 , E2`. 6.5.17 makes it worth the value of
+// its right operand and sequences the left before the right: the left is
+// evaluated for what it does and thrown away. It is not the comma that
+// separates: the commas in an argument list, a parameter list and a brace
+// initializer are separators and are read where they are written, so this node
+// is built only where a comma stands inside an expression.
+pub struct Comma {
+pub:
+	left  Expr
+	right Expr
+	typ   types.Type
+	line  int
+	col   int
+}
 
 // Conditional is the conditional operator, `cond ? then_expr : else_expr`. It is
 // worth a value rather than an effect: the value of whichever arm the condition

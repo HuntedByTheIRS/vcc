@@ -957,7 +957,7 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 				e.emit_var_decl(stmt)!
 			}
 			.assign {
-				e.emit_assign(stmt)!
+				e.emit_assign(stmt, 0)!
 			}
 			.if_stmt {
 				if e.emit_if(stmt)! {
@@ -1181,7 +1181,7 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		// registers, or a narrower value widened into the two words. The store asks
 		// the value which of the three it is, so a declaration and an assignment
 		// share one path.
-		return e.store_wide(slot, init, stmt.line, stmt.col)
+		return e.store_wide(slot, init, stmt.line, stmt.col, 0)
 	}
 	if slot.bytes > 0 {
 		// An object of an aggregate type declared with an initializer takes the
@@ -1195,7 +1195,7 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 			line:   stmt.line
 			col:    stmt.col
 		}
-		return e.assign_object_local(declared, slot)
+		return e.assign_object_local(declared, slot, 0)
 	}
 	if stmt.decl_count > 0 {
 		// An array is storage, and the elements of it are whatever the frame
@@ -1228,31 +1228,31 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 // emit_assign evaluates the value and writes it into the slot the name lives in.
 // The name has to be in scope: an assignment to a name that was never declared
 // has nowhere to go, and a guessed slot would be someone else's variable.
-fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
+fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 	expr := stmt.expr or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned without a value')
 		return error('assignment without a value')
 	}
 	if deref := stmt.deref {
-		return e.assign_deref(stmt, deref, expr)
+		return e.assign_deref(stmt, deref, expr, depth)
 	}
 	if member := stmt.field {
-		return e.assign_member(stmt, member, expr)
+		return e.assign_member(stmt, member, expr, depth)
 	}
 	if subscript := stmt.subscript {
-		return e.assign_subscript(stmt, subscript, expr)
+		return e.assign_subscript(stmt, subscript, expr, depth)
 	}
 	if subscript := stmt.index {
-		return e.assign_element(stmt, subscript, expr)
+		return e.assign_element(stmt, subscript, expr, depth)
 	}
 	target := e.lookup(stmt.target) or {
 		// A top-level object is written through its address in the image, the
 		// same way a local is written through its place in the frame.
 		if object := e.global_of(stmt.target) {
 			if object.object && object.count == 0 {
-				return e.assign_object_global(stmt, object)
+				return e.assign_object_global(stmt, object, depth)
 			}
-			return e.assign_global(stmt, object, expr)
+			return e.assign_global(stmt, object, expr, depth)
 		}
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
@@ -1263,10 +1263,10 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 		// computation left in the registers, or a narrower value widened. The store
 		// asks the value which of the three it is, so every wide assignment and
 		// every wide declaration shares one path.
-		return e.store_wide(target, expr, stmt.line, stmt.col)
+		return e.store_wide(target, expr, stmt.line, stmt.col, depth)
 	}
 	if target.bytes > 0 {
-		return e.assign_object_local(stmt, target)
+		return e.assign_object_local(stmt, target, depth)
 	}
 	if e.wide_value(expr) {
 		// The same read the declaration makes: the low word of the object, at the
@@ -1276,10 +1276,12 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a conversion from a 128-bit object to a slot that holds a double is not one this back end makes, and a value that wide does not convert to a floating type here')
 			return error('128-bit to a double')
 		}
-		e.low_word_of_object(expr, target.width, stmt.line, stmt.col, 1)!
+		e.low_word_of_object(expr, target.width, stmt.line, stmt.col, depth + 1)!
 		return e.store_accumulator(target, stmt.line, stmt.col)
 	}
-	e.emit_expr(expr)!
+	// The value is read one level deeper than the assignment is written at, so
+	// that its own half-finished values sit above the slots this store uses.
+	e.emit_expr_at(expr, depth)!
 	e.store_value(target, expr, stmt.line, stmt.col)!
 }
 
@@ -1301,22 +1303,22 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 // guessed width would take bytes from a neighbouring object. A char object is
 // the one exception, because the language stores an int value in a char by
 // taking its low byte, which is what makes `*cp = 1` one byte.
-fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr) !void {
+fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, depth int) !void {
 	unary := target as ast.Unary
 	// The address is the value of the expression the dereference reads
 	// through: `*p` writes at the address p holds, and `**pp` writes at the
 	// address the outer read gives, which is the value of `*pp`.
-	e.emit_expr_at(unary.expr, 1)!
-	address := e.value_slot(0)
+	e.emit_expr_at(unary.expr, depth + 1)!
+	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	if unary.typ.kind == .double {
-		return e.assign_double_at(stmt, address, expr)
+		return e.assign_double_at(stmt, address, expr, depth)
 	}
 	width := e.storage_width(unary.typ) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: *p is assigned through an address of ${unary.typ.describe()}, and this back end writes ints, chars, doubles and pointers only')
 		return error('unsupported pointed-at type')
 	}
-	e.emit_expr_at(expr, 1)!
+	e.emit_expr_at(expr, depth + 1)!
 	address_register := e.scratch(stmt.line, stmt.col)!
 	if e.floating_of(expr) {
 		// A double written into an integer object converts first, because the
@@ -1359,12 +1361,12 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr) !
 // that moves a double rather than with the integer store of the same width.
 // An integer value converts to a double first; a pointer is not converted into
 // one, and is refused by name rather than written as the bits of an address.
-fn (mut e Emitter) assign_double_at(stmt ast.Stmt, address Slot, expr ast.Expr) !void {
+fn (mut e Emitter) assign_double_at(stmt ast.Stmt, address Slot, expr ast.Expr, depth int) !void {
 	if !e.floating_of(expr) && e.is_a_pointer(expr) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored through an address of double, and there is no conversion between them')
 		return error('pointer into a double')
 	}
-	e.emit_expr_at(expr, 1)!
+	e.emit_expr_at(expr, depth + 1)!
 	e.convert_to_double(expr, stmt.line, stmt.col)!
 	value := e.float_accumulator(stmt.line, stmt.col)!
 	address_register := e.scratch(stmt.line, stmt.col)!
@@ -1375,26 +1377,26 @@ fn (mut e Emitter) assign_double_at(stmt ast.Stmt, address Slot, expr ast.Expr) 
 // assign_object_local writes an object into a local object: the destination's
 // address is the frame's address plus the slot's offset, parked in a value slot
 // while the value is read.
-fn (mut e Emitter) assign_object_local(stmt ast.Stmt, target Slot) !void {
+fn (mut e Emitter) assign_object_local(stmt ast.Stmt, target Slot, depth int) !void {
 	expr_value := stmt.expr or { return error('assignment without a value') }
 	register := e.accumulator(stmt.line, stmt.col)!
 	frame := e.frame_pointer(stmt.line, stmt.col)!
 	e.append(e.target.address_of_slot(frame, target.offset, register))
-	address := e.value_slot(0)
+	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
-	return e.assign_object(address, target.width, expr_value, stmt.line, stmt.col)
+	return e.assign_object(address, target.width, expr_value, stmt.line, stmt.col, depth)
 }
 
 // assign_object_global writes an object into a top-level object: the destination's
 // address is in the image, so it is a reference the layout fills in rather than an
 // offset from the frame.
-fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object image.GlobalSlot) !void {
+fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object image.GlobalSlot, depth int) !void {
 	expr_value := stmt.expr or { return error('assignment without a value') }
 	register := e.accumulator(stmt.line, stmt.col)!
 	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, e.target.name_of(register))
-	address := e.value_slot(0)
+	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
-	return e.assign_object(address, object.width, expr_value, stmt.line, stmt.col)
+	return e.assign_object(address, object.width, expr_value, stmt.line, stmt.col, depth)
 }
 
 // assign_object writes one object of an aggregate type into the storage at an
@@ -1406,7 +1408,7 @@ fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object image.GlobalSlot) 
 // copy of its bytes: the source's address is taken and the bytes are read from it.
 // The destination's address is loaded into a scratch register last, because that is
 // the register the store goes through and reading the value must not disturb it.
-fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line int, col int) !void {
+fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line int, col int, depth int) !void {
 	if expr is ast.Call {
 		if class := e.return_classes[expr.name] {
 			// The value arrives in the registers the classes name: one eightbyte,
@@ -1419,10 +1421,10 @@ fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line in
 			if class.count > 2 {
 				// The object is in the storage this call lent the function it called,
 				// and it is copied from there into the object it is assigned to.
-				e.emit_expr_at(expr, 1)!
+				e.emit_expr_at(expr, depth + 1)!
 				return e.copy_frame_object(e.hidden, address, class.bytes, line, col)
 			}
-			e.emit_expr_at(expr, 1)!
+			e.emit_expr_at(expr, depth + 1)!
 			base := e.scratch(line, col)!
 			e.load_argument(address, base, e.target.word_size, line, col)!
 			e.store_return_eightbyte(base, 0, e.target.word_size, class.first_floating, expr.line,
@@ -1438,8 +1440,8 @@ fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line in
 	// An object of the same type: a copy of its bytes, which is what the language
 	// asks for and what the machine does in chunks it can move in one instruction.
 	// Neither object is read as a value, so an object of any size is copied.
-	e.address_of_object(expr, 1)!
-	source := e.value_slot(1)
+	e.address_of_object(expr, depth + 1)!
+	source := e.value_slot(depth + 1)
 	e.store_accumulator(source, line, col)!
 	return e.copy_address_object(source, address, width, line, col)
 }
@@ -1647,26 +1649,26 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 	e.append(e.target.address_of_slot(base, slot.offset + offset, register))
 }
 
-fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr) !void {
+fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr, depth int) !void {
 	if e.writes_a_128(member.spelling) {
 		// A member of that width takes a value narrower than it the way an object
 		// of the type does, through the member's own address: the object the
 		// member lies in may be a pointer's target or a top-level object, so the
 		// store cannot be an offset from the frame.
-		e.address_of_member(member.name, member.index, member.offset, member.through_pointer, 1,
+		e.address_of_member(member.name, member.index, member.offset, member.through_pointer, depth + 1,
 			stmt.line, stmt.col)!
-		address := e.value_slot(0)
+		address := e.value_slot(depth)
 		e.store_accumulator(address, stmt.line, stmt.col)!
-		return e.store_wide_at(address, expr, stmt.line, stmt.col)
+		return e.store_wide_at(address, expr, stmt.line, stmt.col, depth)
 	}
 	width := e.type_width(member.spelling) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, floats, doubles and pointers only')
 		return error('unsupported member type')
 	}
-	e.address_of_member(member.name, member.index, member.offset, member.through_pointer, 1, stmt.line, stmt.col)!
-	address := e.value_slot(0)
+	e.address_of_member(member.name, member.index, member.offset, member.through_pointer, depth + 1, stmt.line, stmt.col)!
+	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
-	e.emit_expr_at(expr, 1)!
+	e.emit_expr_at(expr, depth + 1)!
 	address_register := e.scratch(stmt.line, stmt.col)!
 	member_name := '${member.name}.${member.member}'
 	if e.writes_a_float(member.spelling) {
@@ -1768,7 +1770,7 @@ fn (mut e Emitter) element_address(base backend.Register, index backend.Register
 // through it. The parking is what makes `a[i] = a[i] + 1` work: the value reads
 // the array again, and computing it would otherwise write over the register the
 // address was in.
-fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Expr) !void {
+fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Expr, depth int) !void {
 	slot := e.lookup(stmt.target) or {
 		// A top-level array is addressed from its storage in the image instead
 		// of from the frame: the address of the object is what the element is an
@@ -1778,21 +1780,21 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned an element of it, and it is not an array')
 				return error('not an array')
 			}
-			e.emit_expr_at(subscript, 0)!
+			e.emit_expr_at(subscript, depth)!
 			register := e.accumulator(stmt.line, stmt.col)!
 			base := e.scratch(stmt.line, stmt.col)!
 			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, e.target.name_of(base))
 			is_wide := !object.object && object.width == wide_bytes
 			e.element_address(base, register, object.width, 0, is_wide, stmt.target, stmt.line,
 				stmt.col)!
-			address := e.value_slot(0)
+			address := e.value_slot(depth)
 			e.store_accumulator(address, stmt.line, stmt.col)!
 			if is_wide {
 				// An element of that width takes the two words an object of the type
 				// takes, through the element's own address.
-				return e.store_wide_at(address, expr, stmt.line, stmt.col)
+				return e.store_wide_at(address, expr, stmt.line, stmt.col, depth)
 			}
-			e.emit_expr_at(expr, 1)!
+			e.emit_expr_at(expr, depth + 1)!
 			address_register := e.scratch(stmt.line, stmt.col)!
 			if object.single {
 				if !e.floating_of(expr) && e.is_a_pointer(expr) {
@@ -1849,19 +1851,19 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an element of ${stmt.target} is written, and ${stmt.target} is not an array')
 		return error('not an array')
 	}
-	e.emit_expr_at(subscript, 0)!
+	e.emit_expr_at(subscript, depth)!
 	base := e.frame_pointer(stmt.line, stmt.col)!
 	register := e.accumulator(stmt.line, stmt.col)!
 	e.element_address(base, register, slot.width, slot.offset, slot.wide, stmt.target,
 		stmt.line, stmt.col)!
-	address := e.value_slot(0)
+	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	if slot.wide {
 		// An element of that width takes the two words an object of the type takes,
 		// through the element's own address.
-		return e.store_wide_at(address, expr, stmt.line, stmt.col)
+		return e.store_wide_at(address, expr, stmt.line, stmt.col, depth)
 	}
-	e.emit_expr_at(expr, 1)!
+	e.emit_expr_at(expr, depth + 1)!
 	address_register := e.scratch(stmt.line, stmt.col)!
 	if slot.single {
 		// An element of an array of floats: the value is rounded to four bytes
@@ -1921,13 +1923,13 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 // value is computed, and the value is written through it at the width of the
 // element's type. It is the write half of the general element read, and it is
 // what `3[p] = 9` and an element written through a pointer go through.
-fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.Expr) !void {
+fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.Expr, depth int) !void {
 	index := subscript as ast.Index
-	e.emit_element_address(index, 1)!
-	address := e.value_slot(0)
+	e.emit_element_address(index, depth + 1)!
+	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	address_register := e.scratch(stmt.line, stmt.col)!
-	e.emit_expr_at(expr, 1)!
+	e.emit_expr_at(expr, depth + 1)!
 	if index.typ.kind == .double {
 		if !e.floating_of(expr) && e.is_a_pointer(expr) {
 			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored in an element that holds a double, and there is no conversion between them')
@@ -2999,6 +3001,16 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 				e.floating_at(expr.then_expr, depth + 1) || e.floating_at(expr.else_expr, depth + 1)
 			}
 		}
+		ast.Assign {
+			// The value written, whose type is the object's: the whole
+			// expression is floating when the object is.
+			expr.typ.kind != .unknown && expr.typ.is_floating()
+		}
+		ast.Comma {
+			// Worth the value of its right operand, so that operand's type
+			// is the answer.
+			expr.typ.kind != .unknown && expr.typ.is_floating()
+		}
 		ast.Index {
 			// An element is a floating value when the type the reader gave the
 			// element is one: the element type of the array or the pointee of
@@ -3090,6 +3102,12 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 			} else {
 				e.floating_at(expr.then_expr, depth + 1) || e.floating_at(expr.else_expr, depth + 1)
 			}
+		}
+		ast.Assign, ast.Comma {
+			// The node's own type is the type of the value it leaves, which
+			// the reader resolved, so it decides this the way it decides
+			// whether the value is floating at all.
+			expr.typ.kind == .float
 		}
 		else {
 			false
@@ -3246,15 +3264,15 @@ fn (e Emitter) wide_value(expr ast.Expr) bool {
 // that moves sixteen bytes. The high word is stored first: a store reads the
 // accumulator, so the low word waits in the third register until the accumulator
 // is free for it.
-fn (mut e Emitter) store_wide(slot Slot, expr ast.Expr, line int, col int) !void {
+fn (mut e Emitter) store_wide(slot Slot, expr ast.Expr, line int, col int, depth int) !void {
 	// A slot's two words are written through its address, which is the same store
 	// a member's is: the frame's address plus the slot's offset.
 	frame := e.frame_pointer(line, col)!
 	register := e.accumulator(line, col)!
 	e.append(e.target.address_of_slot(frame, slot.offset, register))
-	address := e.value_slot(0)
+	address := e.value_slot(depth)
 	e.store_accumulator(address, line, col)!
-	return e.store_wide_at(address, expr, line, col)
+	return e.store_wide_at(address, expr, line, col, depth)
 }
 
 // store_wide_at widens a value narrower than sixteen bytes into the two words at an
@@ -3268,7 +3286,7 @@ fn (mut e Emitter) store_wide(slot Slot, expr ast.Expr, line int, col int) !void
 // to the higher of the two addresses and the low word follows: the address register
 // holds the member's first byte, and the second store comes back to it rather than
 // keeping two addresses alive over the expression that produced the value.
-fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int) !void {
+fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int, depth int) !void {
 	if e.wide_value(expr) {
 		// An object of the type is a copy of its bytes rather than a value to
 		// widen, which is the shape an assignment between two of them has; a value
@@ -3276,13 +3294,13 @@ fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int)
 		// already the pair, and it is written at the address as two words.
 		match expr {
 			ast.Ident, ast.Field, ast.Index {
-				return e.assign_object(address, wide_bytes, expr, line, col)
+				return e.assign_object(address, wide_bytes, expr, line, col, depth)
 			}
 			else {
 				// The value is an expression rather than storage: it is computed
 				// here, below the slot the address is parked in, and what it leaves
 				// in the registers is the pair the store writes.
-				e.emit_value(expr, 1)!
+				e.emit_value(expr, depth + 1)!
 				return e.store_pair_at(address, line, col)
 			}
 		}
@@ -3302,7 +3320,7 @@ fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int)
 	accumulator := e.accumulator(line, col)!
 	waiting := e.remainder(line, col)!
 	pointer := e.scratch(line, col)!
-	e.emit_expr_at(expr, 1)!
+	e.emit_expr_at(expr, depth + 1)!
 	e.append(e.target.sign_extend_word(accumulator, accumulator)!)
 	e.append(e.target.move_register64(waiting, accumulator)!)
 	e.append(e.target.shift_right_arithmetic(accumulator, 63)!)
@@ -3618,6 +3636,12 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		}
 		ast.Conditional {
 			e.emit_conditional(expr, depth)!
+		}
+		ast.Assign {
+			e.emit_assign_expression(expr, depth)!
+		}
+		ast.Comma {
+			e.emit_comma(expr, depth)!
 		}
 		ast.Call {
 			// A call's value arrives in the register the machine returns
@@ -3976,6 +4000,82 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 			return error('unsupported unary operator')
 		}
 	}
+}
+
+// emit_assign_expression writes an assignment that is used as a value. The store
+// is the one an assignment statement makes, so the node is turned into the
+// statement the store reader takes and that reader writes the bytes. What the
+// expression is worth is the value of the object after the store: 6.5.16 gives
+// the assignment the value of its left operand after the assignment, which is
+// the value written converted to the object's type. That value is read back from
+// the object rather than kept in a register, because the store paths leave what
+// they wrote in whichever register the machine needed and every shape of the
+// object has a read that answers with its value.
+//
+// The target has to be one of the places the statement reader addresses. The
+// parser refuses the others, so a node with a target this reader does not know
+// was written by something that got past it; it is refused here by name rather
+// than stored through an address that was never computed.
+fn (mut e Emitter) emit_assign_expression(assign ast.Assign, depth int) !void {
+	stmt := assignment_statement(assign) or {
+		e.diagnostics << problem(assign.line, assign.col, 'unsupported: the target of this assignment expression is ${describe_target(assign.target)}, and this back end writes a name, an element, a member or a dereference')
+		return error('assignment expression target')
+	}
+	e.emit_assign(stmt, depth)!
+	e.emit_expr_at(assign.target, depth + 1)!
+}
+
+// assignment_statement turns an assignment expression into the statement the
+// store reader takes. The two carry the same three things - what is written,
+// what it is written into, and where it was written - and the statement reader
+// already addresses every place an assignment can write, so the store is not
+// written a second time here.
+fn assignment_statement(assign ast.Assign) ?ast.Stmt {
+	mut target := ''
+	mut subscript := ?ast.Expr(none)
+	mut member := ?ast.Field(none)
+	mut deref := ?ast.Expr(none)
+	match assign.target {
+		ast.Ident {
+			target = assign.target.name
+		}
+		ast.Index {
+			subscript = ast.Expr(assign.target)
+		}
+		ast.Field {
+			member = assign.target
+		}
+		ast.Unary {
+			if assign.target.op != '*' {
+				return none
+			}
+			deref = ast.Expr(assign.target)
+		}
+		else {
+			return none
+		}
+	}
+	return ast.Stmt{
+		kind:      .assign
+		expr:      assign.value
+		target:    target
+		subscript: subscript
+		field:     member
+		deref:     deref
+		line:      assign.line
+		col:       assign.col
+	}
+}
+
+// emit_comma writes `E1 , E2`. 6.5.17 sequences the left before the right and
+// makes the expression worth the value of its right operand, so the left is
+// evaluated for what it does and the value it leaves is overwritten by the
+// right. Nothing is loaded from the left: a conversion to void or a call for its
+// effect are the shapes a value is thrown away in, and leaving the register
+// alone is the same thing for every other shape.
+fn (mut e Emitter) emit_comma(comma ast.Comma, depth int) !void {
+	e.emit_expr_at(comma.left, depth + 1)!
+	e.emit_expr_at(comma.right, depth + 1)!
 }
 
 // emit_inc_dec writes `++x`, `--x`, `x++` or `x--` for the name the node holds,
@@ -5938,6 +6038,12 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			// of whichever arm the tree happens to hold first.
 			e.converted_width(expr.typ)
 		}
+		ast.Assign, ast.Comma {
+			// An assignment is worth the object's value after the store and a
+			// comma the value of its right operand; both are the type the
+			// reader resolved for the node, which is what the width comes from.
+			e.converted_width(expr.typ)
+		}
 	}
 }
 
@@ -7070,18 +7176,18 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 // address of it is loaded out of the image, parked in a scratch slot while the
 // value is computed - the value can read the object again - and then the value is
 // written through the address.
-fn (mut e Emitter) assign_global(stmt ast.Stmt, object image.GlobalSlot, expr ast.Expr) !void {
+fn (mut e Emitter) assign_global(stmt ast.Stmt, object image.GlobalSlot, expr ast.Expr, depth int) !void {
 	register := e.accumulator(stmt.line, stmt.col)!
 	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, e.target.name_of(register))
-	address := e.value_slot(0)
+	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	if object.width == wide_bytes {
 		// A top-level object of a 128-bit type takes the two words a local of it
 		// takes, through the address the image holds: the same widening store, and
 		// the same copy when the value is another object of the type.
-		return e.store_wide_at(address, expr, stmt.line, stmt.col)
+		return e.store_wide_at(address, expr, stmt.line, stmt.col, depth)
 	}
-	e.emit_expr_at(expr, 1)!
+	e.emit_expr_at(expr, depth + 1)!
 	e.convert_for_global(expr, object, e.written_is_unsigned(e.global_written(stmt.target)), stmt.line,
 		stmt.col)!
 	address_register := e.scratch(stmt.line, stmt.col)!
@@ -7259,6 +7365,8 @@ fn expr_line(expr ast.Expr) int {
 		ast.Field { expr.line }
 		ast.IncDec { expr.line }
 		ast.Conditional { expr.line }
+		ast.Assign { expr.line }
+		ast.Comma { expr.line }
 	}
 }
 
@@ -7276,6 +7384,8 @@ fn expr_col(expr ast.Expr) int {
 		ast.Field { expr.col }
 		ast.IncDec { expr.col }
 		ast.Conditional { expr.col }
+		ast.Assign { expr.col }
+		ast.Comma { expr.col }
 	}
 }
 
