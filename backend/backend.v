@@ -856,6 +856,18 @@ pub fn (t Target) unsigned_word_to_double(dst Register, src Register, scratch Re
 	return x86_64.unsigned_word_to_double(t.describe(dst), t.describe(src), t.describe(scratch))
 }
 
+// double_to_signed_word and double_to_unsigned_word truncate a double into an
+// eight-byte integer. The unsigned one takes a general register for 2^63 and a
+// double register to hold it in, because the boundary is a double and no
+// instruction here carries one as an immediate for the floating-point file.
+pub fn (t Target) double_to_signed_word(dst Register, src Register) ![]u8 {
+	return x86_64.double_to_signed_word(t.describe(dst), t.describe(src))
+}
+
+pub fn (t Target) double_to_unsigned_word(dst Register, src Register, scratch Register, float_scratch Register) ![]u8 {
+	return x86_64.double_to_unsigned_word(t.describe(dst), t.describe(src), t.describe(scratch), t.describe(float_scratch))
+}
+
 // The jumps. The distance is filled in once the whole function is laid out,
 // which is why a jump is written here with a displacement the emitter will patch.
 pub fn (t Target) jump(disp i32) []u8 {

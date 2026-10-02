@@ -1341,3 +1341,139 @@ fn test_a_double_converts_to_an_unsigned_integer_at_the_width_it_needs() {
 		0xc0,
 	]
 }
+
+// The conversion of a double to an eight-byte unsigned integer. The signed
+// truncation saturates at 2^63, so a double at or above the boundary is split
+// there: 2^63 is taken off the double, the difference truncates as a signed value,
+// and the bit that was taken off is set again in the integer. 2^63 is a double no
+// instruction here carries as an immediate for the floating-point file, so its
+// eight bytes are moved in from a general register. The bytes are what the machine
+// disassembles to for `movabs rcx,0x43e0000000000000 / movq xmm1,rcx / comisd
+// xmm0,xmm1 / jb / subsd xmm0,xmm1 / cvttsd2si rax,xmm0 / bts rax,63 / jmp /
+// cvttsd2si rax,xmm0`, with each jump the distance to the next part. gcc 16.2.1
+// emits the same shape at -O0.
+fn test_a_double_reaches_an_unsigned_word_by_its_range() {
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	eax := target.reg('eax') or { panic('the target description has no such name') }
+	ecx := target.reg('ecx') or { panic('the target description has no such name') }
+	edx := target.reg('edx') or { panic('the target description has no such name') }
+	xmm0 := target.float_reg('xmm0') or { panic('the target description has no such name') }
+	xmm1 := target.float_reg('xmm1') or { panic('the target description has no such name') }
+	xmm2 := target.float_reg('xmm2') or { panic('the target description has no such name') }
+	// The signed truncation at eight bytes, for contrast: REX.W is the whole of
+	// the difference from the four-byte one.
+	assert x86_64.double_to_signed_word(target.describe(eax), target.describe(xmm0)) or { panic('the target description has no such name') } == [
+		u8(0xf2),
+		0x48,
+		0x0f,
+		0x2c,
+		0xc0,
+	]
+	assert x86_64.double_to_unsigned_word(target.describe(eax), target.describe(xmm0), target.describe(ecx), target.describe(xmm1)) or { panic('the target description has no such name') } == [
+		u8(0x48),
+		0xb9,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0xe0,
+		0x43, // movabs rcx,0x43e0000000000000
+		0x66,
+		0x48,
+		0x0f,
+		0x6e,
+		0xc9, // movq xmm1,rcx
+		0x66,
+		0x0f,
+		0x2f,
+		0xc1, // comisd xmm0,xmm1
+		0x0f,
+		0x82,
+		0x13,
+		0x00,
+		0x00,
+		0x00, // jb .low, over the fourteen bytes above the boundary and the jump
+		0xf2,
+		0x0f,
+		0x5c,
+		0xc1, // subsd xmm0,xmm1
+		0xf2,
+		0x48,
+		0x0f,
+		0x2c,
+		0xc0, // cvttsd2si rax,xmm0
+		0x48,
+		0x0f,
+		0xba,
+		0xe8,
+		0x3f, // bts rax,63
+		0xe9,
+		0x05,
+		0x00,
+		0x00,
+		0x00, // jmp .done, over the five-byte truncation below the boundary
+		0xf2,
+		0x48,
+		0x0f,
+		0x2c,
+		0xc0, // cvttsd2si rax,xmm0
+	]
+	// A second register set pins the ModRM fields and the two jump distances:
+	// ecx is 1, edx is 2, xmm1 is 1 and xmm2 is 2.
+	assert x86_64.double_to_unsigned_word(target.describe(ecx), target.describe(xmm1), target.describe(edx), target.describe(xmm2)) or { panic('the target description has no such name') } == [
+		u8(0x48),
+		0xba,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0xe0,
+		0x43, // movabs rdx,0x43e0000000000000
+		0x66,
+		0x48,
+		0x0f,
+		0x6e,
+		0xd2, // movq xmm2,rdx
+		0x66,
+		0x0f,
+		0x2f,
+		0xca, // comisd xmm1,xmm2
+		0x0f,
+		0x82,
+		0x13,
+		0x00,
+		0x00,
+		0x00,
+		0xf2,
+		0x0f,
+		0x5c,
+		0xca, // subsd xmm1,xmm2
+		0xf2,
+		0x48,
+		0x0f,
+		0x2c,
+		0xc9, // cvttsd2si rcx,xmm1
+		0x48,
+		0x0f,
+		0xba,
+		0xe9,
+		0x3f, // bts rcx,63
+		0xe9,
+		0x05,
+		0x00,
+		0x00,
+		0x00,
+		0xf2,
+		0x48,
+		0x0f,
+		0x2c,
+		0xc9, // cvttsd2si rcx,xmm1
+	]
+	// The same goes through the target, which is the seam the emitter sees.
+	assert target.double_to_unsigned_word(eax, xmm0, ecx, xmm1) or { panic('the target description has no such name') } ==
+		x86_64.double_to_unsigned_word(target.describe(eax), target.describe(xmm0), target.describe(ecx), target.describe(xmm1)) or { panic('the target description has no such name') }
+}

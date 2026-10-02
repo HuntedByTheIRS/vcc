@@ -2262,6 +2262,74 @@ fn test_a_double_converts_to_an_unsigned_integer() {
 	}
 }
 
+// A double converts to an eight-byte integer with its value kept, signed and
+// unsigned. gcc 16.2.1 answers every one of these programs with 0. Before this a
+// conversion to a 64-bit type was refused by name, and the four-byte truncation
+// the back end had would have saturated the values above 2^31 instead. The doubles
+// sit on both sides of 2^63 and next to the top of the range, so a fix that
+// special-cased one boundary would fail the rest.
+fn test_a_double_converts_to_an_eight_byte_integer_with_its_value() {
+	cases := [
+		'double d = 9223372036854775808.0; unsigned long u = (unsigned long)d; return u == 9223372036854775808UL ? 0 : 1;',
+		'double d = 10000000000000000000.0; unsigned long u = (unsigned long)d; return u == 10000000000000000000UL ? 0 : 1;',
+		'double d = 18446744073709549568.0; unsigned long u = (unsigned long)d; return u == 18446744073709549568UL ? 0 : 1;',
+		'double d = 9223372036854774784.0; unsigned long u = (unsigned long)d; return u == 9223372036854774784UL ? 0 : 1;',
+		'double d = 0.0; unsigned long u = (unsigned long)d; return u == 0UL ? 0 : 1;',
+		'double d = 4611686018427387904.0; long u = (long)d; return u == 4611686018427387904L ? 0 : 1;',
+		'double d = -1.0; long u = (long)d; return u == -1L ? 0 : 1;',
+		'double d = 10000000000000000000.0; unsigned long long u = (unsigned long long)d; return u == 10000000000000000000ULL ? 0 : 1;',
+	]
+	for index, body in cases {
+		source := scratch('uconv64_dest_${index}.c')
+		binary := scratch('uconv64_dest_${index}')
+		exit_status := compile_and_run([source, '-o', binary], 'int main(void) { ${body} }\n')
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// The same conversion where a value is stored rather than cast: an unsigned local,
+// an element of an array, a member, a top-level object, and the value a function
+// returns. Each reads the destination's type rather than the expression's, so a fix
+// at the cast alone would leave them wrong.
+fn test_a_double_reaches_an_eight_byte_integer_wherever_it_is_asked_for() {
+	programs := [
+		'int main(void){ double d = 10000000000000000000.0; unsigned long u = 0; u = d; return u == 10000000000000000000UL ? 0 : 1; }\n',
+		'int main(void){ double d = 10000000000000000000.0; unsigned long a[2]; a[0] = d; return a[0] == 10000000000000000000UL ? 0 : 1; }\n',
+		'struct S { unsigned long u; };\nint main(void){ struct S s; double d = 10000000000000000000.0; s.u = d; return s.u == 10000000000000000000UL ? 0 : 1; }\n',
+		'unsigned long g;\nint main(void){ double d = 10000000000000000000.0; g = d; return g == 10000000000000000000UL ? 0 : 1; }\n',
+		'unsigned long f(double d){ return d; }\nint main(void){ return f(10000000000000000000.0) == 10000000000000000000UL ? 0 : 1; }\n',
+		'long f(double d){ return d; }\nint main(void){ return f(4611686018427387904.0) == 4611686018427387904L ? 0 : 1; }\n',
+	]
+	for index, program in programs {
+		source := scratch('uconv64_dest_place_${index}.c')
+		binary := scratch('uconv64_dest_place_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A float reaches the same conversion by widening to a double first, which is
+// exact: the four-byte truncation saturates at 2^31, which a float at 3e9 is
+// above. gcc 16.2.1 answers both of these with 0.
+fn test_a_float_reaches_an_eight_byte_integer_by_widening() {
+	cases := [
+		'float f = 3000000000.0f; unsigned long u = f; return u == 3000000000UL ? 0 : 1;',
+		'float f = 4611686018427387904.0f; long u = f; return u == 4611686018427387904L ? 0 : 1;',
+	]
+	for index, body in cases {
+		source := scratch('uconv64_dest_float_${index}.c')
+		binary := scratch('uconv64_dest_float_${index}')
+		exit_status := compile_and_run([source, '-o', binary], 'int main(void) { ${body} }\n')
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 // The same conversion where a value is stored rather than cast: an unsigned local,
 // an element of an unsigned array, an unsigned member, an unsigned parameter a
 // double is handed to, and a top-level unsigned object. Each would saturate at
