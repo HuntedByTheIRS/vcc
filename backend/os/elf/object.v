@@ -68,7 +68,12 @@ const section_shstrtab = 7
 // and its presence is the whole point: a linker that does not find it has to
 // assume the worst and asks about it.
 const section_gnu_stack = 8
-const section_count = 9
+// The relocations against the writable data: one per eight bytes of a top-level
+// object that hold an address rather than a number, which is what a file-scope
+// pointer initializer is. They sit in a table of their own because a relocation
+// is against one section, and these are against .data.
+const section_rela_data = 9
+const section_count = 10
 
 // The three symbols every object has before its own: one per section a reference
 // can be made against. A reference to a string is a reference to .rodata at an
@@ -90,6 +95,7 @@ struct NameOffsets {
 	strtab    int
 	shstrtab  int
 	gnu_stack int
+	rela_data int
 }
 
 // PartSizes is how long each part of the object is. The sizes are kept apart from
@@ -97,26 +103,30 @@ struct NameOffsets {
 // layout pads each part to an eight-byte boundary, and a section header has to
 // say how long the part is and not how much room it was given.
 struct PartSizes {
-	text     int
-	rodata   int
-	data     int
-	rela     int
-	symtab   int
-	strtab   int
-	shstrtab int
+	text   int
+	rodata int
+	data   int
+	// rela is the size of .rela.text, the relocations against the code, and
+	// rela_data is .rela.data, the ones against the writable data.
+	rela      int
+	rela_data int
+	symtab    int
+	strtab    int
+	shstrtab  int
 }
 
 // PartOffsets is where each part of the object landed, as a file offset.
 struct PartOffsets {
-	text     int
-	rodata   int
-	data     int
-	rela     int
-	symtab   int
-	strtab   int
-	shstrtab int
-	headers  int
-	total    int
+	text      int
+	rodata    int
+	data      int
+	rela      int
+	rela_data int
+	symtab    int
+	strtab    int
+	shstrtab  int
+	headers   int
+	total     int
 }
 
 // ObjectRelocation is one hole the linker has to fill: where it is in .text,
@@ -255,15 +265,56 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 			}
 		}
 	}
+	// The references inside the writable data are the eight bytes of an address
+	// each, and a relocatable file has no addresses: whichever symbol the bytes
+	// name is what the linker resolves, and the addend is zero because the value
+	// is the address itself rather than a distance from the field.
+	mut data_relocations := []ObjectRelocation{}
+	for fixup in program.data_fixups {
+		match fixup.kind {
+			.take_address, .take_wide_address {
+				where := if fixup.kind == .take_address {
+					program.strings[fixup.name] or {
+						return error('no string ${fixup.name} in the object')
+					}
+				} else {
+					program.wide_strings[fixup.name] or {
+						return error('no wide string ${fixup.name} in the object')
+					}
+				}
+				data_relocations << ObjectRelocation{
+					offset: fixup.offset
+					symbol: symbol_rodata_section
+					addend: i64(where)
+					call:   false
+				}
+			}
+			.function_address, .global_address, .import_address {
+				symbol := symbol_index[fixup.name] or {
+					return error('${fixup.name} is addressed in the data but this object defines no such name')
+				}
+				data_relocations << ObjectRelocation{
+					offset: fixup.offset
+					symbol: symbol
+					addend: 0
+					call:   false
+				}
+			}
+			else {
+				return error('the data reference to ${fixup.name} is not one this object can carry')
+			}
+		}
+	}
 	names, shstrtab := section_names()
 	sizes := PartSizes{
-		text:     text.len
-		rodata:   program.string_blob.len
-		data:     program.globals_blob.len
-		rela:     relocations.len * elf_relocation_size
-		symtab:   symbol_count * elf_symbol_size
-		strtab:   strtab.len
-		shstrtab: shstrtab.len
+		text:      text.len
+		rodata:    program.string_blob.len
+		data:      program.globals_blob.len
+		rela:      relocations.len * elf_relocation_size
+		rela_data: data_relocations.len * elf_relocation_size
+		symtab:    symbol_count * elf_symbol_size
+		strtab:    strtab.len
+		shstrtab:  shstrtab.len
 	}
 	parts := place(sizes)
 	mut output := []u8{len: parts.total, init: u8(0)}
@@ -271,6 +322,7 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 	put(mut output, parts.rodata, program.string_blob)
 	put(mut output, parts.data, program.globals_blob)
 	emit_object_relocations(mut output, parts, relocations, target)
+	emit_object_data_relocations(mut output, parts, data_relocations, target)
 	emit_object_symbols(mut output, parts, program, functions, objects, symbol_index,
 		name_offset)
 	put(mut output, parts.strtab, strtab)
@@ -293,6 +345,7 @@ fn section_names() (NameOffsets, []u8) {
 	strtab := intern_name(mut table, '.strtab')
 	shstrtab := intern_name(mut table, '.shstrtab')
 	gnu_stack := intern_name(mut table, '.note.GNU-stack')
+	rela_data := intern_name(mut table, '.rela.data')
 	return NameOffsets{
 		text:      text
 		rela:      rela
@@ -302,6 +355,7 @@ fn section_names() (NameOffsets, []u8) {
 		strtab:    strtab
 		shstrtab:  shstrtab
 		gnu_stack: gnu_stack
+		rela_data: rela_data
 	}, table
 }
 
@@ -326,6 +380,8 @@ fn place(sizes PartSizes) PartOffsets {
 	offset = align(offset + sizes.data, 8)
 	rela := offset
 	offset = align(offset + sizes.rela, 8)
+	rela_data := offset
+	offset = align(offset + sizes.rela_data, 8)
 	symtab := offset
 	offset = align(offset + sizes.symtab, 8)
 	strtab := offset
@@ -334,15 +390,16 @@ fn place(sizes PartSizes) PartOffsets {
 	offset = align(offset + sizes.shstrtab, 8)
 	headers := offset
 	return PartOffsets{
-		text:     text
-		rodata:   rodata
-		data:     data
-		rela:     rela
-		symtab:   symtab
-		strtab:   strtab
-		shstrtab: shstrtab
-		headers:  headers
-		total:    offset + section_count * elf_section_header_size
+		text:      text
+		rodata:    rodata
+		data:      data
+		rela:      rela
+		rela_data: rela_data
+		symtab:    symtab
+		strtab:    strtab
+		shstrtab:  shstrtab
+		headers:   headers
+		total:     offset + section_count * elf_section_header_size
 	}
 }
 
@@ -358,6 +415,19 @@ fn emit_object_relocations(mut output []u8, parts PartOffsets, relocations []Obj
 		kind := if relocation.call { target.call_relocation() } else { target.address_relocation() }
 		put_u64(mut output, at, u64(relocation.offset))
 		put_u64(mut output, at + 8, (u64(relocation.symbol) << 32) | u64(kind))
+		put_u64(mut output, at + 16, u64(relocation.addend))
+	}
+}
+
+// emit_object_data_relocations writes the holes in the writable data the same
+// way, but against .data: the field is the eight bytes the address goes in, the
+// reference is an address rather than a distance, and the addend is the object's
+// own offset into whatever the symbol names.
+fn emit_object_data_relocations(mut output []u8, parts PartOffsets, relocations []ObjectRelocation, target backend.Target) {
+	for i, relocation in relocations {
+		at := parts.rela_data + i * elf_relocation_size
+		put_u64(mut output, at, u64(relocation.offset))
+		put_u64(mut output, at + 8, (u64(relocation.symbol) << 32) | u64(target.address_relocation()))
 		put_u64(mut output, at + 16, u64(relocation.addend))
 	}
 }
@@ -436,6 +506,9 @@ fn emit_object_section_headers(mut output []u8, parts PartOffsets, sizes PartSiz
 		0, 0, 1, 0)
 	put_section_header(mut output, parts.headers + section_gnu_stack * elf_section_header_size,
 		names.gnu_stack, sht_progbits, 0, 0, 0, 0, 0, 1, 0)
+	put_section_header(mut output, parts.headers + section_rela_data * elf_section_header_size,
+		names.rela_data, sht_rela, 0, parts.rela_data, sizes.rela_data,
+		section_symtab, section_data, 8, elf_relocation_size)
 }
 
 fn put_section_header(mut output []u8, at int, name int, kind u32, flags u64, offset int, size int, link u32, info u32, alignment u64, entry_size u64) {
