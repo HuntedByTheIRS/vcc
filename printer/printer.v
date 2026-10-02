@@ -224,7 +224,14 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			dump_expression(expr, depth, mut out)
 		}
 		ast.Call {
-			out << '${indent}call ${expr.name} with ${expr.args.len} argument(s) at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			if callee := expr.callee {
+				// A call written to an expression prints the expression, since
+				// the name it would otherwise print is the one thing it is not.
+				out << '${indent}call through an expression with ${expr.args.len} argument(s) at ${expr.line}:${expr.col}${typed(expr.typ)}'
+				dump_expression(callee, depth + 1, mut out)
+			} else {
+				out << '${indent}call ${expr.name} with ${expr.args.len} argument(s) at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			}
 			for arg in expr.args {
 				dump_expression(arg, depth + 1, mut out)
 			}

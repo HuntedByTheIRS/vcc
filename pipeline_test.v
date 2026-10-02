@@ -107,6 +107,23 @@ fn test_a_source_file_becomes_a_runnable_binary() {
 	os.rm(binary) or {}
 }
 
+fn test_a_call_through_a_function_pointer_is_the_address_it_holds() {
+	// A call written to an expression calls the address the expression is worth,
+	// and the answer says which function that was: add and mul disagree on
+	// (3, 4), so a call that reached the wrong one is a different number and not
+	// a plausible one. The five shapes are the four of 6.5.2.2 and the one of
+	// 6.3.2.1: a pointer in a variable, a dereference of one, an element of a
+	// table, a dereference of an element, and a designator passed as an argument.
+	source := scratch('call_through.c')
+	binary := scratch('call_through')
+	exit_status := compile_and_run([source, '-o', binary], 'int add(int a, int b) { return a + b; }\nint mul(int a, int b) { return a * b; }\nstatic int through(int (*fn)(int, int)) { return fn(3, 4); }\nint main(void) {\n    int (*p)(int, int) = add;\n    int (*t[2])(int, int);\n    t[0] = add;\n    t[1] = mul;\n    int total = p(3, 4);\n    total += (*p)(3, 4);\n    total += t[1](3, 4);\n    total += (*t[0])(3, 4);\n    total += through(mul);\n    return total;\n}\n')
+	// 7 + 7 + 12 + 7 + 12 = 45, which is what the same program returns under
+	// gcc 16.2.1 with -std=c99.
+	assert exit_status == 45
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_a_static_function_nothing_names_is_not_read() {
 	// The shape <bits/byteswap.h> and <bits/uintn-identity.h> have, which main.c
 	// reaches through <stdio.h> and <stdlib.h>: a helper nothing calls, written

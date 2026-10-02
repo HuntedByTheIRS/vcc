@@ -3362,6 +3362,16 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 					e.append(e.target.load_indirect(register, register, object.width)!)
 					return
 				}
+				if expr.name in e.program.defined {
+					// 6.3.2.1: a function designator used where a value is
+					// wanted is the pointer to the function, so a name that is
+					// a function this file defines is worth where its code
+					// begins.
+					e.emit_function_address(expr.name, expr.line, expr.col) or {
+						return error('no function address')
+					}
+					return
+				}
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a constant and is not a local of this function')
 				return error('unknown name')
 			}
@@ -3669,6 +3679,12 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 		if _ := e.global_of(name) {
 			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
 			return
+		}
+		if name in e.program.defined {
+			// `&f` is the same value a bare `f` is worth where a value is
+			// wanted: 6.3.2.1 does not give a function designator an address
+			// operator of its own.
+			return e.emit_function_address(name, unary.line, unary.col)
 		}
 	}
 	if unary.expr is ast.Field {
@@ -5608,6 +5624,11 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 					}
 					return if object.width == 1 { 4 } else { object.width }
 				}
+				if expr.name in e.program.defined {
+					// 6.3.2.1: a function designator used as a value is the
+					// pointer to the function, which is the machine's word.
+					return e.target.word_size
+				}
 				return none
 			}
 			// An array's name is the address of its first element, which is a
@@ -5808,6 +5829,40 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 	}
 }
 
+// emit_function_address leaves the address of a function this file defines in the
+// accumulator. 6.3.2.1 makes a function designator used as a value the pointer to
+// that function, so `int (*p)(void) = f;` and `p = &f;` both reach this: what a
+// value of a function type is worth is where the function's code begins. The
+// address is a reference the layout fills in, because where the code begins is not
+// known while it is written.
+fn (mut e Emitter) emit_function_address(name string, line int, col int) !void {
+	if name !in e.program.defined {
+		e.diagnostics << problem(line, col, 'unsupported: the address of ${name} is not implemented, and only a function this file defines has one this back end can take')
+		return error('no function address')
+	}
+	register := e.accumulator(line, col)!
+	e.reference(e.target.address_of(register, 0), .function_address, name, e.target.name_of(register))
+}
+
+// emit_callee_value leaves the address a call goes to in the accumulator. It is
+// the value of the callee with 6.3.2.1's conversion applied: a function designator
+// is the address of its code, and the dereference of a pointer to a function is
+// that pointer itself, because `(*fp)(1, 2)` calls the address fp holds and a
+// value of a function type is not something this machine reads out of memory.
+fn (mut e Emitter) emit_callee_value(callee ast.Expr, depth int) !void {
+	if callee is ast.Unary {
+		if callee.op == '*' {
+			return e.emit_expr_at(callee.expr, depth)
+		}
+	}
+	if callee is ast.Ident {
+		if callee.name in e.program.defined {
+			return e.emit_function_address(callee.name, callee.line, callee.col)
+		}
+	}
+	return e.emit_expr_at(callee, depth)
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -5827,6 +5882,18 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 // name is a symbol the loader resolves before the program starts.
 fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	mut places := []ArgPlace{cap: call.args.len}
+	// A call written to an expression calls the address that expression is
+	// worth. The address is computed before anything else and waits in a slot of
+	// its own, because the register it is computed into is the same one every
+	// argument is loaded through, and the argument registers are loaded last.
+	mut indirect := false
+	mut callee_slot := Slot{}
+	if expression := call.callee {
+		callee_slot = e.value_slot(depth + call.args.len)
+		e.emit_callee_value(expression, depth + call.args.len + 1)!
+		e.store_accumulator(callee_slot, call.line, call.col)!
+		indirect = true
+	}
 	// A call to a function that hands an object of more than two eightbytes back is
 	// given the address of this frame's storage for it in the first general register,
 	// so the arguments written in the call start one register later.
@@ -6170,6 +6237,17 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		width := e.passed_width(call, widths, i, arg, place.floating)!
 		e.load_argument(slot, register, width, line, col)!
+	}
+	if indirect {
+		// The address is read back into the accumulator after the argument
+		// registers are loaded, because loading them is the last thing that
+		// could disturb it and the accumulator carries no argument of this
+		// convention. The call then goes to the address rather than to a name.
+		e.load_accumulator(callee_slot, call.line, call.col)!
+		register := e.accumulator(call.line, call.col)!
+		e.append(e.target.call_register(register)!)
+		e.release_call_stack()
+		return
 	}
 	if call.name in e.program.defined {
 		e.reference(e.target.call_near(0), .call_local, call.name, '')

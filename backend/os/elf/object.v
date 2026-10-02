@@ -218,9 +218,9 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 					call:   false
 				}
 			}
-			.global_address {
+			.global_address, .function_address {
 				symbol := symbol_index[fixup.name] or {
-					return error('${fixup.name} is addressed but this object defines no such object')
+					return error('${fixup.name} is addressed but this object defines no such name')
 				}
 				relocations << ObjectRelocation{
 					offset: field

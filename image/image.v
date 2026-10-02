@@ -23,15 +23,16 @@ pub:
 }
 
 pub enum FixupKind {
-	call_local      // a call to a function this translation unit defines
-	call_import     // a call to a symbol the loader resolves out of a library
-	take_address    // the address of a string in the image
-	jump_local      // a jump to a label inside the function being emitted
-	branch_zero     // the same jump, taken when the value last tested was zero
-	branch_nonzero  // and when it was not
-	global_address  // the address of an object defined at the top level
-	float_constant  // a double the instruction reads out of the read-only data
-	single_constant // the same read of a four-byte float
+	call_local       // a call to a function this translation unit defines
+	call_import      // a call to a symbol the loader resolves out of a library
+	take_address     // the address of a string in the image
+	jump_local       // a jump to a label inside the function being emitted
+	branch_zero      // the same jump, taken when the value last tested was zero
+	branch_nonzero   // and when it was not
+	global_address   // the address of an object defined at the top level
+	function_address // the address of a function defined in this translation unit
+	float_constant   // a double the instruction reads out of the read-only data
+	single_constant  // the same read of a four-byte float
 }
 
 // GlobalSlot is where a top-level object lives in the image and how wide it is:

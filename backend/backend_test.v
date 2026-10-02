@@ -51,6 +51,21 @@ fn test_the_exit_sequence_is_the_bytes_that_end_the_process() {
 	assert code == expected
 }
 
+fn test_the_indirect_call_is_the_bytes_that_call_the_address_in_a_register() {
+	// call *%rax / call *%r8, which is what the machine's assembler produces for
+	// an indirect call. Written out here so a change to the encoding has to be a
+	// change to this expectation.
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	rax := target.reg('rax') or { panic('the target description has no such name') }
+	r8 := target.reg('r8') or { panic('the target description has no such name') }
+	assert target.call_register(rax) or {
+		panic('the target description has no such name')
+	} == [u8(0xff), u8(0xd0)]
+	assert target.call_register(r8) or {
+		panic('the target description has no such name')
+	} == [u8(0x41), u8(0xff), u8(0xd0)]
+}
+
 fn test_a_system_that_does_not_know_a_machine_answers_nothing() {
 	// An empty table is how the emitter finds out that the combination is not
 	// described yet. Falling back to another machine's numbers would be a wrong

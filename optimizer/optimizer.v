@@ -432,10 +432,13 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			// The arguments are rewritten first, so `abs(abs(-3))` folds the
 			// inner call and then has a constant to work with.
 			rewritten := ast.Call{
-				name: expr.name
-				args: rewrite_arguments(expr.args, opts, depth + 1)
-				line: expr.line
-				col:  expr.col
+				name:   expr.name
+				// A callee that is an expression travels with the call: the
+				// rewrite changes the arguments, not what the call calls.
+				callee: expr.callee
+				args:   rewrite_arguments(expr.args, opts, depth + 1)
+				line:   expr.line
+				col:    expr.col
 			}
 			return fold_call(rewritten, opts) or { ast.Expr(rewritten) }
 		}

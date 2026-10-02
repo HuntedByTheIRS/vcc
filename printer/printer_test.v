@@ -115,3 +115,15 @@ fn test_the_step_of_a_loop_has_its_own_heading() {
 	while_dump := lines(tree('int main() { int j = 0; while (j < 3) { j = j + 1; } }'))
 	assert !while_dump.any(it.contains('step'))
 }
+
+fn test_a_call_through_an_expression_prints_the_expression_it_calls() {
+	// The callee of `(*fp)(1, 2)` is a value rather than a name, so the dump has
+	// to print the expression: printing a name here would say the call reaches
+	// something the source does not name.
+	dumped := lines(tree('int h(int (*fp)(int, int)) { return (*fp)(1, 2); }'))
+	assert dumped.any(it.contains('call through an expression with 2 argument(s)'))
+	assert dumped.any(it.contains('unary *'))
+	// A call to a function still prints the name it reaches.
+	direct := lines(tree('int f(void) { return 0; } int main(void) { return f(); }'))
+	assert direct.any(it.contains('call f with 0 argument(s)'))
+}

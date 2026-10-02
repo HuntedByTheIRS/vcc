@@ -341,7 +341,13 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
 		}
 		ast.Call {
-			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			if callee := expr.callee {
+				// A call through an expression names nothing itself; the names
+				// are inside the expression the call is written to.
+				p.check_undeclared_expression(callee, mut reported)
+			} else {
+				p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			}
 			for argument in expr.args {
 				p.check_undeclared_expression(argument, mut reported)
 			}
@@ -798,7 +804,13 @@ fn describe_operand(expr ast.Expr) string {
 		ast.IntLit { expr.text }
 		ast.FloatLit { expr.text }
 		ast.StrLit { 'a string literal' }
-		ast.Call { 'a call to ${expr.name}' }
+		ast.Call {
+			if _ := expr.callee {
+				'a call through an expression'
+			} else {
+				'a call to ${expr.name}'
+			}
+		}
 		ast.Unary { 'a value with ${expr.op} applied to it' }
 		ast.Cast { 'a value converted to ${expr.spelling}' }
 		ast.Binary { 'a value of ${expr.op}' }
@@ -1002,6 +1014,16 @@ fn (mut p Parser) parse_postfix() !ast.Expr {
 		if t.kind == .punct && (t.text == '++' || t.text == '--') {
 			op := p.next()
 			expr = p.inc_dec(op, expr, true)!
+			continue
+		}
+		if t.kind == .punct && t.text == '(' {
+			// A call binds to whatever comes before it the way a subscript
+			// does, so it is read here and after any base: a name, an element,
+			// a dereferenced pointer, or a parenthesised expression. The base
+			// is the callee, and what it has to be is checked where the call
+			// is built.
+			args := p.parse_arguments()!
+			expr = p.call(expr, args)!
 			continue
 		}
 		if t.kind == .punct && t.text == '[' {
@@ -1298,16 +1320,6 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
-		if p.at_punct('(') {
-			args := p.parse_arguments()!
-			return ast.Expr(ast.Call{
-				name: t.text
-				args: args
-				typ:  p.call_type(t, args)
-				line: t.line
-				col:  t.col
-			})
-		}
 		if p.at_punct('.') || p.at_punct('->') {
 			return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'), ?ast.Expr(none))!)
 		}
@@ -1470,12 +1482,24 @@ fn (mut p Parser) call_type(name tokenize.Token, args []ast.Expr) types.Type {
 		return types.Type{}
 	}
 	signature := p.signature(name.text) or { return types.Type{} }
+	return p.checked_arguments(signature, args, name, name.text)
+}
+
+// checked_arguments checks one call's arguments against the function type its
+// callee is worth and answers with what the function returns. It is the half of
+// call_type that does not depend on the callee being a name, so a call through an
+// expression is checked by the same rule: 6.5.2.2 makes an argument an assignment
+// to its parameter, and one function decides that for both call shapes.
+//
+// A function type that named no parameters - `int f()` - says nothing about the
+// call, so nothing is checked against nothing.
+fn (mut p Parser) checked_arguments(signature types.Type, args []ast.Expr, at tokenize.Token, what string) types.Type {
 	if !signature.prototyped {
 		return signature.returns() or { types.Type{} }
 	}
 	parameters := signature.params
 	if !signature.variadic && parameters.len != args.len {
-		p.error_at(name, 'the call to ${name.text} passes ${args.len} argument(s), and the declaration of ${name.text} names ${parameters.len} argument(s)')
+		p.error_at(at, 'the call to ${what} passes ${args.len} argument(s), and the declaration of ${what} names ${parameters.len} argument(s)')
 	}
 	for index, argument in args {
 		if index >= parameters.len {
@@ -1487,6 +1511,90 @@ fn (mut p Parser) call_type(name tokenize.Token, args []ast.Expr) types.Type {
 		p.error_span(argument.line, argument.col, problem)
 	}
 	return signature.returns() or { types.Type{} }
+}
+
+// call builds the node for a call whose callee was read as an expression. A name
+// is the one case a call is written to a function rather than through a value: a
+// name that holds a function pointer is an object, and calling one is an indirect
+// call like any other, while a name that is a function is called directly by the
+// name the back end resolves. Every other callee - an element, a dereference, a
+// parenthesised expression - has to be worth a function or a pointer to one, and
+// anything else is refused by name here, where the call is written.
+fn (mut p Parser) call(callee ast.Expr, args []ast.Expr) !ast.Expr {
+	if callee is ast.Ident {
+		name := (callee as ast.Ident).name
+		at := tokenize.Token{
+			kind: .identifier
+			text: name
+			line: callee.line
+			col:  callee.col
+		}
+		typ := p.call_type(at, args)
+		if p.object_holds_a_function_pointer(name) {
+			return ast.Expr(ast.Call{
+				callee: callee
+				args:   args
+				typ:    typ
+				line:   callee.line
+				col:    callee.col
+			})
+		}
+		return ast.Expr(ast.Call{
+			name: name
+			args: args
+			typ:  typ
+			line: callee.line
+			col:  callee.col
+		})
+	}
+	what := describe_operand(callee)
+	signature := callable_signature(callee) or {
+		p.error_span(callee.line, callee.col, 'a constraint violation: what a call calls has to be a function or a pointer to a function, and this is ${callee.typ.describe()}')
+		return error('the callee is not callable')
+	}
+	at := tokenize.Token{
+		kind: .identifier
+		text: what
+		line: callee.line
+		col:  callee.col
+	}
+	return ast.Expr(ast.Call{
+		callee: callee
+		args:   args
+		typ:    p.checked_arguments(signature, args, at, what)
+		line:   callee.line
+		col:    callee.col
+	})
+}
+
+// object_holds_a_function_pointer says whether a name is an object whose type is a
+// pointer to a function, which is a call through a value rather than a call to the
+// function the name is. A typedef that names the pointer type resolves to the
+// pointer here, so `binop fp` and `int (*fp)(int, int)` answer the same.
+fn (p Parser) object_holds_a_function_pointer(name string) bool {
+	declared := p.resolve(name)
+	if !declared.is_pointer() {
+		return false
+	}
+	inner := declared.pointee() or { return false }
+	return inner.is_function()
+}
+
+// callable_signature is the function type an expression is worth calling: the
+// function it is, or the function a pointer to it points at, and nothing for
+// anything else. It is the question 6.5.2.2 asks of the callee, asked of an
+// expression rather than of a name.
+fn callable_signature(callee ast.Expr) ?types.Type {
+	if callee.typ.is_function() {
+		return callee.typ
+	}
+	if callee.typ.is_pointer() {
+		inner := callee.typ.pointee() or { return none }
+		if inner.is_function() {
+			return inner
+		}
+	}
+	return none
 }
 
 // is_null_constant says whether an expression is the integer constant expression
