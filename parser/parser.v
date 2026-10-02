@@ -1470,12 +1470,14 @@ fn (p Parser) is_null_constant(expr ast.Expr) bool {
 
 // constant_value is the value of an integer constant expression this reader
 // evaluates while it reads: a literal, a literal with a sign in front of it, a
-// cast of one to an integer type, the arithmetic of two values, and the
-// conditional operator. The set is 6.6's rather than the shapes a header happens
-// to write: 6.6p3 excludes assignment, increment, decrement, a function call and
-// a comma from a constant expression and leaves the conditional and the rest of
-// the operators in, so `1 ? 2 : 3` is an integer constant expression and gcc
-// 16.2.1 accepts `int x[1 ? 2 : 3];` at file scope under `-std=c99`. The
+// cast of one to an integer type, the arithmetic of two values, the shifts, the
+// comparisons, the bitwise and logical operators, the prefix operators, and the
+// conditional. The set is 6.6's rather than the shapes a header happens to
+// write: 6.6p3 excludes assignment, increment, decrement, a function call and a
+// comma from a constant expression and leaves everything else in, so `1 ? 2 : 3`
+// and `4 > 1` and `1 << 2` are integer constant expressions and gcc 16.2.1
+// accepts them at file scope under `-std=c99` where this folder answered none.
+// The
 // arithmetic is what the bounds a real header writes reach for: measured with
 // `vcc -E`, glibc's `stdio.h` declares `char _unused2[12 * sizeof (int) - 5 *
 // sizeof (void *)]` and `sys/select.h` declares `char data[1024 / (8 * (int)
@@ -1499,6 +1501,12 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 		if expr.op == '+' {
 			return operand
 		}
+		if expr.op == '~' {
+			return ~operand
+		}
+		if expr.op == '!' {
+			return if operand == 0 { i64(1) } else { i64(0) }
+		}
 		return none
 	}
 	if expr is ast.Cast {
@@ -1518,6 +1526,26 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 	}
 	if expr is ast.Binary {
 		left := p.constant_value(expr.left) or { return none }
+		// `&&` and `||` are operators 6.6p3 leaves in a constant expression, and
+		// the operand the result does not need is not evaluated. Measured on gcc
+		// 16.2.1 under `-std=c99`, `int x[1 || f()]` and `int x[0 && n]` are
+		// accepted at file scope while `int x[2 && f()]` is `variably modified`,
+		// so the right operand is read only when the left one leaves the answer
+		// open.
+		if expr.op == '&&' {
+			if left == 0 {
+				return i64(0)
+			}
+			right := p.constant_value(expr.right) or { return none }
+			return if right != 0 { i64(1) } else { i64(0) }
+		}
+		if expr.op == '||' {
+			if left != 0 {
+				return i64(1)
+			}
+			right := p.constant_value(expr.right) or { return none }
+			return if right != 0 { i64(1) } else { i64(0) }
+		}
 		right := p.constant_value(expr.right) or { return none }
 		match expr.op {
 			'+' {
@@ -1540,6 +1568,45 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 					return none
 				}
 				return left % right
+			}
+			'<<' {
+				if right < 0 || right >= 64 {
+					return none
+				}
+				return left << right
+			}
+			'>>' {
+				if right < 0 || right >= 64 {
+					return none
+				}
+				return left >> right
+			}
+			'<' {
+				return if left < right { i64(1) } else { i64(0) }
+			}
+			'>' {
+				return if left > right { i64(1) } else { i64(0) }
+			}
+			'<=' {
+				return if left <= right { i64(1) } else { i64(0) }
+			}
+			'>=' {
+				return if left >= right { i64(1) } else { i64(0) }
+			}
+			'==' {
+				return if left == right { i64(1) } else { i64(0) }
+			}
+			'!=' {
+				return if left != right { i64(1) } else { i64(0) }
+			}
+			'&' {
+				return left & right
+			}
+			'^' {
+				return left ^ right
+			}
+			'|' {
+				return left | right
 			}
 			else {
 				return none

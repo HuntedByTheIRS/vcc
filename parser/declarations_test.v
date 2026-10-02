@@ -658,3 +658,55 @@ fn test_a_conditional_bound_is_an_integer_constant_expression() {
 	assert floating.diagnostics.len == 1
 	assert floating.diagnostics[0].msg.contains('is not an integer constant expression')
 }
+
+// 6.6p3 excludes assignment, increment, decrement, function call and comma from a
+// constant expression and leaves everything else in, so the shifts, the four
+// comparisons, the two equalities, the three bitwise operators, the two logical
+// operators and the prefix `~` and `!` all fold. Measured one at a time against
+// gcc 16.2.1 under `-std=c99`, each bound here is the size of the value it names:
+// `4 && 1` and `4 > 1` and `4 == 4` and `!0` are one, `16 >> 2` and `1 << 2` are
+// four, `2 | 1` is three, `6 ^ 3` is five and `6 & 3` is two.
+fn test_a_bitwise_relational_or_logical_bound_is_an_integer_constant_expression() {
+	controls := [
+		'int x[4 && 1];',
+		'int x[4 > 1];',
+		'int x[4 == 4];',
+		'int x[!0];',
+		'int x[16 >> 2];',
+		'int x[1 << 2];',
+		'int x[2 | 1];',
+		'int x[6 ^ 3];',
+		'int x[6 & 3];',
+	]
+	expected := [1, 1, 1, 1, 4, 4, 3, 5, 2]
+	for index, source in controls {
+		result := declarations_of(source)
+		assert result.diagnostics.len == 0
+		assert result.unit.globals[0].count == expected[index]
+	}
+	// `~` and `!` are prefix operators over a constant: `(~0 & 3) + 1` is four
+	// and `!7 + 3` is three, and both are positive so the count is the value.
+	prefix := declarations_of('int x[(~0 & 3) + 1];\nint y[!7 + 3];')
+	assert prefix.diagnostics.len == 0
+	assert prefix.unit.globals[0].count == 4
+	assert prefix.unit.globals[1].count == 3
+	// A logical operator does not evaluate the operand its result does not need,
+	// which gcc confirms: `1 || f()` and `0 && n` are accepted at file scope with
+	// f a function and n a variable, while `2 && f()` has to read f() and is
+	// refused.
+	short := declarations_of('int f(void);\nint n = 4;\nint x[1 || f()];\nint y[0 && n];')
+	assert short.diagnostics.len == 0
+	// globals holds the objects in order: n, then x, then y. `1 || f()` is one and
+	// `0 && n` is zero, and neither read the operand the result does not need.
+	assert short.unit.globals.len == 3
+	assert short.unit.globals[1].count == 1
+	assert short.unit.globals[2].count == 0
+	needed := declarations_of('int f(void);\nint x[2 && f()];')
+	assert needed.diagnostics.len == 1
+	assert needed.diagnostics[0].msg.contains('is not an integer constant expression')
+	// Division by zero is still not a value this reader answers, so a bound
+	// written with one leaves the object without a size and is refused.
+	divided := declarations_of('int x[4 / 0];')
+	assert divided.diagnostics.len == 1
+	assert divided.diagnostics[0].msg.contains('is not an integer constant expression')
+}
