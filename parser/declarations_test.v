@@ -889,10 +889,15 @@ fn test_the_argument_list_resolves_from_the_compiler_spelling() {
 	assert body[0].decl_type.contains('__va_list_tag')
 }
 
-fn test_an_array_parameter_of_a_definition_is_reported() {
+// 6.7.5.3p7: a parameter written with brackets adjusts to a pointer to its
+// element, so `int f(char s[10])` and `int f(char *s)` are one function and the
+// bound does not travel with the parameter. Measured on gcc 16.2.1, the two
+// declarations are the same and each compiles.
+fn test_an_array_parameter_adjusts_to_a_pointer_to_its_element() {
 	result := declarations_of('int f(char s[10]) { return 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('array parameters')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].params[0].resolved.is_pointer()
+	assert result.unit.decls[0].params[0].typ.contains('*')
 }
 
 fn test_a_parameter_of_a_definition_needs_a_name() {

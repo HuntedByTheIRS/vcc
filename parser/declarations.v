@@ -3440,22 +3440,32 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			}
 		} else {
 			d := p.parse_declarator(depth + 1)!
-			resolved := p.declared_type(spec.clause, d)
+			mut resolved := p.declared_type(spec.clause, d)
+			mut stars := d.pointer_count()
+			// 6.7.5.3p7: a parameter written with brackets adjusts to a pointer
+			// to its element, so `int f(int a[3])`, `int f(int a[n])` and
+			// `int f(int *a)` are one function. The bound, a size or a variable
+			// length, is not part of the parameter's type and does not travel
+			// with it; the element it names is what the pointer points at.
+			if d.is_array() {
+				if element := resolved.element() {
+					resolved = types.pointer_to(element)
+					stars += 1
+				}
+			}
 			params.params << ast.Param{
 				name:     d.name
-				typ:      p.spelling_of(spec, d.pointer_count())
+				typ:      p.spelling_of(spec, stars)
 				resolved: resolved
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
 			// The order of the questions is the order a reader asks them: what
-			// keeps this parameter from being named at all, then the shapes the
-			// tree has no form for, then the types the emitter does.
+			// keeps this parameter from being named at all, then the types the
+			// emitter does.
 			if d.name.len == 0 {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
-			} else if d.is_array() {
-				params.note_problem('unsupported: array parameters are not implemented', d.array_at())
-			} else if !p.parameter_type_is_known(spec, d.pointer_count()) {
+			} else if !p.parameter_type_is_known(spec, stars) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.
 				params.note_problem('unsupported type ${p.parameter_spelling(spec)}', spec.start)
