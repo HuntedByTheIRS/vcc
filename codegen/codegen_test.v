@@ -3379,3 +3379,21 @@ fn test_a_row_of_a_two_dimensional_object_is_the_address_of_its_first_element() 
 	assert both.diagnostics.len == 0
 	assert run_image(both.bytes) == 42
 }
+
+// A two-dimensional object declared in a body takes a nested initializer and a
+// count per dimension, which is a row of storage for each size and not one flat
+// run: measured on gcc 16.2.1 the three programs below exit 6, 36 and 6.
+fn test_a_two_dimensional_object_in_a_body_is_initialized_a_row_at_a_time() {
+	rows := emit(translation_unit('int main(void) { int a[2][3] = {{1,2,3},{4,5,6}}; return a[1][2]; }'),
+		Options{})
+	assert rows.diagnostics.len == 0
+	assert run_image(rows.bytes) == 6
+	loop := emit(translation_unit('int main(void) { int a[2][3]; for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) a[i][j] = i * 10 + j; int s = 0; for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) s += a[i][j]; return s; }'),
+		Options{})
+	assert loop.diagnostics.len == 0
+	assert run_image(loop.bytes) == 36
+	three := emit(translation_unit('int main(void) { int a[2][2][2] = {{{1,2},{3,4}},{{5,6},{7,8}}}; return a[1][0][1] + a[0][1][0] + a[0][0][0]; }'),
+		Options{})
+	assert three.diagnostics.len == 0
+	assert run_image(three.bytes) == 10
+}

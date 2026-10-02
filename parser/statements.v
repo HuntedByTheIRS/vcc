@@ -1098,11 +1098,6 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			p.skip_declaration()
 			return stmts
 		}
-		if d.array_dims() > 1 {
-			p.error_at(d.array_at(), 'unsupported: only one size of an array is implemented, and this declarator writes ${d.array_dims()}')
-			p.skip_declaration()
-			return stmts
-		}
 		declared := p.declared_type(spec.clause, d)
 		mut init := ?ast.Expr(none)
 		// brace says the initializer was written as a list, elements are its
@@ -1295,11 +1290,12 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			decl_init = ?ast.Expr(none)
 		}
 		stmts << ast.Stmt{
-			kind:       .var_decl
-			init:       decl_init
-			decl_name:  d.name
-			decl_type:  p.spelling_of(spec, d.pointer_count())
-			decl_count: count
+			kind:        .var_decl
+			init:        decl_init
+			decl_name:   d.name
+			decl_type:   p.spelling_of(spec, d.pointer_count())
+			decl_count:  count
+			decl_stride: declaration_stride(declared, p.representation)
 			// The declarator decides whether the object is the aggregate or
 			// something derived from it: `struct S x;` is the object, and
 			// `struct S *p;` is one word holding an address, which the back end
@@ -1307,9 +1303,9 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			// An array of aggregates carries the size of one element here, and
 			// the count it was declared with travels beside it: the frame reserves
 			// the product, and an index scales by the size of one element.
-			bytes:      p.aggregate_bytes(declared)
-			line:       d.name_at.line
-			col:        d.name_at.col
+			bytes:       p.aggregate_bytes(declared)
+			line:        d.name_at.line
+			col:         d.name_at.col
 		}
 		// A union's brace initializer is the one member it names, written at the
 		// beginning of the object: `union U u = {5};` stores 5 into u's first
@@ -1428,17 +1424,17 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			array := general_target.kind == .array
 			element := if array { general_target.element() or { declared } } else { declared }
 			element_width := p.representation.size_of(element) or { 0 }
-			if array && object_bytes == 0 && element.kind in [types.Kind.array, .struct_, .union_] {
+			if array && object_bytes == 0 && element.kind in [types.Kind.struct_, .union_] {
 				// The frame sizes an array of scalars from the spelling and the
-				// count, and an array whose element is itself an aggregate has
-				// no width that answers: there is nowhere to put the values.
+				// count, and an array whose element is an aggregate has no
+				// width that answers: there is nowhere to put the values.
 				p.error_at(d.name_at, 'unsupported: ${d.name} is an array whose element is an object of the type ${element.describe()}, and storage for one in a body is not implemented')
 			} else {
 				mut leaves := []BraceWrite{}
 				p.collect_leaves(general_target, 0, mut leaves)
 				for leaf in leaves {
-					stmts << store_a_brace_write(d.name, d.name_at, leaf, zero_initializer(d.name_at),
-						array, object_bytes, element_width)
+					stmts << p.store_a_leaf(d.name, d.name_at, leaf, zero_initializer(d.name_at),
+						array, object_bytes, element_width, general_target)
 				}
 				for write in general_writes {
 					// A leaf is an expression when the list wrote one and a
@@ -1451,8 +1447,8 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 					} else {
 						zero_initializer(d.name_at)
 					}
-					stmts << store_a_brace_write(d.name, d.name_at, write, value, array, object_bytes,
-						element_width)
+					stmts << p.store_a_leaf(d.name, d.name_at, write, value, array, object_bytes,
+						element_width, general_target)
 				}
 			}
 		}
@@ -1517,6 +1513,96 @@ fn zero_initializer(at tokenize.Token) ast.Expr {
 		line:  at.line
 		col:   at.col
 	})
+}
+
+// declaration_stride is the size of one element of an array declaration, which
+// is what an index scales by and what the frame reserves a count of. For an
+// array of arrays it is the size of the element's own type, the whole row for
+// `int a[2][3]` (twelve bytes and not four), because a subscript of the array
+// names a row and moving to the next row steps by that. A declaration that is
+// not an array answers zero, and the frame sizes the value from its spelling.
+fn declaration_stride(declared types.Type, representation types.Representation) int {
+	if !declared.is_array() {
+		return 0
+	}
+	element := declared.element() or { return 0 }
+	return representation.size_of(element) or { 0 }
+}
+
+// array_element_path is the subscript path to the scalar at byte `offset` of an
+// array of arrays, one index per dimension: `a[1][2]` for the leaf at sixteen
+// bytes of an `int[2][3]`. A nested array's element is a row, so the leaves a
+// walk reached carry a byte offset and not a single flat index, and one index
+// into the whole object would address the wrong element. `base` is the
+// expression the path is built on and `typ` its array type; none is answered
+// when the offset does not land on an element boundary or the bottom is not a
+// scalar.
+fn (p Parser) array_element_path(base ast.Expr, typ types.Type, offset int, at tokenize.Token) ?ast.Expr {
+	if typ.kind != .array {
+		return none
+	}
+	element := typ.element() or { return none }
+	stride := p.representation.size_of(element) or { return none }
+	if stride <= 0 {
+		return none
+	}
+	index := offset / stride
+	remainder := offset % stride
+	here := ast.Expr(ast.Index{
+		base:  base
+		index: ast.Expr(ast.IntLit{
+			value: i64(index)
+			text:  '${index}'
+			typ:   types.int_type()
+			line:  at.line
+			col:   at.col
+		})
+		typ:   element
+		line:  at.line
+		col:   at.col
+	})
+	if element.kind == .array {
+		return p.array_element_path(here, element, remainder, at)
+	}
+	if element.kind in [types.Kind.struct_, .union_] {
+		return none
+	}
+	if remainder != 0 {
+		// The offset does not land on a scalar boundary at the bottom level, so
+		// there is no element to name.
+		return none
+	}
+	return here
+}
+
+// store_a_leaf is the store one scalar subobject of a body's initializer makes,
+// at the byte the walk gave it. A nested array is reached by one subscript per
+// dimension rather than by a single index into a flat run, because the element
+// of such an array is a row: `int a[2][3]` is written as `a[i][j]` and its
+// element stride is the whole row. Every other shape is the store
+// store_a_brace_write writes.
+fn (p Parser) store_a_leaf(name string, at tokenize.Token, write BraceWrite, value ast.Expr, array bool, object_bytes int, element_width int, general_target types.Type) ast.Stmt {
+	if array && object_bytes == 0 {
+		element := general_target.element() or { types.Type{} }
+		if element.kind == .array {
+			base := ast.Expr(ast.Ident{
+				name: name
+				typ:  general_target
+				line: at.line
+				col:  at.col
+			})
+			if path := p.array_element_path(base, general_target, write.offset, at) {
+				return ast.Stmt{
+					kind:      .assign
+					subscript: path
+					expr:      value
+					line:      at.line
+					col:       at.col
+				}
+			}
+		}
+	}
+	return store_a_brace_write(name, at, write, value, array, object_bytes, element_width)
 }
 
 // store_a_brace_write is the store a body's initializer makes for one scalar
