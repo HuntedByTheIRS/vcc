@@ -287,7 +287,7 @@ fn test_a_written_bound_is_not_filled_in_from_a_string_literal() {
 fn test_a_narrow_literal_does_not_initialize_an_int_array() {
 	result := declarations_of('int a[] = "xy";')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
+	assert result.diagnostics[0].msg.contains('is initialized with something this compiler cannot write')
 }
 
 // A written bound that is negative is a constraint violation (6.7.5.2p1).
@@ -336,10 +336,10 @@ fn test_a_written_zero_bound_is_zero_for_a_string_initializer() {
 }
 
 // A shape the reader does not implement is refused by name: a nested list, a
-// designator, an element that is not a written number, and an empty pair of
-// braces. Measured on gcc 16.2.1, `int a[] = {};` under `-std=gnu99` is `ISO C
-// forbids empty initializer braces before C23` and `zero or negative size
-// array`.
+// designator, an element that does not begin with a written number or an
+// address, and an empty pair of braces. Measured on gcc 16.2.1, `int a[] = {};`
+// under `-std=gnu99` is `ISO C forbids empty initializer braces before C23` and
+// `zero or negative size array`.
 fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	nested := declarations_of('static int a[2][2] = {{1, 2}, {3, 4}};')
 	assert nested.diagnostics.len == 1
@@ -347,7 +347,16 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	designated := declarations_of('int a[3] = {[1] = 5};')
 	assert designated.diagnostics.len == 1
 	assert designated.diagnostics[0].msg.contains('designator')
-	element := declarations_of('int a[2] = {name};')
+	// A name is read as an address, which is what a pointer's initializer is, so
+	// on an object that holds no address the element is named for that: gcc
+	// 16.2.1 rejects `int a[2] = {name};` as an undeclared name, and this reader
+	// refuses the address the name stands for.
+	addressed := declarations_of('int a[2] = {name};')
+	assert addressed.diagnostics.len == 1
+	assert addressed.diagnostics[0].msg.contains('does not hold addresses')
+	// The element that is neither a written number nor an address is a
+	// parenthesized constant, which gcc 16.2.1 accepts and this reader does not.
+	element := declarations_of('int a[2] = {(1)};')
 	assert element.diagnostics.len == 1
 	assert element.diagnostics[0].msg.contains('written number')
 	empty := declarations_of('int a[] = {};')
@@ -511,9 +520,9 @@ fn test_a_body_scalar_in_braces_is_the_number_in_them() {
 }
 
 // The refusals are the same in a body: a nested list, a designator, an element
-// that is not a written number, and a list too long for the array. Each is one
-// diagnostic that names the construct, and the declaration after the list is
-// still read where it starts.
+// that does not begin with a written number or an address, and a list too long
+// for the array. Each is one diagnostic that names the construct, and the
+// declaration after the list is still read where it starts.
 fn test_a_body_brace_initializer_shape_that_is_not_implemented_is_named() {
 	nested := declarations_of('int main(void) { int a[2] = {{1}, {2}}; return 0; }')
 	assert nested.diagnostics.len == 1
@@ -521,7 +530,10 @@ fn test_a_body_brace_initializer_shape_that_is_not_implemented_is_named() {
 	designated := declarations_of('int main(void) { int a[3] = {[1] = 5}; return 0; }')
 	assert designated.diagnostics.len == 1
 	assert designated.diagnostics[0].msg.contains('designator')
-	element := declarations_of('int main(void) { int a[2] = {name}; return 0; }')
+	// A name is read as an address now, so the element that is neither a written
+	// number nor an address is a parenthesized constant, which gcc 16.2.1
+	// accepts and this reader does not.
+	element := declarations_of('int main(void) { int a[2] = {(1)}; return 0; }')
 	assert element.diagnostics.len == 1
 	assert element.diagnostics[0].msg.contains('written number')
 	excess := declarations_of('int main(void) { int a[2] = {1, 2, 3}; return 0; }')
@@ -529,12 +541,14 @@ fn test_a_body_brace_initializer_shape_that_is_not_implemented_is_named() {
 	assert excess.diagnostics[0].msg.contains('holds 2 elements')
 }
 
-// A pointer array is a list of addresses, which are not the written constants
-// this reader takes, so its list is refused rather than written as numbers.
+// A pointer array in a body is a list of addresses, and storage in a frame is
+// initialized by stores: a store writes a constant, and an address is a
+// reference the layout resolves rather than bytes a store can write. So the
+// list is refused by name rather than written as numbers.
 fn test_a_body_list_of_addresses_is_refused() {
 	result := declarations_of('int main(void) { int v = 1; int *p[2] = {&v, 0}; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('written number')
+	assert result.diagnostics[0].msg.contains('an address in a brace initializer inside a body is not implemented')
 }
 
 // A struct's brace initializer in a body is the stores the members make at the
@@ -598,9 +612,9 @@ fn test_a_body_list_for_a_struct_with_an_aggregate_member_is_refused() {
 // A file-scope initializer that is a number the literal reader refuses gets the
 // refusal the expression path gives it, at the literal as it was written, rather
 // than the report for an initializer that is not a number at all. Measured,
-// `int x = 0x1p3;` used to exit with `x is initialized with something that is
-// not a number and only a number can be written into the image so far`, which
-// names neither the construct nor where it is.
+// `int x = 0x1p3;` used to exit with a message that the object was initialized
+// with something that is not a number, which names neither the construct nor
+// where it is.
 fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
 	result := declarations_of('int x = 0x1p3;')
 	assert result.diagnostics.len == 1
@@ -646,7 +660,7 @@ fn test_a_file_scope_parenthesized_constant_is_the_number_in_them() {
 	// pair with one after it stays refused by name.
 	refused := declarations_of('int g = (7, 8);')
 	assert refused.diagnostics.len == 1
-	assert refused.diagnostics[0].msg.contains('is initialized with something that is not a number')
+	assert refused.diagnostics[0].msg.contains('is initialized with something this compiler cannot write')
 }
 
 // A file-scope scalar may be initialized by an integer constant expression, and
@@ -692,7 +706,7 @@ fn test_a_file_scope_initializer_that_is_an_integer_constant_expression_is_folde
 	for source in refused {
 		result := declarations_of(source)
 		assert result.diagnostics.len == 1
-		assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
+		assert result.diagnostics[0].msg.contains('is initialized with something this compiler cannot write')
 	}
 	// A single number is still read, and its sign with it, which is the shape the
 	// language puts in the image.
@@ -703,11 +717,17 @@ fn test_a_file_scope_initializer_that_is_an_integer_constant_expression_is_folde
 	assert zero.diagnostics.len == 0
 }
 
-fn test_a_pointer_defined_at_the_top_level_is_reported() {
+// A pointer object at the top level is one word of storage whatever it points
+// at, so a declaration of one is laid out rather than refused, and a null
+// pointer constant is the number written into it.
+fn test_a_pointer_defined_at_the_top_level_is_storage() {
 	result := declarations_of('char *message = 0;')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('pointer')
-	assert result.unit.globals.len == 0
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	assert object.name == 'message'
+	assert object.count == 0
+	assert (object.init or { i64(-1) }) == 0
 }
 
 fn test_a_definition_keeps_its_parameters() {

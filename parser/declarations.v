@@ -706,6 +706,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// element: `char s[0] = "";` writes none, and the report for an initializer
 	// that is not a number is not about it.
 	mut data_string := false
+	// data_address is the initializer of an object whose value is an address
+	// rather than a number, which is what a pointer at the top level has: a
+	// function designator, the address of an object, or a string literal.
+	mut data_address := ?ast.AddressInit(none)
+	// data_address_inits is a brace list of addresses, one per element of an
+	// array whose elements are pointers: `int (*t[2])(int) = {inc, dec};`. It is
+	// separate from data_inits because an element that is an address is a
+	// reference the layout resolves rather than a constant written here.
+	mut data_address_inits := []ast.AddressInit{}
 	// data_problem says a brace initializer was read and refused for its size,
 	// which is a declaration the image does not lay out: the program is already
 	// refused, and storage for an object whose initializer is wrong is storage
@@ -842,10 +851,8 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				if p.at_punct('{') && d.pointer_count() == 0 {
 					// A brace initializer, read here because a list is
 					// what gives an array with empty brackets its size.
-					// A pointer's initializer is not read this way: a
-					// pointer at the top level is refused below, and
-					// reading its list first would report the same
-					// declaration twice.
+					// A pointer's list is read by the arm below, which
+					// knows the elements are addresses.
 					data_brace = true
 					if list := p.parse_brace_initializer() {
 						if !data_array {
@@ -858,8 +865,8 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 								// the object. A first member that is itself an
 								// aggregate takes a list of its own, and a list of
 								// more than one value has no room in one object.
-								if list.values.len > 1 {
-									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.values.len}')
+								if list.elements.len > 1 {
+									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.elements.len}')
 									data_problem = true
 								} else if spec.clause.members.len == 0 {
 									p.error_at(list.at, 'unsupported: ${spec.clause.describe()} has no first member to initialize')
@@ -870,10 +877,31 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 										p.error_at(list.at, 'unsupported: the first member of ${spec.clause.describe()} is an object of the type ${first.typ.describe()}, and a brace initializer for one is not implemented')
 										data_problem = true
 									} else {
-										element := list.values[0]
-										data_init, data_init_float = initializer_for(first.typ.describe(), element.number.integer,
-											element.number.floating)
-										data_union_first = true
+										element := list.elements[0]
+										if address := element.address {
+											if first.typ.kind != .pointer {
+												// The first member does not hold an
+												// address, and an address is not
+												// converted to another scalar: gcc
+												// 16.2.1 warns and the program reads
+												// a different value, so the shape is
+												// refused rather than written.
+												p.error_at(list.at, 'unsupported: the first member of ${spec.clause.describe()} is of the type ${first.typ.describe()}, and its initializer writes an address')
+												data_problem = true
+											} else {
+												// A union's first member sits at the
+												// beginning of the object, so an
+												// address initializing a pointer
+												// member is written at the union's
+												// own offset.
+												data_address = address
+												data_union_first = true
+											}
+										} else if number := element.number {
+											data_init, data_init_float = initializer_for(first.typ.describe(), number.number.integer,
+												number.number.floating)
+											data_union_first = true
+										}
 									}
 								}
 							} else if spec.clause.kind == .struct_ {
@@ -895,13 +923,22 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 								// (6.7.8p2, measured on gcc 16.2.1:
 								// `int x = {1, 2};` is `excess elements
 								// in scalar initializer`).
-								if list.values.len > 1 {
-									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.values.len}')
+								if list.elements.len > 1 {
+									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.elements.len}')
 									data_problem = true
 								}
-								element := list.values[0]
-								data_init, data_init_float = initializer_for(data_type, element.number.integer,
-									element.number.floating)
+								element := list.elements[0]
+								if element.address != none {
+									// The object's type is not a pointer: a
+									// pointer's braces are read as a table
+									// before this arm, and an address has no
+									// conversion to another scalar.
+									p.error_at(list.at, 'unsupported: ${data_name} is not of pointer type, and its initializer writes an address')
+									data_problem = true
+								} else if number := element.number {
+									data_init, data_init_float = initializer_for(data_type, number.number.integer,
+										number.number.floating)
+								}
 							}
 						} else {
 							// A written size smaller than the list is
@@ -910,17 +947,57 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 							// elements in array initializer`), and a
 							// list for an array with empty brackets
 							// is what its size is.
-							if data_count > 0 && list.values.len > data_count {
-								p.error_at(list.at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${list.values.len}')
+							if data_count > 0 && list.elements.len > data_count {
+								p.error_at(list.at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${list.elements.len}')
 								data_problem = true
 							}
 							if data_count == 0 {
-								data_count = list.values.len
+								data_count = list.elements.len
 							}
-							data_inits, data_init_floats = initializer_list_for(data_type, list.values)
+							data_inits, data_init_floats = p.initializer_list_for(data_type, list.elements,
+								data_name, list.at)
 						}
 					}
 					literal_refused = true
+				} else if d.pointer_count() > 0 {
+					// An object of pointer type takes an address: a
+					// function designator, the address of an object, or a
+					// string literal. A written number is a null pointer
+					// constant, which is the one value of an integer type
+					// a pointer takes, and it is written as the number it
+					// is. A brace list is a table of them, one per element,
+					// and it is read on its own path because an element
+					// that is an address is a reference the layout resolves
+					// rather than bytes written here.
+					if p.at_punct('{') {
+						if elements := p.parse_address_initializer() {
+							data_address_inits = elements.clone()
+							if data_count == 0 {
+								// Empty brackets are what the list sizes, the
+								// same as a list of numbers sizes an array.
+								data_count = elements.len
+							} else if elements.len > data_count {
+								p.error_at(data_at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${elements.len}')
+								data_problem = true
+							}
+						} else {
+							// The list was refused at its own element; there is
+							// nothing to lay out.
+							data_problem = true
+							literal_refused = true
+						}
+					} else if address := p.file_scope_address() {
+						data_address = address
+					} else {
+						// What is left is a constant: a written number is a null
+						// pointer constant, which is the one value of an integer
+						// type a pointer takes. A shape the constant reader does
+						// not read is reported at the literal itself.
+						constant := p.file_scope_constant()
+						data_init = constant.integer
+						data_init_float = constant.floating
+						literal_refused = p.diagnostics.len > before
+					}
 				} else if p.peek().kind == .string && d.is_array() {
 					// 6.7.8p14: an array of character type may be
 					// initialized by a string literal. The elements become
@@ -986,10 +1063,12 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// somewhere else, and this compiler has no storage to give it.
 			return decls
 		}
-		if data_stars > 0 {
-			p.error_at(data_at, 'unsupported: ${data_name} is a pointer, and a pointer defined at the top level is storage this compiler does not lay out yet')
-			return decls
-		}
+		// A pointer object at the top level is one word of storage, and what it
+		// points at does not decide how wide it is: 6.2.5 lets a pointer name an
+		// incomplete type, and the back end sizes a pointer from its star rather
+		// than from the type under it. It takes the value path below rather than
+		// the aggregate one, whatever the type under the star is.
+		//
 		// The type of an object defined at the top level is the same question a
 		// definition's return type is: storage the program has to find room for,
 		// so the answer is the same helper. A prototype can promise anything; a
@@ -998,7 +1077,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.error_at(data_at, 'unsupported type ${offender}')
 			return decls
 		}
-		if spec.clause.kind in [types.Kind.struct_, .union_] {
+		if data_stars == 0 && spec.clause.kind in [types.Kind.struct_, .union_] {
 			if data_problem {
 				// The list was refused for its size and has already been
 				// named: there is nothing to lay out.
@@ -1041,6 +1120,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				bytes:        bytes
 				init:         data_init
 				init_float:   data_init_float
+				address:      data_address
 				member_inits: data_member_inits
 				line:         data_at.line
 				col:          data_at.col
@@ -1048,13 +1128,14 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if data_defined && data_init == none && data_init_float == none && data_inits.len == 0
-			&& data_init_floats.len == 0 && !data_string {
+			&& data_init_floats.len == 0 && !data_string && data_address == none
+			&& data_address_inits.len == 0 {
 			// Either way the definition is refused. When the initializer was a
 			// shape the reader reported, it has already been named at its own
 			// location and this report would be a second message about the
 			// same construct.
 			if !literal_refused {
-				p.error_at(data_at, 'unsupported: ${data_name} is initialized with something that is not a number, and only a number can be written into the image so far')
+				p.error_at(data_at, 'unsupported: ${data_name} is initialized with something this compiler cannot write into the image, and it is not a shape it reads')
 			}
 			return decls
 		}
@@ -1089,16 +1170,18 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.scopes.complete_type(data_name, completed)
 		}
 		p.globals << ast.Global{
-			name:        data_name
-			typ:         data_type
-			resolved:    if completed := data_complete { completed } else { data_clause }
-			count:       data_count
-			init:        init
-			init_float:  init_float
-			inits:       data_inits
-			init_floats: data_init_floats
-			line:        data_at.line
-			col:         data_at.col
+			name:          data_name
+			typ:           data_type
+			resolved:      if completed := data_complete { completed } else { data_clause }
+			count:         data_count
+			init:          init
+			init_float:    init_float
+			address:       data_address
+			inits:         data_inits
+			init_floats:   data_init_floats
+			address_inits: data_address_inits
+			line:          data_at.line
+			col:           data_at.col
 		}
 	}
 	return decls
@@ -1231,6 +1314,75 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 	return constant.number
 }
 
+// file_scope_address reads the initializer of an object whose value is an address
+// rather than a number: a function designator, the address of an object, or a
+// string literal. It answers none for anything else without consuming a token, so
+// a caller that finds no address can read the same place as a number instead, and
+// a null pointer constant is still a number.
+//
+// The name is kept rather than resolved. This reader knows the scope, and whether
+// a name is a function or an object is a question about the whole file's
+// definitions, which the back end asks where it lays the storage out.
+fn (mut p Parser) file_scope_address() ?ast.AddressInit {
+	if p.peek().kind == .string {
+		token := p.next()
+		literal := parse_string_literal(token.text) or {
+			p.error_at(token, err.msg())
+			return none
+		}
+		if literal.unit == 4 {
+			// A wide literal is a run of ints, and a pointer at the top level
+			// takes the literal of its own element's type: this reader has no
+			// wchar_t to compare the pointee against here, so it names the
+			// shape rather than writing the wrong address.
+			p.error_at(token, 'unsupported: a wide string literal does not initialize a pointer here')
+			return none
+		}
+		return ast.AddressInit{
+			name:   literal.value
+			string: true
+			line:   token.line
+			col:    token.col
+		}
+	}
+	if p.at_punct('&') {
+		amp := p.next()
+		if p.peek().kind != .identifier {
+			p.error_at(amp, 'unsupported: the operand of & in a file-scope initializer has to be a name')
+			return none
+		}
+		name := p.next()
+		if p.at_punct('[') || p.at_punct('.') || p.at_punct('->') {
+			// `&name[0]`, `&name.m` and `&name->m` are the address of a part of
+			// an object, which is the object's address plus an offset: the
+			// reference carries no offset yet, so the shape is refused by name
+			// rather than written as the address of the whole object, which is
+			// not what it names.
+			p.error_at(name, 'unsupported: the address of a part of ${name.text} is not implemented, and the address of the whole object is not what it names')
+			return none
+		}
+		return ast.AddressInit{
+			name:     name.text
+			explicit: true
+			line:     name.line
+			col:      name.col
+		}
+	}
+	if p.peek().kind == .identifier {
+		name := p.next()
+		if p.at_punct('[') || p.at_punct('.') || p.at_punct('->') {
+			p.error_at(name, 'unsupported: ${name.text} is named where an address is wanted and a part of it is read, and an address of a part of an object is not implemented')
+			return none
+		}
+		return ast.AddressInit{
+			name: name.text
+			line: name.line
+			col:  name.col
+		}
+	}
+	return none
+}
+
 // folded_file_initializer reads the initializer as an expression and answers the
 // integer constant expression it is worth. Its operand and operator set is the
 // folder's, which is 6.6's, so the same expressions are constants here as in a
@@ -1302,26 +1454,37 @@ fn (p Parser) is_parenthesized_constant() bool {
 	return after.kind == .punct && (after.text == ',' || after.text == ';')
 }
 
-// BraceList is a brace initializer as the reader read it: the constants in the
+// BraceElement is one element of a brace initializer: a written number with its
+// sign, or an address. At most one of the two is set, and which one is what tells
+// a caller whether the element is a constant written into the storage or a
+// reference the layout resolves. A struct whose members mix a scalar and a
+// pointer needs both in one list.
+struct BraceElement {
+	number  ?NumberConstant
+	address ?ast.AddressInit
+}
+
+// BraceList is a brace initializer as the reader read it: the elements in the
 // order written, and the opening brace, which is what a diagnostic about the
 // list points at.
 struct BraceList {
-	values []NumberConstant
-	at     tokenize.Token
+	elements []BraceElement
+	at       tokenize.Token
 }
 
-// parse_brace_initializer reads `{ v, v, ... }`, the list of constants that
-// initializes an object. One element is one written number with its sign, or a
+// parse_brace_initializer reads `{ v, v, ... }`, the list of values that
+// initializes an object. One element is one written number with its sign or a
 // character constant, which 6.4.4.4 gives the value of the character and the
-// type int.
+// type int, or an address, which is what an element of a pointer's type is: a
+// function designator, `&name`, or a string literal.
 //
 // A shape this reader does not read is refused by name and at its own location
 // rather than read as a shorter list, because a list that wrote three values and
 // was read as one would write a wrong table, and a wrong value in a table is
 // worse than a refusal. Refused here: a nested list, `{{...}}`; a designator,
-// `{.x = 1}` or `{[2] = 1}`; an element that is not a written constant, which is
-// every expression, `{1 + 2}` included; and an empty pair of braces, which gives
-// an array no size to be.
+// `{.x = 1}` or `{[2] = 1}`; an element that is neither a number nor an address,
+// which is every other expression, `{1 + 2}` included; and an empty pair of
+// braces, which gives an array no size to be.
 fn (mut p Parser) parse_brace_initializer() !BraceList {
 	open := p.next() // {
 	if p.at_punct('}') {
@@ -1334,7 +1497,7 @@ fn (mut p Parser) parse_brace_initializer() !BraceList {
 	// the declaration reader expects it: a failed read that left the cursor
 	// inside the braces would report the same declaration a second time at a
 	// token of the next one.
-	mut values := []NumberConstant{}
+	mut elements := []BraceElement{}
 	for {
 		t := p.peek()
 		if t.kind == .eof {
@@ -1352,18 +1515,35 @@ fn (mut p Parser) parse_brace_initializer() !BraceList {
 			return error('brace designator')
 		}
 		before := p.diagnostics.len
-		constant := p.number_constant() or {
-			// A literal the reader refused has already been named at the
-			// literal; this is the report for an element that is not a number
-			// at all, which is every character constant, every name and every
-			// expression.
-			if p.diagnostics.len == before {
-				p.error_at(t, 'unsupported: an element of a brace initializer is a written number, found ${describe(t)}')
+		// Only a token that can start an address takes the address path: a name,
+		// a string literal, or the ampersand in front of one. Everything else is
+		// read the way a constant was always read, so a character constant and a
+		// number keep the one path they had.
+		if t.kind == .identifier || t.kind == .string || (t.kind == .punct && t.text == '&') {
+			if address := p.file_scope_address() {
+				elements << BraceElement{
+					address: address
+				}
+			} else {
+				// The address was refused and named inside the reader.
+				p.skip_balanced(open) or {}
+				return error('brace element')
 			}
-			p.skip_balanced(open) or {}
-			return error('brace element')
+		} else {
+			constant := p.number_constant() or {
+				// A literal the reader refused has already been named at the
+				// literal; this is the report for an element that is not a
+				// number at all.
+				if p.diagnostics.len == before {
+					p.error_at(t, 'unsupported: an element of a brace initializer is a written number or an address, found ${describe(t)}')
+				}
+				p.skip_balanced(open) or {}
+				return error('brace element')
+			}
+			elements << BraceElement{
+				number: constant
+			}
 		}
-		values << constant
 		if p.at_punct(',') {
 			p.next()
 			continue
@@ -1371,13 +1551,105 @@ fn (mut p Parser) parse_brace_initializer() !BraceList {
 		if p.at_punct('}') {
 			p.next()
 			return BraceList{
-				values: values
-				at:     open
+				elements: elements
+				at:       open
 			}
 		}
 		p.error_at(p.peek(), 'unsupported: expected , or } in a brace initializer, found ${describe(p.peek())}')
 		p.skip_balanced(open) or {}
 		return error('brace list')
+	}
+}
+
+// parse_address_initializer reads `{ a, a, ... }` where every element initializes
+// an object of pointer type: an address - a function designator, `&name`, or a
+// string literal - or a written integer, which is a null pointer constant. It
+// mirrors parse_brace_initializer, including refusing a nested list, a designator,
+// and an element that is neither an address nor a number by name and at its own
+// location: a list read as shorter than it was written would write a wrong table,
+// and a wrong address is worse than a refusal.
+fn (mut p Parser) parse_address_initializer() ![]ast.AddressInit {
+	open := p.next() // {
+	if p.at_punct('}') {
+		p.next()
+		p.error_at(open, 'unsupported: an empty brace initializer is not implemented')
+		return error('empty brace initializer')
+	}
+	mut elements := []ast.AddressInit{}
+	for {
+		t := p.peek()
+		if t.kind == .eof {
+			p.error_at(open, 'unsupported: unterminated { opened at ${open.line}:${open.col}')
+			return error('unterminated brace initializer')
+		}
+		if t.kind == .punct && t.text == '{' {
+			p.error_at(t, 'unsupported: a nested brace initializer is not implemented')
+			p.skip_balanced(open) or {}
+			return error('nested brace initializer')
+		}
+		if t.kind == .punct && (t.text == '.' || t.text == '[') {
+			p.error_at(t, 'unsupported: a designator in a brace initializer is not implemented')
+			p.skip_balanced(open) or {}
+			return error('brace designator')
+		}
+		before := p.diagnostics.len
+		// Only a token that can start an address takes the address path: a name,
+		// a string literal, or the ampersand in front of one. Everything else is
+		// read the way a constant was always read, so a character constant and a
+		// number keep the one path they had.
+		if t.kind == .identifier || t.kind == .string || (t.kind == .punct && t.text == '&') {
+			if address := p.file_scope_address() {
+				elements << address
+			} else {
+				p.skip_balanced(open) or {}
+				return error('address element')
+			}
+		} else {
+			constant := p.number_constant() or {
+				if p.diagnostics.len == before {
+					p.error_at(t, 'unsupported: an element of a pointer initializer is an address or a written number, found ${describe(t)}')
+				}
+				p.skip_balanced(open) or {}
+				return error('address element')
+			}
+			value := constant.number.integer or {
+				p.error_at(t, 'unsupported: an element of a pointer initializer is an address or an integer constant')
+				p.skip_balanced(open) or {}
+				return error('address element')
+			}
+			elements << ast.AddressInit{
+				number: value
+				line:   t.line
+				col:    t.col
+			}
+		}
+		if p.at_punct(',') {
+			p.next()
+			continue
+		}
+		if p.at_punct('}') {
+			p.next()
+			return elements
+		}
+		p.error_at(p.peek(), 'unsupported: expected , or } in a pointer initializer, found ${describe(p.peek())}')
+		p.skip_balanced(open) or {}
+		return error('pointer list')
+	}
+}
+
+// refuse_an_address_in_a_body reports, once, that a brace list inside a body
+// writes an address. Storage in a frame is initialized by stores, and a store
+// writes a constant; an address is a reference the image's layout resolves, which
+// a body's store is not. It is refused by name rather than stored as a zero,
+// because a zero is a value the declaration did not write. The shape is the one
+// a file-scope object has, where the layout can resolve the reference; it is not
+// one this reader places inside a body.
+fn (mut p Parser) refuse_an_address_in_a_body(list BraceList) {
+	for element in list.elements {
+		if element.address != none {
+			p.error_at(list.at, 'unsupported: an address in a brace initializer inside a body is not implemented')
+			return
+		}
 	}
 }
 
@@ -1446,24 +1718,40 @@ fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
 	return value, none
 }
 
-// initializer_list_for makes each constant of a brace list the class the object's
-// element type holds, which is the conversion an initialization makes: an integer
-// constant initializing a double is that integer as a double, and a floating
-// constant initializing an integer is truncated towards zero. At most one of the
-// two answers is non-empty, for the same reason the scalar pair is split: how the
-// element's bytes are written is a question about the class.
-fn initializer_list_for(written string, values []NumberConstant) ([]i64, []f64) {
+// initializer_list_for makes each element of an array's brace list the class the
+// object's element type holds, which is the conversion an initialization makes:
+// an integer constant initializing a double is that integer as a double, and a
+// floating constant initializing an integer is truncated towards zero. At most one
+// of the two answers is non-empty, for the same reason the scalar pair is split:
+// how the element's bytes are written is a question about the class.
+//
+// An element that is an address does not belong here: the type is not a pointer,
+// or the list would have been read as a table of addresses before this path, and
+// an address has no conversion to another scalar. It is refused by name rather
+// than read as a zero, because a zero in the storage is a value the declaration
+// did not write.
+fn (mut p Parser) initializer_list_for(written string, elements []BraceElement, name string, at tokenize.Token) ([]i64, []f64) {
 	if written == 'double' || written == 'float' {
-		mut floats := []f64{cap: values.len}
-		for value in values {
-			_, fraction := initializer_for(written, value.number.integer, value.number.floating)
+		mut floats := []f64{cap: elements.len}
+		for element in elements {
+			if element.address != none {
+				p.error_at(at, 'unsupported: ${name} does not hold addresses, and its initializer writes one')
+				return []i64{}, []f64{}
+			}
+			number := element.number or { continue }
+			_, fraction := initializer_for(written, number.number.integer, number.number.floating)
 			floats << (fraction or { f64(0) })
 		}
 		return []i64{}, floats
 	}
-	mut integers := []i64{cap: values.len}
-	for value in values {
-		integer, _ := initializer_for(written, value.number.integer, value.number.floating)
+	mut integers := []i64{cap: elements.len}
+	for element in elements {
+		if element.address != none {
+			p.error_at(at, 'unsupported: ${name} does not hold addresses, and its initializer writes one')
+			return []i64{}, []f64{}
+		}
+		number := element.number or { continue }
+		integer, _ := initializer_for(written, number.number.integer, number.number.floating)
 		integers << (integer or { i64(0) })
 	}
 	return integers, []f64{}
@@ -1492,9 +1780,28 @@ fn (mut p Parser) struct_brace_members(aggregate types.Type, list BraceList, nam
 			return none
 		}
 	}
-	if list.values.len > aggregate.members.len {
-		p.error_at(list.at, 'a constraint violation: ${name} has ${aggregate.members.len} members and its initializer writes ${list.values.len}')
+	if list.elements.len > aggregate.members.len {
+		p.error_at(list.at, 'a constraint violation: ${name} has ${aggregate.members.len} members and its initializer writes ${list.elements.len}')
 		return none
+	}
+	// An element has to be the class its member holds: an address for a member of
+	// pointer type, a number for any other scalar, and a written zero, which is
+	// the null pointer constant, for either. The two are told apart here rather
+	// than converted, because an address written into a member that does not hold
+	// one is a wrong value, not a conversion.
+	for i in 0 .. list.elements.len {
+		element := list.elements[i]
+		pointer := aggregate.members[i].typ.kind == .pointer
+		if element.address != none && !pointer {
+			p.error_at(list.at, 'unsupported: ${name} has a member ${aggregate.members[i].name} of the type ${aggregate.members[i].typ.describe()}, and its initializer writes an address')
+			return none
+		}
+		if number := element.number {
+			if pointer && (number.number.integer or { i64(0) }) != 0 {
+				p.error_at(list.at, 'unsupported: ${name} has a member ${aggregate.members[i].name} of the type ${aggregate.members[i].typ.describe()}, and its initializer writes the number ${number.number.integer or { i64(0) }}')
+				return none
+			}
+		}
 	}
 	layout := p.representation.layout(aggregate) or {
 		p.error_at(list.at, 'unsupported: the layout of ${aggregate.describe()} is not one this compiler knows')
@@ -1503,15 +1810,27 @@ fn (mut p Parser) struct_brace_members(aggregate types.Type, list BraceList, nam
 	return layout
 }
 
-// struct_member_inits makes each value a struct's brace initializer wrote the
-// constant the image holds for that member: the conversion the member's own type
-// makes, at the offset and width the layout gave the member.
+// struct_member_inits makes each element a struct's brace initializer wrote the
+// value the image holds for that member: the conversion the member's own type
+// makes, at the offset and width the layout gave the member, or an address the
+// layout resolves when the member is a pointer.
 fn (mut p Parser) struct_member_inits(aggregate types.Type, list BraceList, layout types.Layout) []ast.MemberInit {
-	mut members := []ast.MemberInit{cap: list.values.len}
-	for i in 0 .. list.values.len {
+	mut members := []ast.MemberInit{cap: list.elements.len}
+	for i in 0 .. list.elements.len {
+		element := list.elements[i]
 		member := aggregate.members[i]
-		init, init_float := initializer_for(member.typ.describe(), list.values[i].number.integer,
-			list.values[i].number.floating)
+		if address := element.address {
+			members << ast.MemberInit{
+				offset:   layout.offsets[i]
+				width:    p.representation.size_of(member.typ) or { 0 }
+				spelling: member.typ.describe()
+				address:  address
+			}
+			continue
+		}
+		number := element.number or { continue }
+		init, init_float := initializer_for(member.typ.describe(), number.number.integer,
+			number.number.floating)
 		members << ast.MemberInit{
 			offset:     layout.offsets[i]
 			width:      p.representation.size_of(member.typ) or { 0 }

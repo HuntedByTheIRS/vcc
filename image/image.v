@@ -42,6 +42,23 @@ pub enum FixupKind {
 	single_constant  // the same read of a four-byte float
 }
 
+// DataFixup is a reference inside the writable data: eight bytes of a top-level
+// object that hold the address of something rather than a number, which is what
+// a file-scope pointer initializer is. The address is not settled while the
+// bytes are laid out - the image is placed afterwards - so the bytes start at
+// zero and the layout writes the address in, the way a reference in the code is
+// filled in. Its kinds are the ones that name an address: `global_address` for
+// an object, `function_address` for a function this unit defines,
+// `import_address` for one the loader resolves, and `take_address` or
+// `take_wide_address` for a string literal. `offset` is where the eight bytes
+// are in globals_blob.
+pub struct DataFixup {
+pub:
+	offset int
+	kind   FixupKind
+	name   string
+}
+
 // GlobalSlot is where a top-level object lives in the image and how wide it is:
 // the offset of its first element in globals_blob, the width of one element, and
 // the count of elements it was defined with. floating says the object holds
@@ -74,6 +91,9 @@ pub mut:
 	text []u8
 	// fixups are the references the layout has to fill in.
 	fixups []Fixup
+	// data_fixups are the references the layout has to write into the storage
+	// of the objects at the top level: one per address-valued initializer.
+	data_fixups []DataFixup
 	// labels is where each function's code begins in text, and where every jump
 	// label inside one landed.
 	labels map[string]int
@@ -114,4 +134,18 @@ pub mut:
 	// interned for the name it was defined with.
 	globals_blob []u8
 	globals      map[string]GlobalSlot
+}
+
+// import_data_count is how many of the references inside the writable data name
+// a symbol the loader resolves rather than an address this image settles. Each
+// one costs a dynamic relocation in an executable, so the container asks before
+// it places its tables.
+pub fn (p Program) import_data_count() int {
+	mut count := 0
+	for fixup in p.data_fixups {
+		if fixup.kind == .import_address {
+			count++
+		}
+	}
+	return count
 }

@@ -1721,15 +1721,22 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 	slot := e.lookup(name) or {
 		// A top-level object: it has no slot in the frame, so the address of the
 		// member is the address of the object in the image plus the byte the
-		// layout gave the member. A pointer at the top level is storage the tree
-		// does not lay out, so an arrow on one cannot be reached from here.
-		// `global_of` also lays the storage out the first time the name is
-		// used, which is what an address of it needs: a reference the layout
-		// fills in is meaningless until there is an object to point at.
-		if _ := e.global_of(name) {
+		// layout gave the member. `global_of` also lays the storage out the
+		// first time the name is used, which is what an address of it needs: a
+		// reference the layout fills in is meaningless until there is an object
+		// to point at.
+		if object := e.global_of(name) {
 			register := e.accumulator(line, col)!
 			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
-			if offset != 0 && !through_pointer {
+			if through_pointer {
+				// The name is a pointer at the top level, so what is in the
+				// image is the address of the object: read it out of the
+				// storage and the member's byte is added to that. Reading
+				// through the address of the storage itself would answer from
+				// the object's own bytes, which is the wrong object.
+				e.load_indirect_value(register, register, object.unsigned, e.target.word_size)!
+			}
+			if offset != 0 {
 				e.append(e.target.add_immediate(register, offset))
 			}
 			return
@@ -8058,9 +8065,24 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		offset := e.program.globals_blob.len
 		space := if object.count > 0 { object.count * object.bytes } else { object.bytes }
 		e.program.globals_blob << []u8{len: space, init: u8(0)}
+		// The slot is registered before its initializer is written, because an
+		// initializer that is an address may name the object itself
+		// (`struct S { struct S *next; } s = {&s};`) and asking for its storage
+		// again has to find this slot rather than lay it out a second time and
+		// never stop.
+		slot := image.GlobalSlot{
+			offset:   offset
+			width:    object.bytes
+			count:    object.count
+			object:   true
+			unsigned: e.written_is_unsigned(object.typ)
+		}
+		e.program.globals[name] = slot
 		// A union initialized in braces holds that value in its first member,
 		// which sits at the beginning of the object: the constant is written
 		// there at the member's width and the rest of the union stays zero.
+		// An address initializing a pointer first member is written at the
+		// same byte, as a reference the layout resolves.
 		if object.resolved.kind == .union_ && object.resolved.members.len > 0 {
 			first := object.resolved.members[0]
 			member_width := e.type_width(first.typ.describe()) or { object.bytes }
@@ -8080,7 +8102,8 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		// own width, which is the width a store into that member writes. The
 		// members the list did not reach are the zeros the storage started as
 		// (6.7.8p21). The value is converted the way the member's own store
-		// converts it, `_Bool` included.
+		// converts it, `_Bool` included. A member that holds an address gets a
+		// reference the layout resolves instead of bytes written here.
 		for member in object.member_inits {
 			if value := member.init_float {
 				if member.spelling == 'float' {
@@ -8093,15 +8116,13 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 				put_integer(mut e.program.globals_blob, offset + member.offset,
 					e.normalize_a_bool_constant(member.spelling, value), member.width)
 			}
+			if address := member.address {
+				e.write_data_address(address, offset + member.offset)
+			}
 		}
-		slot := image.GlobalSlot{
-			offset:   offset
-			width:    object.bytes
-			count:    object.count
-			object:   true
-			unsigned: e.written_is_unsigned(object.typ)
+		if address := object.address {
+			e.write_data_address(address, offset)
 		}
-		e.program.globals[name] = slot
 		return slot
 	}
 	count := if shape.count > 0 { shape.count } else { 1 }
@@ -8110,6 +8131,19 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 	}
 	offset := e.program.globals_blob.len
 	e.program.globals_blob << []u8{len: count * element, init: u8(0)}
+	// The slot is registered before its initializer is written, because an
+	// initializer that is an address may name the object itself (`int *p =
+	// &p;`) and asking for its storage again has to find this slot rather than
+	// lay it out a second time and never stop.
+	slot := image.GlobalSlot{
+		offset:   offset
+		width:    element
+		count:    shape.count
+		floating: shape.floating
+		single:   shape.single
+		unsigned: shape.unsigned
+	}
+	e.program.globals[name] = slot
 	single := e.writes_a_float(object.typ)
 	if value := object.init_float {
 		if single {
@@ -8143,16 +8177,79 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		put_integer(mut e.program.globals_blob, offset + index * element,
 			e.normalize_a_bool_constant(object.typ, value), element)
 	}
-	slot := image.GlobalSlot{
-		offset:   offset
-		width:    element
-		count:    shape.count
-		floating: shape.floating
-		single:   shape.single
-		unsigned: shape.unsigned
+	// A table whose elements are addresses writes each element the way a scalar
+	// one is written, at one element's offset into the storage: a written number
+	// is the null pointer constant it is, and an address is a reference the
+	// layout resolves, which is why it is not bytes here.
+	for index, address in object.address_inits {
+		if index >= count {
+			break
+		}
+		if value := address.number {
+			put_integer(mut e.program.globals_blob, offset + index * element, value, element)
+			continue
+		}
+		e.write_data_address(address, offset + index * element)
 	}
-	e.program.globals[name] = slot
+	if address := object.address {
+		e.write_data_address(address, offset)
+	}
 	return slot
+}
+
+// write_data_address records the eight bytes of a top-level object that hold the
+// address of something rather than a number. The address is not settled while the
+// bytes are written, so the bytes stay zero and a reference is recorded for the
+// layout, which runs after every definition has been read: that is what lets an
+// initializer name an object defined later or the object itself. The name is a
+// function this unit defines, a function the loader resolves, an object, or a
+// string literal, and the four are different references. A name that is none of
+// them is refused by name rather than written as an address that would be wrong.
+fn (mut e Emitter) write_data_address(address ast.AddressInit, at int) {
+	if address.string {
+		e.intern(address.name)
+		e.program.data_fixups << image.DataFixup{
+			offset: at
+			kind:   .take_address
+			name:   address.name
+		}
+		return
+	}
+	if address.name in e.program.defined {
+		e.program.data_fixups << image.DataFixup{
+			offset: at
+			kind:   .function_address
+			name:   address.name
+		}
+		return
+	}
+	if address.name in e.returns {
+		e.import_symbol(address.name)
+		e.program.data_fixups << image.DataFixup{
+			offset: at
+			kind:   .import_address
+			name:   address.name
+		}
+		return
+	}
+	if slot := e.global_of(address.name) {
+		if !address.explicit && slot.count == 0 && !slot.object {
+			// The bare name of a scalar object is its value, and a value is
+			// not a constant a file-scope initializer may hold. gcc 16.2.1
+			// rejects `static int x; static int *p = &x; static int *q = p;`
+			// with `initializer element is not constant`, so the address of
+			// the storage is not written in its place.
+			e.diagnostics << problem(address.line, address.col, 'unsupported: ${address.name} is a scalar object, and its bare name as a file-scope initializer is its value, which is not a constant expression')
+			return
+		}
+		e.program.data_fixups << image.DataFixup{
+			offset: at
+			kind:   .global_address
+			name:   address.name
+		}
+		return
+	}
+	e.diagnostics << problem(address.line, address.col, 'unsupported: ${address.name} is named where an address is wanted, and no declaration of it is in scope')
 }
 
 // assign_global writes a value into the storage of a top-level object: the

@@ -71,6 +71,12 @@ fn dynamic_entry_count(library_count int) int {
 
 // A relocation that asks the loader to write a symbol's address into a slot.
 pub const relocation_glob_dat = u64(6)
+// A relocation that asks the loader to write a symbol's address into the eight
+// bytes it names, which is what an imported function's address needs when it is
+// the value of an object in the writable data rather than the target of a call.
+// It is R_X86_64_64 in this machine's psABI: the symbol's value plus the addend,
+// which is zero here.
+pub const relocation_absolute = u64(1)
 
 // The st_info byte of every symbol this image imports: global, and of function
 // type. The symbols are undefined, which is to say the value comes from
@@ -184,7 +190,9 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	got := offset
 	offset = align(offset + program.imports.len * 8, 8)
 	rela := offset
-	offset = align(offset + program.imports.len * elf_relocation_size, 8)
+	// One relocation per import, plus one per address in the writable data that
+	// names a symbol the loader resolves.
+	offset = align(offset + (program.imports.len + program.import_data_count()) * elf_relocation_size, 8)
 	dynamic := offset
 	offset = align(offset + dynamic_entry_count(library_count) * elf_dynamic_entry_size, 8)
 	return Sections{
@@ -239,6 +247,29 @@ fn emit_relocations(mut output []u8, program image.Program, sections Sections, b
 		put_u64(mut output, at + 8, (u64(i + 1) << 32) | relocation_glob_dat)
 		// The addend is zero, which says the address itself is the value.
 	}
+	// One more relocation per address in the writable data that names a symbol
+	// the loader resolves: the address goes into the eight bytes the data fixup
+	// points at, and the symbol is the same one its calls go through.
+	mut entry := program.imports.len
+	for fixup in program.data_fixups {
+		if fixup.kind != .import_address {
+			continue
+		}
+		mut index := -1
+		for i, name in program.imports {
+			if name == fixup.name {
+				index = i
+			}
+		}
+		if index < 0 {
+			continue
+		}
+		at := sections.rela + entry * elf_relocation_size
+		put_u64(mut output, at, base + u64(sections.globals + fixup.offset))
+		put_u64(mut output, at + 8, (u64(index + 1) << 32) | relocation_absolute)
+		// The addend is zero, so the address itself is written.
+		entry++
+	}
 }
 
 // emit_dynamic writes the table that tells the loader what the image needs: each
@@ -254,7 +285,8 @@ fn emit_dynamic(mut output []u8, program image.Program, sections Sections, dynst
 	entries << [dt_strtab, base + u64(sections.dynstr)]
 	entries << [dt_symtab, base + u64(sections.dynsym)]
 	entries << [dt_rela, base + u64(sections.rela)]
-	entries << [dt_relasz, u64(program.imports.len * elf_relocation_size)]
+	entries << [dt_relasz,
+		u64((program.imports.len + program.import_data_count()) * elf_relocation_size)]
 	entries << [dt_relaent, u64(elf_relocation_size)]
 	entries << [dt_strsz, u64(dynstr_len)]
 	entries << [dt_syment, u64(elf_symbol_size)]
@@ -336,7 +368,7 @@ fn emit_program_headers(mut output []u8, target backend.Target, sections Section
 // the parts are in place, because a displacement depends on the whole layout.
 fn patch(mut output []u8, program image.Program, target backend.Target, sections Sections) ! {
 	for fixup in program.fixups {
-		referent := referent_of(program, sections, fixup)!
+		referent := referent_of(program, sections, fixup.kind, fixup.name)!
 		instruction := sections.text + fixup.start
 		disp := i32(referent - (instruction + fixup.length))
 		mut replacement := []u8{}
@@ -407,45 +439,59 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 		}
 		put(mut output, instruction, replacement)
 	}
+	// The references inside the writable data are the eight bytes of an address
+	// each, written once every address is settled. An imported symbol's address
+	// is not known until the loader runs, so its bytes are left at zero and the
+	// dynamic table fills them in (emit_relocations); every other kind is an
+	// address this image settles, and it is written here.
+	for fixup in program.data_fixups {
+		if fixup.kind == .import_address {
+			continue
+		}
+		referent := referent_of(program, sections, fixup.kind, fixup.name)!
+		put_u64(mut output, sections.globals + fixup.offset, target.load_base + u64(referent))
+	}
 }
 
-// referent_of is where one reference points, as an offset into the image.
-fn referent_of(program image.Program, sections Sections, fixup image.Fixup) !int {
-	match fixup.kind {
+// referent_of is where one reference points, as an offset into the image. It is
+// asked with a kind and a name rather than a reference, because the same
+// question is asked of a reference in the code and of one in the writable data.
+fn referent_of(program image.Program, sections Sections, kind image.FixupKind, name string) !int {
+	match kind {
 		.call_local, .jump_local, .branch_zero, .branch_nonzero, .function_address {
-			return sections.text + (program.labels[fixup.name] or {
-				return error('no code for ${fixup.name}')
+			return sections.text + (program.labels[name] or {
+				return error('no code for ${name}')
 			})
 		}
 		.call_import, .import_address {
-			for i, name in program.imports {
-				if name == fixup.name {
+			for i, symbol in program.imports {
+				if symbol == name {
 					return sections.got + i * 8
 				}
 			}
-			return error('${fixup.name} is called but was never imported')
+			return error('${name} is called but was never imported')
 		}
 		.take_address {
-			return sections.strings + (program.strings[fixup.name] or {
-				return error('no string ${fixup.name} in the image')
+			return sections.strings + (program.strings[name] or {
+				return error('no string ${name} in the image')
 			})
 		}
 		.take_wide_address {
-			return sections.strings + (program.wide_strings[fixup.name] or {
-				return error('no wide string ${fixup.name} in the image')
+			return sections.strings + (program.wide_strings[name] or {
+				return error('no wide string ${name} in the image')
 			})
 		}
 		.float_constant, .single_constant {
 			// A floating constant is eight bytes in the same read-only data a
 			// string lives in, and a float is four, so the section is the same
 			// one and only the table it was interned in differs.
-			return sections.strings + (program.doubles[fixup.name] or {
-				return error('no floating constant ${fixup.name} in the image')
+			return sections.strings + (program.doubles[name] or {
+				return error('no floating constant ${name} in the image')
 			})
 		}
 		.global_address {
-			return sections.globals + (program.globals[fixup.name] or {
-				return error('no global ${fixup.name} in the image')
+			return sections.globals + (program.globals[name] or {
+				return error('no global ${name} in the image')
 			}).offset
 		}
 	}

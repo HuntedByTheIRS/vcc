@@ -789,13 +789,12 @@ fn test_a_pointer_to_a_tag_read_before_its_body_is_compatible_with_one_read_afte
 
 // The members of a struct belong to its tag, so a member read through a pointer
 // whose pointee was read before the body completed the tag is read from the tag.
-// The pointer object at the top level is refused for a reason of its own, which
-// is the one diagnostic here; the assignment and the member read are not
-// refused, and the member is typed from the tag's own list.
+// The pointer object at the top level is one word of storage whatever it points
+// at, so the incomplete tag is no obstacle: the assignment and the member read
+// are both read, and the member is typed from the tag's own list.
 fn test_a_member_is_read_from_the_tag_completed_after_the_pointer_was_read() {
 	result := parsed('struct S;\nstruct S *p;\nstruct S { int a; } v;\nint main(void) { p = &v; return p->a; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg == 'unsupported: p is a pointer, and a pointer defined at the top level is storage this compiler does not lay out yet'
+	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
 	returned := body[1].expr or {
 		assert false

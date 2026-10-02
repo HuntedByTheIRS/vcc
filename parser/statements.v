@@ -1085,7 +1085,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// layout gave that member.
 		mut union_first := ?types.Member(none)
 		mut struct_brace := ?types.Layout(none)
-		mut struct_values := []NumberConstant{}
+		mut struct_values := []BraceElement{}
 		if p.at_punct('=') {
 			p.next()
 			if p.at_punct('{') {
@@ -1098,20 +1098,22 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 					// offset is worse than a refusal.
 					if list := p.parse_brace_initializer() {
 						list_ok = true
-						struct_values = list.values
+						p.refuse_an_address_in_a_body(list)
+						struct_values = list.elements.clone()
 						struct_brace = p.struct_brace_members(spec.clause, list, d.name)
 					}
 				} else if list := p.parse_brace_initializer() {
 					list_ok = true
+					p.refuse_an_address_in_a_body(list)
 					if !d.is_array() {
 						// One scalar in braces. A list of more values has no
 						// room in one object (6.7.8p2, measured on gcc
 						// 16.2.1: `int x = {1, 2};` is `excess elements in
 						// scalar initializer`).
-						if list.values.len > 1 {
-							p.error_at(list.at, 'a constraint violation: ${d.name} holds one value and its initializer writes ${list.values.len}')
+						if list.elements.len > 1 {
+							p.error_at(list.at, 'a constraint violation: ${d.name} holds one value and its initializer writes ${list.elements.len}')
 						}
-						init = p.constant_expr(list.values[0])
+						init = p.constant_expr(list.elements[0].number or { NumberConstant{} })
 						if d.pointer_count() == 0 && spec.clause.kind == .union_ {
 							// The value initializes the union's first member,
 							// which sits at the beginning of the object. A first
@@ -1134,11 +1136,12 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						// A written size smaller than the list is the same
 						// violation (measured, `int a[2] = {1, 2, 3};` is
 						// `excess elements in array initializer`).
-						if d.array_count() > 0 && list.values.len > d.array_count() {
-							p.error_at(list.at, 'a constraint violation: ${d.name} holds ${d.array_count()} elements and its initializer writes ${list.values.len}')
+						if d.array_count() > 0 && list.elements.len > d.array_count() {
+							p.error_at(list.at, 'a constraint violation: ${d.name} holds ${d.array_count()} elements and its initializer writes ${list.elements.len}')
 						}
-						for value in list.values {
-							elements << p.constant_expr(value)
+						for element in list.elements {
+							number := element.number or { continue }
+							elements << p.constant_expr(number)
 						}
 					}
 				}
@@ -1294,7 +1297,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						line:     d.name_at.line
 						col:      d.name_at.col
 					}
-					expr:   p.constant_expr(struct_values[i])
+					expr:   p.constant_expr(struct_values[i].number or { NumberConstant{} })
 					line:   d.name_at.line
 					col:    d.name_at.col
 				}

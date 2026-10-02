@@ -75,6 +75,34 @@ pub:
 	col      int
 }
 
+// AddressInit is one file-scope initializer whose value is an address rather
+// than a number: a function designator, the address of an object, or a string
+// literal. `name` is what it names - the function or object whose address it is,
+// or the bytes of the literal - and `string` says it was a literal, whose bytes
+// live in the image's read-only data rather than its code or its storage. Which
+// of a function and an object a name is is not decided here: the reader knows
+// the scope, not the definition, and the back end resolves the name against the
+// functions and the objects it holds.
+pub struct AddressInit {
+pub:
+	name   string
+	string bool
+	// number is a written integer where an element of a pointer initializer is a
+	// null pointer constant rather than an address. It is none for an address,
+	// and the two are told apart because one writes bytes and the other records a
+	// reference.
+	number ?i64
+	// explicit says the ampersand was written, `&name`, which is the address of
+	// the name whatever it names. A bare name is an address only when it names
+	// a function or an array: the bare name of a scalar object is its value,
+	// which is not a constant a file-scope initializer may hold (6.7.8p4), and
+	// the back end refuses it rather than writing the address of the storage the
+	// value sits in.
+	explicit bool
+	line     int
+	col      int
+}
+
 // Global is one object defined at the top level. The type is written the way a
 // declaration writes it and `resolved` is what it names, which a count above zero
 // makes an array of that many elements. The initializer is a constant, which is
@@ -98,6 +126,10 @@ pub:
 	bytes      int
 	init       ?i64
 	init_float ?f64
+	// address is the object's initializer when it is an address rather than a
+	// number, which is what a pointer defined at the top level has: a function
+	// designator, the address of an object, or a string literal.
+	address ?AddressInit
 	// inits and init_floats are a brace initializer for an array: one constant
 	// per element in the order written, the first list for an object whose
 	// elements are integers and the second for one whose elements are doubles,
@@ -106,6 +138,13 @@ pub:
 	// of a partly initialized array holds.
 	inits       []i64
 	init_floats []f64
+	// address_inits is a brace initializer for an array whose elements are
+	// addresses: one initializer per element in the order written, each either an
+	// address or a written number, which is a null pointer constant. It is what a
+	// table of function pointers at the top level is, and it is separate from
+	// inits because an element that is an address is a reference the layout
+	// resolves rather than bytes written here.
+	address_inits []AddressInit
 	// member_inits is a struct's brace initializer: one entry per member the
 	// list wrote, in the order written. A struct's members sit at successive
 	// offsets, so each constant carries the member it goes to and the members
@@ -129,6 +168,12 @@ pub:
 	// init_float is the same constant when the member holds a floating value,
 	// the split a scalar and an array initializer already make.
 	init_float ?f64
+	// address is the member's initializer when it is an address rather than a
+	// number, which is what a member of pointer type has: a function designator,
+	// the address of an object, or a string literal. It is separate from the two
+	// constants because an address is a reference the layout resolves rather than
+	// bytes written here.
+	address ?AddressInit
 }
 
 pub enum StmtKind {

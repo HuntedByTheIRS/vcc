@@ -30,6 +30,16 @@ fn translation_unit(source string) ast.TranslationUnit {
 	return parsed.unit
 }
 
+// translation_unit_refused is the same read without the clean-parse assert, for
+// a program the reader refuses: a refusal test carries diagnostics, and the
+// assert on the message is the test rather than something the helper may make
+// impossible.
+fn translation_unit_refused(source string) parser.Result {
+	lexed := tokenize.lex(source)
+	assert lexed.diagnostics.len == 0
+	return parser.parse(lexed.tokens)
+}
+
 // run_capturing writes an image the way main.v does and runs it, so these tests
 // check the artifact and not the intent behind it. The output is what a library
 // call was supposed to produce, and the exit status is what the returned
@@ -251,6 +261,190 @@ fn test_a_read_through_an_address_reads_the_value_at_it() {
 		Options{})
 	assert signed.diagnostics.len == 0
 	assert run_image(signed.bytes) == 200
+}
+
+// A pointer object declared at the top level is storage in the image, and the
+// object it points at is reached through the address it holds rather than
+// answered from its own bytes. Measured with gcc 16.2.1, the programs below
+// exit 7 and 71.
+fn test_a_top_level_pointer_holds_the_address_it_was_given() {
+	for source in [
+		'int g = 7; int *p; int main(void) { p = &g; return *p; }',
+		'static int g = 7; static int *p; int main(void) { p = &g; return *p * 10 + (p == &g); }',
+	] {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		answer := if source.contains('* 10') { 71 } else { 7 }
+		assert run_image(emitted.bytes) == answer
+	}
+}
+
+// A member read through a pointer at the top level is read from the object the
+// pointer holds the address of, not from the pointer's own storage, and the
+// same is true of a store into that member. Measured with gcc 16.2.1, the
+// programs below exit 7 and 59.
+fn test_a_member_read_through_a_top_level_pointer_reads_the_object() {
+	read := emit(translation_unit('struct S { int a; }; static struct S v; static struct S *p; int main(void) { p = &v; v.a = 7; return p->a; }'),
+		Options{})
+	assert read.diagnostics.len == 0
+	assert run_image(read.bytes) == 7
+	written := emit(translation_unit('struct S { int a; int b; }; static struct S v; static struct S *p; int main(void) { p = &v; p->a = 5; p->b = 9; return p->a * 10 + p->b; }'),
+		Options{})
+	assert written.diagnostics.len == 0
+	assert run_image(written.bytes) == 59
+}
+
+// A top-level pointer whose initializer is an address holds that address in the
+// image: the address of an object, the bytes of a string literal, the address of
+// a function this unit defines, and the address of one the loader resolves, each
+// written where the program reads it. Measured with gcc 16.2.1, the four
+// programs below exit 7, 98, 11 and 42.
+fn test_a_top_level_pointer_holds_the_address_it_was_initialized_with() {
+	object := emit(translation_unit('int g = 7; int *p = &g; int main(void) { return *p; }'),
+		Options{})
+	assert object.diagnostics.len == 0
+	assert run_image(object.bytes) == 7
+	literal := emit(translation_unit('char *s = "abc"; int main(void) { return s[1]; }'), Options{})
+	assert literal.diagnostics.len == 0
+	assert run_image(literal.bytes) == 98
+	defined := emit(translation_unit('int inc(int x) { return x + 1; } int (*fp)(int) = inc; int main(void) { return fp(10); }'),
+		Options{})
+	assert defined.diagnostics.len == 0
+	assert run_image(defined.bytes) == 11
+	imported := emit(translation_unit('int atoi(const char *s); int (*fp)(const char *) = atoi; int main(void) { return fp("42"); }'),
+		Options{})
+	assert imported.diagnostics.len == 0
+	assert run_image(imported.bytes) == 42
+}
+
+// A table of function pointers at the top level is storage whose elements are
+// addresses the layout resolves, and the program reaches each element through
+// the table: by a written index, by a run-time index, and by reading one into a
+// local. Measured with gcc 16.2.1, the programs below exit 119, 9 and 9.
+fn test_a_table_of_function_pointers_holds_each_address() {
+	call := emit(translation_unit('static int inc(int x) { return x + 1; } static int dec(int x) { return x - 1; } static int (*t[2])(int) = {inc, dec}; int main(void) { return t[0](10) * 10 + t[1](10); }'),
+		Options{})
+	assert call.diagnostics.len == 0
+	assert run_image(call.bytes) == 119
+	runtime := emit(translation_unit('static int inc(int x) { return x + 1; } static int dec(int x) { return x - 1; } static int (*t[2])(int) = {inc, dec}; int main(void) { int i = 2; return t[i - 1](10); }'),
+		Options{})
+	assert runtime.diagnostics.len == 0
+	assert run_image(runtime.bytes) == 9
+	chosen := emit(translation_unit('static int inc(int x) { return x + 1; } static int dec(int x) { return x - 1; } static int (*t[2])(int) = {inc, dec}; int main(void) { int i = 1; int (*p)(int) = t[i]; return p(10); }'),
+		Options{})
+	assert chosen.diagnostics.len == 0
+	assert run_image(chosen.bytes) == 9
+}
+
+// A table of addresses is not only functions: the address of an object, the
+// bytes of a string literal, and a written zero all initialize an element of it.
+// Measured with gcc 16.2.1, the programs below exit 12, 198 and 4.
+fn test_a_table_of_addresses_holds_objects_and_literals() {
+	objects := emit(translation_unit('int a = 1; int b = 2; int *const t[2] = {&a, &b}; int main(void) { return *t[0] * 10 + *t[1]; }'),
+		Options{})
+	assert objects.diagnostics.len == 0
+	assert run_image(objects.bytes) == 12
+	literals := emit(translation_unit('char *const names[2] = {"ab", "cd"}; int main(void) { return names[0][1] + names[1][1]; }'),
+		Options{})
+	assert literals.diagnostics.len == 0
+	assert run_image(literals.bytes) == 198
+	nulls := emit(translation_unit('int a = 3; int *t[3] = {&a, 0}; int main(void) { return *t[0] + (t[1] == 0) + (t[2] == 0); }'),
+		Options{})
+	assert nulls.diagnostics.len == 0
+	assert run_image(nulls.bytes) == 5
+}
+
+// The corpus shape, measured at /home/specter/bs/main.c:10735: a const table of
+// function pointers called through by a written index, through the second
+// indirection, and read into a local of its own. gcc 16.2.1 exits 6.
+fn test_a_const_table_of_function_pointers_is_called_through() {
+	emitted := emit(translation_unit('static int add(int a, int b) { return a + b; } static int mul(int a, int b) { return a * b; } static int (*const t[2])(int, int) = {add, mul}; int main(void) { int (*chosen)(int, int) = t[1]; return (t[0](3, 4) == 7) + (t[1](3, 4) == 12) + ((*t[0])(3, 4) == 7) + (chosen(5, 6) == 30) + (chosen == t[1]) + (chosen != t[0]); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 6
+}
+
+// A member of a struct at the top level that holds an address takes one the same
+// way a pointer object does, at the member's own offset. Measured with gcc
+// 16.2.1, the programs below exit 115, 145 and 3.
+fn test_a_member_of_a_top_level_struct_holds_an_address() {
+	function := emit(translation_unit('static int inc(int x) { return x + 1; } struct S { int (*fp)(int); int n; }; static struct S s = {inc, 5}; int main(void) { return s.fp(10) * 10 + s.n; }'),
+		Options{})
+	assert function.diagnostics.len == 0
+	assert run_image(function.bytes) == 115
+	mixed := emit(translation_unit('static int b = 2; struct S { int n; int *p; const char *s; }; static struct S s = {5, &b, "xy"}; int main(void) { return s.n + *s.p * 10 + s.s[0]; }'),
+		Options{})
+	assert mixed.diagnostics.len == 0
+	assert run_image(mixed.bytes) == 145
+	imported := emit(translation_unit('int atoi(const char *s); struct S { int (*fp)(const char *); }; static struct S s = {atoi}; int main(void) { return s.fp("3"); }'),
+		Options{})
+	assert imported.diagnostics.len == 0
+	assert run_image(imported.bytes) == 3
+}
+
+// A local table whose elements are addresses is not a shape this reader places:
+// storage in a frame is initialized by stores, and a store writes a constant.
+// It is refused by name rather than stored as a zero, and the message names the
+// construct rather than a token inside it.
+fn test_an_address_table_inside_a_body_is_refused_by_name() {
+	// The reader refuses the shape before the emitter is handed it: storage in
+	// a frame is initialized by stores, and a store writes a constant.
+	parsed := translation_unit_refused('int main(void) { const char *const names[] = {"a", "b"}; return names[0][0]; }')
+	mut refused := false
+	for diagnostic in parsed.diagnostics {
+		if diagnostic.msg.contains('an address in a brace initializer inside a body is not implemented') {
+			refused = true
+		}
+	}
+	assert refused
+}
+
+// A member of a table's element type that does not hold an address is refused by
+// name rather than converted, because the address of the storage is a value the
+// declaration did not write.
+fn test_an_address_into_a_member_that_is_not_a_pointer_is_refused() {
+	// The reader refuses the shape: the first member holds a number, and an
+	// address is not converted to one.
+	parsed := translation_unit_refused('union U { int n; int *p; }; int a = 3; static union U u = {&a}; int main(void) { return u.n; }')
+	mut refused := false
+	for diagnostic in parsed.diagnostics {
+		if diagnostic.msg.contains('and its initializer writes an address') {
+			refused = true
+		}
+	}
+	assert refused
+}
+
+// A table of pointers to imported functions is a table of addresses the loader
+// resolves: the image writes a reference for each element and the program reads
+// the address out of the data. Measured with gcc 16.2.1, the programs below
+// exit 11 and 12.
+fn test_a_table_of_imported_function_pointers_is_resolved_by_the_loader() {
+	imported := emit(translation_unit('int isalpha(int); int isdigit(int); static int (*t[2])(int) = {isalpha, isdigit}; int main(void) { return (t[0](65) != 0) + (t[1](48) != 0) * 10; }'),
+		Options{})
+	assert imported.diagnostics.len == 0
+	assert run_image(imported.bytes) == 11
+	mixed := emit(translation_unit('int atoi(const char *s); static int seven(const char *s) { (void)s; return 7; } static int (*t[2])(const char *) = {atoi, seven}; int main(void) { return t[0]("5") + t[1]("x"); }'),
+		Options{})
+	assert mixed.diagnostics.len == 0
+	assert run_image(mixed.bytes) == 12
+}
+
+// A bare name that is a scalar object is its value, and a value is not a
+// constant a file-scope initializer may hold, so the address of the storage is
+// not written in its place. gcc 16.2.1 rejects the same program with
+// `initializer element is not constant`, and the exit status of an accepted
+// program cannot be told from a refusal, so this checks the diagnostic.
+fn test_a_bare_scalar_name_as_an_address_is_refused() {
+	emitted := emit(translation_unit('int x = 5; int *p = &x; int *q = p; int main(void) { return *q; }'),
+		Options{})
+	mut refused := false
+	for diagnostic in emitted.diagnostics {
+		if diagnostic.msg.contains('is a scalar object') {
+			refused = true
+		}
+	}
+	assert refused
 }
 
 // A store through an address writes the object the pointer points at and not

@@ -258,3 +258,129 @@ fn test_a_reference_with_no_symbol_behind_it_is_refused() {
 		assert false, 'an object was written for a call to a symbol that was never imported'
 	}
 }
+
+// The relocations against the writable data live in a table of their own, and
+// these read one entry out of it the way a linker does.
+
+fn data_relocation_offset(bytes []u8, index int) u64 {
+	at := section_offset(bytes, section_rela_data) + index * elf_relocation_size
+	return u64_at(bytes, at)
+}
+
+fn data_relocation_info(bytes []u8, index int) u64 {
+	at := section_offset(bytes, section_rela_data) + index * elf_relocation_size
+	return u64_at(bytes, at + 8)
+}
+
+fn data_relocation_addend(bytes []u8, index int) i64 {
+	at := section_offset(bytes, section_rela_data) + index * elf_relocation_size
+	return i64(u64_at(bytes, at + 16))
+}
+
+fn data_relocation_count(bytes []u8) int {
+	return section_size(bytes, section_rela_data) / elf_relocation_size
+}
+
+// A top-level pointer whose value is a function's address is eight bytes of
+// .data, and the bytes are zero in a relocatable file because there are no
+// addresses yet: the relocation names the function and the linker writes its
+// value in. The addend is zero, because the value is the address itself.
+fn test_a_pointer_to_a_function_is_a_data_relocation_against_it() {
+	mut program := image.Program{}
+	program.defined['inc'] = true
+	program.labels['inc'] = 0
+	program.globals_blob = []u8{len: 8, init: u8(0)}
+	program.globals['fp'] = image.GlobalSlot{
+		offset: 0
+		width:  8
+	}
+	program.data_fixups << image.DataFixup{
+		offset: 0
+		kind:   .function_address
+		name:   'inc'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	assert data_relocation_count(bytes) == 1
+	assert data_relocation_offset(bytes, 0) == 0
+	// `inc` is the first function this object defines, so it is the first
+	// global symbol in the table.
+	info := data_relocation_info(bytes, 0)
+	assert u32(info >> 32) == first_global_symbol
+	assert u32(info & 0xffffffff) == x86_64().address_relocation()
+	assert data_relocation_addend(bytes, 0) == 0
+}
+
+// A pointer to a string is against the read-only section at the offset the
+// emitter interned the literal at, which is the same reference a `take_address`
+// in the code is.
+fn test_a_pointer_to_a_string_is_against_the_read_only_section() {
+	mut program := image.Program{}
+	program.string_blob = []u8{len: 8, init: u8(0)}
+	program.strings['hi'] = 0
+	program.globals_blob = []u8{len: 8, init: u8(0)}
+	program.globals['s'] = image.GlobalSlot{
+		offset: 0
+		width:  8
+	}
+	program.data_fixups << image.DataFixup{
+		offset: 0
+		kind:   .take_address
+		name:   'hi'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	assert data_relocation_count(bytes) == 1
+	assert u32(data_relocation_info(bytes, 0) >> 32) == symbol_rodata_section
+	// The addend is the string's own offset and not the -4 a distance would
+	// carry, because the value is an address and not a displacement.
+	assert data_relocation_addend(bytes, 0) == 0
+}
+
+// A pointer to a function the loader resolves is against the undefined symbol,
+// so a linker carries it through the way it carries a call to that function.
+fn test_a_pointer_to_an_import_is_against_that_symbol() {
+	mut program := image.Program{}
+	program.imports << 'puts'
+	program.globals_blob = []u8{len: 8, init: u8(0)}
+	program.globals['fp'] = image.GlobalSlot{
+		offset: 0
+		width:  8
+	}
+	program.data_fixups << image.DataFixup{
+		offset: 0
+		kind:   .import_address
+		name:   'puts'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	assert data_relocation_count(bytes) == 1
+	// `fp` is the object this file defines, at the first global index, and the
+	// import comes after it: puts is the symbol at first_global_symbol + 1.
+	puts := symbol_entry_at(bytes, first_global_symbol + 1)
+	assert u16_at(bytes, puts + 6) == shn_undef
+	assert u32(data_relocation_info(bytes, 0) >> 32) == first_global_symbol + 1
+	assert data_relocation_addend(bytes, 0) == 0
+}
+
+// A data relocation this object cannot carry is refused rather than written as
+// something a linker would resolve to a wrong address.
+fn test_a_data_reference_this_object_cannot_carry_is_refused() {
+	mut program := image.Program{}
+	program.globals_blob = []u8{len: 8, init: u8(0)}
+	program.globals['fp'] = image.GlobalSlot{
+		offset: 0
+		width:  8
+	}
+	program.data_fixups << image.DataFixup{
+		offset: 0
+		kind:   .call_local
+		name:   'inc'
+	}
+	if _ := object(program, x86_64()) {
+		assert false, 'an object was written for a data reference that is not an address'
+	}
+}
