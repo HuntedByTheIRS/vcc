@@ -458,10 +458,15 @@ fn test_a_prototype_keeps_the_parameters_it_promises() {
 	assert params[0].typ == 'char *'
 }
 
-fn test_a_variadic_definition_is_reported() {
+// A definition whose parameter list ends in an ellipsis is a definition like any
+// other: which arguments arrived in registers and which on the stack is what the
+// save area records, and the reader carries the ellipsis on the declaration so
+// that the back end can lay one out. Nothing here refuses it.
+fn test_a_variadic_definition_is_read() {
 	result := declarations_of('int f(int a, ...) { return a; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('variadic')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].resolved.variadic
+	assert result.unit.decls[0].params.len == 1
 }
 
 // `<stdarg.h>` declares the compiler's own spelling of the argument list and

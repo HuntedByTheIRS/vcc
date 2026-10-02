@@ -2068,13 +2068,13 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			return error('unterminated parameter list')
 		}
 		if t.kind == .punct && t.text == '...' {
-			// An ellipsis says there are arguments the list does not name.
-			// Nothing in the tree records that, so a definition with one is a
-			// function whose arguments this back end cannot lay out. For a
-			// prototype it is a promise, and promises are not checked here.
+			// An ellipsis says there are arguments the list does not name, and
+			// the tree records it: a definition with one is emitted with a save
+			// area and an argument list the body can walk, and a prototype that
+			// has one is a promise about the call rather than about the
+			// definition.
 			p.next()
 			params.variadic = true
-			params.note_problem('unsupported: a variadic definition is not implemented', t)
 			if !p.expect_punct(')') {
 				return error('parameter list')
 			}
