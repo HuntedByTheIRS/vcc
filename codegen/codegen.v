@@ -1823,20 +1823,34 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				e.append(e.target.store_indirect(address_register, value, object.width)!)
 				return
 			}
-			if width := e.width_of(expr) {
-				if width != object.width && !(object.width < 4 && width == 4) {
-					e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${stmt.target}, which holds ${object.width}')
-					return error('width mismatch')
-				}
-			} else {
+			width := e.width_of(expr) or {
 				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 				return error('unknown width')
+			}
+			// A constant is written at the width of the element, because a
+			// constant says nothing about its own width: this is what a store
+			// into a local already does, and an element of a top-level array is
+			// the same store at an address the image holds. Any other value has
+			// to have the element's width already, except into an element
+			// narrower than four bytes, where the language converts an int by
+			// taking its low byte or its low two.
+			if e.constant(expr) == none && width != object.width && !(object.width < 4 && width == 4) {
+				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${stmt.target}, which holds ${object.width}')
+				return error('width mismatch')
+			}
+			if object.width == 8 && width != 8 {
+				// A value narrower than the element is widened into the whole
+				// register before it is written, the way a store into a name
+				// of that width does: the store moves eight bytes, so a
+				// negative constant whose upper half the immediate cleared
+				// would otherwise be written as its unsigned reading.
+				e.extend_operand_to_word(expr, stmt.line, stmt.col)!
 			}
 			// An element of a `_Bool` array holds 0 or 1 whatever was written
 			// into it, and the type is the declaration's because the storage in
 			// the image carries a width and not a signedness or a `_Bool`.
 			e.normalize_a_bool_store(e.declares_a_bool(e.global_written(stmt.target)),
-				(e.width_of(expr) or { 4 }) == 8, stmt.line, stmt.col)!
+				width == 8, stmt.line, stmt.col)!
 			value := e.accumulator(stmt.line, stmt.col)!
 			e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 			e.append(e.target.store_indirect(address_register, value, object.width)!)
@@ -1904,9 +1918,23 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 		return error('unknown width')
 	}
-	if width != slot.width && !(slot.width < 4 && width == 4) {
+	// A constant is written at the width of the element, because a constant
+	// says nothing about its own width: this is what a store into a local
+	// already does, and an element is the same store at a computed address.
+	// Any other value has to have the element's width already, except into an
+	// element narrower than four bytes, where the language converts an int by
+	// taking its low byte or its low two.
+	if e.constant(expr) == none && width != slot.width && !(slot.width < 4 && width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${slot.width}')
 		return error('width mismatch')
+	}
+	if slot.width == 8 && width != 8 {
+		// A value narrower than the element is widened into the whole register
+		// before it is written, the way a store into a name of that width does:
+		// the store moves eight bytes, so a negative constant whose upper half
+		// the immediate cleared would otherwise be written as its unsigned
+		// reading.
+		e.extend_operand_to_word(expr, stmt.line, stmt.col)!
 	}
 	// An element of a local array of `_Bool` holds 0 or 1, and the slot carries
 	// that fact because the element type is what the declaration wrote.
@@ -1956,9 +1984,23 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 		return error('unknown width')
 	}
-	if value_width != width && !(width < 4 && value_width == 4) {
+	// A constant is written at the width of the element, because a constant
+	// says nothing about its own width: this is what a store into a local
+	// already does, and an element reached through an address is the same store
+	// at a computed address. Any other value has to have the element's width
+	// already, except into an element narrower than four bytes, where the
+	// language converts an int by taking its low byte or its low two.
+	if e.constant(expr) == none && value_width != width && !(width < 4 && value_width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into an element of ${width}')
 		return error('width mismatch')
+	}
+	if width == 8 && value_width != 8 {
+		// A value narrower than the element is widened into the whole register
+		// before it is written, the way a store into a name of that width does:
+		// the store moves eight bytes, so a negative constant whose upper half
+		// the immediate cleared would otherwise be written as its unsigned
+		// reading.
+		e.extend_operand_to_word(expr, stmt.line, stmt.col)!
 	}
 	// An element of a `_Bool` array holds 0 or 1, and the element's type is
 	// resolved here, which is where the answer is read from.
