@@ -261,6 +261,14 @@ pub fn (t Target) call_slot(disp i32) []u8 {
 	return x86_64.call_rip_slot(disp)
 }
 
+// load_slot_value reads the value a slot holds, found through a displacement from
+// the instruction. It is the load form of call_slot: a dynamically linked
+// function's address is read out of the slot the loader fills rather than called
+// through it, which is what lets a program hold the address in a pointer.
+pub fn (t Target) load_slot_value(reg Register, disp i32) []u8 {
+	return x86_64.load_rip_slot(t.describe(reg), disp)
+}
+
 // call_register calls the address a register holds: the indirect form, for a call
 // written to an expression rather than to a name. It carries no reference, because
 // the address is in the register rather than at a place in the image.

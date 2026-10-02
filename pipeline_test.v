@@ -124,6 +124,52 @@ fn test_a_call_through_a_function_pointer_is_the_address_it_holds() {
 	os.rm(binary) or {}
 }
 
+fn test_a_designator_naming_a_declared_function_is_its_address() {
+	// A function the file only declares has its code somewhere the image is not,
+	// so a designator naming it is a symbol the loader resolves: 6.3.2.1 makes it
+	// the pointer to that function whether or not the file wrote the body. The
+	// address is read out of the same slot a call to that function goes through,
+	// so a pointer to it, an address taken with `&`, and a call through either
+	// are one value. getpid is the callee because its answer is its own pid and
+	// the program asks for the same one twice; there is no argument to pass, so
+	// nothing here leans on how an argument travels.
+	source := scratch('declared_designator.c')
+	binary := scratch('declared_designator')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int getpid(void);\nint same(int (*f)(void), int (*g)(void)) { return f == g; }\nint main(void) {\n    int (*p)(void) = getpid;\n    int (*q)(void) = &getpid;\n    if (p != q) { return 1; }\n    if (p == 0) { return 2; }\n    if (!same(p, getpid)) { return 3; }\n    return p() == getpid() ? 0 : 4;\n}\n')
+	// gcc 16.2.1 with -std=c99 exits 0 from the same program.
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+fn test_a_call_through_a_function_pointer_uses_the_type_the_pointer_carries() {
+	// A pointer to a function has the parameter list and the return type its
+	// declaration wrote, and C calls through one with that prototype: a float
+	// parameter takes the argument as a float rather than as a promoted double,
+	// and a float return is read from the floating-point register rather than
+	// from the general one. A pointer to a same-file function is beside the
+	// library ones as the constraint, and each program answers 2.5 from the
+	// arguments below: one parameter for the first four, two for fmodf and three
+	// for fmaf. Measured on gcc 16.2.1 with -std=c99, every one exits 0.
+	programs := [
+		'float idl(float x) { return x; }\nint main(void) { float (*p)(float) = idl; return p(2.5f) == 2.5f ? 0 : 1; }\n',
+		'float fabsf(float);\nint main(void) { float (*p)(float) = fabsf; return p(-2.5f) == 2.5f ? 0 : 1; }\n',
+		'float fabsf(float);\nint main(void) { float (*p)(float) = fabsf; float x = -2.5f; return p(x) == 2.5f ? 0 : 1; }\n',
+		'float sqrtf(float);\nint main(void) { float (*p)(float) = sqrtf; return p(6.25f) == 2.5f ? 0 : 1; }\n',
+		'float fmodf(float, float);\nint main(void) { float (*p)(float, float) = fmodf; return p(5.5f, 3.0f) == 2.5f ? 0 : 1; }\n',
+		'float fmaf(float, float, float);\nint main(void) { float (*p)(float, float, float) = fmaf; return p(1.0f, 1.5f, 1.0f) == 2.5f ? 0 : 1; }\n',
+	]
+	for i, program in programs {
+		source := scratch('pointer_float_${i}.c')
+		binary := scratch('pointer_float_${i}')
+		exit_status := compile_and_run([source, '-o', binary, '-lm'], program)
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 fn test_a_static_function_nothing_names_is_not_read() {
 	// The shape <bits/byteswap.h> and <bits/uintn-identity.h> have, which main.c
 	// reaches through <stdio.h> and <stdlib.h>: a helper nothing calls, written

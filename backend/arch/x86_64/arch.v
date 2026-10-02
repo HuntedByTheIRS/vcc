@@ -948,6 +948,23 @@ pub fn call_rip_slot(disp i32) []u8 {
 		u8((value >> 24) & 0xff)]
 }
 
+// load_rip_slot reads the eight bytes held in a quadword found at a displacement
+// from the instruction, which is the load form of call_rip_slot: a dynamically
+// linked function's address is read out of its slot rather than called through it,
+// so a program can put that address in a pointer. The encoding is the move that
+// reads a quadword with the r/m field naming the next instruction, which is how
+// the machine spells a displacement from the program counter; the register that
+// receives the value needs a REX prefix of its own when it is one of r8 and up.
+pub fn load_rip_slot(reg Register, disp i32) []u8 {
+	mut rex := u8(0x48) // REX.W: the value is a wide register
+	if reg.code >= 8 {
+		rex |= 0x04 // REX.R reaches registers the low three bits cannot name
+	}
+	value := u32(disp)
+	return [rex, 0x8b, u8(((reg.code & 0x07) << 3) | 0x05), u8(value & 0xff), u8((value >> 8) & 0xff),
+		u8((value >> 16) & 0xff), u8((value >> 24) & 0xff)]
+}
+
 // call_register calls the address a register holds, which is the form a call
 // written to an expression takes: the expression's value is read into a register
 // and the call goes there. The opcode is the indirect group with the mod field set

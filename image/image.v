@@ -31,6 +31,7 @@ pub enum FixupKind {
 	branch_nonzero   // and when it was not
 	global_address   // the address of an object defined at the top level
 	function_address // the address of a function defined in this translation unit
+	import_address   // the address of a function the loader resolves out of a library
 	float_constant   // a double the instruction reads out of the read-only data
 	single_constant  // the same read of a four-byte float
 }

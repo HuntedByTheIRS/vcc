@@ -1489,7 +1489,7 @@ fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object image.GlobalSlot, 
 // the register the store goes through and reading the value must not disturb it.
 fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line int, col int, depth int) !void {
 	if expr is ast.Call {
-		if class := e.return_classes[expr.name] {
+		if class := e.call_return_class(expr) {
 			// The value arrives in the registers the classes name: one eightbyte,
 			// or two when the object is two of them, each in the register a value
 			// of its class comes back in.
@@ -1602,6 +1602,15 @@ fn (mut e Emitter) copy_frame_object(source Slot, destination Slot, width int, l
 // knows; a call to a name nothing declares has no signature, and an object is
 // refused there rather than handed to a function whose convention is unknown.
 fn (e Emitter) aggregate_argument(call ast.Call, position int) ?abi.Class {
+	if parameter := call_parameter(call, position) {
+		// The callee's parameter type is the object that travels, so its class is
+		// the target's answer for that type rather than a table entry.
+		class := abi.class_of(e.representation, parameter)
+		if class.bytes > 0 {
+			return class
+		}
+		return none
+	}
 	if classes := e.aggregate_params[call.name] {
 		if position < classes.len && classes[position].bytes > 0 {
 			return classes[position]
@@ -3223,6 +3232,12 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 			if expr.typ.kind != .unknown {
 				return expr.typ.is_floating()
 			}
+			// A call written to an expression carries the type the parser
+			// resolved onto the callee, which is the other source for the same
+			// answer: either one can be the one that got set.
+			if typ := indirect_call_returns(expr) {
+				return typ.is_floating()
+			}
 			e.returns[expr.name] == 'double' || e.returns[expr.name] == 'float'
 				|| e.return_classes[expr.name].first_floating
 		}
@@ -3288,6 +3303,9 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 			// answer where it has one.
 			if expr.typ.kind != .unknown {
 				return expr.typ.kind == .float
+			}
+			if typ := indirect_call_returns(expr) {
+				return typ.kind == .float
 			}
 			e.returns[expr.name] == 'float'
 		}
@@ -3776,11 +3794,11 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 					e.load_indirect_value(register, register, object.unsigned, object.width)!
 					return
 				}
-				if expr.name in e.program.defined {
+				if e.is_function_name(expr.name) {
 					// 6.3.2.1: a function designator used where a value is
 					// wanted is the pointer to the function, so a name that is
-					// a function this file defines is worth where its code
-					// begins.
+					// a function this unit names, defined here or declared
+					// elsewhere, is worth the address of that function.
 					e.emit_function_address(expr.name, expr.line, expr.col) or {
 						return error('no function address')
 					}
@@ -3898,7 +3916,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			// A function the file defines says what it returns, and a void one
 			// returns nothing: reading that as a value is reported rather than
 			// read from a register the call happened to leave something in.
-			if e.returns[expr.name] == 'void' {
+			// A call through an expression says the same thing through the
+			// type the parser resolved onto the call.
+			if typ := indirect_call_returns(expr) {
+				if typ.is_void() {
+					e.diagnostics << problem(expr.line, expr.col, 'unsupported: the call is used as a value, and what it calls returns void')
+					return error('void value')
+				}
+			} else if e.returns[expr.name] == 'void' {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the call to ${expr.name} is used as a value, and ${expr.name} returns void')
 				return error('void value')
 			}
@@ -4103,7 +4128,7 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
 			return
 		}
-		if name in e.program.defined {
+		if e.is_function_name(name) {
 			// `&f` is the same value a bare `f` is worth where a value is
 			// wanted: 6.3.2.1 does not give a function designator an address
 			// operator of its own.
@@ -6236,7 +6261,7 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 					}
 					return if object.width < 4 { 4 } else { object.width }
 				}
-				if expr.name in e.program.defined {
+				if e.is_function_name(expr.name) {
 					// 6.3.2.1: a function designator used as a value is the
 					// pointer to the function, which is the machine's word.
 					return e.target.word_size
@@ -6262,6 +6287,12 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 			// anything else this back end emits is four. A narrow integer return
 			// type is four as well, because the register holds the widened value
 			// the way it holds an int, which is the width every use of it reads.
+			// A call through an expression reads the same answer off the type the
+			// parser resolved onto the call.
+			if typ := indirect_call_returns(expr) {
+				width := e.type_width(typ.describe()) or { 4 }
+				return if width < 4 { 4 } else { width }
+			}
 			width := e.type_width(e.returns[expr.name]) or { 4 }
 			if width < 4 { 4 } else { width }
 		}
@@ -6484,19 +6515,43 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 	}
 }
 
-// emit_function_address leaves the address of a function this file defines in the
-// accumulator. 6.3.2.1 makes a function designator used as a value the pointer to
-// that function, so `int (*p)(void) = f;` and `p = &f;` both reach this: what a
-// value of a function type is worth is where the function's code begins. The
-// address is a reference the layout fills in, because where the code begins is not
-// known while it is written.
+// emit_function_address leaves the address of a function in the accumulator. 6.3.2.1
+// makes a function designator used as a value the pointer to that function, so
+// `int (*p)(void) = f;` and `p = &f;` both reach this: what a value of a function
+// type is worth is where the function's code begins. A function this file defines
+// has its code here, so the address is a reference the layout fills in. One the
+// file only declares has its code somewhere the image is not, so its address is a
+// symbol the loader resolves: it is read out of the slot the loader fills, the same
+// slot a call to that function goes through, and in an object the reference is left
+// for the linker the way a call to a declared function is. The address is not known
+// while it is written, so it is filled in either way.
 fn (mut e Emitter) emit_function_address(name string, line int, col int) !void {
-	if name !in e.program.defined {
-		e.diagnostics << problem(line, col, 'unsupported: the address of ${name} is not implemented, and only a function this file defines has one this back end can take')
+	register := e.accumulator(line, col)!
+	if name in e.program.defined {
+		e.reference(e.target.address_of(register, 0), .function_address, name, e.target.name_of(register))
+		return
+	}
+	if name !in e.returns {
+		e.diagnostics << problem(line, col, 'unsupported: the address of ${name} is not implemented, and only a function this unit declares has one this back end can take')
 		return error('no function address')
 	}
-	register := e.accumulator(line, col)!
-	e.reference(e.target.address_of(register, 0), .function_address, name, e.target.name_of(register))
+	e.import_symbol(name)
+	if e.compile_only {
+		// An object has no slots and no loader: it leaves the reference for the
+		// linker to route, which is what a call to a symbol means in a
+		// relocatable file.
+		e.reference(e.target.address_of(register, 0), .import_address, name, e.target.name_of(register))
+	} else {
+		e.reference(e.target.load_slot_value(register, 0), .import_address, name, e.target.name_of(register))
+	}
+}
+
+// is_function_name says whether a name is a function this unit names, whether it
+// defines the function or only declares it. 6.3.2.1 makes either one, written
+// where a value is wanted, the pointer to that function, so both are worth where a
+// value is wanted; only where the address comes from differs.
+fn (e Emitter) is_function_name(name string) bool {
+	return name in e.program.defined || name in e.returns
 }
 
 // emit_callee_value leaves the address a call goes to in the accumulator. It is
@@ -6511,7 +6566,9 @@ fn (mut e Emitter) emit_callee_value(callee ast.Expr, depth int) !void {
 		}
 	}
 	if callee is ast.Ident {
-		if callee.name in e.program.defined {
+		// A local of the same name is the object it names, so the designator is
+		// read as a function only when nothing in scope holds that name.
+		if e.lookup(callee.name) == none && e.is_function_name(callee.name) {
 			return e.emit_function_address(callee.name, callee.line, callee.col)
 		}
 	}
@@ -6832,7 +6889,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	// given the address of this frame's storage for it in the first general register,
 	// so the arguments written in the call start one register later.
 	mut hidden := false
-	if class := e.return_classes[call.name] {
+	if class := e.call_return_class(call) {
 		if class.count > 2 {
 			hidden = true
 		}
@@ -6952,7 +7009,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	// The widths the callee's parameters were declared with, read once for the
 	// call: every argument asks the same table, and a lookup per argument is a
 	// string-keyed map probe in the middle of the emitter's hottest loop.
-	widths := e.signatures[call.name] or { []int{} }
+	widths := e.call_widths(call)
 	for i, arg in call.args {
 		place := places[i]
 		line := expr_line(arg)
@@ -6998,7 +7055,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		if place.floating {
 			e.emit_expr_at(arg, depth + i + 1)!
-			single := e.argument_is_single(call.name, i)
+			single := e.argument_is_single(call, i)
 			e.convert_to_float_class(arg, single, line, col)!
 			slot := e.value_slot(depth + i)
 			if single {
@@ -7162,7 +7219,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} passes more floating-point arguments than the machine has registers for')
 				return error('too many arguments')
 			}
-			if e.argument_is_single(call.name, i) {
+			if e.argument_is_single(call, i) {
 				e.load_single_argument(slot, register, line, col)!
 				continue
 			}
@@ -7386,6 +7443,11 @@ fn (mut e Emitter) copy_stack_object(object Slot, at int, line int, col int) !vo
 // parameters has no parameter type to consult, so the argument's own type is
 // the answer.
 fn (e Emitter) argument_is_double(call ast.Call, position int, arg ast.Expr) bool {
+	if parameter := call_parameter(call, position) {
+		// The callee's parameter list is in front of the call, so it decides:
+		// a float parameter is a floating-class argument, and an int one is not.
+		return parameter.is_floating()
+	}
 	if classes := e.float_params[call.name] {
 		if position < classes.len {
 			return classes[position]
@@ -7406,8 +7468,11 @@ fn (e Emitter) argument_is_double(call ast.Call, position int, arg ast.Expr) boo
 // The argument is not asked because the answer is not the argument's to give:
 // whether the value is a float before the call is not whether it is one at the
 // parameter.
-fn (e Emitter) argument_is_single(name string, position int) bool {
-	if singles := e.single_params[name] {
+fn (e Emitter) argument_is_single(call ast.Call, position int) bool {
+	if parameter := call_parameter(call, position) {
+		return parameter.kind == .float
+	}
+	if singles := e.single_params[call.name] {
 		if position < singles.len {
 			return singles[position]
 		}
@@ -7422,6 +7487,9 @@ fn (e Emitter) argument_is_single(name string, position int) bool {
 // argument's own type is the answer, which is the same fallback
 // argument_is_double makes.
 fn (e Emitter) argument_is_unsigned(call ast.Call, position int, arg ast.Expr) bool {
+	if parameter := call_parameter(call, position) {
+		return parameter.kind.is_unsigned()
+	}
 	if unsigneds := e.unsigned_params[call.name] {
 		if position < unsigneds.len {
 			return unsigneds[position]
@@ -7452,12 +7520,112 @@ fn (e Emitter) pair_argument_registers(position int) ?[]backend.Register {
 // handed over as two words, and a parameter of an int with a 128-bit argument
 // written for it is a call the type model refuses before this sees it.
 fn (e Emitter) wide_argument(call ast.Call, position int, arg ast.Expr) bool {
+	if parameter := call_parameter(call, position) {
+		return parameter.kind in [types.Kind.int128, .unsigned_int128]
+	}
 	if wides := e.wide_params[call.name] {
 		if position < wides.len {
 			return wides[position]
 		}
 	}
 	return e.wide_value(arg)
+}
+
+// call_parameter says what type the parameter at `position` of the call's callee
+// has, and none when the call's callee does not name one. A call written to an
+// expression reads the type that expression is worth, which for a pointer to a
+// function is the parameter list its declaration wrote, so a call through such a
+// pointer has a prototype in front of it the way a call to a declared name does.
+// A callee that is a function type names its parameters directly; one that is a
+// pointer is followed to the function it points at.
+fn call_parameter(call ast.Call, position int) ?types.Type {
+	signature := call_signature(call) or { return none }
+	if position >= signature.params.len {
+		return none
+	}
+	return signature.params[position].typ
+}
+
+// indirect_call_returns is the type a call through an expression is worth, and none
+// for a call written to a name. The parser resolved the type the callee's function
+// returns onto the call, so a call through a pointer to a function knows what its
+// value is and how it travels the way a call to a declared name does: the pointer
+// carries the return type its declaration wrote. A call written to a name reads
+// that from the tables the declarations filled instead, which is why this answers
+// none for one.
+fn indirect_call_returns(call ast.Call) ?types.Type {
+	if call.callee == none || call.typ.kind == .unknown {
+		return none
+	}
+	return call.typ
+}
+
+// call_return_class is how the object a call hands back travels, and none for a
+// call that hands back a value. A call written to a name reads the class the
+// declaration's return type filled; a call through an expression reads the class
+// of the type the parser resolved onto the call, which is the return type the
+// pointer carries. It is the same answer either way, because the class of an
+// object is the target's answer for its type.
+fn (e Emitter) call_return_class(call ast.Call) ?abi.Class {
+	if typ := indirect_call_returns(call) {
+		class := abi.class_of(e.representation, typ)
+		if class.bytes > 0 {
+			return class
+		}
+		return none
+	}
+	if class := e.return_classes[call.name] {
+		return class
+	}
+	return none
+}
+
+// call_signature is the function type a call's callee is worth calling: for an
+// expression, the function it is or the function a pointer to it points at, and
+// none when the callee names no parameters at all. A call written to a name has
+// its parameters in the table the declarations filled, so this answers none and
+// the caller reads that table instead.
+fn call_signature(call ast.Call) ?types.Type {
+	callee := call.callee or { return none }
+	mut signature := callee.typ
+	if signature.is_pointer() {
+		signature = signature.pointee() or { return none }
+	}
+	if !signature.is_function() || !signature.prototyped {
+		return none
+	}
+	return signature
+}
+
+// call_widths is the width of each parameter the call's callee names, for the
+// calls whose parameter types are known. A call written to a name reads the table
+// the declarations filled; a call written to an expression reads the type of that
+// expression, which for a pointer to a function is a parameter list this back end
+// sizes the same way. A callee that names no parameters, or one whose parameter
+// this back end cannot size, answers with no widths, and passed_width then falls
+// back to the argument's own width the way it does for a library function with no
+// prototype here.
+fn (e Emitter) call_widths(call ast.Call) []int {
+	if call.callee == none {
+		return e.signatures[call.name] or { []int{} }
+	}
+	signature := call_signature(call) or { return []int{} }
+	mut widths := []int{cap: signature.params.len}
+	for parameter in signature.params {
+		class := abi.class_of(e.representation, parameter.typ)
+		if class.bytes > 0 {
+			widths << class.bytes
+			continue
+		}
+		if width := e.type_width(parameter.typ.describe()) {
+			widths << width
+		} else if parameter.typ.kind in [types.Kind.int128, .unsigned_int128] {
+			widths << wide_bytes
+		} else {
+			return []int{}
+		}
+	}
+	return widths
 }
 
 // passed_width is the width one argument is handed over at. A function this file
