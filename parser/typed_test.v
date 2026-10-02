@@ -842,17 +842,74 @@ fn test_a_floating_constant_is_typed_as_the_double_it_is() {
 	assert (numeric as ast.FloatLit).value == 1000.0
 }
 
-fn test_a_floating_suffix_is_refused_by_the_type_it_names() {
-	// A suffix is not dropped: `1.5f` names a float and `1.5L` a long double, and
-	// reading either as a double would give the program a type it did not ask
-	// for. The refusal names the type, at the constant as it was written.
-	narrow := parsed('double f(void) { return 1.5f; }')
-	assert narrow.diagnostics.len == 1
-	assert narrow.diagnostics[0].msg.contains('float literal')
-	assert narrow.diagnostics[0].col == 25
+fn test_a_floating_suffix_names_the_type_and_the_value_it_has() {
+	// 6.4.4.2 makes the suffix decide the type of a floating constant. A
+	// constant written with `f` is a float, and the value it carries is that
+	// float's value rather than the double the same digits name.
+	//
+	// This test replaces the one that asserted the suffix was refused, because
+	// the behaviour it asserted is gone: the reader reads the suffix now, and
+	// what is checked is the type and the value it produced.
+	narrow := first('int main(void) { return 1.5f; }')
+	half := narrow.body[0].expr or {
+		assert false
+		return
+	} as ast.FloatLit
+	assert half.typ.same(types.float_type())
+	assert half.value == 1.5
+	assert half.text == '1.5f'
+	// The capital spelling is the same suffix.
+	upper := first('int main(void) { return 1.5F; }')
+	assert (upper.body[0].expr or {
+		assert false
+		return
+	} as ast.FloatLit).typ.same(types.float_type())
+	// An exponent may carry a suffix, and one that does not is still a double.
+	exponent := first('int main(void) { return 1e10f; }')
+	assert (exponent.body[0].expr or {
+		assert false
+		return
+	} as ast.FloatLit).typ.same(types.float_type())
+	wide := first('int main(void) { return 1e10; }')
+	assert (wide.body[0].expr or {
+		assert false
+		return
+	} as ast.FloatLit).typ.same(types.double_type())
+}
+
+fn test_a_float_constant_is_not_the_double_of_the_same_digits() {
+	// `0.1f` and `0.1` are different values, which is the cheapest evidence
+	// that the four bytes are real and not a double relabelled. Measured on gcc
+	// 16.2.1: `0.1f == 0.1` is 0 and `1.5f == 1.5` is 1, because 1.5 is exact
+	// in both widths and 0.1 is not.
+	tenth := first('int main(void) { return 0.1f; }')
+	value := (tenth.body[0].expr or {
+		assert false
+		return
+	} as ast.FloatLit).value
+	assert value == f64(f32(0.1))
+	assert value != 0.1
+	// 1.5 is exact in both widths, so the two spellings carry the same value
+	// even though they are two types.
+	exact := first('int main(void) { return 1.5f; }')
+	assert (exact.body[0].expr or {
+		assert false
+		return
+	} as ast.FloatLit).value == 1.5
+}
+
+fn test_the_long_double_suffix_is_still_refused_by_name() {
+	// `l` names a type this compiler has no value for, and it is refused by
+	// name at the constant rather than read as a double. The hexadecimal form
+	// is not implemented at all, with or without a suffix, and its refusal
+	// names the construct rather than the suffix on the end of it.
 	long_double := parsed('double f(void) { return 1.5L; }')
 	assert long_double.diagnostics.len == 1
 	assert long_double.diagnostics[0].msg.contains('long double literal')
+	assert long_double.diagnostics[0].col == 25
+	hex := parsed('double f(void) { return 0x1.8p3f; }')
+	assert hex.diagnostics.len == 1
+	assert hex.diagnostics[0].msg.contains('hexadecimal floating constants')
 }
 
 fn test_a_mixed_operation_is_a_double_on_both_sides() {

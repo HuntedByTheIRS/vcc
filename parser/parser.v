@@ -1057,11 +1057,13 @@ fn (mut p Parser) constant_type(at tokenize.Token, value i64) types.Type {
 }
 
 // floating_type is the type a floating constant has. 6.4.4.2 makes that a
-// question about the suffix: a constant with no suffix is a double, and the two
-// suffixes name types this compiler does not have, so the reader refuses them
-// where the constant is written rather than choosing between three types here.
-// A constant with no suffix is therefore a double, which is the type this
-// compiler emits.
+// question about the suffix: a constant with no suffix is a double, one written
+// with an `f` is a float, and `l` names a long double this compiler has no value
+// for, which the literal reader refuses where the constant is written.
+//
+// The value arrives already rounded to the width the suffix named, so nothing
+// here changes it; this only says which of the two floating types the constant
+// is.
 fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 	if value != value {
 		// A NaN is what a conversion that ran out of range produces, and the
@@ -1069,6 +1071,9 @@ fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 		// the constant is better than emitting a NaN where a number was.
 		p.error_at(at, '${at.text}: the constant is out of range for a double')
 		return types.Type{}
+	}
+	if at.text.len > 0 && (at.text[at.text.len - 1] == `f` || at.text[at.text.len - 1] == `F`) {
+		return types.float_type()
 	}
 	return types.double_type()
 }
