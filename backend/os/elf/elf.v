@@ -373,6 +373,15 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 				}
 				replacement = target.address_of(register, disp)
 			}
+			.function_address {
+				// The address of a function is computed the way the address of
+				// a top-level object is: the layout has settled where the code
+				// begins and the instruction reads that address into a register.
+				register := target.reg(fixup.register) or {
+					return error('no register named ${fixup.register} to compute an address into')
+				}
+				replacement = target.address_of(register, disp)
+			}
 			.jump_local {
 				replacement = target.jump(disp)
 			}
@@ -393,7 +402,7 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 // referent_of is where one reference points, as an offset into the image.
 fn referent_of(program image.Program, sections Sections, fixup image.Fixup) !int {
 	match fixup.kind {
-		.call_local, .jump_local, .branch_zero, .branch_nonzero {
+		.call_local, .jump_local, .branch_zero, .branch_nonzero, .function_address {
 			return sections.text + (program.labels[fixup.name] or {
 				return error('no code for ${fixup.name}')
 			})
