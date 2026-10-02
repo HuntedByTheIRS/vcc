@@ -435,6 +435,55 @@ fn test_a_file_scope_union_initializer_writes_its_first_member() {
 	}
 }
 
+// A struct's brace initializer in a body gives each value to a member in the
+// order the members were written, one store per member, and the members the list
+// did not reach are zero (6.7.8p21). A value written into a member of a narrower
+// type is converted the way a store into that member converts it, `_Bool`
+// included, and a character constant is the value of the character it names.
+// Measured on gcc 16.2.1, these programs return 56, 56, 244, 144, 65 and 34.
+fn test_a_body_struct_brace_initializer_stores_the_values_into_its_members() {
+	programs := [
+		'struct P { int a, b; };\nint main(void) { struct P p = {5, 6}; return p.a * 10 + p.b; }\n',
+		'typedef struct { int a, b; } P;\nint main(void) { P p = {5, 6}; return p.a * 10 + p.b; }\n',
+		'struct P { int a, b, c; };\nint main(void) { struct P p = {5}; return p.a * 100 + p.b * 10 + p.c; }\n',
+		'struct N { _Bool b; char c; unsigned char u; short s; };\nint main(void) { struct N n = {5, 300, 300, 70000}; return (int)n.b * 100 + (int)n.c; }\n',
+		"struct C { char c; int i; };\nint main(void) { struct C s = { 'A' }; return s.c; }\n",
+		'struct S { int a; int b; };\nint main(void) { struct S s = {3, 4}; return s.a * 10 + s.b; }\n',
+	]
+	expected := [56, 56, 244, 144, 65, 34]
+	for index, program in programs {
+		source := scratch('struct_init_${index}.c')
+		binary := scratch('struct_init_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == expected[index]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A struct defined at the top level with an initializer has each member written
+// into the image at the byte the layout gave it, and the members the list did
+// not reach are the zeros the storage starts as. Measured on gcc 16.2.1, these
+// programs return 56, 244, 144, 65 and 4.
+fn test_a_file_scope_struct_brace_initializer_writes_the_members() {
+	programs := [
+		'struct P { int a, b; };\nstruct P p = {5, 6};\nint main(void) { return p.a * 10 + p.b; }\n',
+		'struct P { int a, b, c; };\nstruct P p = {5};\nint main(void) { return p.a * 100 + p.b * 10 + p.c; }\n',
+		'struct N { _Bool b; char c; unsigned char u; short s; };\nstruct N n = {5, 300, 300, 70000};\nint main(void) { return (int)n.b * 100 + (int)n.c; }\n',
+		"struct C { char c; int i; };\nstruct C s = { 'A', 7 };\nint main(void) { return s.c; }\n",
+		'struct D { double d; int n; };\nstruct D g = {1.5, 3};\nint main(void) { struct D l = {2.5, 4}; return (int)(g.d + l.d); }\n',
+	]
+	expected := [56, 244, 144, 65, 4]
+	for index, program in programs {
+		source := scratch('struct_global_init_${index}.c')
+		binary := scratch('struct_global_init_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == expected[index]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 // typeof is read by the parser and answered by the emitter as the type behind
 // it: a program that declares an object through typeof compiles and runs, and
 // the exit status is what the types decided. Measured on gcc 16.2.1, the same

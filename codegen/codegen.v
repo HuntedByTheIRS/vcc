@@ -7483,6 +7483,25 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 				put_integer(mut e.program.globals_blob, offset, value, member_width)
 			}
 		}
+		// A struct's brace initializer wrote a constant into each of the members
+		// it named, at the byte the layout gave the member and at the member's
+		// own width, which is the width a store into that member writes. The
+		// members the list did not reach are the zeros the storage started as
+		// (6.7.8p21). The value is converted the way the member's own store
+		// converts it, `_Bool` included.
+		for member in object.member_inits {
+			if value := member.init_float {
+				if member.spelling == 'float' {
+					put_single(mut e.program.globals_blob, offset + member.offset, value)
+				} else {
+					put_double(mut e.program.globals_blob, offset + member.offset, value, member.width)
+				}
+			}
+			if value := member.init {
+				put_integer(mut e.program.globals_blob, offset + member.offset,
+					e.normalize_a_bool_constant(member.spelling, value), member.width)
+			}
+		}
 		slot := image.GlobalSlot{
 			offset:   offset
 			width:    object.bytes

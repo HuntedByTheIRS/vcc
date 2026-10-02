@@ -1048,23 +1048,30 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// initializes the first member of a union, so that initializer is a store
 		// into that member at the point of the declaration rather than the copy of
 		// a whole object the other initializers make.
+		//
+		// struct_brace is a struct's brace initializer: the object's layout when
+		// the list is one this reader places, and struct_values the constants it
+		// wrote. A struct's values are one store per member, at the offset the
+		// layout gave that member.
 		mut union_first := ?types.Member(none)
+		mut struct_brace := ?types.Layout(none)
+		mut struct_values := []NumberConstant{}
 		if p.at_punct('=') {
 			p.next()
 			if p.at_punct('{') {
 				brace = true
 				if d.pointer_count() == 0 && spec.clause.kind == .struct_ {
-					// A list for an object of a struct type is a list of
-					// lists: a member may itself be an aggregate, and the
-					// designators and the nesting are not shapes this reader
-					// has. Measured, gcc 16.2.1 refuses `struct S s = {5, 6};`
-					// with `invalid initializer`, and this compiler used to
-					// report the same declaration twice.
-					p.error_at(p.peek(), 'unsupported: ${d.name} is an object of the type ${spec.clause.describe()}, and a brace initializer for one is not implemented')
-					p.skip_declaration()
-					return stmts
-				}
-				if list := p.parse_brace_initializer() {
+					// A struct's brace initializer gives each value to a
+					// member in the order the members were written. A member
+					// that is itself an aggregate or a bitfield is refused by
+					// name in the helper, because a value placed at the wrong
+					// offset is worse than a refusal.
+					if list := p.parse_brace_initializer() {
+						list_ok = true
+						struct_values = list.values
+						struct_brace = p.struct_brace_members(spec.clause, list, d.name)
+					}
+				} else if list := p.parse_brace_initializer() {
 					list_ok = true
 					if !d.is_array() {
 						// One scalar in braces. A list of more values has no
@@ -1135,10 +1142,10 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		}
 		count := if d.array_count() > 0 { d.array_count() } else { elements.len }
 		// A union's initializer is the store into its first member written
-		// below, not the value of the whole object, so the declaration itself
-		// starts as storage and carries no initializer.
+		// below, and a struct's is the stores into its members, so the
+		// declaration itself starts as storage and carries no initializer.
 		mut decl_init := init
-		if union_first != none {
+		if union_first != none || struct_brace != none {
 			decl_init = ?ast.Expr(none)
 		}
 		stmts << ast.Stmt{
@@ -1178,6 +1185,59 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						col:      d.name_at.col
 					}
 					expr:   initializer
+					line:   d.name_at.line
+					col:    d.name_at.col
+				}
+			}
+		}
+		// A struct's brace initializer is one store per member the list wrote,
+		// at the offset the layout gave that member: `struct S s = {1, 2};`
+		// stores 1 into the first member and 2 into the second, which is the
+		// assignment `s.first = 1;` makes and then `s.second = 2;`. The members
+		// the list did not reach are the zeros C says the rest of the object
+		// holds (6.7.8p21), and the frame slot starts as whatever was there, so
+		// they have to be written.
+		if layout := struct_brace {
+			for i in 0 .. struct_values.len {
+				member := spec.clause.members[i]
+				stmts << ast.Stmt{
+					kind:   .assign
+					target: d.name
+					field:  ast.Field{
+						name:     d.name
+						member:   member.name
+						offset:   layout.offsets[i]
+						spelling: member.typ.describe()
+						typ:      member.typ
+						line:     d.name_at.line
+						col:      d.name_at.col
+					}
+					expr:   p.constant_expr(struct_values[i])
+					line:   d.name_at.line
+					col:    d.name_at.col
+				}
+			}
+			for i in struct_values.len .. spec.clause.members.len {
+				member := spec.clause.members[i]
+				stmts << ast.Stmt{
+					kind:   .assign
+					target: d.name
+					field:  ast.Field{
+						name:     d.name
+						member:   member.name
+						offset:   layout.offsets[i]
+						spelling: member.typ.describe()
+						typ:      member.typ
+						line:     d.name_at.line
+						col:      d.name_at.col
+					}
+					expr:   ast.Expr(ast.IntLit{
+						value: 0
+						text:  '0'
+						typ:   types.int_type()
+						line:  d.name_at.line
+						col:   d.name_at.col
+					})
 					line:   d.name_at.line
 					col:    d.name_at.col
 				}
