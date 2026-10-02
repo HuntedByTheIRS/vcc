@@ -288,8 +288,13 @@ struct DeclStep {
 	kind  DeclStepKind
 	quals types.Qualifiers
 	// count is how many elements an array step asked for, and zero when the
-	// brackets named no size this reader could read.
+	// brackets named no size this reader could read. unreadable_bound is a
+	// bound that was written and could not be evaluated, which is not zero.
 	count int
+	// sized says the brackets wrote something: a number, or an expression
+	// this reader read. Empty brackets wrote nothing, and that is the only
+	// pair a later reader may take a size for from an initializer.
+	sized bool
 	// at is where the step was written.
 	at tokenize.Token
 	// params, variadic and prototyped are a function step's parameter list.
@@ -350,6 +355,17 @@ fn (d Declarator) array_count() int {
 	}
 	count := d.steps.last().count
 	return if count > 0 { count } else { 0 }
+}
+
+// array_sized says the array's brackets wrote something, which tells a pair of
+// empty brackets from a size that was written and could not be read. Only empty
+// brackets may take a size from an initializer, so a reader that has an
+// initializer asks.
+fn (d Declarator) array_sized() bool {
+	if !d.is_array() {
+		return false
+	}
+	return d.steps.last().sized
 }
 
 // array_at is where the array the name has was written, and the zero token when
@@ -1829,10 +1845,11 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 	for {
 		if p.at_punct('[') {
 			at := p.peek()
-			count := p.parse_array_suffix()!
+			suffix := p.parse_array_suffix()!
 			steps.prepend(DeclStep{
 				kind:  .array_step
-				count: int(count)
+				count: suffix.count_as_step()
+				sized: suffix.bound != .empty
 				at:    at
 			})
 			continue
@@ -2203,35 +2220,77 @@ fn (mut params Params) note_problem(problem string, at tokenize.Token) {
 	}
 }
 
-// unreadable_bound is what parse_array_suffix answers for a bound that was
+// unreadable_bound is what a declarator step carries for a bound that was
 // written in the brackets and is not an integer constant expression this reader
 // evaluated. It is negative, so a step whose bound was a size stays positive and
-// a pair of empty brackets stays zero, which is the answer the reader of a
-// deduced size reads. The value says which of the two happened, because the
-// question differs by context: a body's bound that is not constant is a
+// a pair of empty brackets stays zero; array_sized says which of those a zero
+// was. The value says which of the two kinds of unread step happened, because
+// the question differs by context: a body's bound that is not constant is a
 // variable-length array this compiler does not implement, and a file-scope
 // object's is a constraint violation, while a struct member's is a member that
 // still compiles.
 const unreadable_bound = -1
+
+// ArrayBound is what one pair of brackets said about an array's size. The four
+// answers are kept apart because a caller has to tell them apart: an initializer
+// may give a size to empty brackets and to nothing else, and a bound that was
+// written and read as no positive size is a different thing from one this
+// reader could not evaluate at all.
+enum ArrayBound {
+	// empty is a pair of brackets with nothing between them: `int a[]`. An
+	// initializer may be what gives the array its size.
+	empty
+	// held is a bound this reader evaluated to a positive size.
+	held
+	// unheld is a bound that was written and evaluated to something that is
+	// not a size: `int a[0]`, `int a[2 - 5]`.
+	unheld
+	// unreadable is a bound that was written and this reader could not
+	// evaluate, as in `int a[n]` where n is a name.
+	unreadable
+}
+
+// ArraySuffix is what one pair of brackets answered: which of the four shapes it
+// was, and the size when it read one. The kind beside the size is what keeps the
+// two distinctions a caller needs in one answer: empty brackets may take a size
+// from an initializer, and any bound that was written may not, whether it read
+// as a size or not.
+struct ArraySuffix {
+	bound ArrayBound
+	count i64
+}
+
+// count_as_step is the size a declarator step carries for this suffix: the size
+// when one was read, zero when the brackets wrote no size or one that did not
+// read as a size, and unreadable_bound when a bound was written and could not be
+// evaluated at all.
+fn (s ArraySuffix) count_as_step() int {
+	if s.bound == .unreadable {
+		return unreadable_bound
+	}
+	return int(s.count)
+}
 
 // parse_array_suffix reads `[ ... ]`. A bound written in the brackets is an
 // integer constant expression and its value is what the array's type is built
 // from, so it is evaluated here rather than scanned past. `sizeof` is an
 // operator the expression reader already turns into the number it names, so a
 // real header's bound reaches this reader as arithmetic over constants:
-// `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]` is worth 8. A bound
-// that evaluates to nothing a size can be is unreadable_bound, which the caller
-// reads as "no size this reader read".
+// `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]` is worth 8.
 //
-// A pair of empty brackets answers zero without parsing anything, which is what
-// it answered before and what a size deduced from an initializer hooks into. A
-// region that does not evaluate is skipped to its bracket as it always was, so
-// the suffix still ends where it says it ends.
-fn (mut p Parser) parse_array_suffix() !i64 {
+// A pair of empty brackets answers `.empty` without parsing anything, which is
+// what tells it from a bound that was written; a bound that evaluated to
+// something that is not a positive size answers `.unheld`, and one this reader
+// could not evaluate answers `.unreadable`. A region that does not evaluate is
+// skipped to its bracket as it always was, so the suffix still ends where it
+// says it ends.
+fn (mut p Parser) parse_array_suffix() !ArraySuffix {
 	open := p.next() // [
 	if p.at_punct(']') {
 		p.next()
-		return 0
+		return ArraySuffix{
+			bound: .empty
+		}
 	}
 	// The bound is read as an expression so that it can be evaluated. Nothing the
 	// trial read is kept if it does not end at the bracket: the cursor, the
@@ -2252,19 +2311,32 @@ fn (mut p Parser) parse_array_suffix() !i64 {
 	if expr := read {
 		if p.at_punct(']') {
 			p.next()
-			value := p.constant_value(expr) or { return unreadable_bound }
-			if value > 0 {
-				return value
+			value := p.constant_value(expr) or {
+				return ArraySuffix{
+					bound: .unreadable
+				}
 			}
-			// A size written and not held — `int a[0]`, `int a[2 - 5]` — reads
-			// as no size at all, and the reader that asked for one says so.
-			return 0
+			if value > 0 {
+				return ArraySuffix{
+					bound: .held
+					count: value
+				}
+			}
+			// A size written and not held — `int a[0]`, `int a[2 - 5]` —
+			// reads as no size at all, and the reader that asked for one says
+			// so. It was written, though, so it is not a pair a size may be
+			// taken for from an initializer.
+			return ArraySuffix{
+				bound: .unheld
+			}
 		}
 	}
 	p.pos = saved_pos
 	p.diagnostics = p.diagnostics[..saved_diagnostics]
 	p.skip_balanced(open)!
-	return unreadable_bound
+	return ArraySuffix{
+		bound: .unreadable
+	}
 }
 
 // skip_to_separator consumes the rest of a declaration that is scanned rather
