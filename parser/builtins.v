@@ -15,7 +15,8 @@ import types
 // value it is worth is an integer constant expression with no run-time part. A
 // builtin whose answer would be a guess is refused by name here rather than
 // filled in with a value this compiler has not computed.
-const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr']
+const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr',
+	'__builtin_offsetof']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -46,6 +47,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_choose_expr' {
 			return p.parse_choose_expr(at)
+		}
+		'__builtin_offsetof' {
+			return p.parse_offsetof(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -138,4 +142,92 @@ fn (mut p Parser) parse_builtin_type(at tokenize.Token) !TypeName {
 		return error('unresolved type')
 	}
 	return name
+}
+
+// parse_offsetof answers `__builtin_offsetof(type, member)`, which is what
+// stddef.h's `offsetof` expands to. The answer is where the model's own layout
+// puts the member and how big it is, not a number worked out from the spelling:
+// the same `layout` the reader asks when it builds a `Field`, so an offsetof and
+// the field it names cannot disagree.
+//
+// The value has the type size_t, which is what offsetof yields, so it is written
+// as the constant `sizeof` writes and not as an int.
+fn (mut p Parser) parse_offsetof(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	start := p.parse_builtin_type(at)!
+	if !p.expect_punct(',') {
+		return error('expected the member path')
+	}
+	offset := p.parse_member_offset(start.typ)!
+	if !p.expect_punct(')') {
+		return error('unclosed __builtin_offsetof')
+	}
+	return ast.Expr(ast.IntLit{
+		value: i64(offset)
+		text:  '__builtin_offsetof(${start.spelling})'
+		typ:   types.unsigned_long_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// parse_member_offset walks a member path in the type it was given and answers
+// where the last member of it sits, in bytes. It is the walk a `Field` makes, and
+// it reads the offset from the model's layout for the same reason: an offsetof
+// that disagreed with the field it names would be a wrong constant in a program
+// that is full of them.
+//
+// The path is dots, `point.y` and `inner`. An array subscript is part of the
+// designator gcc allows (`chain[1].a`) and is not read here, so it is refused by
+// name rather than skipped; a bitfield has no address to take and gcc refuses
+// `offsetof` of one, so it is refused here too.
+fn (mut p Parser) parse_member_offset(declared types.Type) !int {
+	if p.peek().kind != .identifier {
+		p.error_at(p.peek(), 'unsupported: __builtin_offsetof reads a member, and ${describe(p.peek())} is not a member name')
+		return error('member name')
+	}
+	mut current := declared
+	mut total := 0
+	mut path := ''
+	for {
+		name := p.next()
+		path = if path == '' { name.text } else { '${path}.${name.text}' }
+		aggregate := p.tagged_type(current)
+		if aggregate.kind !in [types.Kind.struct_, .union_] {
+			p.error_at(name, 'unsupported: __builtin_offsetof reads ${path} from ${aggregate.describe()}, and a member is read from an object whose type has members')
+			return error('not an aggregate')
+		}
+		mut at := -1
+		for i, member in aggregate.members {
+			if member.name == name.text {
+				at = i
+				break
+			}
+		}
+		if at < 0 {
+			p.error_at(name, 'unsupported: ${aggregate.describe()} has no member called ${name.text}')
+			return error('unknown member')
+		}
+		member := aggregate.members[at]
+		if member.bitfield {
+			p.error_at(name, 'unsupported: ${path} is a bitfield, and a bitfield sits in bits inside a unit rather than at a byte offset')
+			return error('bitfield')
+		}
+		layout := p.representation.layout(aggregate) or {
+			p.error_at(name, 'unsupported: the members of ${aggregate.describe()} are not a layout this compiler knows, so the offset of ${path} cannot be read')
+			return error('no layout')
+		}
+		total += layout.offsets[at]
+		current = member.typ
+		if p.at_punct('.') {
+			p.next()
+			continue
+		}
+		break
+	}
+	if p.at_punct('[') {
+		p.error_at(p.peek(), 'unsupported: __builtin_offsetof reads ${path}[...], and this compiler answers a path of members only')
+		return error('array designator')
+	}
+	return total
 }

@@ -136,6 +136,45 @@ fn test_types_compatible_p_refuses_a_type_it_cannot_resolve() {
 	assert result.diagnostics[0].msg == "unsupported: __builtin_types_compatible_p asks for a type name, and '_Float128' is not a type this compiler knows"
 }
 
+// __builtin_offsetof is where stddef.h's offsetof lands, and the answer has to be
+// the offset the layout really puts the member at. Measured on gcc 16.2.1, the
+// `b` of `struct { char a; int b; }` is 4 and the `b` of `struct { int a; int b;
+// }` is 4 as well, so a test that only asked the second would pass on a reader
+// that ignored the padding.
+fn test_offsetof_is_the_offset_the_layout_gives() {
+	assert builtin_value('struct P { char a; int b; };\nint main(void) { return __builtin_offsetof(struct P, b); }') == 4
+	assert builtin_value('struct P { int a; int b; };\nint main(void) { return __builtin_offsetof(struct P, b); }') == 4
+	assert builtin_value('struct P { char a; char b; };\nint main(void) { return __builtin_offsetof(struct P, b); }') == 1
+	assert builtin_value('typedef struct { int a, b; } pair_t;\nint main(void) { return __builtin_offsetof(pair_t, b); }') == 4
+}
+
+// A member of a member is one offset and not two answers: the offset of the
+// inner member inside the outer object is what offsetof asks for.
+fn test_offsetof_walks_a_path_of_members() {
+	source := 'struct inner { int x, y; };\nstruct outer { struct inner point; int flag; };\nint main(void) { return __builtin_offsetof(struct outer, point.y); }'
+	assert builtin_value(source) == 4
+	second := 'struct inner { int x, y; };\nstruct outer { struct inner point; int flag; };\nint main(void) { return __builtin_offsetof(struct outer, flag); }'
+	assert builtin_value(second) == 8
+}
+
+// offsetof yields size_t, which is what the standard says and what makes
+// `sizeof(offsetof(...))` the size of a size_t and not of an int.
+fn test_offsetof_is_size_t() {
+	result := builtin_read('struct P { char a; int b; };\nint main(void) { return sizeof(__builtin_offsetof(struct P, b)); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (expr as ast.IntLit).value == 8
+}
+
+fn test_offsetof_refuses_a_member_the_type_does_not_have() {
+	result := builtin_read('struct P { int a; };\nint main(void) { return __builtin_offsetof(struct P, b); }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'unsupported: struct P has no member called b'
+}
+
 // A deep chain of one builtin inside another is a file attacking the reader, and
 // the answer is a diagnostic rather than a stack overflow.
 fn test_a_deep_chain_of_choose_expr_is_refused_rather_than_followed() {
