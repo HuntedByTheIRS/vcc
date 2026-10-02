@@ -518,6 +518,34 @@ fn test_a_universal_character_name_in_a_wide_literal_is_its_code_point() {
 	assert literal.value == '\xe9\x00\x00\x00\x00\xf6\x01\x00'
 }
 
+fn test_a_universal_character_name_in_a_character_constant_is_packed() {
+	// Measured on gcc 16.2.1: a narrow character constant takes the bytes of
+	// the character's UTF-8 packed into the int, so '\u00E9' is 0xC3A9 and
+	// '\U0001F600' is 0xF09F9880 as a signed int; a wide one takes the code
+	// point, so L'\u00E9' is 233.
+	narrow := parsed("int main() { return '\\u00E9'; }")
+	assert narrow.diagnostics.len == 0
+	narrow_expr := narrow.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (narrow_expr as ast.IntLit).value == 50089
+	emoji := parsed("int main() { return '\\U0001F600'; }")
+	assert emoji.diagnostics.len == 0
+	emoji_expr := emoji.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (emoji_expr as ast.IntLit).value == -257976192
+	wide := parsed("int main() { return L'\\u00E9'; }")
+	assert wide.diagnostics.len == 0
+	wide_expr := wide.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (wide_expr as ast.IntLit).value == 233
+}
+
 fn test_a_bad_integer_literal_is_reported() {
 	result := parsed('int main() { return 0x; }')
 	assert result.diagnostics.len == 1

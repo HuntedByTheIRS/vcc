@@ -188,8 +188,10 @@ fn parse_floating_literal(text string) !f64 {
 // is an int in C, so that is what it becomes here.
 fn parse_character_literal(text string) !i64 {
 	mut body := text
+	mut narrow := true
 	if body.len > 0 && (body[0] == `L` || body[0] == `u` || body[0] == `U`) {
 		body = body[1..]
+		narrow = false
 	}
 	if body.len < 2 || body[0] != `'` || body[body.len - 1] != `'` {
 		return error('${text}: not a character constant')
@@ -203,6 +205,19 @@ fn parse_character_literal(text string) !i64 {
 			return error('${text}: multi-character constants are not implemented')
 		}
 		return i64(inner[0])
+	}
+	if inner.len >= 2 && (inner[1] == `u` || inner[1] == `U`) {
+		// A universal character name in a character constant names one
+		// character. A narrow constant takes its execution-set encoding, which
+		// is UTF-8, packed into the int the way gcc packs a multi-character
+		// constant: measured on gcc 16.2.1, '\u00E9' is 0xC3A9, '\U0001F600'
+		// is 0xF09F9880 and '\U00020000' is 0xF0A08080. A wide one takes the
+		// code point itself: L'\u00E9' is 233 and L'\U0001F600' is 128512.
+		name, _ := parse_ucn(inner, 1) or { return error('${text}: ${err.msg()}') }
+		if narrow {
+			return ucn_value(name)
+		}
+		return i64(name)
 	}
 	return parse_escape(inner[1..]) or { error('${text}: ${err.msg()}') }
 }
@@ -237,14 +252,6 @@ fn parse_escape(rest string) !i64 {
 			seen++
 		}
 		return value
-	}
-	if c == `u` || c == `U` {
-		// A universal character name in a literal is an escape whose value is
-		// the character it names, written in the execution character set. That
-		// encoding is the literal reader's next piece of work, so the refusal
-		// names the construct rather than calling a name an unknown escape,
-		// which is what the base's message did.
-		return error('universal character names in a literal are not implemented')
 	}
 	return match c {
 		`a` { i64(7) }
@@ -330,6 +337,21 @@ fn encode_utf8(cp u32) []u8 {
 		out[k] = u8(0x80) | u8((cp >> shift) & u32(0x3F))
 	}
 	return out
+}
+
+// ucn_value is the value a universal character name gives an integer character
+// constant. gcc writes the character's encoding into the int, most significant
+// byte first, and keeps the last four bytes when the encoding is longer than
+// the int. Measured on gcc 16.2.1: '\u00E9' is 0xC3A9, '\U0001F600' is
+// 0xF09F9880, and '\U7FFFFFFF' is 0xBFBFBFBF, the tail of the six-byte encoding.
+fn ucn_value(cp u32) i64 {
+	bytes := encode_utf8(cp)
+	start := if bytes.len > 4 { bytes.len - 4 } else { 0 }
+	mut packed := u32(0)
+	for b in bytes[start..] {
+		packed = (packed << 8) | u32(b)
+	}
+	return i64(i32(packed))
 }
 
 // StringLiteral is the object a string literal names: the bytes of its
