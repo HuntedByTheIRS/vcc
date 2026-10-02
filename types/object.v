@@ -305,6 +305,18 @@ pub fn from_target(target backend.Target) Description {
 	// target with gcc 16.2.1, `sizeof(char)` is 1 with an alignment of 1.
 	sizes[Kind.char_] = 1
 	aligns[Kind.char_] = 1
+	// The two-byte integers. Measured on this target with gcc 16.2.1, `short`
+	// and `unsigned short` are each 2 bytes with an alignment of 2. The back end
+	// has no instruction that writes a value of that width, so a declaration of
+	// one is still refused by its spelling in the reader; what is carried here
+	// is the width a layout needs, because a union with a `short` member cannot
+	// be sized without it and `sizeof` of that union is a question the model
+	// answers. The promotion of `unsigned short` is the other question that
+	// needs it, and the model answers that too.
+	sizes[Kind.short] = 2
+	aligns[Kind.short] = 2
+	sizes[Kind.unsigned_short] = 2
+	aligns[Kind.unsigned_short] = 2
 	sizes[Kind.int_] = 4
 	aligns[Kind.int_] = 4
 	sizes[Kind.unsigned_int] = 4

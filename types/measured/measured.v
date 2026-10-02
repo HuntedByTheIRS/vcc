@@ -83,11 +83,11 @@ pub fn representation() types.Representation {
 }
 
 // partial is the representation the compiler actually has while it reads: the
-// target description answers the width of a pointer, a char, a four-byte int, the
-// four 64-bit integer kinds, a double and the two 128-bit types, and nothing
-// else, so every other kind is missing and the model refuses a question that needs
-// a width rather than guessing one. The tests use it to check that a refusal names
-// the fact it is missing.
+// target description answers the width of a pointer, a char, the two two-byte
+// integers, a four-byte int, the four 64-bit integer kinds, a double and the two
+// 128-bit types, and nothing else, so every other kind is missing and the model
+// refuses a question that needs a width rather than guessing one. The tests use
+// it to check that a refusal names the fact it is missing.
 pub fn partial() types.Representation {
 	target := backend.host() or {
 		return types.Representation{
