@@ -424,6 +424,39 @@ pub fn (t Target) frame_immediate_offset() int {
 	return x86_64.frame_reserve_immediate
 }
 
+// loader_arguments is what the kernel hands a process on its stack, moved into
+// the registers a call passes its first arguments in: the count of the
+// arguments, the vector of their addresses, and the environment. A process
+// starts with the stack pointer pointing at the count, the addresses just above
+// it, and the environment after the null that ends the vector, so the count is
+// read through the vector register before that register is given the vector's
+// own address. The entry point asks for this before it aligns the stack, because
+// the layout is written against the stack pointer the kernel left and aligning
+// would move it.
+pub fn (t Target) loader_arguments() ![]u8 {
+	stack := t.reg('rsp') or {
+		return error('${t.name}: no stack pointer to read the argument vector from')
+	}
+	count := t.arg_reg(0) or {
+		return error('${t.name}: no register carries the argument count')
+	}
+	vector := t.arg_reg(1) or {
+		return error('${t.name}: no register carries the argument vector')
+	}
+	mut out := []u8{cap: 24}
+	// The vector register holds the address of the count for one instruction,
+	// and then moves up one word to where the addresses of the arguments begin.
+	out << t.move_register64(vector, stack)!
+	out << t.load_indirect(vector, count, 4)!
+	out << t.add_immediate(vector, 8)
+	// The environment begins one word past the null that ends the vector: the
+	// vector's address, one word per argument, and one word for the null.
+	if env := t.arg_reg(2) {
+		out << t.address_of_element(vector, count, 8, 8, env)!
+	}
+	return out
+}
+
 // align_stack is how the entry point makes the stack aligned before it calls
 // anything: a process is started on whatever stack the kernel left, and every
 // frame this compiler opens assumes the boundary is where the convention puts it.

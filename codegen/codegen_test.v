@@ -47,6 +47,19 @@ fn run_image(image []u8) int {
 	return run_capturing(image).exit_code
 }
 
+// run_capturing_arguments is run_capturing with command text after the program
+// name, so a program that reads the argument vector the loader built is checked
+// by running it with arguments rather than by reading the image. The tail is
+// what a caller would have typed after the program's name.
+fn run_capturing_arguments(image []u8, tail string) os.Result {
+	path := os.join_path(os.temp_dir(), 'vcc_codegen_args_test_${os.getpid()}_${time.now().unix()}')
+	os.write_file_array(path, image) or { panic(err) }
+	os.chmod(path, 0o755) or { panic(err) }
+	result := os.execute('${os.quoted_path(path)}${tail}')
+	os.rm(path) or {}
+	return result
+}
+
 // The tree for a program the parser cannot write down yet: a function that calls
 // other functions, with string and integer arguments, and returns a constant.
 fn call_statement(name string, args []ast.Expr) ast.Stmt {
@@ -996,6 +1009,49 @@ fn test_the_entry_point_can_be_named() {
 	})
 	assert emitted.diagnostics.len == 0
 	assert run_image(emitted.bytes) == 9
+}
+
+// The entry point is handed the argument vector the kernel left on the stack:
+// the count of the arguments, not a value the last instruction left behind.
+// Measured against gcc 16.2.1, a program that returns its argument count exits
+// 1 when it is run with no arguments, 2 with one, and 4 with three.
+fn test_the_entry_point_receives_the_argument_count() {
+	emitted := emit(translation_unit('int main(int argc, char **argv) { return argc; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+	assert run_capturing_arguments(emitted.bytes, ' one').exit_code == 2
+	assert run_capturing_arguments(emitted.bytes, ' one two three').exit_code == 4
+}
+
+// The vector itself holds what the loader built: the first entry is a program
+// name that is not empty, and the entry one past the last argument is the null
+// that ends the vector. gcc 16.2.1 exits 0 from both programs.
+fn test_the_entry_point_receives_the_argument_vector() {
+	named := emit(translation_unit('int main(int argc, char **argv) { return argv[0][0] == 0; }'), Options{})
+	assert named.diagnostics.len == 0
+	assert run_image(named.bytes) == 0
+	terminated := emit(translation_unit('int main(int argc, char **argv) { return argv[argc] != 0; }'), Options{})
+	assert terminated.diagnostics.len == 0
+	assert run_image(terminated.bytes) == 0
+	assert run_capturing_arguments(terminated.bytes, ' one two').exit_code == 0
+}
+
+// A third parameter is the environment the kernel passed, which begins one word
+// past the null that ends the argument vector. gcc 16.2.1 exits 0 from this
+// program, so the relation is the one the loader keeps.
+fn test_the_entry_point_receives_the_environment() {
+	emitted := emit(translation_unit('int main(int argc, char **argv, char **envp) { return envp != argv + argc + 1; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// An entry point that declares no parameters still runs: the registers it does
+// not read are the ones the loader's count and vector were put in, and a body
+// that ignores them returns what it always did.
+fn test_an_entry_point_with_no_parameters_still_runs() {
+	emitted := emit(translation_unit('int main(void) { return 7; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
 }
 
 fn test_an_unknown_target_names_the_targets_that_exist() {

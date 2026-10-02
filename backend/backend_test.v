@@ -290,6 +290,40 @@ fn test_the_frame_instructions_are_the_bytes_the_machine_reads() {
 	assert target.frame_immediate_offset() == 3
 }
 
+// The entry point reads the kernel's argument vector off the stack before the
+// stack is aligned for the call. A process starts with the stack pointer at the
+// count of the arguments, the addresses of the arguments one word above it, and
+// the environment after the null that ends the vector, so the count goes into
+// the second argument register as the address of the count and then that
+// register moves up one word. Measured with gcc 16.2.1, a program that returns
+// its argument count exits 1 with no arguments and 4 with three, which is what
+// the run tests in codegen check on the image this sequence is part of.
+fn test_the_entry_point_reads_the_argument_vector_the_kernel_left() {
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	assert target.loader_arguments() or { panic('the target description has no such name') } == [
+		u8(0x48),
+		0x89,
+		0xe6, // mov rsi, rsp
+		0x8b,
+		0x3e, // mov edi, [rsi]
+		0x48,
+		0x81,
+		0xc6,
+		0x08,
+		0x00,
+		0x00,
+		0x00, // add rsi, 8
+		0x48,
+		0x8d,
+		0x94,
+		0xfe,
+		0x08,
+		0x00,
+		0x00,
+		0x00, // lea rdx, [rsi + rdi*8 + 8]
+	]
+}
+
 fn test_the_arithmetic_is_the_bytes_the_machine_reads() {
 	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
 	eax := target.reg('eax') or { panic('the target description has no such name') }
