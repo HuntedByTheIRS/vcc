@@ -1008,3 +1008,37 @@ fn test_a_typedef_of_a_pointer_to_a_function_is_a_pointer() {
 	assert param.resolved.kind == .pointer
 	assert param.resolved.base.kind == .function
 }
+
+// The same two meanings with the bracket outside the name: `int *g(void)` is a
+// function that returns a pointer, `int (*f)(void)` is a pointer to a function.
+// Measured on gcc 16.2.1 under -std=c99, the first takes no storage and the
+// second is 8 bytes.
+fn test_a_function_returning_a_pointer_and_a_pointer_to_a_function_differ() {
+	pointing := checked('int main(void) { int (*f)(void); return 0; }')
+	f := pointing.unit.decls[0].body[0]
+	assert f.kind == .var_decl
+	assert f.resolved.kind == .pointer
+	assert f.resolved.base.kind == .function
+
+	returning := checked('int *g(void);\nint main(void) { return 0; }')
+	assert returning.diagnostics.len == 0
+	g := returning.unit.decls[0]
+	assert g.name == 'g'
+	assert g.ret_type.kind == .pointer
+	assert g.ret_type.base.same(types.int_type())
+}
+
+// A two-dimensional declarator is an array of arrays, read from the name out:
+// `int a[2][3]` is two rows of three ints and not two ints, which gcc 16.2.1
+// sizes at 24 with `sizeof a[0]` at 12. The row is the element type, so it is
+// what a row passed to a `const int *` parameter decays from.
+fn test_a_two_dimensional_declarator_is_an_array_of_arrays() {
+	result := checked('int a[2][3];')
+	g := result.unit.globals[0]
+	assert g.name == 'a'
+	assert g.resolved.kind == .array
+	assert g.resolved.count == 2
+	assert g.resolved.base.kind == .array
+	assert g.resolved.base.count == 3
+	assert g.resolved.base.base.same(types.int_type())
+}
