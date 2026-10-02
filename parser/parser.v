@@ -540,10 +540,10 @@ fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_e
 	}
 	// 6.5.15: a pointer beside an integer constant of value zero is that
 	// pointer, the same pairing an initializer and an assignment allow.
-	if a.is_pointer() && is_null_constant(else_expr) {
+	if a.is_pointer() && p.is_null_constant(else_expr) {
 		return a
 	}
-	if b.is_pointer() && is_null_constant(then_expr) {
+	if b.is_pointer() && p.is_null_constant(then_expr) {
 		return b
 	}
 	p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and 6.5.15 pairs two arithmetic types, two void types, or two pointers')
@@ -1481,7 +1481,7 @@ fn (mut p Parser) call_type(name tokenize.Token, args []ast.Expr) types.Type {
 		if index >= parameters.len {
 			break
 		}
-		problem := types.assignment_problem(parameters[index].typ, p.value_type(argument), is_null_constant(argument)) or {
+		problem := types.assignment_problem(parameters[index].typ, p.value_type(argument), p.is_null_constant(argument)) or {
 			continue
 		}
 		p.error_span(argument.line, argument.col, problem)
@@ -1496,26 +1496,33 @@ fn (mut p Parser) call_type(name tokenize.Token, args []ast.Expr) types.Type {
 // are the same answer to the question here. Measured, gcc 16.2.1 under `-std=c99`
 // accepts `h(1 - 1)` for a parameter of type `int (*)(void)`, which this compiler
 // refused while the question was asked of the literal alone.
-fn is_null_constant(expr ast.Expr) bool {
-	value := constant_value(expr) or { return false }
+fn (p Parser) is_null_constant(expr ast.Expr) bool {
+	value := p.constant_value(expr) or { return false }
 	return value == 0
 }
 
 // constant_value is the value of an integer constant expression this reader
-// evaluates while it reads: a literal, a literal with a sign in front of it, and
-// the arithmetic of two values. The five arithmetic operators are the ones it
-// folds, which is the arithmetic this compiler reads at all.
+// evaluates while it reads: a literal, a literal with a sign in front of it, a
+// cast of one to an integer type, and the arithmetic of two values. The five
+// arithmetic operators are the ones it folds, which is the arithmetic the bounds
+// a real header writes reach for: measured with `vcc -E`, glibc's `stdio.h`
+// declares `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]` and
+// `sys/select.h` declares `char data[1024 / (8 * (int) sizeof (__fd_mask))]`.
+// `sizeof` is an operator the expression reader turns into its value, so the
+// arithmetic arrives here as integer constants and the cast is the one node kind
+// the folder was missing.
 //
 // An expression that is not one of those answers none, which says that this is not
 // a constant expression the compiler can evaluate - not that it has no value. A
-// name, a call and a cast all answer none, so a pointer is still never initialized
-// with something that only has a value at run time.
-fn constant_value(expr ast.Expr) ?i64 {
+// name, a call and a cast to a floating or pointer type all answer none, so a
+// pointer is still never initialized with something that only has a value at run
+// time.
+fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 	if expr is ast.IntLit {
 		return expr.value
 	}
 	if expr is ast.Unary {
-		operand := constant_value(expr.expr) or { return none }
+		operand := p.constant_value(expr.expr) or { return none }
 		if expr.op == '-' {
 			return -operand
 		}
@@ -1524,9 +1531,24 @@ fn constant_value(expr ast.Expr) ?i64 {
 		}
 		return none
 	}
+	if expr is ast.Cast {
+		// 6.6 makes a cast of an integer constant to an integer type an integer
+		// constant expression, and the value is the one the conversion makes:
+		// `(char) 300` is 44 here as it is at run time, because a value that
+		// narrows keeps what the target type can hold.
+		operand := p.constant_value(expr.expr) or { return none }
+		if !expr.typ.kind.is_integer() {
+			return none
+		}
+		if expr.typ.kind == .bool_ {
+			return if operand != 0 { i64(1) } else { i64(0) }
+		}
+		size := p.representation.size_of(expr.typ) or { return none }
+		return truncate_integer(operand, size, expr.typ.kind.is_unsigned())
+	}
 	if expr is ast.Binary {
-		left := constant_value(expr.left) or { return none }
-		right := constant_value(expr.right) or { return none }
+		left := p.constant_value(expr.left) or { return none }
+		right := p.constant_value(expr.right) or { return none }
 		match expr.op {
 			'+' {
 				return left + right
@@ -1555,6 +1577,23 @@ fn constant_value(expr ast.Expr) ?i64 {
 		}
 	}
 	return none
+}
+
+// truncate_integer is a constant converted to an integer type of size bytes: a
+// narrowing conversion keeps the low bytes, and a signed one sign-extends them.
+// A width of eight bytes or more changes nothing, because every constant this
+// reader holds is an i64 already.
+fn truncate_integer(value i64, size int, unsigned bool) i64 {
+	if size <= 0 || size >= 8 {
+		return value
+	}
+	bits := size * 8
+	mask := (i64(1) << bits) - 1
+	kept := value & mask
+	if !unsigned && (kept & (i64(1) << (bits - 1))) != 0 {
+		return kept | ~mask
+	}
+	return kept
 }
 
 // binary_precedence is the binding strength of an operator the tree has a node

@@ -570,3 +570,63 @@ fn test_a_keyword_cannot_be_the_name_of_a_declaration() {
 	ordinary := declarations_of('int size = 1;\nint main(void) { return size; }')
 	assert ordinary.diagnostics.len == 0
 }
+
+// A bound written in the brackets is an integer constant expression, and the
+// value is what the array's type is built from. Measured on gcc 16.2.1 under
+// `-std=c99`, `char b[12 * sizeof(int) - 5 * sizeof(void *)];` at file scope is
+// an array of 8 and `int main(void) { ...; return sizeof b; }` exits 8; this
+// compiler scanned the region and read no size, so the object was laid out with
+// a count of zero. glibc declares the same bound as a struct member in
+// `bits/types/struct_FILE.h`, and the member is the case that must keep
+// compiling: only a file-scope object's bound is refused when it is not
+// constant, because the suffix is read for a member too.
+fn test_a_written_array_bound_is_evaluated_as_a_constant_expression() {
+	object := declarations_of('char b[12 * sizeof(int) - 5 * sizeof(void *)];')
+	assert object.diagnostics.len == 0
+	assert object.unit.globals.len == 1
+	assert object.unit.globals[0].count == 8
+	// A narrowing cast is one integer constant converted to another, so the value
+	// is the one the conversion makes. Measured, gcc 16.2.1 gives `char b[(char)
+	// 300];` 44 elements and a program that returns `sizeof b` exits 44.
+	narrowed := declarations_of('char b[(char)300];')
+	assert narrowed.diagnostics.len == 0
+	assert narrowed.unit.globals[0].count == 44
+	// The same bound as a struct member still compiles, which is the line the
+	// shared suffix reader must not cross.
+	member := declarations_of('struct S { char _unused2[12 * sizeof(int) - 5 * sizeof(void *)]; int x; };')
+	assert member.diagnostics.len == 0
+	// A body's bound is evaluated the same way. Measured on gcc 16.2.1, a program
+	// whose `char b[12 * sizeof(int) - 5 * sizeof(void *)]` is a local and that
+	// returns `sizeof b` exits 8.
+	body := declarations_of('int main(void) { char b[12 * sizeof(int) - 5 * sizeof(void *)]; return 0; }')
+	assert body.diagnostics.len == 0
+	assert body.unit.decls[0].body[0].decl_count == 8
+}
+
+// A bound that is not an integer constant expression leaves an object at the top
+// level without a size the image can carry, which 6.6 makes a constraint
+// violation. Measured on gcc 16.2.1 under `-std=c99`, `int a[1/0];` and
+// `int n = 3; int a[n];` are both `variably modified 'a' at file scope` and exit
+// 1. A body's bound that is not constant is a different thing and is left to the
+// body's own reader: this compiler does not implement a variable-length array and
+// refuses it there by name.
+fn test_a_non_constant_bound_at_file_scope_is_a_constraint_violation() {
+	divided := declarations_of('int a[1/0];')
+	assert divided.diagnostics.len == 1
+	assert divided.diagnostics[0].msg.contains('a constraint violation')
+	assert divided.diagnostics[0].msg.contains('is not an integer constant expression')
+	assert divided.unit.globals.len == 0
+	named := declarations_of('int n = 3;\nint a[n];')
+	assert named.diagnostics.len == 1
+	assert named.diagnostics[0].msg.contains('a constraint violation')
+	assert named.unit.globals.len == 1
+	// A dimension inside a written one is the same object and the same refusal.
+	inner := declarations_of('int n = 3;\nint a[3][n];')
+	assert inner.diagnostics.len == 1
+	assert inner.diagnostics[0].msg.contains('a constraint violation')
+	// A body's copy of the named bound stays the variable-length array this
+	// compiler refuses by name rather than the constraint violation.
+	body := declarations_of('int main(void) { int n = 3; int a[n]; return 0; }')
+	assert body.diagnostics.len == 1
+	assert body.diagnostics[0].msg.contains('an array declaration in a body needs a size')
+}
