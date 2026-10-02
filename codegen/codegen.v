@@ -4725,9 +4725,16 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 				// never was, and the high word is exactly what the round trip
 				// is asked to keep.
 			} else if source == 4 {
-				// An int is four bytes and an address is eight: the value is
-				// widened into the whole register with its sign kept.
-				e.append(e.target.sign_extend_word(register, register)!)
+				// A four-byte source is widened into the whole register, and
+				// which bits open above it is the source's own signedness: an
+				// int keeps its sign, and an unsigned int takes zeros. Measured
+				// on gcc 16.2.1: `(char *)0xffffffffu` is the address
+				// 0xffffffff, which sign-extending would have made all ones.
+				if cast.expr.typ.kind.is_unsigned() {
+					e.append(e.target.move_register32(register, register)!)
+				} else {
+					e.append(e.target.sign_extend_word(register, register)!)
+				}
 			} else {
 				// A source this back end cannot size is not a value an address
 				// is made of, and answering with a plausible one would be a

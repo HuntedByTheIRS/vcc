@@ -376,6 +376,24 @@ fn test_a_pointer_round_trips_through_a_64_bit_integer() {
 	assert run_image(object.bytes) == 5
 }
 
+// A four-byte unsigned value converted to a pointer takes zeros above it, which
+// is gcc's answer; sign-extending it would make every address with the top bit
+// set all ones. Measured with gcc 16.2.1: `(int *)(unsigned)0x80000001u` is the
+// address 0x80000001, so shifting it right by 62 answers 0, and the value read
+// back through a signed int is negative.
+fn test_an_unsigned_int_converted_to_a_pointer_takes_zeros_above_it() {
+	emitted := emit(translation_unit('int main() { unsigned int u = 0x80000001u; int *p = (int *)u; return (int)((unsigned long)p >> 62); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+	// An int is the signed source and keeps its sign, so the same conversion of
+	// the same bits through a signed int is the address 0xffffffff80000001.
+	signed := emit(translation_unit('int main() { int i = -1; int *p = (int *)i; return (int)((unsigned long)p >> 62); }'),
+		Options{})
+	assert signed.diagnostics.len == 0
+	assert run_image(signed.bytes) == 3
+}
+
 fn test_a_cast_with_no_conversion_behind_it_is_reported() {
 	// A conversion to a type this back end has no register for is refused by
 	// name rather than written as a value of the wrong width.
