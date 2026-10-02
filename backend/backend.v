@@ -675,11 +675,29 @@ pub fn (t Target) store_double_slot(base Register, disp i32, src Register) ![]u8
 	return x86_64.store_double_slot(t.describe(base), disp, t.describe(src))
 }
 
+// load_float_slot and store_float_slot are the same two moves for a float,
+// which is four bytes rather than eight. Both are the one instruction with the
+// single-precision prefix, so a caller that knows which width a slot holds does
+// not have to know an encoding to read or write it.
+pub fn (t Target) load_float_slot(base Register, disp i32, dst Register) ![]u8 {
+	return x86_64.load_float_slot(t.describe(base), disp, t.describe(dst))
+}
+
+pub fn (t Target) store_float_slot(base Register, disp i32, src Register) ![]u8 {
+	return x86_64.store_float_slot(t.describe(base), disp, t.describe(src))
+}
+
 // load_double_constant reads a double out of the image's read-only data, which
 // is where a floating constant lives: the eight bytes are the value, and the
 // instruction names the place they are at relative to itself.
 pub fn (t Target) load_double_constant(dst Register, disp i32) ![]u8 {
 	return x86_64.load_double_rip(t.describe(dst), disp)
+}
+
+// load_float_constant is the same read of a single-precision constant, which is
+// four bytes in the image rather than eight.
+pub fn (t Target) load_float_constant(dst Register, disp i32) ![]u8 {
+	return x86_64.load_float_rip(t.describe(dst), disp)
 }
 
 pub fn (t Target) load_double_indirect(address Register, dst Register) ![]u8 {
@@ -690,8 +708,23 @@ pub fn (t Target) store_double_indirect(address Register, src Register) ![]u8 {
 	return x86_64.store_double_indirect(t.describe(address), t.describe(src))
 }
 
+// load_float_indirect and store_float_indirect are the same pair of moves for a
+// value four bytes wide.
+pub fn (t Target) load_float_indirect(address Register, dst Register) ![]u8 {
+	return x86_64.load_float_indirect(t.describe(address), t.describe(dst))
+}
+
+pub fn (t Target) store_float_indirect(address Register, src Register) ![]u8 {
+	return x86_64.store_float_indirect(t.describe(address), t.describe(src))
+}
+
 pub fn (t Target) move_double(dst Register, src Register) ![]u8 {
 	return x86_64.move_double(t.describe(dst), t.describe(src))
+}
+
+// move_float copies one floating-point register into another at four bytes.
+pub fn (t Target) move_float(dst Register, src Register) ![]u8 {
+	return x86_64.move_float(t.describe(dst), t.describe(src))
 }
 
 // double_arithmetic applies an arithmetic operator to two doubles. The operator
@@ -709,6 +742,22 @@ pub fn (t Target) double_arithmetic(op string, dst Register, src Register) ![]u8
 	return x86_64.double_arithmetic(opcode, t.describe(dst), t.describe(src))
 }
 
+// float_arithmetic is the same four operations computed at four bytes, which is
+// how a float expression rounds at every step rather than carrying a double
+// through it.
+pub fn (t Target) float_arithmetic(op string, dst Register, src Register) ![]u8 {
+	opcode := match op {
+		'+' { x86_64.double_add }
+		'-' { x86_64.double_subtract }
+		'*' { x86_64.double_multiply }
+		'/' { x86_64.double_divide }
+		else {
+			return error('${t.name}: ${op} is not an operation this machine computes a float with')
+		}
+	}
+	return x86_64.float_arithmetic(opcode, t.describe(dst), t.describe(src))
+}
+
 // double_comparison puts two doubles in the order the operator names and leaves
 // the answer in a register as zero or one. The comparison itself only sets
 // flags, so the answer is read out of them, and for the orders where an
@@ -717,6 +766,15 @@ pub fn (t Target) double_arithmetic(op string, dst Register, src Register) ![]u8
 // anything, and the pair of flags is what says so.
 pub fn (t Target) double_comparison(op string, left Register, right Register, reg Register, scratch Register) ![]u8 {
 	mut out := x86_64.compare_double(t.describe(left), t.describe(right))!
+	out << x86_64.set_float_condition(op, t.describe(reg), t.describe(scratch))!
+	return out
+}
+
+// float_comparison is the same comparison at four bytes. Only the instruction
+// that sets the flags differs; the orders are read out of the flags the same
+// way, because Comiss sets them where Comisd does.
+pub fn (t Target) float_comparison(op string, left Register, right Register, reg Register, scratch Register) ![]u8 {
+	mut out := x86_64.compare_float(t.describe(left), t.describe(right))!
 	out << x86_64.set_float_condition(op, t.describe(reg), t.describe(scratch))!
 	return out
 }
@@ -744,6 +802,26 @@ pub fn (t Target) int_to_double(dst Register, src Register) ![]u8 {
 
 pub fn (t Target) double_to_int(dst Register, src Register) ![]u8 {
 	return x86_64.double_to_int(t.describe(dst), t.describe(src))
+}
+
+// int_to_float and float_to_int are the same two conversions at four bytes.
+pub fn (t Target) int_to_float(dst Register, src Register) ![]u8 {
+	return x86_64.int_to_float(t.describe(dst), t.describe(src))
+}
+
+pub fn (t Target) float_to_int(dst Register, src Register) ![]u8 {
+	return x86_64.float_to_int(t.describe(dst), t.describe(src))
+}
+
+// float_to_double widens a float into a double and double_to_float narrows one
+// back, which is the conversion between the two floating types. Both operands
+// are in the floating-point file, so neither touches a general register.
+pub fn (t Target) float_to_double(dst Register, src Register) ![]u8 {
+	return x86_64.float_to_double(t.describe(dst), t.describe(src))
+}
+
+pub fn (t Target) double_to_float(dst Register, src Register) ![]u8 {
+	return x86_64.double_to_float(t.describe(dst), t.describe(src))
 }
 
 // The jumps. The distance is filled in once the whole function is laid out,

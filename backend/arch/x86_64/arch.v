@@ -76,8 +76,12 @@ pub const float_return_reg = 'xmm0'
 pub const float_scratch_reg = 'xmm1'
 
 // The SSSE3-era two-byte prefix of every scalar double instruction: F2 says the
-// operand is one double rather than a packed pair, and 0F is the escape.
+// operand is one double rather than a packed pair, and 0F is the escape. The
+// single-precision form of every one of them writes F3 in that place instead,
+// which is what makes a float and a double the same instruction at two widths
+// rather than two instruction sets.
 const prefix_double = u8(0xf2)
+const prefix_float = u8(0xf3)
 
 // The opcodes this file emits for scalar double arithmetic, and the one that
 // compares. The comparison is 66 0F 2F because it belongs to the packed
@@ -94,8 +98,17 @@ const double_int_truncate = u8(0x2c)
 // ModRM byte naming the destination in the reg field and the source in the r/m
 // one, with mod 11 saying the source is a register rather than an address.
 fn double_modrm(opcode u8, dst Register, src Register) ![]u8 {
+	return scalar_modrm(prefix_double, opcode, dst, src)
+}
+
+// scalar_modrm is that shape with the prefix named, which is the one byte that
+// tells a single-precision instruction from a double-precision one. Both
+// operands are sixteen-byte registers either way: a float's four bytes sit in
+// the low half of one, so the register an instruction names is the same size in
+// both.
+fn scalar_modrm(prefix u8, opcode u8, dst Register, src Register) ![]u8 {
 	if dst.width != 16 || src.width != 16 {
-		return error('${name}: a scalar double operand is a sixteen-byte register, and ${dst.name} or ${src.name} is not one')
+		return error('${name}: a scalar floating-point operand is a sixteen-byte register, and ${dst.name} or ${src.name} is not one')
 	}
 	mut out := []u8{cap: 4}
 	mut rex := u8(0x40)
@@ -108,7 +121,7 @@ fn double_modrm(opcode u8, dst Register, src Register) ![]u8 {
 	if rex != 0x40 {
 		out << rex
 	}
-	out << prefix_double
+	out << prefix
 	out << u8(0x0f)
 	out << opcode
 	out << u8(0xc0 | ((dst.code & 0x07) << 3) | (src.code & 0x07))
@@ -148,6 +161,17 @@ pub fn compare_double(left Register, right Register) ![]u8 {
 	return out
 }
 
+// compare_float is the same comparison for two floats. The instruction is
+// Comiss, which is Comisd without the 66 prefix: it sets the same four flags in
+// the same places, so the code that reads an order out of them serves both.
+// Measured against gcc 16.2.1, which compares two floats with comiss.
+pub fn compare_float(left Register, right Register) ![]u8 {
+	if left.code >= 8 || right.code >= 8 {
+		return error('${name}: a float comparison names ${left.name} against ${right.name}, and neither may be above xmm7')
+	}
+	return [u8(0x0f), u8(0x2f), u8(0xc0 | ((left.code & 0x07) << 3) | (right.code & 0x07))]
+}
+
 // int_to_double converts a four-byte integer to a double, and double_to_int
 // truncates a double towards zero. The second is the C conversion from a
 // floating type to an integer one, which is defined to truncate, and the
@@ -160,6 +184,13 @@ pub fn compare_double(left Register, right Register) ![]u8 {
 // differs between them. `cvtsi2sd xmm, r/m32` converts an integer into a double
 // and `cvttsd2si r32, xmm` converts the other way.
 fn double_conversion(opcode u8, reg_field Register, rm Register) []u8 {
+	return scalar_conversion(prefix_double, opcode, reg_field, rm)
+}
+
+// scalar_conversion is that shape with the prefix named: the integer-to-float
+// and float-to-integer instructions come in a single-precision form and a
+// double-precision one, and the prefix is the whole of the difference.
+fn scalar_conversion(prefix u8, opcode u8, reg_field Register, rm Register) []u8 {
 	mut out := []u8{cap: 5}
 	mut rex := u8(0x40)
 	if reg_field.code >= 8 {
@@ -171,7 +202,7 @@ fn double_conversion(opcode u8, reg_field Register, rm Register) []u8 {
 	if rex != 0x40 {
 		out << rex
 	}
-	out << prefix_double
+	out << prefix
 	out << u8(0x0f)
 	out << opcode
 	out << u8(0xc0 | ((reg_field.code & 0x07) << 3) | (rm.code & 0x07))
@@ -195,7 +226,60 @@ pub fn double_to_int(dst Register, src Register) ![]u8 {
 	if src.width != 16 {
 		return error('${name}: a double is truncated out of a double register, and ${src.name} is not one')
 	}
-	return double_conversion(double_int_truncate, dst, src)
+	return scalar_conversion(prefix_double, double_int_truncate, dst, src)
+}
+
+// The single-precision forms of the same instructions. A float and a double are
+// one instruction set at two widths, so each of these is its double counterpart
+// with the F3 prefix, and the operand registers are the same sixteen-byte ones:
+// a float's four bytes sit in the low half of one.
+//
+// cvtsi2ss converts a four-byte integer to a float, cvttss2si truncates one
+// towards zero into a four-byte integer, and the last two widen and narrow
+// between the two floating widths, which both keep the value as closely as the
+// narrower type can hold it.
+const double_float_convert = u8(0x5a)
+
+pub fn move_float(dst Register, src Register) ![]u8 {
+	return scalar_modrm(prefix_float, 0x10, dst, src)
+}
+
+pub fn float_arithmetic(opcode u8, dst Register, src Register) ![]u8 {
+	if opcode !in [double_add, double_subtract, double_multiply, double_divide] {
+		return error('${name}: ${opcode} is not one of the four operations a float is computed with')
+	}
+	return scalar_modrm(prefix_float, opcode, dst, src)
+}
+
+pub fn int_to_float(dst Register, src Register) ![]u8 {
+	if dst.width != 16 {
+		return error('${name}: an integer is converted into a float register, and ${dst.name} is not one')
+	}
+	if src.width != 4 {
+		return error('${name}: a float comes from a four-byte integer, and ${src.name} is not one')
+	}
+	return scalar_conversion(prefix_float, double_int_convert, dst, src)
+}
+
+pub fn float_to_int(dst Register, src Register) ![]u8 {
+	if dst.width != 4 {
+		return error('${name}: a float is truncated into a four-byte integer, and ${dst.name} is not one')
+	}
+	if src.width != 16 {
+		return error('${name}: a float is truncated out of a floating-point register, and ${src.name} is not one')
+	}
+	return scalar_conversion(prefix_float, double_int_truncate, dst, src)
+}
+
+// float_to_double widens a float into a double, which is exact: every value a
+// float holds is a value a double holds. double_to_float narrows one, rounding
+// to nearest, which is the conversion the language defines between the two.
+pub fn float_to_double(dst Register, src Register) ![]u8 {
+	return scalar_modrm(prefix_float, double_float_convert, dst, src)
+}
+
+pub fn double_to_float(dst Register, src Register) ![]u8 {
+	return scalar_modrm(prefix_double, double_float_convert, dst, src)
 }
 
 // Movq, in both directions, between a general register and the low half of a
@@ -264,23 +348,35 @@ pub fn zero_double(reg Register) ![]u8 {
 // a register. The displacement is written wide for the reason every other frame
 // access writes it wide: the frame is still growing while the body is emitted,
 // so the length of an access must not depend on how big it ends up.
+//
+// load_float_slot, store_float_slot and load_float_rip are the same three moves
+// for a float. They are the same instruction with the single-precision prefix,
+// and they move four bytes rather than eight.
 pub fn load_double_slot(base Register, disp i32, dst Register) ![]u8 {
-	return double_slot_move(base, disp, dst, false)
+	return scalar_slot_move(prefix_double, base, disp, dst, false)
 }
 
 pub fn store_double_slot(base Register, disp i32, src Register) ![]u8 {
-	return double_slot_move(base, disp, src, true)
+	return scalar_slot_move(prefix_double, base, disp, src, true)
 }
 
-fn double_slot_move(base Register, disp i32, operand Register, store bool) ![]u8 {
+pub fn load_float_slot(base Register, disp i32, dst Register) ![]u8 {
+	return scalar_slot_move(prefix_float, base, disp, dst, false)
+}
+
+pub fn store_float_slot(base Register, disp i32, src Register) ![]u8 {
+	return scalar_slot_move(prefix_float, base, disp, src, true)
+}
+
+fn scalar_slot_move(prefix u8, base Register, disp i32, operand Register, store bool) ![]u8 {
 	if operand.width != 16 {
-		return error('${name}: a double is moved through a sixteen-byte register, and ${operand.name} is not one')
+		return error('${name}: a floating value is moved through a sixteen-byte register, and ${operand.name} is not one')
 	}
 	mut out := []u8{cap: 9}
 	if operand.code >= 8 || base.code >= 8 {
 		return error('${name}: a frame access names ${operand.name} and ${base.name}, and neither may be above the seventh register')
 	}
-	out << prefix_double
+	out << prefix
 	out << u8(0x0f)
 	out << u8(if store { 0x11 } else { 0x10 })
 	out << u8(0x80 | ((operand.code & 0x07) << 3) | 0x05) // mod 10, rm 101: [base + disp32]
@@ -295,12 +391,22 @@ fn double_slot_move(base Register, disp i32, operand Register, store bool) ![]u8
 // load_double_rip reads a double out of the image's read-only data, at a
 // displacement from the instruction. It is how a floating constant reaches a
 // register: the eight bytes are in the image and the instruction says where.
+// load_float_rip reads the four bytes of a single-precision constant the same
+// way.
 pub fn load_double_rip(dst Register, disp i32) ![]u8 {
+	return scalar_rip_move(prefix_double, dst, disp)
+}
+
+pub fn load_float_rip(dst Register, disp i32) ![]u8 {
+	return scalar_rip_move(prefix_float, dst, disp)
+}
+
+fn scalar_rip_move(prefix u8, dst Register, disp i32) ![]u8 {
 	if dst.width != 16 || dst.code >= 8 {
-		return error('${name}: a floating constant is loaded into one of the first eight double registers, and ${dst.name} is not one')
+		return error('${name}: a floating constant is loaded into one of the first eight floating-point registers, and ${dst.name} is not one')
 	}
 	mut out := []u8{cap: 8}
-	out << prefix_double
+	out << prefix
 	out << u8(0x0f)
 	out << u8(0x10)
 	out << u8(((dst.code & 0x07) << 3) | 0x05) // mod 00, rm 101: [rip + disp32]
@@ -314,25 +420,34 @@ pub fn load_double_rip(dst Register, disp i32) ![]u8 {
 
 // load_double_indirect and store_double_indirect move a double between a
 // register and the address in another register, which is what an object the
-// program addresses itself is read and written through.
+// program addresses itself is read and written through. The float pair beside
+// them is the same two instructions at four bytes.
 pub fn load_double_indirect(address Register, dst Register) ![]u8 {
-	return double_indirect_move(address, dst, false)
+	return scalar_indirect_move(prefix_double, address, dst, false)
 }
 
 pub fn store_double_indirect(address Register, src Register) ![]u8 {
-	return double_indirect_move(address, src, true)
+	return scalar_indirect_move(prefix_double, address, src, true)
 }
 
-fn double_indirect_move(address Register, operand Register, store bool) ![]u8 {
+pub fn load_float_indirect(address Register, dst Register) ![]u8 {
+	return scalar_indirect_move(prefix_float, address, dst, false)
+}
+
+pub fn store_float_indirect(address Register, src Register) ![]u8 {
+	return scalar_indirect_move(prefix_float, address, src, true)
+}
+
+fn scalar_indirect_move(prefix u8, address Register, operand Register, store bool) ![]u8 {
 	if operand.width != 16 {
-		return error('${name}: a double is moved through a sixteen-byte register, and ${operand.name} is not one')
+		return error('${name}: a floating value is moved through a sixteen-byte register, and ${operand.name} is not one')
 	}
 	low := address.code & 0x07
 	if low == 4 || low == 5 {
 		return error('${name}: an address in ${address.name} cannot be named without a displacement')
 	}
 	mut out := []u8{cap: 4}
-	out << prefix_double
+	out << prefix
 	out << u8(0x0f)
 	out << u8(if store { 0x11 } else { 0x10 })
 	out << u8(((operand.code & 0x07) << 3) | low) // mod 00: [address]
