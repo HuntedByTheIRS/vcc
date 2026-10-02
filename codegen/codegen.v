@@ -70,10 +70,55 @@ struct Slot {
 }
 
 // LoopLabels are the two places a loop's body can leave by: where the loop ends,
-// for a break, and where it goes round again, for a continue.
+// for a break, and where it goes round again, for a continue. A switch is a
+// break target of its own and not a loop, so it appears here with is_switch set:
+// a break inside it leaves it, and a continue inside it belongs to the loop
+// outside, which is the binding C asks for and the one a single innermost
+// target gets wrong.
 struct LoopLabels {
 	break_to    string
 	continue_to string
+	// is_switch says this entry is a switch statement and not a loop, so a
+	// continue in its body looks past it for the loop it belongs to.
+	is_switch bool
+}
+
+// CaseTarget is one case or default label of the switch being emitted: the
+// constant it matches, the machine label its statement is placed at, and
+// whether it is the default one. A switch's dispatch compares the controlling
+// expression against every non-default value and jumps to the matching label;
+// the default is where it goes when none matches.
+struct CaseTarget {
+	value      i64
+	label      string
+	is_default bool
+}
+
+// SwitchState is the switch whose body is being emitted: its labels in the order
+// the body writes them, and how many of them emission has reached. The parser
+// wrote every case label as a statement of its own, so the body's statements are
+// what names the arms, and this is what matches each of them to its target.
+struct SwitchState {
+mut:
+	cases []CaseTarget
+	next  int
+}
+
+// CaseWalk is one statement list a walk of a switch body is in the middle of:
+// where it is in the list, and the list itself. It is a frame of an explicit
+// stack rather than a recursion, because how deeply blocks nest is what the
+// source says and not something a compiler chooses.
+struct CaseWalk {
+mut:
+	list []ast.Stmt
+	at   int
+}
+
+// LabelUse is where a goto named a label: the position the diagnostic about a
+// label nothing defines belongs at.
+struct LabelUse {
+	line int
+	col  int
 }
 
 // Emitter writes one translation unit into a Program. It owns statement and
@@ -189,7 +234,24 @@ mut:
 	wide_arguments []Slot
 	wide_working   []WideWorking
 	// loops is the loops being emitted, innermost last, for break and continue.
+	// A switch is on this stack too, because a break inside one leaves it: the
+	// entry says which it is.
 	loops []LoopLabels
+	// switches is the switch statements being emitted, innermost last. A case
+	// label is placed as its statement comes out of the walk, and the entry
+	// says which target of the switch that is.
+	switches []SwitchState
+	// goto_labels is where each named label of the function being emitted is,
+	// by the name the source wrote. A label a goto reaches before it is placed
+	// is created here by the goto, which is what makes a forward jump a jump to
+	// a label that is not in the text yet.
+	goto_labels map[string]string
+	// goto_placed says which of those labels have been placed. A name that is
+	// used and never placed is a goto to a label nothing defines, which is
+	// reported once the whole body has been emitted.
+	goto_placed map[string]bool
+	// goto_used is where each name was used, for that diagnostic.
+	goto_used map[string]LabelUse
 	// next_label numbers the jump labels. It runs across the whole file rather
 	// than restarting at each function, because every label of every function
 	// lives in the same table.
@@ -741,6 +803,11 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		stacked++
 	}
 	returned := e.emit_statements(decl.body)!
+	// Every label a goto in this function named has to be a label this function
+	// wrote, and the question is about the whole body: a jump to a label the
+	// function never writes would be an instruction to an address the image
+	// does not hold.
+	e.report_undefined_labels()
 	if !returned {
 		if decl.ret == 'double' {
 			// A function that falls off its end returns zero, and zero as a
@@ -780,6 +847,13 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	e.wide_scratch = []Slot{}
 	e.wide_arguments = []Slot{}
 	e.wide_working = []WideWorking{}
+	// The named labels of a function are that function's, and the maps that
+	// hold them start empty for each one: a label is a name for a place inside
+	// one function, and a goto cannot reach out of the function it is written
+	// in. The jumps themselves keep their own numbering across the file.
+	e.goto_labels = map[string]string{}
+	e.goto_placed = map[string]bool{}
+	e.goto_used = map[string]LabelUse{}
 }
 
 // emit_statements writes a list of statements in order and answers whether any
@@ -830,6 +904,21 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 			}
 			.continue_stmt {
 				e.emit_jump_out(stmt, false)!
+			}
+			.switch_stmt {
+				e.emit_switch(stmt)!
+			}
+			.case_stmt {
+				e.emit_case_label(stmt, false)!
+			}
+			.default_stmt {
+				e.emit_case_label(stmt, true)!
+			}
+			.label_stmt {
+				e.emit_label(stmt)!
+			}
+			.goto_stmt {
+				e.emit_goto(stmt)!
 			}
 		}
 	}
@@ -1763,18 +1852,297 @@ fn (mut e Emitter) emit_branch_body(body []ast.Stmt) !bool {
 	return returned
 }
 
-// emit_jump_out writes a break or a continue, which are the same jump to two
-// different labels of the innermost loop. A loop is what either is about, so one
-// outside a loop is reported rather than emitted as a jump to nowhere.
+// emit_jump_out writes a break or a continue, which are two different questions
+// about the loop and switch statements around them.
+//
+// A break belongs to the innermost of either: `break` inside a loop inside a
+// switch leaves the loop, because a loop encloses the break more closely than
+// the switch does. A continue belongs to the innermost loop, and a switch on the
+// way in is not one, so a continue inside a switch inside a loop goes round the
+// loop: two functions with a switch in them and a single innermost target for
+// both get that wrong in opposite directions.
 fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
-	if e.loops.len == 0 {
-		word := if is_break { 'break' } else { 'continue' }
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${word} outside a loop')
-		return error('${word} outside a loop')
+	if is_break {
+		if e.loops.len == 0 {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: break outside a loop or a switch')
+			return error('break outside a loop or a switch')
+		}
+		e.jump(e.loops[e.loops.len - 1].break_to)!
+		return
 	}
-	loop := e.loops[e.loops.len - 1]
-	name := if is_break { loop.break_to } else { loop.continue_to }
-	e.jump(name)!
+	mut at := e.loops.len - 1
+	for at >= 0 {
+		if !e.loops[at].is_switch {
+			e.jump(e.loops[at].continue_to)!
+			return
+		}
+		at--
+	}
+	e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: continue outside a loop')
+	return error('continue outside a loop')
+}
+
+// emit_switch writes the dispatch of a switch and then its body, so that control
+// falls from one case into the next the way the labels are written.
+//
+// The controlling expression is evaluated once, into a slot of its own, because
+// the dispatch compares it once per case label and the expression is a program
+// of its own: `switch (setjmp(buf))` is a call the standard requires to happen
+// once and to answer the value the labels are matched against. It is widened to
+// the machine's word before it is stored, so the comparisons below are word
+// comparisons of values that are all sign or zero extended the same way, and a
+// case value is converted to the operand's type the same way C converts it.
+//
+// The comparison chain is a loop and not a recursion, and it is one comparison
+// per case: the corpus writes a switch with 1023 labels and a few thousand is
+// the size a switch is allowed to reach.
+fn (mut e Emitter) emit_switch(stmt ast.Stmt) !void {
+	cond := stmt.cond or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a switch without a controlling expression')
+		return error('switch without an expression')
+	}
+	width := e.converted_width(cond.typ) or { e.target.word_size }
+	unsigned := cond.typ.kind.is_unsigned()
+	e.emit_expr(cond)!
+	e.extend_operand_to_word(cond, stmt.line, stmt.col)!
+	operand := e.reserve(e.target.word_size)
+	e.store_accumulator(operand, stmt.line, stmt.col)!
+	end := e.label()
+	mut cases := []CaseTarget{}
+	e.collect_cases(stmt.body, mut cases)
+	mut default_label := ''
+	for target in cases {
+		if target.is_default {
+			default_label = target.label
+		}
+	}
+	accumulator := e.accumulator(stmt.line, stmt.col)!
+	other := e.scratch(stmt.line, stmt.col)!
+	for target in cases {
+		if target.is_default {
+			continue
+		}
+		e.load_accumulator(operand, stmt.line, stmt.col)!
+		e.append(e.target.move_immediate64(other, u64(case_constant_in(target.value, width, unsigned)))!)
+		e.append(e.target.compare_word('==', accumulator, other)!)
+		// A branch reads flags and the comparison above leaves its answer as a 0
+		// or a 1 instead. The value is tested explicitly, so the branch depends
+		// on that value and not on which flags happen to have survived the two
+		// instructions that produced it.
+		e.emit_test(false, false, stmt.line, stmt.col)!
+		e.branch(.branch_nonzero, target.label, stmt.line, stmt.col)!
+	}
+	if default_label != '' {
+		e.jump(default_label)!
+	} else {
+		e.jump(end)!
+	}
+	// The body runs with the switch as the break target and without a continue
+	// target of its own, which is what the entry says.
+	e.loops << LoopLabels{
+		break_to:    end
+		continue_to: ''
+		is_switch:   true
+	}
+	e.switches << SwitchState{
+		cases: cases
+		next:  0
+	}
+	e.emit_branch_body(stmt.body)!
+	e.switches.pop()
+	e.loops.pop()
+	e.place(end)
+}
+
+// case_constant_in is a case label's constant as a value of the controlling
+// expression's type, which is the conversion 6.8.4.2 asks for: the constant is
+// converted to the promoted type of the controlling expression, and a value that
+// does not fit wraps. Measured on gcc 16.2.1, `switch ((char)1) { case 257: }`
+// warns that the value is greater than the type's maximum and matches nothing,
+// and `switch (u) { case -1: }` on an `unsigned` matches when u is 4294967295.
+//
+// The width is the width of a value of the operand's type in a register and not
+// its storage, because the operand was widened to the machine's word before it
+// was stored and this is what it was widened to.
+fn case_constant_in(value i64, width int, unsigned bool) i64 {
+	if width >= 8 {
+		return value
+	}
+	if width == 4 {
+		return if unsigned { i64(u32(value)) } else { i64(i32(value)) }
+	}
+	if width == 2 {
+		return if unsigned { i64(u16(value)) } else { i64(i16(value)) }
+	}
+	return if unsigned { i64(u8(value)) } else { i64(i8(value)) }
+}
+
+// collect_cases walks a switch body and gives every case and default label a
+// machine label, in the order emission will meet them.
+//
+// The walk is the one emission makes: statements in the order they are written,
+// a block's contents where the block is, an if's two bodies in the order they
+// run, and a loop's body before its step. That order is what makes the labels
+// line up with the statements, because emission consumes this list from the
+// front as it places each of them.
+//
+// A switch inside the body is not walked into: its labels belong to it, and the
+// dispatch of this one must not jump to them. The walk carries its own stack
+// rather than recursing, because the depth is what the source writes.
+fn (mut e Emitter) collect_cases(body []ast.Stmt, mut cases []CaseTarget) {
+	mut stack := []CaseWalk{}
+	if body.len > 0 {
+		stack << CaseWalk{
+			list: body
+		}
+	}
+	for stack.len > 0 {
+		top := stack.len - 1
+		if stack[top].at >= stack[top].list.len {
+			stack.pop()
+			continue
+		}
+		at := stack[top].at
+		stmt := stack[top].list[at]
+		stack[top].at = at + 1
+		match stmt.kind {
+			.case_stmt {
+				cases << CaseTarget{
+					value: stmt.case_value
+					label: e.label()
+				}
+			}
+			.default_stmt {
+				cases << CaseTarget{
+					label:      e.label()
+					is_default: true
+				}
+			}
+			.switch_stmt {
+				// The labels of a nested switch are its own.
+			}
+			.block {
+				if stmt.body.len > 0 {
+					stack << CaseWalk{
+						list: stmt.body
+					}
+				}
+			}
+			.if_stmt {
+				if stmt.else_body.len > 0 {
+					stack << CaseWalk{
+						list: stmt.else_body
+					}
+				}
+				if stmt.then_body.len > 0 {
+					stack << CaseWalk{
+						list: stmt.then_body
+					}
+				}
+			}
+			.while_stmt {
+				if stmt.step.len > 0 {
+					stack << CaseWalk{
+						list: stmt.step
+					}
+				}
+				if stmt.body.len > 0 {
+					stack << CaseWalk{
+						list: stmt.body
+					}
+				}
+			}
+			.do_while_stmt {
+				if stmt.body.len > 0 {
+					stack << CaseWalk{
+						list: stmt.body
+					}
+				}
+			}
+			else {}
+		}
+	}
+}
+
+// emit_case_label places the machine label of one case or default statement. The
+// targets are consumed in the order collect_cases gave them out, which is the
+// order the statements are emitted, so the label this statement settles is the
+// one the dispatch jumps to for its value. A label with no target left, or one
+// whose kind does not match the target it reached, means the walk and the
+// emission disagree, and that is reported rather than papered over.
+fn (mut e Emitter) emit_case_label(stmt ast.Stmt, is_default bool) !void {
+	if e.switches.len == 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'internal: a case label is being emitted outside a switch')
+		return error('case label outside a switch')
+	}
+	at := e.switches.len - 1
+	state := e.switches[at]
+	if state.next >= state.cases.len {
+		e.diagnostics << problem(stmt.line, stmt.col, 'internal: a switch has more case labels than its dispatch was built from')
+		return error('case label with no target')
+	}
+	target := state.cases[state.next]
+	e.switches[at].next = state.next + 1
+	if target.is_default != is_default {
+		e.diagnostics << problem(stmt.line, stmt.col, 'internal: the case labels of a switch do not line up with its dispatch')
+		return error('case label out of line')
+	}
+	e.place(target.label)
+}
+
+// emit_goto writes a jump to a named label. The label is created here if no
+// label statement has placed it yet, which is what a forward jump is: the label
+// table is settled once every label of the file is known, so a jump may be
+// written before the place it lands on. What is not settled until then is
+// whether a label of that name is written at all.
+fn (mut e Emitter) emit_goto(stmt ast.Stmt) !void {
+	if !(stmt.label in e.goto_used) {
+		e.goto_used[stmt.label] = LabelUse{
+			line: stmt.line
+			col:  stmt.col
+		}
+	}
+	e.jump(e.named_label(stmt.label))!
+}
+
+// emit_label places the label a goto jumps to. Two labels of one name in a
+// function are refused, which is what gcc reports as a duplicate label: a name
+// for two places is not a name.
+fn (mut e Emitter) emit_label(stmt ast.Stmt) !void {
+	if e.goto_placed[stmt.label] {
+		e.diagnostics << problem(stmt.line, stmt.col, 'duplicate label ${stmt.label}')
+		return error('duplicate label')
+	}
+	name := e.named_label(stmt.label)
+	e.place(name)
+	e.goto_placed[stmt.label] = true
+}
+
+// named_label is the machine label a function's named label is emitted at,
+// created the first time the name is met so that a goto written before the label
+// and one written after it are the same label.
+fn (mut e Emitter) named_label(name string) string {
+	if existing := e.goto_labels[name] {
+		return existing
+	}
+	created := e.label()
+	e.goto_labels[name] = created
+	return created
+}
+
+// report_undefined_labels refuses a goto whose label the function never writes.
+// The jump itself is an instruction to a label the file does not hold, so the
+// image is not written at all; the label is still placed here, so that the
+// layout stage has one to resolve and the refusal is the diagnostic rather than
+// a crash in a stage below it.
+fn (mut e Emitter) report_undefined_labels() {
+	for name, used in e.goto_used {
+		if name in e.goto_placed {
+			continue
+		}
+		e.diagnostics << problem(used.line, used.col, 'unsupported: label ${name} is used but not defined')
+		e.place(e.named_label(name))
+	}
 }
 
 // declare gives a name a slot and makes it visible in the block being emitted.

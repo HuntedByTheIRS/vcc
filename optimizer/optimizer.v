@@ -328,6 +328,11 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 			step:       rewrite_body(stmt.step, opts)
 			then_body:  rewrite_body(stmt.then_body, opts)
 			else_body:  rewrite_body(stmt.else_body, opts)
+			// The name a goto jumps to and the constant a case label names are
+			// not expressions, so they are carried over as they are: a rewrite
+			// that dropped them would turn a jump into a jump to nothing.
+			label:      stmt.label
+			case_value: stmt.case_value
 			line:       stmt.line
 			col:        stmt.col
 		}

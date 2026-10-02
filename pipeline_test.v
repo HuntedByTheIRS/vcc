@@ -1552,3 +1552,206 @@ fn test_a_scalar_in_braces_and_a_list_of_doubles_hold_what_they_wrote() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// A case with no break before the next label runs into it, which is what makes a
+// switch a jump into a run of statements and not a chain of branches: this
+// program exits 11, and one that stopped at each case would exit 1. Measured on
+// gcc 16.2.1, which exits 11.
+fn test_a_case_falls_through_into_the_next_one() {
+	source := scratch('switch_fallthrough.c')
+	binary := scratch('switch_fallthrough')
+	program := 'int main(void) { int n = 0; switch (1) { case 1: n += 1; case 2: n += 10; break; default: n += 100; } return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 11
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A default reads the same wherever it is written and runs only when no case
+// matches, so its position in the body is not its position in the dispatch. The
+// three programs here exit 2, 0 and 7: the default written first is taken when
+// nothing else matches, a switch with no matching case and no default runs none
+// of its body, and a default in the middle is taken from either side of it.
+// Measured on gcc 16.2.1, which exits 2, 0 and 7.
+fn test_a_default_reads_wherever_it_is_written_and_only_when_nothing_matches() {
+	source := scratch('switch_default.c')
+	binary := scratch('switch_default')
+	first := 'int main(void) { int n = 0; switch (2) { default: n += 100; break; case 1: n += 1; break; case 2: n += 2; break; } return n; }\n'
+	assert compile_and_run([source, '-o', binary], first) == 2
+	unmatched := 'int main(void) { int n = 0; switch (5) { case 1: n += 1; break; case 2: n += 2; break; } return n; }\n'
+	assert compile_and_run([source, '-o', binary], unmatched) == 0
+	middle := 'int main(void) { int n = 0; switch (5) { case 1: n += 1; break; default: n += 7; break; case 2: n += 2; break; } return n; }\n'
+	assert compile_and_run([source, '-o', binary], middle) == 7
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A continue inside a switch inside a loop belongs to the loop, so the turn the
+// continue is on does not add to the accumulator below the switch. This program
+// exits 44: four of the five turns add ten and one, and the turn the continue is
+// on adds neither, where a continue that left the switch alone would exit 33 and
+// one that left the loop would exit 11. Measured on gcc 16.2.1, which exits 44.
+fn test_a_continue_in_a_switch_belongs_to_the_loop_outside_it() {
+	source := scratch('switch_continue.c')
+	binary := scratch('switch_continue')
+	program := 'int main(void) { int i = 0; int n = 0; for (i = 0; i < 5; i++) { switch (i) { case 1: continue; default: n += 10; } n += 1; } return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 44
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A break inside a loop inside a switch belongs to the loop, because the loop
+// encloses the break more closely than the switch does. This program exits 13:
+// the loop leaves after three steps and the ten below it is added, where a break
+// bound to the switch would leave it at once and exit 3. Measured on gcc 16.2.1,
+// which exits 13.
+fn test_a_break_in_a_loop_inside_a_switch_belongs_to_the_loop() {
+	source := scratch('switch_break.c')
+	binary := scratch('switch_break')
+	program := 'int main(void) { int n = 0; switch (1) { case 1: while (1) { n = n + 1; if (n == 3) break; } n += 10; break; default: n += 100; } return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 13
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The case labels of a nested switch belong to it and not to the one outside, so
+// a continue in the inner switch still belongs to the loop around both. This
+// program exits 22: the two outer turns that are not case 1 add ten and one
+// each, the case 1 turn adds neither because the continue skips the outer
+// accumulator too, and the inner default is never reached. Measured on gcc
+// 16.2.1, which exits 22.
+fn test_a_nested_switch_owns_its_own_labels() {
+	source := scratch('switch_nested.c')
+	binary := scratch('switch_nested')
+	program := 'int main(void) { int i = 0; int n = 0; for (i = 0; i < 3; i++) { switch (i) { case 1: switch (i) { case 1: continue; default: n += 1; } n += 100; break; default: n += 10; } n += 1; } return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 22
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A goto jumps forward, backward and out of nested loops, and the three are one
+// mechanism: a name for a place in the function. This program exits 10, which is
+// the value the forward jump leaves where a program that never took it exits 3,
+// and the loops the second jump leaves have both of their counters at their
+// first values. Measured on gcc 16.2.1, which exits 10 and 11.
+fn test_a_goto_jumps_forward_backward_and_out_of_nested_loops() {
+	source := scratch('goto_jumps.c')
+	binary := scratch('goto_jumps')
+	forward := 'int main(void) { int c = 0; goto forward; backward: c = c + 1; if (c < 3) goto backward; goto done; forward: c = 10; goto after; done: c = 3; after: return c; }\n'
+	assert compile_and_run([source, '-o', binary], forward) == 10
+	nested := 'int main(void) { int i = 0; int j = 0; for (i = 0; i < 3; ++i) { for (j = 0; j < 3; ++j) { if (i == 1 && j == 1) goto out_of_loops; } } out_of_loops: return i * 10 + j; }\n'
+	assert compile_and_run([source, '-o', binary], nested) == 11
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A label is a name for a place and an object of the same name is another name,
+// so the two do not collide. This program exits 7, and a reader that treated the
+// label as a declaration of `label`, or the goto's name as a use of it, would
+// either refuse the file or reach a different object. Measured on gcc 16.2.1,
+// which exits 7.
+fn test_a_label_and_an_object_of_the_same_name_are_two_names() {
+	source := scratch('goto_namespace.c')
+	binary := scratch('goto_namespace')
+	program := 'int main(void) { int label = 5; goto past; past: label = label + 2; return label; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 7
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A label at the end of a block is a place a goto reaches, and the statement
+// under it is the empty statement `;`, which is legal wherever a statement is.
+// This program exits 0 because the goto skips the assignment; a reader that read
+// `end: ;` as a label over the closing brace, or that reported the empty
+// statement, would not compile it. Measured on gcc 16.2.1, which exits 0.
+fn test_a_label_at_the_end_of_a_block_is_a_place_a_goto_reaches() {
+	source := scratch('goto_end_label.c')
+	binary := scratch('goto_end_label')
+	program := 'int main(void) { int n = 0; goto end; n = 5; end: ; return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A goto to a label the function never writes is refused by name, and no image
+// is written: the jump would be an instruction to an address the image does not
+// hold, which is worse than a refusal. Measured on gcc 16.2.1, which refuses the
+// same program with `label 'nowhere' used but not defined`.
+fn test_a_goto_to_a_label_nothing_defines_is_refused_and_writes_no_image() {
+	source := scratch('goto_undefined.c')
+	binary := scratch('goto_undefined')
+	image := compile([source, '-o', binary], 'int main(void) { goto nowhere; return 0; }\n')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('label nowhere is used but not defined')
+	assert image.bytes.len == 0
+	os.rm(source) or {}
+}
+
+// Two labels of one name in a function are refused where the second is written,
+// which is what gcc reports as a duplicate label: a name for two places is not a
+// name. Measured on gcc 16.2.1, which refuses the same program.
+fn test_two_labels_of_one_name_are_refused_and_write_no_image() {
+	source := scratch('goto_duplicate.c')
+	binary := scratch('goto_duplicate')
+	image := compile([source, '-o', binary], 'int main(void) { int n = 0; goto x; x: n = 1; x: n = 2; return n; }\n')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('duplicate label x')
+	assert image.bytes.len == 0
+	os.rm(source) or {}
+}
+
+// A switch with a few thousand labels is compiled by a walk and a dispatch that
+// are loops: the labels of the body are numbered by walking it, and the dispatch
+// is one comparison per case, so the cost of a switch is its length and not the
+// stack. This program has 4000 labels and exits 200, which is the arm 3999
+// selects: measured on gcc 16.2.1, which exits 200. The source is built rather
+// than written out because it is four thousand lines.
+fn test_a_switch_with_a_few_thousand_cases_is_matched_and_not_run_out_of_stack() {
+	source := scratch('switch_many.c')
+	binary := scratch('switch_many')
+	mut program := 'int main(void) { int s = 3999; int n = 0; switch (s) {\n'
+	for i in 0 .. 4000 {
+		program += 'case ${i}: n = ${i % 200 + 1}; break;\n'
+	}
+	program += 'default: n = 99;\n}\nreturn n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 200
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A case label is a place in its switch wherever it is written inside it,
+// including inside a block, and the labels fall through in the order they are
+// written rather than the order they nest: the label inside the second block is
+// between the case above it and the default below it. This program exits 7,
+// which is 2 from the arm plus 5 from the default it falls into. Measured on gcc
+// 16.2.1, which exits 7.
+fn test_a_case_label_inside_a_block_is_an_arm_of_its_switch() {
+	source := scratch('switch_block_case.c')
+	binary := scratch('switch_block_case')
+	program := 'int main(void) { int i = 2; int n = 0; switch (i) { case 1: { n = 1; break; } case 2: { n = 2; } default: n += 5; } return n; }\n'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	assert exit_status == 7
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The optimizer rebuilds every statement of a body, so a statement it rebuilds
+// has to keep the names and the constants it carries: a label name or a case
+// value dropped there turns a jump into a jump to nothing or an arm into an arm
+// for no value. This is the fallthrough program with a goto after it, compiled
+// through the -O1 pipeline, which is the level the only pass runs at. Measured on
+// gcc 16.2.1, which exits 11 at every level.
+fn test_the_optimizer_keeps_a_switch_and_a_goto_whole() {
+	source := scratch('switch_optimized.c')
+	binary := scratch('switch_optimized')
+	program := 'int main(void) { int n = 0; switch (1) { case 1: n += 1; case 2: n += 10; break; default: n += 100; } goto end; end: return n; }\n'
+	assert compile_and_run([source, '-O1', '-o', binary], program) == 11
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

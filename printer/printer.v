@@ -118,6 +118,21 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			.continue_stmt {
 				out << '${indent}continue at ${stmt.line}:${stmt.col}'
 			}
+			.switch_stmt {
+				out << '${indent}switch at ${stmt.line}:${stmt.col}'
+			}
+			.case_stmt {
+				out << '${indent}case ${stmt.case_value} at ${stmt.line}:${stmt.col}'
+			}
+			.default_stmt {
+				out << '${indent}default at ${stmt.line}:${stmt.col}'
+			}
+			.label_stmt {
+				out << '${indent}label ${stmt.label} at ${stmt.line}:${stmt.col}'
+			}
+			.goto_stmt {
+				out << '${indent}goto ${stmt.label} at ${stmt.line}:${stmt.col}'
+			}
 		}
 		if expr := stmt.expr {
 			dump_expression(expr, depth + 1, mut out)

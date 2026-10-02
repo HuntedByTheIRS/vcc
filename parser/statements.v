@@ -10,16 +10,16 @@ import types
 // reported where it was written. Which of them a run of tokens is, is a question
 // about the first token and the one after it, and it is asked here.
 
-// statement_keywords are the statements this compiler does not implement. They
-// are named so that `switch (x)` is reported as an unsupported statement rather
-// than as an expression that went wrong at its first parenthesis.
-const statement_keywords = ['switch', 'case', 'default', 'goto']
-
-// parse_statement reads one statement. A statement that cannot be read is
-// reported where it starts and skipped by the reader that failed on it, so the
-// statements after it still parse and one unsupported construct costs one
-// diagnostic. The error is returned for a region that never closed and nothing
-// else: the closing brace the caller is waiting for is gone with it.
+// parse_statement reads one statement. A statement that opens with a word the
+// language reserves is read by the reader that word names, and the dispatch
+// below is the whole table: C's statements begin with a keyword or with an
+// identifier and nothing else, so a word that is not there is a name, and a name
+// nothing declares is reported by the check over the whole unit. A statement
+// that cannot be read is reported where it starts and skipped by the reader that
+// failed on it, so the statements after it still parse and one unsupported
+// construct costs one diagnostic. The error is returned for a region that never
+// closed and nothing else: the closing brace the caller is waiting for is gone
+// with it.
 fn (mut p Parser) parse_statement() ![]ast.Stmt {
 	t := p.peek()
 	if t.kind == .punct && t.text == '{' {
@@ -47,6 +47,18 @@ fn (mut p Parser) parse_statement() ![]ast.Stmt {
 		if t.text == 'for' {
 			return p.parse_for_statement()
 		}
+		if t.text == 'switch' {
+			return p.parse_switch_statement()
+		}
+		if t.text == 'case' {
+			return p.parse_case_label()
+		}
+		if t.text == 'default' {
+			return p.parse_default_label()
+		}
+		if t.text == 'goto' {
+			return p.parse_goto_statement()
+		}
 		if t.text == 'break' || t.text == 'continue' {
 			return p.parse_loop_jump(t)
 		}
@@ -58,10 +70,12 @@ fn (mut p Parser) parse_statement() ![]ast.Stmt {
 			p.skip_statement()
 			return []ast.Stmt{}
 		}
-		if t.text in statement_keywords {
-			p.error_at(t, 'unsupported statement starting at ${describe(t)}: ${t.text} is not implemented yet')
-			p.skip_statement()
-			return []ast.Stmt{}
+		// A name followed by `:` names a place in the function and not an
+		// object. The two namespaces are separate in C, which is why a label
+		// and a variable of the same name are two names and why this check is
+		// the shape of the tokens and not a lookup.
+		if p.peek_at(1).kind == .punct && p.peek_at(1).text == ':' {
+			return p.parse_label_statement(t)
 		}
 	}
 	// A statement that starts with a type name declares an object. Storage in
@@ -566,6 +580,236 @@ fn (mut p Parser) parse_loop_jump(t tokenize.Token) []ast.Stmt {
 		line: t.line
 		col:  t.col
 	}]
+}
+
+// parse_label_statement reads `name: stmt`. The label is a place in the
+// function and not an object, so nothing is declared here and the name is
+// looked up nowhere: a label is a name for the position of the statement that
+// follows it, and whether a goto ever reaches it is a question about the
+// function.
+fn (mut p Parser) parse_label_statement(name tokenize.Token) ![]ast.Stmt {
+	p.next() // the name
+	p.next() // :
+	mut out := [ast.Stmt{
+		kind:  .label_stmt
+		label: name.text
+		line:  name.line
+		col:   name.col
+	}]
+	out << p.statement_under_label()!
+	return out
+}
+
+// statement_under_label reads the statement a label governs. An empty statement
+// is legal wherever a statement is, and it is nothing in the tree, which is the
+// rule the block reader already applies to a `;` written between two statements.
+// A label whose statement is empty is a label at the end of a block, which is a
+// place a goto still reaches.
+fn (mut p Parser) statement_under_label() ![]ast.Stmt {
+	if p.at_punct(';') {
+		p.next()
+		return []ast.Stmt{}
+	}
+	return p.parse_statement()
+}
+
+// parse_goto_statement reads `goto name;`. The name is a label and never an
+// object, so it is not resolved here: what a label is a place in is a function,
+// and only the whole of one says whether the name was defined, which is where
+// the jump is emitted.
+fn (mut p Parser) parse_goto_statement() ![]ast.Stmt {
+	t := p.next() // goto
+	if p.peek().kind != .identifier {
+		p.error_at(p.peek(), 'unsupported: expected a label name after goto, found ${describe(p.peek())}')
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	name := p.next()
+	if is_keyword(name.text) {
+		p.error_at(name, 'unsupported: ${name.text} is a keyword and cannot name a label')
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	return [ast.Stmt{
+		kind:  .goto_stmt
+		label: name.text
+		line:  t.line
+		col:   t.col
+	}]
+}
+
+// parse_switch_statement reads `switch (expr) stmt`. The controlling expression
+// is what the case labels are matched against, and the body is read as a
+// statement like any other: the case labels inside it are statements too, and
+// the reader of a case label is what knows it is inside a switch.
+//
+// The values the labels have written are collected while the body is read, so
+// that a value written twice in one switch is refused where it is written the
+// second time. The set is pushed around the body rather than kept in the reader,
+// because the cases of a nested switch belong to it and not to the one outside.
+fn (mut p Parser) parse_switch_statement() ![]ast.Stmt {
+	t := p.next() // switch
+	if !p.expect_punct('(') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	cond := p.parse_expression() or {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(')') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	p.check_switch_operand(cond, t)
+	p.case_values << map[i64]bool{}
+	p.case_defaults << false
+	body := p.parse_control_body()!
+	p.case_values.pop()
+	p.case_defaults.pop()
+	return [ast.Stmt{
+		kind: .switch_stmt
+		cond: cond
+		body: body
+		line: t.line
+		col:  t.col
+	}]
+}
+
+// check_switch_operand refuses a controlling expression that is not an integer,
+// which is what 6.8.4.2 asks for: measured on gcc 16.2.1, `switch (1.5)` is
+// `switch quantity not an integer` and `switch (p)` on a `char *` is the same
+// message about the address. An operand whose type the reader did not resolve
+// was refused where it was written, and it is left alone here so that one
+// construct is one diagnostic.
+fn (mut p Parser) check_switch_operand(expr ast.Expr, at tokenize.Token) {
+	typ := p.value_type(expr)
+	if typ.kind == .unknown {
+		return
+	}
+	if !typ.kind.is_integer() {
+		p.error_at(at, 'unsupported: the switch quantity is not an integer')
+	}
+}
+
+// parse_case_label reads `case constant: stmt`. The value is converted to the
+// type of the controlling expression where the label is placed, so what is kept
+// here is the constant as written; what this reader refuses is a value it cannot
+// reduce to one, which is a constant expression that is not a written constant.
+//
+// The label is worth a statement of its own rather than a field on the statement
+// after it: a run of labels over one statement, `case 0: case 1: x += 1;`, is a
+// run of statements in C's grammar, and a label with no statement under it is a
+// case that falls into the next one.
+fn (mut p Parser) parse_case_label() ![]ast.Stmt {
+	t := p.next() // case
+	if p.case_values.len == 0 {
+		p.error_at(t, 'unsupported: a case label is not in a switch statement')
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	expr := p.parse_expression() or {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(':') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	value := p.case_constant(expr) or {
+		// The label is refused for its value, and the statement under it is
+		// still read: the arm is not a place the switch can jump to, and
+		// skipping it would report the statements after it a second time.
+		p.error_at(t, 'unsupported: this case value is not one this reader reduces to an integer constant, and only a written integer constant or one of those negated is read')
+		return p.statement_under_label()
+	}
+	if p.case_values[p.case_values.len - 1][value] {
+		p.error_at(t, 'duplicate case value ${value} in one switch')
+		return p.statement_under_label()
+	}
+	p.case_values[p.case_values.len - 1][value] = true
+	mut out := [ast.Stmt{
+		kind:       .case_stmt
+		case_value: value
+		line:       t.line
+		col:        t.col
+	}]
+	out << p.statement_under_label()!
+	return out
+}
+
+// parse_default_label reads `default: stmt`. Which of the labels is the default
+// one is not a position in the body: measured on gcc 16.2.1, a default written
+// first, in the middle or last selects the same arm, because the labels are a
+// set and the order they are written in is the order control falls through them.
+// A second default in one switch is refused.
+fn (mut p Parser) parse_default_label() ![]ast.Stmt {
+	t := p.next() // default
+	if p.case_defaults.len == 0 {
+		p.error_at(t, 'unsupported: a default label is not in a switch statement')
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(':') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	// The colon is read before the label is judged, so that a refused default
+	// leaves the reader at the statement under it rather than at its colon.
+	// Reading it as an expression would report the label twice.
+	if p.case_defaults[p.case_defaults.len - 1] {
+		p.error_at(t, 'duplicate default label in one switch')
+		return p.statement_under_label()
+	}
+	p.case_defaults[p.case_defaults.len - 1] = true
+	mut out := [ast.Stmt{
+		kind: .default_stmt
+		line: t.line
+		col:  t.col
+	}]
+	out << p.statement_under_label()!
+	return out
+}
+
+// case_constant is the integer a case label names. 6.8.4.2 asks for an integer
+// constant expression, and what this reader reduces is a written integer
+// constant, a character constant, or a chain of `-`, `+` and `~` over one of
+// those: an expression worked out from several terms is refused by name rather
+// than guessed at, and the chain is walked with a loop because how many
+// operators one has is what the source says and not something a compiler
+// chooses.
+fn (mut p Parser) case_constant(expr ast.Expr) ?i64 {
+	mut operators := []string{}
+	mut node := expr
+	for node is ast.Unary {
+		unary := node as ast.Unary
+		operators << unary.op
+		node = unary.expr
+	}
+	if node !is ast.IntLit {
+		return none
+	}
+	written := node as ast.IntLit
+	mut value := written.value
+	for i := operators.len - 1; i >= 0; i-- {
+		match operators[i] {
+			'-' {
+				value = -value
+			}
+			'~' {
+				value = ~value
+			}
+			'+' {}
+			else {
+				return none
+			}
+		}
+	}
+	return value
 }
 
 // parse_for_statement reads `for (A; B; C) D` and writes the loop it means: a

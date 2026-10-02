@@ -373,12 +373,14 @@ fn test_a_definition_of_an_object_carries_its_type_and_constant() {
 
 // The statement is skipped to its semicolon, so the return after it parses and
 // the file produces exactly one diagnostic. A statement this compiler has no
-// form for is what that path is for, and `goto` is one of those: this test used
-// to write `do` here, and `do` has a form of its own now.
+// form for is what that path is for, and `else` with nothing to attach to is
+// one of them: this test used to write `goto end;`, which has a reader now and
+// is a jump the emitter has to find a label for, so the construct that still
+// takes this path is the one that is still refused.
 fn test_one_unsupported_statement_does_not_cascade() {
-	result := parsed('int main() { goto end; return 0; }')
+	result := parsed('int main() { else; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('unsupported statement')
+	assert result.diagnostics[0].msg.contains('else with no if')
 	assert result.unit.decls.len == 1
 	assert result.unit.decls[0].body.len == 1
 	assert result.unit.decls[0].body[0].kind == .return_stmt
@@ -1547,4 +1549,120 @@ fn test_a_long_chain_of_conditionals_is_refused_rather_than_run_out_of_stack() {
 	result := parsed(source)
 	assert result.diagnostics.len >= 1
 	assert result.diagnostics[0].msg.contains('nested more than')
+}
+
+// A switch is a statement whose controlling expression the case labels inside
+// its body are matched against. The labels are statements of their own, so a run
+// of them over one statement is a run of statements: `case 0: case 1: x = 1;`
+// is two labels and an assignment, and the two labels are two places the switch
+// can jump to.
+fn test_a_switch_holds_its_case_labels_as_statements() {
+	result := parsed('int main(void) { int i = 2; int n = 0; switch (i) { case 0: case 1: n = 1; break; case 2: n = 2; default: n = 3; } return n; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[2].kind == .switch_stmt
+	inner := body[2].body
+	assert inner.len == 1
+	assert inner[0].kind == .block
+	arms := inner[0].body
+	assert arms[0].kind == .case_stmt
+	assert arms[0].case_value == 0
+	assert arms[1].kind == .case_stmt
+	assert arms[1].case_value == 1
+	assert arms[2].kind == .assign
+	assert arms[3].kind == .break_stmt
+	assert arms[4].kind == .case_stmt
+	assert arms[4].case_value == 2
+	assert arms[6].kind == .default_stmt
+}
+
+// A case value this reader cannot reduce to an integer is refused by name at the
+// label, and the statement under it is still read: measured on gcc 16.2.1,
+// `switch (v) { case n: }` for an object n is `case label does not reduce to an
+// integer constant`, and the statements after it are read once.
+fn test_a_case_value_that_is_not_a_constant_is_refused_by_name() {
+	result := parsed('int main(void) { int n = 1; int v = 0; switch (v) { case n: v = 1; break; } return v; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('integer constant')
+	assert result.diagnostics[0].line == 1
+}
+
+// Two case labels of one switch with the same value are refused where the second
+// is written, which is the constraint 6.8.4.2 states: measured on gcc 16.2.1,
+// `duplicate case value`.
+fn test_a_duplicate_case_value_is_refused_by_name() {
+	result := parsed('int main(void) { int n = 0; switch (n) { case 1: n = 1; break; case 1: n = 2; break; } return n; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('duplicate case value 1')
+}
+
+// The same value in two different switches is not a collision: each switch has
+// its own set of labels, and the sets nest.
+fn test_the_same_case_value_in_a_nested_switch_is_not_a_duplicate() {
+	result := parsed('int main(void) { int n = 0; switch (n) { case 1: switch (n) { case 1: n = 1; break; default: n = 2; } break; default: n = 3; } return n; }')
+	assert result.diagnostics.len == 0
+}
+
+// One switch has one default, and a second is refused by name: measured on gcc
+// 16.2.1, `multiple default labels in one switch`.
+fn test_a_second_default_in_one_switch_is_refused_by_name() {
+	result := parsed('int main(void) { int n = 0; switch (n) { default: n = 1; break; default: n = 2; break; } return n; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('duplicate default label')
+}
+
+// A case or default label is a label of a switch and nothing else: measured on
+// gcc 16.2.1, `case 1:` outside one is `case label not within a switch
+// statement` and `default:` is the same for the other word.
+fn test_a_label_of_a_switch_outside_one_is_refused_by_name() {
+	offered := parsed('int main(void) { case 1: return 0; }')
+	assert offered.diagnostics.len == 1
+	assert offered.diagnostics[0].msg.contains('not in a switch statement')
+	fallback := parsed('int main(void) { default: return 0; }')
+	assert fallback.diagnostics.len == 1
+	assert fallback.diagnostics[0].msg.contains('not in a switch statement')
+}
+
+// The controlling expression has to be an integer: measured on gcc 16.2.1,
+// `switch (1.5)` is `switch quantity not an integer`, and a pointer is refused
+// with the same words.
+fn test_a_switch_operand_that_is_not_an_integer_is_refused_by_name() {
+	floating := parsed('int main(void) { double d = 1.5; switch (d) { case 1: return 1; } return 0; }')
+	assert floating.diagnostics.len == 1
+	assert floating.diagnostics[0].msg.contains('switch quantity is not an integer')
+	pointer := parsed('int main(void) { int x = 0; int *p = &x; switch (p) { case 1: return 1; } return 0; }')
+	assert pointer.diagnostics.len == 1
+	assert pointer.diagnostics[0].msg.contains('switch quantity is not an integer')
+}
+
+// A goto is a jump to a label of the same function and a label is a place in it,
+// so the two are one jump each way: the label statement is in the body where it
+// was written and the jump names it.
+fn test_a_goto_and_a_label_are_a_jump_and_a_place() {
+	result := parsed('int main(void) { goto done; done: return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 3
+	assert body[0].kind == .goto_stmt
+	assert body[0].label == 'done'
+	assert body[1].kind == .label_stmt
+	assert body[1].label == 'done'
+	assert body[2].kind == .return_stmt
+}
+
+// A label lives in a namespace of its own, so a label and an object of the same
+// name are two names and neither hides the other. Measured on gcc 16.2.1: this
+// program compiles with no diagnostic and exits 7, and reading the object at the
+// label is reading the object.
+fn test_a_label_and_an_object_of_the_same_name_are_two_names() {
+	result := parsed('int main(void) { int label = 5; goto past; past: label = label + 2; return label; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	returned := body[body.len - 1]
+	operand := returned.expr or {
+		assert false
+		return
+	}
+	assert (operand as ast.Ident).name == 'label'
+	assert (operand as ast.Ident).typ.kind == .int_
 }

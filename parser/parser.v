@@ -59,6 +59,15 @@ mut:
 	// file names that file: reporting a header's line number against the name of
 	// the program that included it is a message about the wrong file.
 	file string
+	// case_values is one set of case values per switch statement being read,
+	// innermost last. Two case labels in one switch with the same value are
+	// refused where the second is written, which is the constraint 6.8.4.2
+	// states; a switch's own set is pushed and popped around its body, so the
+	// cases of a nested switch do not collide with the ones outside it.
+	case_values []map[i64]bool
+	// case_defaults says, one entry per switch being read, whether a default
+	// label has been read in it: a second default in one switch is refused.
+	case_defaults []bool
 }
 
 // supported_types are the ones the back end can emit today. The 8-byte integer
