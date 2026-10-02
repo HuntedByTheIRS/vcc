@@ -664,6 +664,11 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// size of an array with empty brackets comes from the list.
 	mut data_array := false
 	mut data_brace := false
+	// data_string says the initializer was a string literal that was read, which
+	// is a declaration with storage even when the array it initializes holds no
+	// element: `char s[0] = "";` writes none, and the report for an initializer
+	// that is not a number is not about it.
+	mut data_string := false
 	// data_problem says a brace initializer was read and refused for its size,
 	// which is a declaration the image does not lay out: the program is already
 	// refused, and storage for an object whose initializer is wrong is storage
@@ -835,6 +840,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 								data_inits = written.inits
 								data_count = written.count
 								data_complete = written.complete
+								data_string = true
 							} else {
 								// The literal was too long for the size that
 								// was written; it has been named at its own
@@ -933,7 +939,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if data_defined && data_init == none && data_init_float == none && data_inits.len == 0
-			&& data_init_floats.len == 0 {
+			&& data_init_floats.len == 0 && !data_string {
 			// Either way the definition is refused. When the initializer was a
 			// shape the reader reported, it has already been named at its own
 			// location and this report would be a second message about the
@@ -1886,7 +1892,7 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 	for {
 		if p.at_punct('[') {
 			at := p.peek()
-			suffix := p.parse_array_suffix()!
+			suffix := p.parse_array_suffix(d.name)!
 			steps.prepend(DeclStep{
 				kind:  .array_step
 				count: suffix.count_as_step()
@@ -2284,7 +2290,8 @@ enum ArrayBound {
 	// held is a bound this reader evaluated to a positive size.
 	held
 	// unheld is a bound that was written and evaluated to something that is
-	// not a size: `int a[0]`, `int a[2 - 5]`.
+	// not a size: `int a[0]`, `int a[2 - 5]`. A negative one is reported where
+	// it is read and reaches the caller as this same case.
 	unheld
 	// unreadable is a bound that was written and this reader could not
 	// evaluate, as in `int a[n]` where n is a name.
@@ -2484,7 +2491,16 @@ fn (mut p Parser) file_scope_string_initializer(d Declarator, declared types.Typ
 // could not evaluate answers `.unreadable`. A region that does not evaluate is
 // skipped to its bracket as it always was, so the suffix still ends where it
 // says it ends.
-fn (mut p Parser) parse_array_suffix() !ArraySuffix {
+//
+// A written bound that is negative is a constraint violation (6.7.5.2p1) and is
+// reported here, where the value is known, rather than left to a reader that
+// would only see that no positive size was read. Measured on gcc 16.2.1,
+// `int x[2 - 5];`, `int x[-1];` and `int x[~0];` are all `size of array 'x' is
+// negative` and rejected under `-std=gnu99` and under `-std=c99
+// -pedantic-errors`, as a file-scope object, a struct member or a parameter.
+// Zero is not that case: `int x[0];` is a zero-size array, which gcc accepts
+// under `-std=gnu99`, and empty brackets are a size the initializer may give.
+fn (mut p Parser) parse_array_suffix(name string) !ArraySuffix {
 	open := p.next() // [
 	if p.at_punct(']') {
 		p.next()
@@ -2492,6 +2508,7 @@ fn (mut p Parser) parse_array_suffix() !ArraySuffix {
 			bound: .empty
 		}
 	}
+	bound_at := p.peek()
 	// The bound is read as an expression so that it can be evaluated. Nothing the
 	// trial read is kept if it does not end at the bracket: the cursor, the
 	// diagnostics it produced, the depth it counted and the type the declarator
@@ -2521,6 +2538,10 @@ fn (mut p Parser) parse_array_suffix() !ArraySuffix {
 					bound: .held
 					count: value
 				}
+			}
+			if value < 0 {
+				who := if name.len > 0 { name } else { 'an array' }
+				p.error_span(bound_at.line, bound_at.col, 'a constraint violation: the bound of ${who} is ${value}, and 6.7.5.2p1 makes a size that was written one that is not negative')
 			}
 			// A size written and not held — `int a[0]`, `int a[2 - 5]` —
 			// reads as no size at all, and the reader that asked for one says

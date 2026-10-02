@@ -279,7 +279,7 @@ fn test_a_written_bound_is_not_filled_in_from_a_string_literal() {
 	assert variable.diagnostics[0].msg.contains('is not an integer constant expression')
 }
 
-// A literal whose element type is not the array's is not this initializer:
+// A narrow literal whose element type is not the array's is not this initializer:
 // measured on gcc 16.2.1, `int a[] = "xy";` is `cannot initialize array of 'int'
 // from a string literal with type array of 'char'`. This compiler reports the
 // declaration as one whose initializer is not a number, which is the refusal it
@@ -288,6 +288,51 @@ fn test_a_narrow_literal_does_not_initialize_an_int_array() {
 	result := declarations_of('int a[] = "xy";')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
+}
+
+// A written bound that is negative is a constraint violation (6.7.5.2p1).
+// Measured on gcc 16.2.1, `int x[2 - 5];`, `int x[-1];` and `int x[~0];` are
+// `size of array 'x' is negative` and rejected under `-std=gnu99` and under
+// `-std=c99 -pedantic-errors`, as a file-scope object, a struct member or a
+// parameter. Zero is not that case: `int x[0];` is a zero-size array gcc accepts
+// under `-std=gnu99`, and empty brackets are a size an initializer may give.
+fn test_a_negative_written_bound_is_a_constraint_violation() {
+	difference := declarations_of('int x[2 - 5];')
+	assert difference.diagnostics.len == 1
+	assert difference.diagnostics[0].msg.contains('the bound of x is -3')
+	assert difference.diagnostics[0].msg.contains('6.7.5.2p1')
+	negative := declarations_of('int x[-1];')
+	assert negative.diagnostics.len == 1
+	assert negative.diagnostics[0].msg.contains('the bound of x is -1')
+	// The same bound as a struct member and as a parameter is the same
+	// violation, which gcc rejects in both places too.
+	member := declarations_of('struct S { int a[-1]; };')
+	assert member.diagnostics.len == 1
+	assert member.diagnostics[0].msg.contains('the bound of a is -1')
+	parameter := declarations_of('void f(int a[-1]);')
+	assert parameter.diagnostics.len == 1
+	assert parameter.diagnostics[0].msg.contains('the bound of a is -1')
+	// Zero was written and is not negative: it reads as no size, which is what
+	// `int x[0];` was before this check.
+	zero := declarations_of('int x[0];')
+	assert zero.diagnostics.len == 0
+}
+
+// A written zero is zero for a string initializer too, so the literal is checked
+// against it rather than the object resized from the literal. Measured on gcc
+// 16.2.1, `char s[0] = "abc";` is `initializer-string for array of 'char' is too
+// long (4 chars into 0 available)`, and `char s[0] = "";` holds no element and
+// is accepted.
+fn test_a_written_zero_bound_is_zero_for_a_string_initializer() {
+	too_long := declarations_of('char s[0] = "abc";')
+	assert too_long.diagnostics.len == 1
+	assert too_long.diagnostics[0].msg.contains('holds 0 elements and its initializer writes 4')
+	empty := declarations_of('char s[0] = "";')
+	assert empty.diagnostics.len == 0
+	// The same in a body, where the written zero sizes the object as zero.
+	body := declarations_of('int main(void) { char s[0] = ""; return 0; }')
+	assert body.diagnostics.len == 0
+	assert body.unit.decls[0].body[0].decl_count == 0
 }
 
 // A shape the reader does not implement is refused by name: a nested list, a

@@ -1145,7 +1145,13 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			p.skip_declaration()
 			return stmts
 		}
-		count := if d.array_count() > 0 { d.array_count() } else { elements.len }
+		// A size that was written is used as it was written, including a written
+		// zero; only a pair of empty brackets takes its size from the literal,
+		// which is the elements the literal writes.
+		mut count := if d.array_count() > 0 { d.array_count() } else { elements.len }
+		if from_string && d.array_sized() {
+			count = d.array_count()
+		}
 		stmts << ast.Stmt{
 			kind:       .var_decl
 			init:       init
