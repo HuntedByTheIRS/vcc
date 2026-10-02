@@ -1004,6 +1004,7 @@ fn test_the_float_instructions_are_the_bytes_the_machine_reads() {
 	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
 	rbp := target.reg('rbp') or { panic('the target description has no such name') }
 	eax := target.reg('eax') or { panic('the target description has no such name') }
+	rax := target.reg('rax') or { panic('the target description has no such name') }
 	xmm0 := target.float_reg('xmm0') or { panic('the target description has no such name') }
 	xmm1 := target.float_reg('xmm1') or { panic('the target description has no such name') }
 	// movss xmm0, xmm1
@@ -1082,5 +1083,42 @@ fn test_the_float_instructions_are_the_bytes_the_machine_reads() {
 		0x00,
 		0x00,
 		0x00,
+	]
+	// negating a float: movq rax, xmm0 / btc eax, 31 / movq xmm0, rax. The middle
+	// instruction is the one that says which bit the sign is: the double's form of
+	// it is the same two bytes with a REX.W in front and 63 for the bit, and that
+	// one flips bit 63 of the register, which a float does not have a sign at.
+	assert target.negate_single(xmm0, eax) or { panic('the target description has no such name') } == [
+		u8(0x66),
+		0x48,
+		0x0f,
+		0x7e,
+		0xc0,
+		0x0f,
+		0xba,
+		0xf8,
+		0x1f,
+		0x66,
+		0x48,
+		0x0f,
+		0x6e,
+		0xc0,
+	]
+	assert target.negate_double(xmm0, rax) or { panic('the target description has no such name') } == [
+		u8(0x66),
+		0x48,
+		0x0f,
+		0x7e,
+		0xc0,
+		0x48,
+		0x0f,
+		0xba,
+		0xf8,
+		0x3f,
+		0x66,
+		0x48,
+		0x0f,
+		0x6e,
+		0xc0,
 	]
 }

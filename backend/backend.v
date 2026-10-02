@@ -792,6 +792,12 @@ pub fn (t Target) negate_double(reg Register, gp Register) ![]u8 {
 	return x86_64.negate_double(t.describe(reg), t.describe(gp))
 }
 
+// negate_single is the same sign flip at four bytes, which is bit 31 rather than
+// bit 63 of the register the float sits in.
+pub fn (t Target) negate_single(reg Register, gp Register) ![]u8 {
+	return x86_64.negate_single(t.describe(reg), t.describe(gp))
+}
+
 // int_to_double widens a four-byte integer to a double, and double_to_int
 // truncates a double to a four-byte integer. Those are the two conversions the
 // language asks for between the classes, and the machine keeps them in the

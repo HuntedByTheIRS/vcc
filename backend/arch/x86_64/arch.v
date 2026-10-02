@@ -324,6 +324,33 @@ pub fn negate_double(reg Register, gp Register) ![]u8 {
 	return out
 }
 
+// negate_single flips the sign bit of a float, which is bit 31 of the low four
+// bytes and not bit 63. The moves and the bit test are the same instructions,
+// with the bit test left at four bytes: that is exactly the difference, because
+// the REX.W that negate_double writes reaches bit 63 and leaves a float's own
+// sign bit alone. Measured against gcc 16.2.1, whose `-f` for a float is this
+// sequence with btc eax, 31.
+pub fn negate_single(reg Register, gp Register) ![]u8 {
+	if reg.width != 16 || gp.width != 4 {
+		return error('${name}: negating a float names a sixteen-byte register and a four-byte one, and ${reg.name} or ${gp.name} is neither')
+	}
+	if reg.code >= 8 || gp.code >= 8 {
+		// Negating a double refuses the same registers for the same reason: the
+		// REX prefix a wider one needs is not written here.
+		return error('${name}: negating a float names ${reg.name} and ${gp.name}, and only the first eight have the encoding written here')
+	}
+	mut out := movq_modrm(movq_from_float, reg, gp)
+	// btc eax, 31: the bit test and complement with the bit in the immediate,
+	// without REX.W so that it reads the bit number modulo 32 and writes the low
+	// four bytes.
+	out << u8(0x0f)
+	out << u8(0xba)
+	out << u8(0xf8 | (gp.code & 0x07))
+	out << u8(31)
+	out << movq_modrm(movq_to_float, reg, gp)
+	return out
+}
+
 // zero_double clears a register, which is the one double constant that needs no
 // memory: the exclusive-or of a value with itself is zero, and the instruction
 // leaves the flags alone so a comparison before it still stands.
