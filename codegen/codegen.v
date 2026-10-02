@@ -4034,6 +4034,15 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 		}
 	}
 	if unary.expr is ast.Field {
+		if unary.expr.bitfield {
+			// A bitfield is not an object with an address of its own: it is a
+			// run of bits inside a storage unit it shares, so `&s.a` has no
+			// byte to give. gcc refuses it too, and a refusal by name is what
+			// keeps this from handing back the unit's address as though it
+			// were the field's.
+			e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of the bitfield ${unary.expr.name}.${unary.expr.member} is taken, and a bitfield does not have an address of its own')
+			return error('address of a bitfield')
+		}
 		// The member's address is the object's address plus the byte the layout
 		// put the member at, which is the same computation a member read makes
 		// and stops short of the read.
