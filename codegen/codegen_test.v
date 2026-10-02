@@ -378,6 +378,29 @@ fn test_the_narrow_integer_types_hold_their_values() {
 	assert run_image(emitted.bytes) == 11
 }
 
+// A function of a narrow integer type returns a value the caller reads at that
+// type's width. The register holds an int whatever the type says, so the callee
+// cuts the value to the type before it returns, which is what makes `return
+// 70000;` in a `short` function the 4464 the language and gcc answer with.
+// Measured on gcc 16.2.1, this program exits 4.
+fn test_a_narrow_return_type_comes_back_cut_to_its_width() {
+	emitted := emit(translation_unit('short nf(void) { return 70000; }\nunsigned short uf(void) { return -1; }\n_Bool bf(void) { return 5; }\nsigned char cf(void) { return 200; }\nint main(void) { return (nf() == 4464) + (uf() == 65535) + (bf() == 1) + (cf() == -56); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
+}
+
+// Every store into a `_Bool` object leaves 0 or 1, which is 6.3.1.2 and not only
+// the store a frame slot goes through: the members and the elements of an array go
+// through their own addresses, and a top-level object's first value is written into
+// the image by the layout. Measured on gcc 16.2.1, this program exits 5.
+fn test_a_store_into_a_bool_makes_the_value_zero_or_one() {
+	emitted := emit(translation_unit('_Bool g = 2;\nstatic _Bool ga[2] = {2, 0};\nstruct S { _Bool b; };\nint main(void) { _Bool a[2]; a[0] = 2; struct S s; s.b = 3; return (g == 1) + (ga[0] == 1) + (ga[1] == 0) + (a[0] == 1) + (s.b == 1); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 5
+}
+
 fn test_a_constant_expression_is_folded() {
 	emitted := emit(translation_unit('int main() { return 6 * 7; }'), Options{})
 	assert emitted.diagnostics.len == 0
@@ -795,7 +818,18 @@ fn test_a_file_without_main_says_so() {
 }
 
 fn test_a_return_type_other_than_int_is_reported() {
-	emitted := emit(translation_unit('char main() { return 1; }'), Options{})
+	// The example has to be a type this compiler still refuses, or the test stops testing the
+	// check: `char` was that example until the narrow integer types were implemented.
+	unit := ast.TranslationUnit{
+		decls: [
+			ast.FnDecl{
+				name: 'main'
+				ret:  'long double'
+				body: [return_statement(0)]
+			},
+		]
+	}
+	emitted := emit(unit, Options{})
 	assert emitted.diagnostics.len == 1
 	assert emitted.diagnostics[0].msg.contains('only int')
 }
@@ -812,7 +846,7 @@ fn test_a_helper_with_another_return_type_is_reported() {
 			},
 			ast.FnDecl{
 				name: 'helper'
-				ret:  'char'
+				ret:  'long double'
 				body: [return_statement(0)]
 			},
 		]

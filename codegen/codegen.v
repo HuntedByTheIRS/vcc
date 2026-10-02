@@ -669,8 +669,9 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// word above it in rdx, and which clears rdx when the returned
 		// expression is narrower than the type.
 	} else if decl.ret != 'int' && decl.ret != 'void' && decl.ret != 'double' && decl.ret != 'float'
-		&& !e.eight_byte_integer(types.from_words(decl.ret.split(' ')) or { types.Type{} }) {
-		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, the four 64-bit integers, float, double and void are implemented')
+		&& !e.eight_byte_integer(types.from_words(decl.ret.split(' ')) or { types.Type{} })
+		&& !e.narrow_integer_spelling(decl.ret) {
+		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, the four 64-bit integers, the narrow integer types, float, double and void are implemented')
 		return error('unsupported return type')
 	}
 	e.returning = decl.ret
@@ -1069,6 +1070,12 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 // is refused is a pointer: a function returning an int or a double has no
 // conversion to make from an address, and the answer would be half of it or an
 // address that is no longer one.
+//
+// A return type narrower than an int is the one case where the conversion cuts
+// the value rather than widening it: the machine hands back an int in the
+// register whatever the type says, and the language makes the caller's value the
+// one of that type, so `short f(void) { return 70000; }` answers 4464 and not
+// 70000. Measured on gcc 16.2.1, which narrows in the callee the same way.
 fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 	if e.returning == 'double' {
 		return e.convert_to_double(expr, line, col)
@@ -1081,16 +1088,65 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 		return e.convert_to_single(expr, line, col)
 	}
 	if e.floating_of(expr) {
-		return e.convert_to_int(expr, e.written_is_unsigned(e.returning), line, col)
-	}
-	if e.returns_eight_byte_integer() {
+		e.convert_to_int(expr, e.written_is_unsigned(e.returning), line, col)!
+	} else if e.returns_eight_byte_integer() {
 		// A function whose return type is a 64-bit integer leaves the whole
 		// register as its value, so a narrower expression is widened into it the
 		// same way an operand of a 64-bit step is: `return -1;` in a function
 		// returning a long answers -1.
-		return e.extend_operand_to_word(expr, line, col)
+		e.extend_operand_to_word(expr, line, col)!
 	}
-	return
+	if kind := e.narrow_return_kind() {
+		register := e.accumulator(line, col)!
+		e.narrow_register(kind, register, (e.storage_width(expr.typ) or { 4 }) == 8)!
+	}
+}
+
+// narrow_return_kind is the kind of a return type narrower than an int, or none
+// for every other type. It is the question the cut in convert_to_return turns on
+// and the same list the return-type check admits.
+fn (e Emitter) narrow_return_kind() ?types.Kind {
+	typ := types.from_words(e.returning.split(' ')) or { return none }
+	return if typ.kind in [.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short] {
+		typ.kind
+	} else {
+		none
+	}
+}
+
+// narrow_integer_spelling says whether a written type is one of the integer kinds
+// narrower than an int. A function of one of those types returns a value the
+// caller reads at the type's own width, which is the width the register's low
+// bits hold, so the type is one the emitter has a return for.
+fn (e Emitter) narrow_integer_spelling(written string) bool {
+	typ := types.from_words(written.split(' ')) or { return false }
+	return typ.kind in [.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short]
+}
+
+// narrow_register cuts the value in a register to the width of a narrow integer
+// kind and puts it back, which is the cut both a conversion to one of those types
+// and a return of one make: `(short)70000` and `short f(void) { return 70000; }`
+// are the same 4464. The word flag says the value arrived as a whole 64-bit
+// register, which is what decides the width the `_Bool` case tests: a `_Bool` is
+// not a cut but a comparison, so the value is 1 for everything that is not zero,
+// and a 64-bit value with nothing in its low four bytes is still not zero.
+fn (mut e Emitter) narrow_register(kind types.Kind, register backend.Register, word bool) !void {
+	match kind {
+		.bool_ {
+			if word {
+				e.append(e.target.test_word(register)!)
+			} else {
+				e.append(e.target.test(register)!)
+			}
+			e.append(e.target.set_condition(backend.Condition.not_equal, register)!)
+			e.append(e.target.widen_byte(register)!)
+		}
+		.char_, .signed_char { e.append(e.target.sign_extend_byte(register)!) }
+		.unsigned_char { e.append(e.target.widen_byte(register)!) }
+		.short { e.append(e.target.sign_extend_half(register)!) }
+		.unsigned_short { e.append(e.target.zero_extend_half(register)!) }
+		else {}
+	}
 }
 
 // returns_eight_byte_integer says whether the function being emitted returns one
@@ -1639,6 +1695,10 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr)
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into the member ${member_name}, which holds ${width}')
 		return error('width mismatch')
 	}
+	// A store into a `_Bool` member makes the value 0 or 1, which is the member's
+	// own type rather than the width the store is made at.
+	e.normalize_a_bool_store(e.declares_a_bool(member.spelling), value_width == 8, stmt.line,
+		stmt.col)!
 	value := e.accumulator(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 	e.append(e.target.store_indirect(address_register, value, width)!)
@@ -1748,6 +1808,11 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 				return error('unknown width')
 			}
+			// An element of a `_Bool` array holds 0 or 1 whatever was written
+			// into it, and the type is the declaration's because the storage in
+			// the image carries a width and not a signedness or a `_Bool`.
+			e.normalize_a_bool_store(e.declares_a_bool(e.global_written(stmt.target)),
+				(e.width_of(expr) or { 4 }) == 8, stmt.line, stmt.col)!
 			value := e.accumulator(stmt.line, stmt.col)!
 			e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 			e.append(e.target.store_indirect(address_register, value, object.width)!)
@@ -1819,6 +1884,9 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${slot.width}')
 		return error('width mismatch')
 	}
+	// An element of a local array of `_Bool` holds 0 or 1, and the slot carries
+	// that fact because the element type is what the declaration wrote.
+	e.normalize_a_bool_store(slot.boolean, width == 8, stmt.line, stmt.col)!
 	value := e.accumulator(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 	e.append(e.target.store_indirect(address_register, value, slot.width)!)
@@ -1868,6 +1936,9 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into an element of ${width}')
 		return error('width mismatch')
 	}
+	// An element of a `_Bool` array holds 0 or 1, and the element's type is
+	// resolved here, which is where the answer is read from.
+	e.normalize_a_bool_store(index.typ.kind == .bool_, value_width == 8, stmt.line, stmt.col)!
 	value := e.accumulator(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 	e.append(e.target.store_indirect(address_register, value, width)!)
@@ -2471,6 +2542,40 @@ fn (e Emitter) writes_a_128(written string) bool {
 fn (e Emitter) written_is_unsigned(written string) bool {
 	typ := types.from_words(written.split(' ')) or { return false }
 	return typ.kind.is_unsigned()
+}
+
+// declares_a_bool says whether a written type is `_Bool`, which is the question a
+// store into that object turns on: 6.3.1.2 makes the object hold 0 or 1 whatever
+// was written into it, and that is a step the width of the object does not ask
+// for.
+fn (e Emitter) declares_a_bool(written string) bool {
+	typ := types.from_words(written.split(' ')) or { return false }
+	return typ.kind == .bool_
+}
+
+// normalize_a_bool_store makes the value in the accumulator 0 or 1 when the object
+// it is about to be stored into is a `_Bool`. The rule holds for every store into
+// one and not only the ones a frame slot or a conversion goes through: a member,
+// an element of an array and a top-level object each hold 0 or 1 after a store,
+// and gcc 16.2.1 leaves 1 for `s.b = 3` and for `a[0] = 2`. The word flag says the
+// value arrived as a whole 64-bit register, where a test of four bytes would call
+// a value of 2^32 zero.
+fn (mut e Emitter) normalize_a_bool_store(boolean bool, word bool, line int, col int) !void {
+	if !boolean {
+		return
+	}
+	register := e.accumulator(line, col)!
+	e.narrow_register(.bool_, register, word)!
+}
+
+// normalize_a_bool_constant is the value a `_Bool` object is defined with: 6.3.1.2
+// makes the object hold 0 or 1 whatever constant the declaration wrote, so
+// `_Bool g = 2;` holds 1 and not 2, which is what gcc 16.2.1 leaves in the image.
+fn (e Emitter) normalize_a_bool_constant(written string, value i64) i64 {
+	if e.declares_a_bool(written) && value != 0 {
+		return 1
+	}
+	return value
 }
 
 // global_written is the type a top-level object was declared with, as it was
@@ -5699,8 +5804,11 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			// A call's value has the width the language returns it with, which
 			// is the type its declaration wrote: a double is eight bytes in the
 			// floating-point file, a long is eight in the general one, and
-			// anything else this back end emits is four.
-			e.type_width(e.returns[expr.name]) or { 4 }
+			// anything else this back end emits is four. A narrow integer return
+			// type is four as well, because the register holds the widened value
+			// the way it holds an int, which is the width every use of it reads.
+			width := e.type_width(e.returns[expr.name]) or { 4 }
+			if width < 4 { 4 } else { width }
 		}
 		ast.Index {
 			// An element is the width of the element's type, with a char
@@ -6798,7 +6906,8 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		}
 	}
 	if value := object.init {
-		put_integer(mut e.program.globals_blob, offset, value, element)
+		put_integer(mut e.program.globals_blob, offset, e.normalize_a_bool_constant(object.typ,
+			value), element)
 	}
 	// A brace list writes one element at a time, at the width of one element, in
 	// the order the list wrote them. The elements the list did not reach stay
@@ -6818,7 +6927,8 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		if index >= count {
 			break
 		}
-		put_integer(mut e.program.globals_blob, offset + index * element, value, element)
+		put_integer(mut e.program.globals_blob, offset + index * element,
+			e.normalize_a_bool_constant(object.typ, value), element)
 	}
 	slot := image.GlobalSlot{
 		offset:   offset
