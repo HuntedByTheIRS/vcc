@@ -1795,16 +1795,22 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			continue
 		}
 		if p.at_punct('(') {
-			// The parameters are read with the reader a declaration uses, and each
-			// of them names its own specifiers, so what the list resolved to last is
-			// not this declarator's base: the base is what the declaration's own
-			// specifiers gave. Measured before this was held, `int f(void); int
-			// main(void) { return f() + 1; }` was refused because the `(void)` left
-			// the base at void and the prototype was declared `void (void)`.
+			// The parameters are read with the reader a declaration uses, and
+			// each of them names its own specifiers, so what the list resolved
+			// to last is not this declarator's base or storage class: the base
+			// is what the declaration's own specifiers gave, and so is the
+			// storage, which decides whether the name is a type. Measured
+			// before each was held, `int f(void); int main(void) { return f() +
+			// 1; }` was refused because the `(void)` left the base at void and
+			// the prototype was declared `void (void)`, and `typedef int
+			// (*cmp)(const void *, const void *);` was recorded as a name of no
+			// type because the parameter list left the storage automatic.
 			at := p.peek()
 			base := p.pending_base
+			storage := p.pending_storage
 			params := p.parse_parameter_list(depth + 1)!
 			p.pending_base = base
+			p.pending_storage = storage
 			if params.problem.len > 0 && d.param_problem.len == 0 {
 				d.param_problem = params.problem
 				d.param_at = params.at

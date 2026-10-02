@@ -996,3 +996,15 @@ fn test_the_stars_and_the_suffixes_take_the_order_the_parentheses_wrote() {
 	assert fp.resolved.base.base.base.count == 3
 	assert fp.resolved.base.base.base.base.same(types.int_type())
 }
+
+// A typedef names the type its declarator wrote, and a parameter list in that
+// declarator is part of the type rather than a change to the declaration around
+// it. Measured on gcc 16.2.1, `__compar_fn_t` and `__sighandler_t` are eight
+// bytes each, so `cmp c` declares a parameter that can be called through.
+fn test_a_typedef_of_a_pointer_to_a_function_is_a_pointer() {
+	result := parsed('typedef int (*cmp)(const void *, const void *);\nint f(cmp c) { return 0; }')
+	assert result.diagnostics.len == 0
+	param := result.unit.decls[0].params[0]
+	assert param.resolved.kind == .pointer
+	assert param.resolved.base.kind == .function
+}
