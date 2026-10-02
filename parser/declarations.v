@@ -1575,13 +1575,31 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 				designators: designators
 			}
 		} else if p.starts_a_written_constant() {
+			before := p.pos
 			constant := p.number_constant() or {
 				p.skip_balanced(open) or {}
 				return error('brace element')
 			}
-			elements << BraceElement{
-				number:      constant
-				designators: designators
+			if body && !p.at_punct(',') && !p.at_punct('}') {
+				// The constant is the first operand of an expression rather than
+				// the whole element: `{1 + 1}` is one element whose value is two,
+				// which gcc 16.2.1 accepts. What ends an element is the comma or
+				// the closing brace, so any other token after the constant means
+				// the element is longer than it and is read as an expression.
+				p.pos = before
+				expr := p.parse_expression() or {
+					p.skip_balanced(open) or {}
+					return error('brace element')
+				}
+				elements << BraceElement{
+					expr:        expr
+					designators: designators
+				}
+			} else {
+				elements << BraceElement{
+					number:      constant
+					designators: designators
+				}
 			}
 		} else if !body && (t.kind == .identifier || t.kind == .string || (t.kind == .punct && t.text == '&')) {
 			// Only a token that can start an address takes the address path: a

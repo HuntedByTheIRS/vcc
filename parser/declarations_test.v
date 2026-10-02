@@ -615,6 +615,26 @@ fn test_a_body_list_that_addresses_a_part_of_an_object_is_refused() {
 	assert result.diagnostics[0].msg.contains('the address of a part of a is not implemented')
 }
 
+// An element that begins with a written constant and is longer than one is the
+// expression the store takes rather than the constant: `{1 + 1}` is one element
+// whose value is two, which gcc 16.2.1 accepts. What ends an element is the comma
+// or the closing brace, so anything else after the constant makes the element an
+// expression.
+fn test_a_body_list_element_that_is_a_constant_expression_is_read() {
+	result := declarations_of('int main(void) { int a[2] = {1 + 1, 3}; return 0; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].body[0].decl_count == 2
+	mut assigns := 0
+	for stmt in result.unit.decls[0].body {
+		if stmt.kind == .assign {
+			assigns++
+		}
+	}
+	// The two elements are stores, and the zero each element starts as is stored
+	// first.
+	assert assigns == 4
+}
+
 // A struct's brace initializer in a body is the stores the members make at the
 // point of the declaration, one per member the list wrote, at the member's own
 // offset. Measured on gcc 16.2.1, `struct S s = {5, 6};` returns 56 for
