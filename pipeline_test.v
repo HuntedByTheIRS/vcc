@@ -129,6 +129,38 @@ fn test_a_static_function_nothing_names_is_not_read() {
 	os.rm(called_binary) or {}
 }
 
+// A definition in the file is what a call in the file reaches, whatever the
+// callee returns. The shape that was wrong is a definition with an empty body:
+// `void f(void) {}` supplies f for this translation unit, but body.len is zero
+// for it exactly as it is for a prototype, so it was read as a declaration, the
+// call was emitted as an undefined dynamic symbol, and the image could not
+// start. These programs are compiled and run, so what is checked is the exit
+// status; a diagnostic count or a byte comparison would pass while the artifact
+// is dead.
+//
+// Both return types are here, and the int callee is called as a value as well as
+// as a statement: a change that made every call local by mishandling the value
+// case would pass the void programs and fail the int ones.
+fn test_a_call_to_a_definition_in_the_file_is_local_for_every_return_type() {
+	cases := [
+		'void f(void) {}\nint main(void) { f(); return 7; }\n',
+		'static void f(void) {}\nint main(void) { f(); return 7; }\n',
+		'void f(void);\nvoid f(void) {}\nint main(void) { f(); return 7; }\n',
+		'int f(void) { return 5; }\nint main(void) { return f(); }\n',
+		'int f(void) { return 5; }\nint main(void) { f(); return 7; }\n',
+		'int add(int a, int b) { return a + b; }\nint main(void) { return add(3, 4); }\n',
+	]
+	answers := [7, 7, 7, 5, 7, 7]
+	for i, program in cases {
+		source := scratch('definition_local_${i}.c')
+		binary := scratch('definition_local_${i}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 fn test_the_output_file_is_executable_and_an_elf() {
 	source := scratch('elf.c')
 	binary := scratch('elf')

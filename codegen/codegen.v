@@ -390,7 +390,7 @@ fn (e &Emitter) class_of(declared types.Type) abi.Class {
 fn entry_definition(unit ast.TranslationUnit, entry string) ?ast.FnDecl {
 	mut found := ?ast.FnDecl(none)
 	for candidate in unit.decls {
-		if candidate.name == entry && candidate.body.len > 0 {
+		if candidate.name == entry && candidate.defined {
 			found = candidate
 		}
 	}
@@ -441,7 +441,7 @@ fn (mut e Emitter) build() ![]u8 {
 				e.hidden_bytes = ret_class.bytes
 			}
 		}
-		if decl.body.len > 0 {
+		if decl.defined {
 			e.program.defined[decl.name] = true
 			mut widths := []int{}
 			mut classes := []bool{}
@@ -508,7 +508,7 @@ fn (mut e Emitter) build() ![]u8 {
 		e.emit_start()!
 	}
 	for decl in e.unit.decls {
-		if decl.body.len == 0 {
+		if !decl.defined {
 			continue
 		}
 		e.emit_function(decl)!

@@ -51,7 +51,7 @@ pub fn render(unit ast.TranslationUnit) string {
 	}
 	for decl in unit.decls {
 		out << 'fn ${decl.name}() ${decl.ret} at ${decl.line}:${decl.col}${typed(decl.resolved)}'
-		if decl.body.len == 0 {
+		if !decl.defined {
 			out << '  (declaration without a definition)'
 			continue
 		}

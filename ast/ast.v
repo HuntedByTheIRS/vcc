@@ -48,7 +48,16 @@ pub:
 	// storage in the frame of the call, so where they are written is where the
 	// back end has to put them.
 	params []Param
-	// body is empty for a declaration without a definition.
+	// defined says the file wrote a body for this function. It is separate
+	// from body because a definition may have an empty body: `void f(void) {}`
+	// is a definition this translation unit supplies, and body.len is zero for
+	// it just as it is for a prototype. A prototype (defined false) names a
+	// function the link has to find elsewhere; a definition is emitted here and
+	// a call to it is a call into this image.
+	defined bool
+	// body is the statements the definition wrote. It is empty both for a
+	// prototype and for a definition written as `{}`, so defined is what tells
+	// the two apart.
 	body []Stmt
 	line int
 	col  int

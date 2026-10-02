@@ -267,12 +267,13 @@ fn fold_builtin_calls(unit ast.TranslationUnit, opts Options) ast.TranslationUni
 		// is a function whose parameters the back end cannot find, which is a
 		// diagnostic at -O1 and up and nothing at all at -O0.
 		decls << ast.FnDecl{
-			name:   decl.name
-			ret:    decl.ret
-			params: decl.params
-			body:   rewrite_body(decl.body, opts)
-			line:   decl.line
-			col:    decl.col
+			name:    decl.name
+			ret:     decl.ret
+			params:  decl.params
+			defined: decl.defined
+			body:    rewrite_body(decl.body, opts)
+			line:    decl.line
+			col:     decl.col
 		}
 	}
 	return ast.TranslationUnit{
