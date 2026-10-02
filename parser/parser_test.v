@@ -466,6 +466,86 @@ fn test_an_escape_that_names_more_than_a_byte_is_reported() {
 	assert result.diagnostics[0].msg.contains('not a byte')
 }
 
+fn test_a_universal_character_name_in_a_string_literal_is_utf8() {
+	// C99 6.4.3: a universal character name is one character, and a narrow
+	// literal writes it in the execution character set, which is UTF-8.
+	// Measured on gcc 16.2.1: "\u00E9" is c3 a9, "\U0001F600" is
+	// f0 9f 98 80, and a literal can mix them with ordinary characters.
+	result := parsed('int main() { return "\\u00E9\\U0001F600"; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	literal := expr as ast.StrLit
+	assert literal.value == '\xc3\xa9\xf0\x9f\x98\x80'
+	assert literal.value.len == 6
+}
+
+fn test_an_incomplete_universal_character_name_is_reported() {
+	// Measured on gcc 16.2.1: a name with fewer than the four hex digits \u
+	// takes, or eight that \U takes, is `incomplete universal character name
+	// \u00E`. The refusal names it where it is written.
+	result := parsed('int main() { return "\\u00E"; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('incomplete universal character name \\u00E')
+}
+
+fn test_a_universal_character_name_that_names_no_character_is_reported() {
+	// The surrogate range and values past the largest character name no
+	// character. Measured on gcc 16.2.1: `\uD800` and `\U80000000` are
+	// reported as `<spelling> is not a valid universal character`.
+	surrogate := parsed('int main() { return "\\uD800"; }')
+	assert surrogate.diagnostics.len == 1
+	assert surrogate.diagnostics[0].msg.contains('\\uD800 is not a valid universal character')
+	big := parsed('int main() { return "\\U80000000"; }')
+	assert big.diagnostics.len == 1
+	assert big.diagnostics[0].msg.contains('\\U80000000 is not a valid universal character')
+}
+
+fn test_a_universal_character_name_in_a_wide_literal_is_its_code_point() {
+	// A wide literal writes the character as the wchar_t this target gives,
+	// four bytes little-endian, rather than as its UTF-8 bytes. Measured on
+	// gcc 16.2.1: L"\u00E9\U0001F600" is two wchar_t, 0xE9 and 0x1F600.
+	result := parsed('int take(int *p);\nint main() { take(L"\\u00E9\\U0001F600"); return 0; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[1].body[0].expr or {
+		assert false
+		return
+	}
+	literal := (expr as ast.Call).args[0] as ast.StrLit
+	assert literal.unit == 4
+	assert literal.value == '\xe9\x00\x00\x00\x00\xf6\x01\x00'
+}
+
+fn test_a_universal_character_name_in_a_character_constant_is_packed() {
+	// Measured on gcc 16.2.1: a narrow character constant takes the bytes of
+	// the character's UTF-8 packed into the int, so '\u00E9' is 0xC3A9 and
+	// '\U0001F600' is 0xF09F9880 as a signed int; a wide one takes the code
+	// point, so L'\u00E9' is 233.
+	narrow := parsed("int main() { return '\\u00E9'; }")
+	assert narrow.diagnostics.len == 0
+	narrow_expr := narrow.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (narrow_expr as ast.IntLit).value == 50089
+	emoji := parsed("int main() { return '\\U0001F600'; }")
+	assert emoji.diagnostics.len == 0
+	emoji_expr := emoji.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (emoji_expr as ast.IntLit).value == -257976192
+	wide := parsed("int main() { return L'\\u00E9'; }")
+	assert wide.diagnostics.len == 0
+	wide_expr := wide.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (wide_expr as ast.IntLit).value == 233
+}
+
 fn test_a_bad_integer_literal_is_reported() {
 	result := parsed('int main() { return 0x; }')
 	assert result.diagnostics.len == 1

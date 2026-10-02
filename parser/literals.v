@@ -188,8 +188,10 @@ fn parse_floating_literal(text string) !f64 {
 // is an int in C, so that is what it becomes here.
 fn parse_character_literal(text string) !i64 {
 	mut body := text
+	mut narrow := true
 	if body.len > 0 && (body[0] == `L` || body[0] == `u` || body[0] == `U`) {
 		body = body[1..]
+		narrow = false
 	}
 	if body.len < 2 || body[0] != `'` || body[body.len - 1] != `'` {
 		return error('${text}: not a character constant')
@@ -203,6 +205,19 @@ fn parse_character_literal(text string) !i64 {
 			return error('${text}: multi-character constants are not implemented')
 		}
 		return i64(inner[0])
+	}
+	if inner.len >= 2 && (inner[1] == `u` || inner[1] == `U`) {
+		// A universal character name in a character constant names one
+		// character. A narrow constant takes its execution-set encoding, which
+		// is UTF-8, packed into the int the way gcc packs a multi-character
+		// constant: measured on gcc 16.2.1, '\u00E9' is 0xC3A9, '\U0001F600'
+		// is 0xF09F9880 and '\U00020000' is 0xF0A08080. A wide one takes the
+		// code point itself: L'\u00E9' is 233 and L'\U0001F600' is 128512.
+		name, _ := parse_ucn(inner, 1) or { return error('${text}: ${err.msg()}') }
+		if narrow {
+			return ucn_value(name)
+		}
+		return i64(name)
 	}
 	return parse_escape(inner[1..]) or { error('${text}: ${err.msg()}') }
 }
@@ -238,14 +253,6 @@ fn parse_escape(rest string) !i64 {
 		}
 		return value
 	}
-	if c == `u` || c == `U` {
-		// A universal character name in a literal is an escape whose value is
-		// the character it names, written in the execution character set. That
-		// encoding is the literal reader's next piece of work, so the refusal
-		// names the construct rather than calling a name an unknown escape,
-		// which is what the base's message did.
-		return error('universal character names in a literal are not implemented')
-	}
 	return match c {
 		`a` { i64(7) }
 		`b` { i64(8) }
@@ -260,6 +267,91 @@ fn parse_escape(rest string) !i64 {
 		`?` { i64(63) }
 		else { error('unknown escape sequence \\${c.ascii_str()}') }
 	}
+}
+
+// parse_ucn reads the universal character name `\uXXXX` or `\UXXXXXXXX` whose
+// `u` or `U` sits at `at` in the literal's inner text, and answers the code
+// point it names and where the text after it starts. C99 6.4.3 makes the two
+// spellings four and eight hexadecimal digits; a name with fewer is not a name
+// and is reported in gcc 16.2.1's own words, `incomplete universal character
+// name \u00E`. A name that stands for no character, which is the surrogate
+// range and everything past the largest the conversion holds, is reported the
+// same way gcc reports it in a literal: `\uD800 is not a valid universal
+// character`. Both messages are measured against gcc 16.2.1 one input at a time.
+fn parse_ucn(inner string, at int) !(u32, int) {
+	width := if inner[at] == `u` { 4 } else { 8 }
+	mut spelling := '\\' + inner[at].ascii_str()
+	mut value := u32(0)
+	mut i := at + 1
+	mut seen := 0
+	for seen < width && i < inner.len {
+		c := inner[i]
+		if c == `\n` {
+			break
+		}
+		digit := digit_value(c, 16) or { break }
+		value = value * 16 + u32(digit)
+		spelling += c.ascii_str()
+		seen++
+		i++
+	}
+	if seen < width {
+		return error('incomplete universal character name ${spelling}')
+	}
+	if (value >= 0xD800 && value <= 0xDFFF) || value > 0x7FFFFFFF {
+		return error('${spelling} is not a valid universal character')
+	}
+	return value, i
+}
+
+// encode_utf8 writes a code point in UTF-8, the execution character set every
+// mainstream toolchain uses for a narrow literal. The carries run to six bytes
+// rather than four because gcc accepts a UCN up to \U7FFFFFFF and encodes it
+// anyway; measured, `"\U7FFFFFFF"` is `fd bf bf bf bf bf`.
+fn encode_utf8(cp u32) []u8 {
+	if cp < 0x80 {
+		return [u8(cp)]
+	}
+	mut len := 2
+	if cp >= 0x4000000 {
+		len = 6
+	} else if cp >= 0x200000 {
+		len = 5
+	} else if cp >= 0x10000 {
+		len = 4
+	} else if cp >= 0x800 {
+		len = 3
+	}
+	mut out := []u8{len: len}
+	lead := match len {
+		2 { u8(0xC0) }
+		3 { u8(0xE0) }
+		4 { u8(0xF0) }
+		5 { u8(0xF8) }
+		else { u8(0xFC) }
+	}
+	mut shift := (len - 1) * 6
+	out[0] = lead | u8((cp >> shift) & u32(0x3F))
+	for k in 1 .. len {
+		shift = (len - 1 - k) * 6
+		out[k] = u8(0x80) | u8((cp >> shift) & u32(0x3F))
+	}
+	return out
+}
+
+// ucn_value is the value a universal character name gives an integer character
+// constant. gcc writes the character's encoding into the int, most significant
+// byte first, and keeps the last four bytes when the encoding is longer than
+// the int. Measured on gcc 16.2.1: '\u00E9' is 0xC3A9, '\U0001F600' is
+// 0xF09F9880, and '\U7FFFFFFF' is 0xBFBFBFBF, the tail of the six-byte encoding.
+fn ucn_value(cp u32) i64 {
+	bytes := encode_utf8(cp)
+	start := if bytes.len > 4 { bytes.len - 4 } else { 0 }
+	mut packed := u32(0)
+	for b in bytes[start..] {
+		packed = (packed << 8) | u32(b)
+	}
+	return i64(i32(packed))
 }
 
 // StringLiteral is the object a string literal names: the bytes of its
@@ -319,6 +411,18 @@ fn parse_string_literal(text string) !StringLiteral {
 			i += 2
 			continue
 		}
+		if i + 1 < inner.len && (inner[i + 1] == `u` || inner[i + 1] == `U`) {
+			// A universal character name names one character, and a narrow
+			// literal writes it in the execution character set, which is
+			// UTF-8, so one name can be several bytes. Measured on gcc
+			// 16.2.1: "\u00E9" is c3 a9 and "\U0001F600" is f0 9f 98 80.
+			name, next := parse_ucn(inner, i + 1) or {
+				return error('${text}: ${err.msg()}')
+			}
+			bytes << encode_utf8(name)
+			i = next
+			continue
+		}
 		value, next := parse_string_escape(inner, i + 1) or {
 			return error('${text}: ${err.msg()}')
 		}
@@ -356,11 +460,23 @@ fn parse_wide_string(text string, inner string) !StringLiteral {
 				i += 2
 				continue
 			}
-			parsed, next := parse_string_escape(inner, i + 1) or {
-				return error('${text}: ${err.msg()}')
+			if i + 1 < inner.len && (inner[i + 1] == `u` || inner[i + 1] == `U`) {
+				// A universal character name in a wide literal is the code
+				// point itself, written into one wchar_t, not its UTF-8
+				// bytes. Measured on gcc 16.2.1: L"\u00E9\U0001F600" is two
+				// wchar_t, 0xE9 and 0x1F600.
+				name, after := parse_ucn(inner, i + 1) or {
+					return error('${text}: ${err.msg()}')
+				}
+				value = i64(name)
+				i = after
+			} else {
+				parsed, next := parse_string_escape(inner, i + 1) or {
+					return error('${text}: ${err.msg()}')
+				}
+				value = parsed
+				i = next
 			}
-			value = parsed
-			i = next
 		} else {
 			decoded, next := decode_utf8(inner, i) or {
 				return error('${text}: ${err.msg()}')
