@@ -1298,6 +1298,13 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
+		// The reserved `__builtin_` spellings are reads of their own and not
+		// calls: their arguments are types as often as expressions, and the
+		// value is settled while the tokens are read. The list is in
+		// builtins.v, where each one's reader is.
+		if t.text in builtin_expression_names && p.at_punct('(') {
+			return p.parse_builtin_expression(t)!
+		}
 		if p.at_punct('(') {
 			args := p.parse_arguments()!
 			return ast.Expr(ast.Call{
