@@ -281,5 +281,15 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			dump_expression(expr.left, depth + 1, mut out)
 			dump_expression(expr.right, depth + 1, mut out)
 		}
+		ast.StmtExpr {
+			// The statements are printed first, in the order they run, and the
+			// value expression after them, which is the order the emitter
+			// produces for this node.
+			out << '${indent}statement expression at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			dump_statements(expr.body, depth + 1, mut out)
+			if value := expr.value {
+				dump_expression(value, depth + 1, mut out)
+			}
+		}
 	}
 }
