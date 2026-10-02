@@ -253,6 +253,17 @@ fn test_sizeof_of_a_type_with_no_size_is_refused() {
 	assert result.diagnostics[0].line == 1
 }
 
+// A tag that was declared and never defined has no members, and no members is
+// not a size of zero: there is nothing to lay out and nothing to answer. The
+// refusal names the tag as it was written, and it is an incomplete type gcc
+// refuses too: measured, gcc 16.2.1 rejects `struct S; sizeof(struct S);` with
+// `invalid application of 'sizeof' to an incomplete type`.
+fn test_sizeof_of_a_tag_that_is_never_completed_is_refused_by_name() {
+	result := parsed('struct S;\nint main(void) { return sizeof(struct S); }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'unsupported: sizeof asks how many bytes struct S takes, and this compiler has no size for it'
+}
+
 // The operand of `sizeof` is a type name or an expression, and `x` is a name
 // here rather than a type: `sizeof (x)` sizes the variable.
 fn test_sizeof_of_a_parenthesised_name_is_the_size_of_the_variable() {
