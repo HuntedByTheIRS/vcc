@@ -285,8 +285,13 @@ fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map
 	for stmt in stmts {
 		if stmt.kind == .assign {
 			// The name an assignment writes to is a use of it: `missing = 1;`
-			// names a missing declaration just as reading the name does.
+			// names a missing declaration just as reading the name does. An
+			// assignment through a dereference has no name of its own, and the
+			// pointer it writes through is the expression below.
 			p.check_undeclared_name(stmt.target, stmt.line, stmt.col, mut reported)
+		}
+		if deref := stmt.deref {
+			p.check_undeclared_expression(deref, mut reported)
 		}
 		if expr := stmt.expr {
 			p.check_undeclared_expression(expr, mut reported)

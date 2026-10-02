@@ -156,6 +156,13 @@ pub:
 	target string
 	index  ?Expr
 	field  ?Field
+	// deref is the dereference an assignment writes through when the target
+	// is not a name: `*p = v` writes the value at the address the pointer
+	// holds, so what the store needs is that address and the tree keeps the
+	// expression that gives it, a Unary whose operand is the pointer. It is
+	// none for an assignment to a name, and target is empty for one written
+	// through a dereference.
+	deref ?Expr
 	// cond is the controlling expression of an if or a while: what has to be
 	// true for the branch to be taken, or for the loop to go round again.
 	cond ?Expr

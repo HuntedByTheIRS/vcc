@@ -306,6 +306,13 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 		if value := stmt.index {
 			index = rewrite(value, opts, 0)
 		}
+		// The expression an assignment writes through is a place as well as a
+		// value: `*p = v` reads the pointer, so a builtin call inside it is
+		// folded the same way.
+		mut deref := ?ast.Expr(none)
+		if value := stmt.deref {
+			deref = rewrite(value, opts, 0)
+		}
 		out << ast.Stmt{
 			kind:       stmt.kind
 			expr:       expr
@@ -315,6 +322,7 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 			decl_count: stmt.decl_count
 			target:     stmt.target
 			index:      index
+			deref:      deref
 			cond:       cond
 			body:       rewrite_body(stmt.body, opts)
 			step:       rewrite_body(stmt.step, opts)
