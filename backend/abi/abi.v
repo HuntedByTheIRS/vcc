@@ -197,3 +197,172 @@ fn note_member(r types.Representation, typ types.Type, start int, low int, high 
 		cover.other = true
 	}
 }
+
+// ---- variadic arguments ----
+
+// The convention passes an argument in a register until the file it belongs to
+// runs out and on the stack after that. These are the counts for the machine
+// this file describes: six general argument registers and eight vector ones,
+// each vector register sixteen bytes because that is the width of the register
+// and a double sits in the low half of one.
+//
+// They are constants rather than a table read off a target, because the numbers
+// below have to be known while the numbers are being computed and a machine
+// whose counts differed would be a machine with its own copy of this section.
+const general_argument_registers = 6
+const vector_argument_registers = 8
+const one_word = 8
+const one_vector = 16
+
+// RegisterArea is the entry save area a variadic callee writes its argument
+// registers into, and the numbers a walk through the arguments reads out of it.
+//
+// A variadic callee cannot know which arguments arrived in registers and which
+// on the stack, so its prologue writes every argument register it may have been
+// given into a save area in its own frame, and `va_start` points the argument
+// list at that area. Where each file of registers starts, how far apart two
+// registers of one file sit, and how many of them there are is a fact about the
+// machine, which is why it lives here and not in the emitter.
+//
+// The general registers come first, one machine word each, and the vector
+// registers follow, sixteen bytes each: the convention lays the area out that
+// way, and every offset a walk computes is an offset into this one area.
+pub struct RegisterArea {
+pub:
+	// gp_at is where the first general argument register is written, and
+	// gp_stride how far after it the second one is.
+	gp_at     int
+	gp_stride int
+	gp_count  int
+	// fp_at is where the first vector register is written, and fp_stride the
+	// distance to the next one. It is not a multiple of the register file's
+	// start by accident: the general registers are written in front of it.
+	fp_at     int
+	fp_stride int
+	fp_count  int
+	// bytes is how much room the whole area takes in the frame.
+	bytes int
+}
+
+// register_area is the save area of this convention.
+pub fn register_area() RegisterArea {
+	gp_stride := one_word
+	fp_stride := one_vector
+	fp_at := general_argument_registers * gp_stride
+	return RegisterArea{
+		gp_at:     0
+		gp_stride: gp_stride
+		gp_count:  general_argument_registers
+		fp_at:     fp_at
+		fp_stride: fp_stride
+		fp_count:  vector_argument_registers
+		bytes:     fp_at + vector_argument_registers * fp_stride
+	}
+}
+
+// ArgumentList is the tag an argument list points at: where a walk through the
+// unnamed arguments has got to in each file of registers, where the arguments
+// that did not fit in a register start, and where the save area was written.
+//
+// The four fields are the convention's, in the order and at the offsets it
+// gives them: two four-byte counters and two addresses, which is twenty-four
+// bytes in all. `argument_list_type` builds the C type from this description and
+// `argument_list_offsets_agree_with_the_type` is the test that keeps the two
+// from drifting apart.
+pub struct ArgumentList {
+pub:
+	gp_offset_at int
+	fp_offset_at int
+	overflow_at  int
+	area_at      int
+	bytes        int
+}
+
+// argument_list is the tag's layout on this convention.
+pub fn argument_list() ArgumentList {
+	return ArgumentList{
+		gp_offset_at: 0
+		fp_offset_at: 4
+		overflow_at:  8
+		area_at:      16
+		bytes:        24
+	}
+}
+
+// gp_start is where a walk through the general arguments begins for a function
+// with `named` general parameters before the ellipsis. Those parameters arrived
+// in the first registers of the file, so the walk starts after them; a function
+// with more named parameters than the machine has registers has none of them
+// left, and the walk starts at the limit, which sends every general argument to
+// the overflow area.
+pub fn gp_start(named int) int {
+	area := register_area()
+	if named >= area.gp_count {
+		return gp_limit()
+	}
+	return area.gp_at + named * area.gp_stride
+}
+
+// fp_start is the same number for the vector file.
+pub fn fp_start(named int) int {
+	area := register_area()
+	if named >= area.fp_count {
+		return fp_limit()
+	}
+	return area.fp_at + named * area.fp_stride
+}
+
+// gp_limit and fp_limit are the offsets a walk compares its own cursor against:
+// below the limit the next argument of that file is in the save area, and at it
+// there are no registers left and the argument is in the overflow area.
+pub fn gp_limit() int {
+	area := register_area()
+	return area.gp_at + area.gp_count * area.gp_stride
+}
+
+pub fn fp_limit() int {
+	area := register_area()
+	return area.fp_at + area.fp_count * area.fp_stride
+}
+
+// argument_list_type is the C type a header's `__builtin_va_list` names: a
+// pointer to the tag above.
+//
+// The standard's `va_list` is an array of one tag, so that passing one to a
+// function passes the address of the tag rather than a copy of it. This compiler
+// keeps the address itself as the type, because that is the value every use of
+// it wants: `va_start` writes through it, `va_arg` reads and steps it, and a
+// `va_list` handed to a library function arrives as the pointer that function
+// expects. The member types are the convention's four fields, and the test
+// beside this file asserts that the model lays them out at the offsets above
+// rather than trusting the two to agree.
+pub fn argument_list_type() types.Type {
+	members := [
+		types.Member{
+			name: 'gp_offset'
+			typ:  types.unsigned_int_type()
+		},
+		types.Member{
+			name: 'fp_offset'
+			typ:  types.unsigned_int_type()
+		},
+		types.Member{
+			name: 'overflow_arg_area'
+			typ:  types.pointer_to(types.void_type())
+		},
+		types.Member{
+			name: 'reg_save_area'
+			typ:  types.pointer_to(types.void_type())
+		},
+	]
+	return types.pointer_to(types.struct_type('__va_list_tag', members))
+}
+
+// argument_list_tag is the tag `argument_list_type` points at, which a caller
+// that wants the type itself rather than an argument list of it asks for.
+pub fn argument_list_tag() types.Type {
+	if pointee := argument_list_type().pointee() {
+		return pointee
+	}
+	return types.Type{}
+}
