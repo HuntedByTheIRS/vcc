@@ -67,6 +67,11 @@ struct Slot {
 	// unsigned four-byte slot has to be converted at a width every value of that
 	// type fits in, and the same conversion into a signed one saturates.
 	unsigned bool
+	// boolean is set for a slot holding a `_Bool`. Every store into one converts
+	// the value to 0 or 1, which is a step neither the width nor the signedness
+	// of the slot asks for, so it travels with the slot the way the signedness
+	// does.
+	boolean bool
 	// bytes is the size of a slot that holds an object of an aggregate type, and
 	// zero for a slot that holds a scalar or an array: an object of a struct
 	// type has no spelling this back end can size, so the size the model laid
@@ -2365,6 +2370,7 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, li
 		floating: bytes == 0 && e.writes_a_double(written)
 		single:   bytes == 0 && e.writes_a_float(written)
 		unsigned: e.written_is_unsigned(written)
+		boolean:  written == '_Bool'
 		bytes:    if wide { wide_bytes } else { bytes }
 		wide:     wide
 	}
@@ -2383,11 +2389,25 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, li
 // are each 8 and `sizeof(unsigned int)` is 4. Everything else is a type this back
 // end has no instruction for.
 fn (e Emitter) type_width(written string) ?int {
-	if written == 'int' || written == 'unsigned' || written == 'unsigned int' {
+	if written == 'int' || written == 'unsigned' || written == 'unsigned int' || written == 'signed' {
 		return 4
 	}
 	if written == 'char' {
 		return 1
+	}
+	// The narrow integer types. `_Bool` and the two character types are one
+	// byte each, and `short` and `unsigned short` are two whatever order their
+	// words were written in. The spelling is what a declaration carries, so the
+	// words a file may write are each listed. Measured on gcc 16.2.1 on this
+	// target: `sizeof(_Bool)`, `sizeof(signed char)` and `sizeof(unsigned char)`
+	// are 1, and `sizeof(short)` and `sizeof(unsigned short)` are 2.
+	if written == '_Bool' || written == 'signed char' || written == 'unsigned char' {
+		return 1
+	}
+	if written == 'short' || written == 'short int' || written == 'signed short'
+		|| written == 'signed short int' || written == 'unsigned short'
+		|| written == 'unsigned short int' {
+		return 2
 	}
 	if written == 'double' {
 		return 8
@@ -2626,8 +2646,15 @@ fn (mut e Emitter) remainder(line int, col int) !backend.Register {
 	}
 }
 
-// store_register writes a register into a slot at the slot's width.
+// store_register writes a register into a slot at the slot's width. A slot
+// holding a `_Bool` converts the value on the way in: 6.3.1.2 says every store
+// into one makes the value 0 or 1, so `_Bool b = 42;` leaves 1 and not 42.
 fn (mut e Emitter) store_register(slot Slot, register backend.Register, line int, col int) !void {
+	if slot.boolean {
+		e.append(e.target.test(register)!)
+		e.append(e.target.set_condition(backend.Condition.not_equal, register)!)
+		e.append(e.target.widen_byte(register)!)
+	}
 	base := e.frame_pointer(line, col)!
 	e.append(e.target.store_slot(base, slot.offset, register, slot.width)!)
 }
@@ -2638,21 +2665,32 @@ fn (mut e Emitter) store_accumulator(slot Slot, line int, col int) !void {
 	e.store_register(slot, register, line, col)!
 }
 
-// load_accumulator reads a slot into the accumulator, at the slot's width.
+// load_accumulator reads a slot into the accumulator, at the slot's width. A
+// one- or two-byte value is widened by the read, with its sign or, for a slot
+// whose type is unsigned, with zero above it.
 fn (mut e Emitter) load_accumulator(slot Slot, line int, col int) !void {
 	register := e.accumulator(line, col)!
 	base := e.frame_pointer(line, col)!
+	if slot.unsigned && slot.width < 4 {
+		e.append(e.target.load_slot_unsigned(base, slot.offset, register, slot.width)!)
+		return
+	}
 	e.append(e.target.load_slot(base, slot.offset, register, slot.width)!)
 }
 
 // load_argument reads one argument slot into the register that carries that
-// position, at the width the argument is passed at. A char argument is read at
-// its own width whatever width the call asks for, because the read is what
-// widens it: four bytes from a one-byte slot would take the padding with them.
+// position, at the width the argument is passed at. A char or a short argument is
+// read at its own width whatever width the call asks for, because the read is
+// what widens it: four bytes from a one-byte slot would take the padding with
+// them.
 fn (mut e Emitter) load_argument(slot Slot, register backend.Register, width int, line int, col int) !void {
 	base := e.frame_pointer(line, col)!
-	if slot.width == 1 {
-		e.append(e.target.load_slot(base, slot.offset, register, 1)!)
+	if slot.width < 4 {
+		if slot.unsigned {
+			e.append(e.target.load_slot_unsigned(base, slot.offset, register, slot.width)!)
+			return
+		}
+		e.append(e.target.load_slot(base, slot.offset, register, slot.width)!)
 		return
 	}
 	e.append(e.target.load_slot(base, slot.offset, register, width)!)
@@ -3953,9 +3991,10 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		e.widen_into_pair(slot, cast.expr.typ.kind.is_unsigned(), width, cast.line, cast.col)!
 		return e.load_pair(slot, cast.line, cast.col)
 	}
-	if target.kind !in [.int_, .unsigned_int, .char_, .signed_char, .double, .float, .pointer,
-		.long, .unsigned_long, .long_long, .unsigned_long_long] {
-		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion to ${cast.spelling} is not one this back end makes, and it converts between int, the four 64-bit integers, char, float, double and a pointer')
+	if target.kind !in [.int_, .unsigned_int, .bool_, .char_, .signed_char, .unsigned_char, .short,
+		.unsigned_short, .double, .float, .pointer, .long, .unsigned_long, .long_long,
+		.unsigned_long_long] {
+		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion to ${cast.spelling} is not one this back end makes, and it converts between int, the four 64-bit integers, the character types, short, _Bool, float, double and a pointer')
 		return error('unsupported conversion')
 	}
 	if e.wide_value(cast.expr) {
@@ -4050,6 +4089,32 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		// that byte's sign, which is what this target's char is.
 		e.append(e.target.sign_extend_byte(register)!)
 	}
+	if target.kind == .unsigned_char {
+		// The same narrowing with zero above the byte rather than its sign,
+		// which is what a value converted to an unsigned char carries.
+		e.append(e.target.widen_byte(register)!)
+	}
+	if target.kind == .short {
+		e.append(e.target.sign_extend_half(register)!)
+	}
+	if target.kind == .unsigned_short {
+		e.append(e.target.zero_extend_half(register)!)
+	}
+	if target.kind == .bool_ {
+		// 6.3.1.2: a value converted to _Bool is 0 when it is zero and 1 when it
+		// is not, which is the comparison `x != 0` written out. The question is
+		// asked at the width the value has in the register, so a long or a
+		// pointer is tested as a whole word and the top half of 4294967296 is
+		// not read as a zero word.
+		if (e.storage_width(cast.expr.typ) or { 4 }) == 8 {
+			e.append(e.target.test_word(register)!)
+		} else {
+			e.append(e.target.test(register)!)
+		}
+		e.append(e.target.set_condition(backend.Condition.not_equal, register)!)
+		e.append(e.target.widen_byte(register)!)
+		return
+	}
 	if e.eight_byte_integer(cast.expr.typ) && target.kind in [.int_, .unsigned_int] {
 		// A narrowing from eight bytes to four: the low half is the value taken
 		// modulo 2^32, and what sits above it is that half's sign when the target
@@ -4073,7 +4138,8 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 // back end has no load for answers none.
 fn (e Emitter) storage_width(t types.Type) ?int {
 	return match t.kind {
-		.char_, .signed_char { 1 }
+		.bool_, .char_, .signed_char, .unsigned_char { 1 }
+		.short, .unsigned_short { 2 }
 		.int_, .unsigned_int { 4 }
 		.long, .unsigned_long, .long_long, .unsigned_long_long { 8 }
 		.pointer, .array { e.target.word_size }
@@ -5540,7 +5606,10 @@ fn (mut e Emitter) move_to_scratch(line int, col int) !void {
 // a type the back end has no register for answers none.
 fn (e Emitter) converted_width(t types.Type) ?int {
 	return match t.kind {
-		.int_, .char_, .signed_char, .unsigned_int { 4 }
+		.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short, .int_,
+		.unsigned_int {
+			4
+		}
 		.long, .unsigned_long, .long_long, .unsigned_long_long { 8 }
 		.double { 8 }
 		// A float in a register is four bytes, which is the width a conversion
