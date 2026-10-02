@@ -1001,24 +1001,45 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		p.next()
 		return stmts
 	}
-	if offender := p.unsupported_type_word(spec) {
-		p.error_at(spec.start, 'unsupported type ${offender}')
-		// The declaration is refused for its type, and the name it declares is
-		// still a name this file declares: recording it here is what keeps a later
-		// use of it from being reported a second time as a name nothing declares,
-		// which would say something untrue about the source. A statement that
-		// reads it is still refused where it is written, by the type this
-		// declaration never gave it.
-		if p.peek().kind == .identifier {
-			p.declared[p.peek().text] = true
+	// A type the model cannot size is refused before the declarator is read, so
+	// a refused declaration leaves its name out of the scope. A tag with no body
+	// is the exception: a pointer to one is a complete object, so whether it is
+	// an error depends on the declarator, and that question is asked below once
+	// the declarator has been read and its stars are a fact.
+	incomplete := p.incomplete_aggregate(spec)
+	if !incomplete {
+		if offender := p.unsupported_type_word(spec, 0) {
+			p.error_at(spec.start, 'unsupported type ${offender}')
+			// The declaration is refused for its type, and the name it declares is
+			// still a name this file declares: recording it here is what keeps a later
+			// use of it from being reported a second time as a name nothing declares,
+			// which would say something untrue about the source. A statement that
+			// reads it is still refused where it is written, by the type this
+			// declaration never gave it.
+			if p.peek().kind == .identifier {
+				p.declared[p.peek().text] = true
+			}
+			p.skip_declaration()
+			return stmts
 		}
-		p.skip_declaration()
-		return stmts
 	}
 	for {
 		d := p.parse_declarator(0) or {
 			p.skip_declaration()
 			return stmts
+		}
+		if incomplete {
+			if offender := p.unsupported_type_word(spec, d.pointer_count()) {
+				p.error_at(spec.start, 'unsupported type ${offender}')
+				// A declaration of a tag with no body is refused here rather than
+				// before the declarator, so the name it declares is recorded the
+				// same way the pre-declarator refusal records one.
+				if d.name.len > 0 {
+					p.declared[d.name] = true
+				}
+				p.skip_declaration()
+				return stmts
+			}
 		}
 		if d.name.len == 0 {
 			p.error_at(p.peek(), 'unsupported: expected a name in a declaration, found ${describe(p.peek())}')

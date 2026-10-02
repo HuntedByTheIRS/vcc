@@ -562,6 +562,39 @@ fn test_a_local_declaration_with_an_unsupported_type_is_reported() {
 	assert result.unit.decls[0].body[0].kind == .return_stmt
 }
 
+// A pointer to a tag with no body is a complete object: it is one address wide
+// whatever the tag turns out to be, which is what lets `FILE *f;` be declared
+// where FILE is `typedef struct _IO_FILE FILE;` and the struct's body is written
+// after the typedef. Measured, gcc 16.2.1 compiles such a program and it exits 0.
+fn test_a_local_pointer_to_a_tag_with_no_body_is_accepted() {
+	direct := parsed('struct S; int main() { struct S *p = 0; return p == 0; }')
+	assert direct.diagnostics.len == 0
+	decl := direct.unit.decls[0].body[0]
+	assert decl.kind == .var_decl
+	assert decl.decl_type == 'struct S *'
+
+	// The typedef spelling resolves to the tag, and a pointer written through it
+	// is accepted for the same reason. A union tag with no body is the same
+	// shape.
+	aliased := parsed('struct S; typedef struct S T; int main() { T *p = 0; return p == 0; }')
+	assert aliased.diagnostics.len == 0
+	assert aliased.unit.decls[0].body[0].decl_type == 'struct S *'
+	tagged := parsed('union U; int main() { union U *p = 0; return p == 0; }')
+	assert tagged.diagnostics.len == 0
+	assert tagged.unit.decls[0].body[0].decl_type == 'union U *'
+}
+
+// The pointer is what makes the object complete, so an object of the tag is
+// still refused with the tag named. gcc 16.2.1 refuses it too ("storage size of
+// 'x' isn't known"), which is what keeps the acceptance above from being a
+// weakening of the refusal.
+fn test_an_object_of_a_tag_with_no_body_is_still_reported() {
+	result := parsed('struct S; int main() { struct S x; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg == 'unsupported type struct S'
+	assert result.unit.decls[0].body.len == 1
+}
+
 // A body's array declaration keeps the size it was given, so what is left to
 // report is a size this reader cannot read as one: a name, a computation, or an
 // empty pair of brackets. The declaration is dropped rather than half-kept.
