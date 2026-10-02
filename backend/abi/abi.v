@@ -358,6 +358,17 @@ pub fn argument_list_type() types.Type {
 	return types.pointer_to(types.struct_type('__va_list_tag', members))
 }
 
+// is_argument_list says whether a type is an argument list. An object of that
+// type is what the four operations over a list are applied to, and an object of
+// any other type is not one: reading a walk out of it would read whatever the
+// object holds as though it were a tag.
+pub fn is_argument_list(typ types.Type) bool {
+	// The question is structural and not an identity: the model holds a type as
+	// a reference to its pointee, so two readings of one argument list are two
+	// values with one shape, and `same` is the model's question for that.
+	return typ.same(argument_list_type())
+}
+
 // argument_list_tag is the tag `argument_list_type` points at, which a caller
 // that wants the type itself rather than an argument list of it asks for.
 pub fn argument_list_tag() types.Type {

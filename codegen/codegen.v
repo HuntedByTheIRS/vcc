@@ -243,6 +243,13 @@ mut:
 	// registers, and none for a function that wrote none. A walk through the
 	// arguments reads the registers out of it.
 	save_area ?Slot
+	// argument_lists are the objects of this function whose declared type is an
+	// argument list: the ones a `va_list` declaration made, and the parameters a
+	// function was handed one in. The four operations over a list are applied to
+	// one of these and refused elsewhere, because an object that is not a list
+	// holds something that is not a tag, and a walk through it reads that
+	// something as though it were.
+	argument_lists []string
 	// stack_pushed is how many bytes the call being emitted has pushed for the
 	// arguments its registers ran out for, and zero when it pushed none. The
 	// caller gives those bytes back once the call returns, so the frame is where
@@ -706,6 +713,16 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	e.named_fp = 0
 	e.named_stacked = 0
 	e.save_area = none
+	e.argument_lists = []
+	// A function that is handed an argument list is not a variadic definition,
+	// but its parameter is a list all the same: `void f(va_list ap)` may walk it,
+	// which is how a function that formats its arguments on behalf of a variadic
+	// one is written.
+	for param in decl.params {
+		if abi.is_argument_list(param.resolved) {
+			e.argument_lists << param.name
+		}
+	}
 	if e.variadic {
 		// A variadic callee is handed arguments it cannot name, and no
 		// instruction says where they went: the convention puts each one in a
@@ -1141,6 +1158,11 @@ fn (e Emitter) returns_eight_byte_integer() bool {
 // whatever the function writes into it next.
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.line, stmt.col)!
+	// What makes an object an argument list is the type it was declared with,
+	// because that is what says how the four operations over a list may treat it.
+	if abi.is_argument_list(stmt.resolved) {
+		e.argument_lists << stmt.decl_name
+	}
 	init := stmt.init or { return }
 	if slot.wide {
 		// A 128-bit object declared with a value takes one of three things: a copy
@@ -5870,6 +5892,26 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 // register files start, which register carries which argument, and where the
 // arguments that did not fit in a register are. Nothing here decides any of it.
 
+// the_argument_list answers the slot of the object a name denotes when that
+// object is an argument list, and refuses the name when it is not.
+//
+// An object that is not a list holds something that is not a tag, and every one
+// of the four operations would read that something as though it were one: a
+// `va_arg(int x, int)` would take the value of x for the address of a tag and
+// read a walk out of whatever it happens to point at. gcc 16.2.1 refuses every
+// one of these, and so does this.
+fn (mut e Emitter) the_argument_list(name string, operation string, line int, col int) ?Slot {
+	slot := e.lookup(name) or {
+		e.diagnostics << problem(line, col, 'unsupported: ${operation} names ${name}, and this function declares no object of that name')
+		return none
+	}
+	if name !in e.argument_lists {
+		e.diagnostics << problem(line, col, 'unsupported: ${operation} names ${name}, and ${name} is not an argument list: only an object declared with the argument-list type, which is what a `va_list` declaration makes, is one')
+		return none
+	}
+	return slot
+}
+
 // save_argument_registers writes every argument register the caller may have
 // filled into a save area in this frame, and answers the slot the area is.
 //
@@ -5921,8 +5963,7 @@ fn (mut e Emitter) emit_va_start(call ast.Call) !void {
 	}
 	list := abi.argument_list()
 	name := (call.args[0] as ast.Ident).name
-	destination := e.lookup(name) or {
-		e.diagnostics << problem(line, col, 'unsupported: __builtin_va_start fills in ${name}, and this function declares no object of that name')
+	destination := e.the_argument_list(name, '__builtin_va_start', line, col) or {
 		return error('no argument list')
 	}
 	base := e.frame_pointer(line, col)!
@@ -5975,8 +6016,7 @@ fn (mut e Emitter) emit_va_arg(call ast.Call) !void {
 	floating := call.typ.kind == .double
 	width := if floating { e.target.word_size } else { e.storage_width(call.typ) or { 0 } }
 	name := (call.args[0] as ast.Ident).name
-	source := e.lookup(name) or {
-		e.diagnostics << problem(line, col, 'unsupported: __builtin_va_arg reads ${name}, and this function declares no object of that name')
+	source := e.the_argument_list(name, '__builtin_va_arg', line, col) or {
 		return error('no argument list')
 	}
 	base := e.frame_pointer(line, col)!
@@ -6068,8 +6108,7 @@ fn (mut e Emitter) emit_va_copy(call ast.Call) !void {
 	col := call.col
 	list := abi.argument_list()
 	name := (call.args[0] as ast.Ident).name
-	destination := e.lookup(name) or {
-		e.diagnostics << problem(line, col, 'unsupported: __builtin_va_copy writes ${name}, and this function declares no object of that name')
+	destination := e.the_argument_list(name, '__builtin_va_copy', line, col) or {
 		return error('no argument list')
 	}
 	e.emit_expr_at(call.args[1], 1)!

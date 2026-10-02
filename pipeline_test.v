@@ -2419,3 +2419,60 @@ fn test_an_argument_list_operation_outside_a_variadic_function_is_refused() {
 	assert emitted.diagnostics.len == 1
 	assert emitted.diagnostics[0].msg.contains('__builtin_va_start')
 }
+
+// A function that is handed an argument list is not a variadic definition, but
+// its parameter is a list all the same: a function that formats or sums on behalf
+// of a variadic one walks the list it was handed. The list is not storage this
+// function filled in, so it is the declared type that says what the walk may
+// read, and the walk steps the caller's tag rather than a copy of it.
+fn test_a_function_handed_an_argument_list_walks_it() {
+	source := scratch('variadic_handed.c')
+	binary := scratch('variadic_handed')
+	program := 'int sum_list(int count, __builtin_va_list ap)
+{
+	int total = 0;
+	int i;
+	for (i = 0; i < count; ++i)
+		total += __builtin_va_arg(ap, int);
+	return total;
+}
+int sum(int count, ...)
+{
+	__builtin_va_list ap;
+	__builtin_va_start(ap, count);
+	return sum_list(count, ap);
+}
+int main(void)
+{
+	if (sum(0) != 0) return 1;
+	if (sum(3, 1, 2, 3) != 6) return 2;
+	if (sum(9, 1, 2, 3, 4, 5, 6, 7, 8, 9) != 45) return 3;
+	return 0;
+}
+'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	assert exit_status == 0
+}
+
+// An object that is not an argument list holds something that is not a tag, so a
+// walk through it reads that something as though it were one: `va_arg(x, int)` on
+// an int takes the value of x for the address of a tag and reads a list out of
+// wherever it points. gcc 16.2.1 refuses this and so does this back end, at the
+// operation rather than by writing a program that reads a wrong address.
+fn test_a_walk_of_an_object_that_is_not_an_argument_list_is_refused() {
+	source := scratch('variadic_not_a_list.c')
+	binary := scratch('variadic_not_a_list')
+	program := 'int main(void)
+{
+	int x = 0;
+	return __builtin_va_arg(x, int);
+}
+'
+	emitted := compile([source, '-o', binary], program)
+	os.rm(source) or {}
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('__builtin_va_arg')
+	assert emitted.diagnostics[0].msg.contains('not an argument list')
+}
