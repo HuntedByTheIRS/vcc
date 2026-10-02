@@ -944,3 +944,55 @@ fn test_a_call_to_a_function_the_128_bit_type_is_written_on_is_read_against_its_
 	}
 	assert (initializer as ast.Call).typ.same(types.int128_type())
 }
+
+// The star inside the parentheses is the whole difference between the two
+// meanings, and the two declarations below use the same tokens in two orders.
+// Measured on gcc 16.2.1 under `-std=c99`: `int *p[5]` is 40 bytes and each
+// `p[i]` is an int *, while `int (*q)[5]` is 8 bytes and `(*q)[i]` is an int.
+fn test_a_parenthesised_pointer_is_a_pointer_to_what_it_wraps() {
+	arrays := checked('int main(void) { int *p[5]; return 0; }')
+	array_decl := arrays.unit.decls[0].body[0]
+	assert array_decl.kind == .var_decl
+	assert array_decl.resolved.kind == .array
+	assert array_decl.resolved.count == 5
+	assert array_decl.resolved.base.kind == .pointer
+	assert array_decl.resolved.base.base.same(types.int_type())
+
+	pointers := checked('int main(void) { int (*q)[5]; return 0; }')
+	pointer_decl := pointers.unit.decls[0].body[0]
+	assert pointer_decl.kind == .var_decl
+	assert pointer_decl.resolved.kind == .pointer
+	assert pointer_decl.resolved.base.kind == .array
+	assert pointer_decl.resolved.base.count == 5
+	assert pointer_decl.resolved.base.base.same(types.int_type())
+}
+
+// A suffix between the parentheses and the star binds to the star and not to
+// the name: `int (*fp[3])(void)` is an array of three pointers to functions,
+// measured on gcc 16.2.1 as 24 bytes, and `int (*p)[5]` is one pointer.
+fn test_a_suffix_inside_the_parentheses_binds_before_the_stars() {
+	row := checked('int main(void) { int (*fp[3])(void); return 0; }')
+	fp := row.unit.decls[0].body[0]
+	assert fp.kind == .var_decl
+	assert fp.resolved.kind == .array
+	assert fp.resolved.count == 3
+	assert fp.resolved.base.kind == .pointer
+	assert fp.resolved.base.base.kind == .function
+}
+
+// A declaration whose star is outside the parentheses around the function
+// suffix keeps that star: `int (*(*fp)(void))[3]` is a pointer to a function
+// returning a pointer to an array of three ints, which gcc 16.2.1 sizes at 8
+// bytes. The reader applies the suffixes to the base before the star around
+// them, so the whole order is the type.
+fn test_the_stars_and_the_suffixes_take_the_order_the_parentheses_wrote() {
+	result := checked('int main(void) { int (*(*fp)(void))[3]; return 0; }')
+	fp := result.unit.decls[0].body[0]
+	assert fp.kind == .var_decl
+	assert fp.resolved.kind == .pointer
+	assert fp.resolved.base.kind == .function
+	assert fp.resolved.base.base.kind == .pointer
+	assert fp.resolved.base.base.base.kind == .array
+	assert fp.resolved.base.base.base.count == 3
+	assert fp.resolved.base.base.base.base.same(types.int_type())
+}

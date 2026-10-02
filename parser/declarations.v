@@ -258,51 +258,147 @@ fn (s DeclSpec) type_spelling(stars int) string {
 	return with_stars(text, stars)
 }
 
-// Declarator is what one declarator says: the name it gives, the pointer stars
-// in front of that name, and whether it declares a function. An abstract
+// DeclStepKind is which constructor a declarator step is: a pointer star, an
+// array suffix, or a function suffix.
+enum DeclStepKind {
+	pointer_step
+	array_step
+	function_step
+}
+
+// DeclStep is one constructor a declarator puts around the type its specifiers
+// named, kept in the order the type is built from that base outward. The order
+// is the type and not a detail of it: `int *p[5]` is a pointer step and then an
+// array step, an array of five pointers, and `int (*p)[5]` is the same two
+// steps the other way round, one pointer to an array of five. The star sits on
+// the other side of the parentheses and that is the whole difference.
+struct DeclStep {
+	kind  DeclStepKind
+	quals types.Qualifiers
+	// count is how many elements an array step asked for, and zero when the
+	// brackets named no size this reader could read.
+	count int
+	// at is where the step was written.
+	at tokenize.Token
+	// params, variadic and prototyped are a function step's parameter list.
+	params     []ast.Param
+	variadic   bool
+	prototyped bool
+}
+
+// Declarator is what one declarator says: the name it gives and the
+// constructors it puts around the type its specifiers named. An abstract
 // declarator has no name, which is what a bare type and a parameter may have.
 struct Declarator {
 mut:
 	name    string
 	name_at tokenize.Token
-	stars   int
-	star_at tokenize.Token
-	// star_quals are the qualifiers written after each star, one entry per star.
-	// That is where `char * const p` puts its const: on the pointer and not on
-	// the character it points at, which is the difference between two types an
-	// assignment may not drop either way.
-	star_quals []types.Qualifiers
-	array_at   tokenize.Token
-	// array_count is how many elements the first `[...]` suffix asked for, and
-	// zero when the suffix did not write a size this reader could read — an
-	// empty pair of brackets, or something that was not a number. array_dims
-	// counts the suffixes: a declarator may write more than one, and only the
-	// first is a shape this tree has.
-	array_count int
-	array_dims  int
-	is_function bool
-	// params are the parameters this declarator names, in the order they were
-	// written. Every function declarator is read for them and the ones that
-	// declare a function by name keep them: a pointer to a function is not
-	// something a call reaches by name, and this compiler emits no such call.
-	params []ast.Param
-	// variadic says the list ended in an ellipsis and prototyped says it was a
-	// prototype at all: `int f()` names no parameters and says nothing about a
-	// call, while `int f(void)` names the empty list.
-	variadic   bool
-	prototyped bool
-	// inner_function says the suffix named the function a pointer points at.
-	// `int (*f)(int)` declares a pointer, and what it points at is a function
-	// type: a type this model has, even though a call through the pointer is not
-	// a shape this tree carries. The parameters in that case are the ones the
-	// function being pointed at takes, and they are read from the same list.
-	inner_function bool
+	// steps are the constructors this declarator puts around the base type, in
+	// the order the type is built: the first is applied to the type the
+	// specifiers named and the last is the type the name has.
+	steps []DeclStep
 	// param_problem says what makes the parameter list one the back end cannot
 	// emit, and stays empty when there is nothing wrong with it. It is recorded
 	// rather than reported because whether it matters is only known when a body
 	// turns up after it: a prototype promises, and a definition is code.
 	param_problem string
 	param_at      tokenize.Token
+}
+
+// pointer_count is how many pointer steps the declarator wrote.
+fn (d Declarator) pointer_count() int {
+	mut count := 0
+	for step in d.steps {
+		if step.kind == .pointer_step {
+			count++
+		}
+	}
+	return count
+}
+
+// is_function says the declared name has a function type, which is a function
+// step as the last one: `int f(void)` is a function, and `int (*f)(void)` is a
+// pointer whose last step is the star.
+fn (d Declarator) is_function() bool {
+	return d.steps.len > 0 && d.steps.last().kind == .function_step
+}
+
+// is_array says the declared name has an array type rather than a pointer to
+// one: `int *p[5]` is an array and `int (*p)[5]` is a pointer whose last step
+// is the star.
+fn (d Declarator) is_array() bool {
+	return d.steps.len > 0 && d.steps.last().kind == .array_step
+}
+
+// array_count is how many elements the array the name has asked for, and zero
+// when the name is not an array or its brackets named no size.
+fn (d Declarator) array_count() int {
+	if !d.is_array() {
+		return 0
+	}
+	count := d.steps.last().count
+	return if count > 0 { count } else { 0 }
+}
+
+// array_at is where the array the name has was written, and the zero token when
+// the name is not an array.
+fn (d Declarator) array_at() tokenize.Token {
+	if !d.is_array() {
+		return tokenize.Token{}
+	}
+	return d.steps.last().at
+}
+
+// array_dims counts the array steps, which is how many sizes the declarator
+// wrote for one name.
+fn (d Declarator) array_dims() int {
+	mut count := 0
+	for step in d.steps {
+		if step.kind == .array_step {
+			count++
+		}
+	}
+	return count
+}
+
+// star_at is where the first pointer step was written, and the zero token when
+// the declarator wrote no star.
+fn (d Declarator) star_at() tokenize.Token {
+	for step in d.steps {
+		if step.kind == .pointer_step {
+			return step.at
+		}
+	}
+	return tokenize.Token{}
+}
+
+// function_params, function_variadic and function_prototyped are what the
+// declarator's function step said about its list.
+fn (d Declarator) function_params() []ast.Param {
+	for step in d.steps {
+		if step.kind == .function_step {
+			return step.params
+		}
+	}
+	return []ast.Param{}
+}
+
+fn (d Declarator) function_variadic() bool {
+	for step in d.steps {
+		if step.kind == .function_step {
+			return step.variadic
+		}
+	}
+	return false
+}
+
+fn (d Declarator) function_prototyped() bool {
+	for step in d.steps {
+		if step.kind == .function_step {
+			return step.prototyped
+		}
+	}
+	return false
 }
 
 // Params is what a parameter list turned out to be: the parameters it named, in
@@ -541,7 +637,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		if d.name.len > 0 {
 			names << d.name
 		}
-		if d.is_function {
+		if d.is_function() {
 			if p.at_punct('{') {
 				if spec.is_typedef {
 					p.error_at(d.name_at, 'unsupported: a typedef names a type, so it cannot have a function body')
@@ -555,7 +651,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				// before the body existed, and a name is typed where it is
 				// read.
 				p.scopes.enter()
-				p.declare_parameters(d.params)
+				p.declare_parameters(d.function_params())
 				body := p.parse_block()
 				p.scopes.leave()
 				statements := body or { return decls }
@@ -566,10 +662,10 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				if d.name.len > 0 {
 					decls << ast.FnDecl{
 						name:     d.name
-						ret:      p.spelling_of(spec, d.stars)
-						ret_type: p.pointer_type(spec.clause, d)
+						ret:      p.spelling_of(spec, d.pointer_count())
+						ret_type: p.return_type(spec.clause, d)
 						resolved: p.declared_type(spec.clause, d)
-						params:   d.params
+						params:   d.function_params()
 						body:     statements
 						line:     d.name_at.line
 						col:      d.name_at.col
@@ -588,10 +684,10 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			if !spec.is_typedef {
 				decls << ast.FnDecl{
 					name:     d.name
-					ret:      p.spelling_of(spec, d.stars)
-					ret_type: p.pointer_type(spec.clause, d)
+					ret:      p.spelling_of(spec, d.pointer_count())
+					ret_type: p.return_type(spec.clause, d)
 					resolved: p.declared_type(spec.clause, d)
-					params:   d.params
+					params:   d.function_params()
 					body:     []ast.Stmt{}
 					line:     d.name_at.line
 					col:      d.name_at.col
@@ -602,10 +698,10 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_seen = true
 				data_name = d.name
 				data_at = if d.name.len > 0 { d.name_at } else { spec.start }
-				data_type = p.spelling_of(spec, d.stars)
-				data_stars = d.stars
-				data_count = d.array_count
-				data_array = d.array_at.line > 0
+				data_type = p.spelling_of(spec, d.pointer_count())
+				data_stars = d.pointer_count()
+				data_count = d.array_count()
+				data_array = d.is_array()
 				data_clause = p.declared_type(spec.clause, d)
 			}
 			if p.at_punct('=') {
@@ -614,7 +710,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_defined = true
 				p.next()
 				before := p.diagnostics.len
-				if p.at_punct('{') && d.stars == 0 {
+				if p.at_punct('{') && d.pointer_count() == 0 {
 					// A brace initializer, read here because a list is
 					// what gives an array with empty brackets its size.
 					// A pointer's initializer is not read this way: a
@@ -1097,8 +1193,8 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
 		return
 	}
-	if d.stars > 0 {
-		p.error_at(d.star_at, 'unsupported: pointer return types are not implemented')
+	if d.pointer_count() > 0 {
+		p.error_at(d.star_at(), 'unsupported: pointer return types are not implemented')
 		return
 	}
 	if d.param_problem.len > 0 {
@@ -1624,40 +1720,51 @@ fn (mut p Parser) parse_bitfield_width() !int {
 }
 
 // parse_declarator reads one declarator: pointer stars, a name, and the array
-// and function suffixes that bind to it.
+// and function suffixes that bind to it. What it answers with is the steps that
+// build the type, in the order the type is built rather than in the order they
+// were written, because a parenthesised pointer swaps the two: the suffixes
+// outside the parentheses apply to the base before the star does.
 fn (mut p Parser) parse_declarator(depth int) !Declarator {
 	if depth > max_declaration_depth {
 		p.error_at(p.peek(), 'declaration is nested more than ${max_declaration_depth} levels deep')
 		return error('declaration nested too deeply')
 	}
 	mut d := Declarator{}
+	// The stars in front of the direct-declarator, as they were written.
+	mut stars := []DeclStep{}
 	for p.at_punct('*') {
-		if d.stars == 0 {
-			d.star_at = p.peek()
-		}
+		at := p.peek()
 		p.next()
-		d.stars++
 		mut quals := types.Qualifiers{}
 		// Qualifiers may sit between the star and the name: `char *restrict p`.
 		for p.peek().kind == .identifier && p.peek().text in type_qualifiers {
 			quals = add_qualifier(quals, p.peek().text)
 			p.next()
 		}
-		d.star_quals << quals
+		stars << DeclStep{
+			kind:  .pointer_step
+			quals: quals
+			at:    at
+		}
 	}
-	mut wrapped := false
+	// The direct-declarator is a name or another declarator in parentheses, and
+	// its own steps sit between this level's stars and the base.
+	mut inner := []DeclStep{}
 	if p.at_punct('(') {
 		// A declarator in parentheses, as in `(*handler)(int)`. The suffixes
 		// after the closing parenthesis bind to the declarator around them, not
 		// to the name inside, which is the difference between a function and a
 		// pointer to one.
 		p.next()
-		inner := p.parse_declarator(depth + 1)!
+		inner_declarator := p.parse_declarator(depth + 1)!
 		if !p.expect_punct(')') {
 			return error('unclosed declarator')
 		}
-		d = inner
-		wrapped = true
+		d.name = inner_declarator.name
+		d.name_at = inner_declarator.name_at
+		d.param_problem = inner_declarator.param_problem
+		d.param_at = inner_declarator.param_at
+		inner = inner_declarator.steps
 	} else if p.peek().kind == .identifier {
 		d.name_at = p.peek()
 		d.name = p.next().text
@@ -1672,17 +1779,19 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			return error('keyword as a name')
 		}
 	}
-	pointer_to_function := wrapped && d.stars > 0
+	// A suffix is applied to the base ahead of what has been read so far: the
+	// brackets bind to the name before the stars do, so each one goes in front
+	// of the steps already there.
+	mut steps := inner.clone()
 	for {
 		if p.at_punct('[') {
-			if d.array_at.line == 0 {
-				d.array_at = p.peek()
-			}
-			d.array_dims++
+			at := p.peek()
 			count := p.parse_array_suffix()!
-			if d.array_dims == 1 {
-				d.array_count = int(count)
-			}
+			steps.prepend(DeclStep{
+				kind:  .array_step
+				count: int(count)
+				at:    at
+			})
 			continue
 		}
 		if p.at_punct('(') {
@@ -1692,25 +1801,32 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			// specifiers gave. Measured before this was held, `int f(void); int
 			// main(void) { return f() + 1; }` was refused because the `(void)` left
 			// the base at void and the prototype was declared `void (void)`.
+			at := p.peek()
 			base := p.pending_base
 			params := p.parse_parameter_list(depth + 1)!
 			p.pending_base = base
-			if !pointer_to_function {
-				d.is_function = true
-			} else {
-				d.inner_function = true
-			}
-			d.params = params.params
-			d.variadic = params.variadic
-			d.prototyped = params.prototyped
 			if params.problem.len > 0 && d.param_problem.len == 0 {
 				d.param_problem = params.problem
 				d.param_at = params.at
 			}
+			steps.prepend(DeclStep{
+				kind:       .function_step
+				params:     params.params
+				variadic:   params.variadic
+				prototyped: params.prototyped
+				at:         at
+			})
 			continue
 		}
 		break
 	}
+	// The stars read at this level apply after everything inside the parentheses
+	// and after every suffix, so they go in front of the steps from the last
+	// written to the first: the star nearest the name is the pointer the name is.
+	for i in 0 .. stars.len {
+		steps.prepend(stars[i])
+	}
+	d.steps = steps
 	// The name is recorded where the declarator ends, which is where 6.2.1 says
 	// its scope begins: a declaration is complete when its reader finishes it.
 	p.note_declaration(d, depth)
@@ -1743,32 +1859,33 @@ fn (mut p Parser) parse_type_name(depth int) !TypeName {
 	}
 	return TypeName{
 		typ:      p.declared_type(spec.clause, d)
-		spelling: p.spelling_of(spec, d.stars)
+		spelling: p.spelling_of(spec, d.pointer_count())
 		at:       start
 	}
 }
 
+// apply_step is one constructor of a declarator applied to a type: a pointer to
+// it, an array of it, or a function returning it.
+fn apply_step(base types.Type, step DeclStep) types.Type {
+	return match step.kind {
+		.pointer_step { types.qualified(types.pointer_to(base), step.quals) }
+		.array_step { types.array_of(base, if step.count > 0 { step.count } else { -1 }) }
+		.function_step {
+			types.function_type(base, type_params(step.params), step.variadic, step.prototyped)
+		}
+	}
+}
+
 // declared_type is the type a specifier and a declarator together name. The
-// declarator grammar applies its pieces in the order it read them: the stars bind
-// first and each binds to what is left, an array suffix makes an array of that,
-// and a function suffix makes a function returning it.
-//
-// A declarator that wrote more than one array suffix is a shape this tree has no
-// form for, so only the first becomes an array and the reader that asked for it
-// reports the rest; the type is the one array it describes.
+// declarator's steps are applied in the order it wrote them: a pointer step is a
+// pointer to what is under it, an array step is an array of it, and a function
+// step is a function returning it. A pointer inside parentheses reverses the
+// order of the two around it, which is the whole difference between `int *p[5]`
+// and `int (*p)[5]`.
 fn (p Parser) declared_type(base types.Type, d Declarator) types.Type {
-	target := if d.inner_function {
-		// The pointer points at the function its suffix named.
-		types.function_type(base, type_params(d.params), d.variadic, d.prototyped)
-	} else {
-		base
-	}
-	mut typ := p.pointer_type(target, d)
-	if d.array_at.line > 0 {
-		typ = types.array_of(typ, if d.array_count > 0 { d.array_count } else { -1 })
-	}
-	if d.is_function {
-		typ = types.function_type(typ, type_params(d.params), d.variadic, d.prototyped)
+	mut typ := base
+	for step in d.steps {
+		typ = apply_step(typ, step)
 	}
 	return typ
 }
@@ -1807,15 +1924,17 @@ fn type_params(params []ast.Param) []types.Param {
 	return out
 }
 
-// pointer_type is the base with the pointer stars of a declarator, and nothing
-// else: what a function returns is its specifiers and its stars, without the
-// function suffix and without an array the same declarator might have written for
-// something else.
-fn (p Parser) pointer_type(base types.Type, d Declarator) types.Type {
+// return_type is the type a function declarator returns: the base with every
+// step but the name's own function suffix applied to it, since a function step
+// says the name is a function rather than making another type. `int *f(void)`
+// returns an int *.
+fn (p Parser) return_type(base types.Type, d Declarator) types.Type {
 	mut typ := base
-	for index in 0 .. d.stars {
-		quals := if index < d.star_quals.len { d.star_quals[index] } else { types.Qualifiers{} }
-		typ = types.qualified(types.pointer_to(typ), quals)
+	for i, step in d.steps {
+		if i == d.steps.len - 1 && step.kind == .function_step {
+			break
+		}
+		typ = apply_step(typ, step)
 	}
 	return typ
 }
@@ -1965,7 +2084,7 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			resolved := p.declared_type(spec.clause, d)
 			params.params << ast.Param{
 				name:     d.name
-				typ:      p.spelling_of(spec, d.stars)
+				typ:      p.spelling_of(spec, d.pointer_count())
 				resolved: resolved
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
@@ -1975,8 +2094,8 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 			// tree has no form for, then the types the emitter does.
 			if d.name.len == 0 {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
-			} else if d.array_at.line > 0 {
-				params.note_problem('unsupported: array parameters are not implemented', d.array_at)
+			} else if d.is_array() {
+				params.note_problem('unsupported: array parameters are not implemented', d.array_at())
 			} else if !p.parameter_type_is_known(spec) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.
