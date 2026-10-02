@@ -1,6 +1,7 @@
 module parser
 
 import ast
+import math
 import tokenize
 import types
 
@@ -17,7 +18,11 @@ import types
 // filled in with a value this compiler has not computed.
 const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr',
 	'__builtin_offsetof', '__builtin_va_arg', '__builtin_va_start', '__builtin_va_end',
-	'__builtin_va_copy']
+	'__builtin_va_copy', '__builtin_huge_val', '__builtin_huge_valf', '__builtin_huge_vall',
+	'__builtin_inf', '__builtin_inff', '__builtin_infl', '__builtin_nan', '__builtin_nanf',
+	'__builtin_nanl', '__builtin_nans', '__builtin_nansf', '__builtin_nansl', '__builtin_classify_type',
+	'__builtin_isinf_sign', '__builtin_signbit', '__builtin_signbitf', '__builtin_signbitl',
+	'__builtin_signbitf128']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -63,6 +68,20 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_va_copy' {
 			return p.parse_va_copy(at)
+		}
+		'__builtin_huge_val', '__builtin_huge_valf', '__builtin_huge_vall', '__builtin_inf',
+		'__builtin_inff', '__builtin_infl', '__builtin_nan', '__builtin_nanf', '__builtin_nanl',
+		'__builtin_nans', '__builtin_nansf', '__builtin_nansl' {
+			return p.parse_value_builtin(at)
+		}
+		'__builtin_signbit', '__builtin_signbitf', '__builtin_signbitl', '__builtin_signbitf128' {
+			return p.parse_signbit(at)
+		}
+		'__builtin_isinf_sign' {
+			return p.parse_isinf_sign(at)
+		}
+		'__builtin_classify_type' {
+			return p.parse_classify_type(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -362,5 +381,252 @@ fn (mut p Parser) parse_va_copy(at tokenize.Token) !ast.Expr {
 		typ:  types.void_type()
 		line: at.line
 		col:  at.col
+	})
+}
+
+// The builtins that are a value rather than a question about a declaration: the
+// infinities and NaNs a math header builds HUGE_VAL, INFINITY and NAN from, and
+// the three that classify an argument. gcc gives each constant a type of its own
+// width, and the type here is the one the answer carries, which is the whole
+// reason the reader has to know: `isinf(HUGE_VALL)` asks the type of
+// `__builtin_huge_vall()` through `__typeof`, and only `long double` answers it
+// the way gcc does.
+
+// parse_value_builtin reads an infinity. It takes no argument; the spelling's
+// last letter picks the width, and `__builtin_nanf("")` and its siblings read a
+// string that names the payload of the NaN. gcc ignores the payload for the value
+// this compiler builds, which is the quiet NaN its own `nan` is.
+fn (mut p Parser) parse_value_builtin(at tokenize.Token) !ast.Expr {
+	if at.text in ['__builtin_nan', '__builtin_nanf', '__builtin_nanl', '__builtin_nans',
+		'__builtin_nansf', '__builtin_nansl'] {
+		p.next() // (
+		if p.peek().kind != .string {
+			p.error_at(p.peek(), 'unsupported: ${at.text} reads the payload of a NaN from a string literal, and ${describe(p.peek())} is not one')
+			return error('the payload of a NaN')
+		}
+		_ := p.next()
+		if !p.expect_punct(')') {
+			return error('a NaN call')
+		}
+		return float_constant(math.nan(), builtin_width(at.text), '${at.text}("")', at)
+	}
+	p.next() // (
+	if !p.expect_punct(')') {
+		return error('a call with no argument')
+	}
+	return float_constant(math.inf(1), builtin_width(at.text), '${at.text}()', at)
+}
+
+// builtin_width is the type a floating builtin answers with, read off the
+// spelling. The width is a `f` or `l` on the end of the *name*, and not the
+// letter before it: `__builtin_huge_val` ends in `l` and is the double one, while
+// `__builtin_huge_vall` is the long double one.
+fn builtin_width(name string) types.Type {
+	if name in ['__builtin_huge_valf', '__builtin_inff', '__builtin_nanf', '__builtin_nansf'] {
+		return types.float_type()
+	}
+	if name in ['__builtin_huge_vall', '__builtin_infl', '__builtin_nanl', '__builtin_nansl'] {
+		return types.long_double_type()
+	}
+	return types.double_type()
+}
+
+// parse_signbit reads `__builtin_signbit(x)`, and the `f`, `l` and `f128`
+// spellings a type-generic macro picks between. The answer is nonzero when the
+// sign bit of x is set, which is what makes it different from `x < 0`: -0.0 has
+// the sign bit set and compares equal to zero. Measured on gcc 16.2.1,
+// `__builtin_signbit(-0.0)` is 1 and `__builtin_signbit(0.0)` is 0.
+//
+// A constant operand is folded exactly, by the sign bit of the value, so -0.0
+// and a NaN keep the answer gcc gives them. Anything else is written as
+// `(x) < 0.0 || (1.0 / (x) < 0.0)`, whose first term is the negative numbers and
+// the infinities and whose second is -0.0 and the negative subnormals, where
+// 1.0 / (x) overflows to -infinity. A NaN whose sign bit is set is the one
+// operand this misses: the arithmetic form has no bit to read and answers 0.
+fn (mut p Parser) parse_signbit(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	operand := p.parse_expression()!
+	if !p.expect_punct(')') {
+		return error('a value')
+	}
+	if value := constant_double(operand) {
+		return integer_constant(if math.signbit(value) { 1 } else { 0 },
+			'${at.text}(${describe_operand(operand)})', at)
+	}
+	zero := float_constant(0.0, types.double_type(), '0.0', at)
+	one := float_constant(1.0, types.double_type(), '1.0', at)
+	negative := p.builtin_binary('<', operand, zero, at)
+	reciprocal := p.builtin_binary('/', one, operand, at)
+	underflow := p.builtin_binary('<', reciprocal, zero, at)
+	return p.builtin_binary('||', negative, underflow, at)
+}
+
+// parse_isinf_sign reads `__builtin_isinf_sign(x)`, which gcc's `<math.h>`
+// writes for `isinf(x)` under a GNU dialect. The answer is 1 for positive
+// infinity, -1 for negative infinity and 0 for everything else, and a NaN is
+// 0 because it is not equal to either infinity.
+//
+// A constant operand is folded, so `__builtin_isinf_sign(__builtin_huge_vall())`
+// answers without a long double ever reaching the emitter: the infinity the
+// header wrote is a constant, and the question has an answer at the call. A
+// value that is not constant is compared with the two infinities.
+fn (mut p Parser) parse_isinf_sign(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	operand := p.parse_expression()!
+	if !p.expect_punct(')') {
+		return error('a value')
+	}
+	if value := constant_double(operand) {
+		return integer_constant(isinf_sign_of(value), '${at.text}(${describe_operand(operand)})', at)
+	}
+	positive := float_constant(math.inf(1), types.double_type(), '__builtin_huge_val()', at)
+	negative := float_constant(-math.inf(1), types.double_type(), '-__builtin_huge_val()', at)
+	positive_answer := p.builtin_conditional(p.builtin_binary('==', operand, positive, at),
+		integer_constant(1, '1', at), integer_constant(0, '0', at), at)
+	return p.builtin_conditional(p.builtin_binary('==', operand, negative, at),
+		integer_constant(-1, '-1', at), positive_answer, at)
+}
+
+// isinf_sign_of is gcc's answer for a constant: 1 at positive infinity, -1 at
+// negative infinity, 0 anywhere else.
+fn isinf_sign_of(value f64) i64 {
+	if math.is_inf(value, 1) {
+		return 1
+	}
+	if math.is_inf(value, -1) {
+		return -1
+	}
+	return 0
+}
+
+// parse_classify_type reads `__builtin_classify_type(expr)`, which is a number
+// for the type of the operand and not for its value. The operand is read and
+// thrown away once its type is known, the way `sizeof` and `typeof` read theirs.
+//
+// The numbers are gcc 16.2.1's, measured by printing one for a value of each
+// kind: every integer type including char, _Bool and an enum answers 1, float and
+// double and long double answer 8, a complex type 9, a pointer 5, a struct 12 and
+// a union 13. gcc has no answer for a void operand and refuses one; so does this
+// reader, by name.
+fn (mut p Parser) parse_classify_type(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	operand := p.parse_expression()!
+	if !p.expect_punct(')') {
+		return error('a value')
+	}
+	typ := p.value_type(operand)
+	if p.is_unresolved(operand) || typ.kind == .unknown {
+		p.error_at(at, 'unsupported: ${at.text} asks about ${describe_operand(operand)}, and this compiler did not resolve its type')
+		return error('no type for the operand')
+	}
+	number := type_class(typ) or {
+		p.error_at(at, 'unsupported: ${at.text} has no number for ${typ.describe()}, and gcc has none either')
+		return error('no class for the type')
+	}
+	return integer_constant(number, '${at.text}(${describe_operand(operand)})', at)
+}
+
+// type_class is the number gcc's `__builtin_classify_type` gives a type, or none
+// for a type gcc has no number for. A void operand is the one gcc refuses, and
+// an unresolved type is one this reader has nothing to answer with.
+fn type_class(typ types.Type) ?i64 {
+	if typ.is_integer() {
+		return 1
+	}
+	if typ.is_floating() {
+		return 8
+	}
+	if typ.is_complex() {
+		return 9
+	}
+	if typ.is_pointer() {
+		return 5
+	}
+	if typ.kind == .struct_ {
+		return 12
+	}
+	if typ.kind == .union_ {
+		return 13
+	}
+	return none
+}
+
+// constant_double is the value of an expression that is a floating constant, or
+// none. A constant written with a leading minus is a unary minus over the
+// literal, and gcc folds it before it is asked for its sign, so the sign is taken
+// off the value here too. That is what makes `__builtin_signbit(-0.0)` the -0.0
+// gcc answers 1 for.
+fn constant_double(expr ast.Expr) ?f64 {
+	match expr {
+		ast.FloatLit {
+			return expr.value
+		}
+		ast.Unary {
+			if expr.op == '-' {
+				if inner := constant_double(expr.expr) {
+					return -inner
+				}
+			}
+		}
+		else {}
+	}
+	return none
+}
+
+// float_constant and integer_constant are the two nodes the builtins above build
+// in place of a call. They are written where the call was written, so a
+// diagnostic about one points at the line that asked for it.
+fn float_constant(value f64, typ types.Type, text string, at tokenize.Token) ast.Expr {
+	return ast.Expr(ast.FloatLit{
+		value: value
+		text:  text
+		typ:   typ
+		line:  at.line
+		col:   at.col
+	})
+}
+
+fn integer_constant(value i64, text string, at tokenize.Token) ast.Expr {
+	return ast.Expr(ast.IntLit{
+		value: value
+		text:  text
+		typ:   types.int_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// builtin_binary and builtin_conditional build the operator nodes a classifying
+// builtin stands for, with the type the reader's own operators would give them.
+// The operator token carries where the call was written so that a refusal inside
+// one of them points at the call rather than at a file position that does not
+// exist.
+fn (mut p Parser) builtin_binary(op string, left ast.Expr, right ast.Expr, at tokenize.Token) ast.Expr {
+	operator := tokenize.Token{
+		...at
+		text: op
+	}
+	return ast.Expr(ast.Binary{
+		op:    op
+		left:  left
+		right: right
+		typ:   p.binary_type(operator, left, right)
+		line:  at.line
+		col:   at.col
+	})
+}
+
+fn (mut p Parser) builtin_conditional(condition ast.Expr, then_expr ast.Expr, else_expr ast.Expr, at tokenize.Token) ast.Expr {
+	question := tokenize.Token{
+		...at
+		text: '?'
+	}
+	return ast.Expr(ast.Conditional{
+		cond:      condition
+		then_expr: then_expr
+		else_expr: else_expr
+		typ:       p.conditional_type(question, then_expr, else_expr)
+		line:      at.line
+		col:       at.col
 	})
 }
