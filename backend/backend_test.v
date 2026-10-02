@@ -178,10 +178,51 @@ fn test_the_slot_moves_are_the_bytes_the_machine_reads() {
 		0xff,
 		0xff,
 	]
-	// A width that is neither a byte, an int nor a pointer is refused: two bytes
-	// is a value this back end has no instruction for, and moving it at four
-	// would read a neighbour.
-	assert x86_64.load_slot(target.describe(rbp), -8, target.describe(eax), 2) or { []u8{} }.len == 0
+	// A two-byte value: a store with the operand-size prefix, and a load that
+	// widens it with its sign kept, which is the shape a read of a short has.
+	assert x86_64.load_slot(target.describe(rbp), -8, target.describe(eax), 2) or { panic('the target description has no such name') } == [
+		u8(0x0f),
+		0xbf,
+		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	assert x86_64.load_slot_unsigned(target.describe(rbp), -8, target.describe(eax), 2) or { panic('the target description has no such name') } == [
+		u8(0x0f),
+		0xb7,
+		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	assert x86_64.store_slot(target.describe(rbp), -8, target.describe(eax), 2) or { panic('the target description has no such name') } == [
+		u8(0x66),
+		0x89,
+		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	// A byte load of an unsigned value is the same read with zero above it
+	// rather than its sign, so the widening instruction is the other one.
+	assert x86_64.load_slot_unsigned(target.describe(rbp), -8, target.describe(eax), 1) or { panic('the target description has no such name') } == [
+		u8(0x40),
+		0x0f,
+		0xb6,
+		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	// A width that is none of a byte, a short, an int or a pointer is refused: a
+	// value of that width has no instruction, and moving it at four would read a
+	// neighbour.
+	assert x86_64.load_slot(target.describe(rbp), -8, target.describe(eax), 3) or { []u8{} }.len == 0
 }
 
 fn test_a_conversion_widens_a_value_with_its_sign_kept() {
@@ -189,10 +230,22 @@ fn test_a_conversion_widens_a_value_with_its_sign_kept() {
 	eax := target.reg('eax') or { panic('the target description has no such name') }
 	rax := target.reg('rax') or { panic('the target description has no such name') }
 	// movsx eax, al is a value narrowed to a char, and movsxd rax, eax is an
-	// address made out of an int: 6.3.1.3 says the sign is the one kept.
+	// address made out of an int: 6.3.1.3 says the sign is the one kept. movsx
+	// eax, ax is the same narrowing at a short, and movzx eax, ax the same with
+	// zero above it.
 	assert x86_64.sign_extend_byte(target.describe(eax)) or { panic('the target description has no such name') } == [
 		u8(0x0f),
 		0xbe,
+		0xc0,
+	]
+	assert x86_64.sign_extend_half(target.describe(eax)) or { panic('the target description has no such name') } == [
+		u8(0x0f),
+		0xbf,
+		0xc0,
+	]
+	assert x86_64.zero_extend_half(target.describe(eax)) or { panic('the target description has no such name') } == [
+		u8(0x0f),
+		0xb7,
 		0xc0,
 	]
 	assert x86_64.sign_extend_word(target.describe(rax), target.describe(eax)) or { panic('the target description has no such name') } == [

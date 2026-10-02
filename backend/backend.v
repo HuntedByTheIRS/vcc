@@ -422,6 +422,13 @@ pub fn (t Target) load_slot(base Register, disp i32, dst Register, width int) ![
 	return x86_64.load_slot(t.describe(base), disp, t.describe(dst), width)
 }
 
+// load_slot_unsigned is the same read of a one- or two-byte value with zero above
+// it rather than its sign, which is what a read of an `unsigned char` or an
+// `unsigned short` is.
+pub fn (t Target) load_slot_unsigned(base Register, disp i32, dst Register, width int) ![]u8 {
+	return x86_64.load_slot_unsigned(t.describe(base), disp, t.describe(dst), width)
+}
+
 pub fn (t Target) store_slot(base Register, disp i32, src Register, width int) ![]u8 {
 	return x86_64.store_slot(t.describe(base), disp, t.describe(src), width)
 }
@@ -459,6 +466,13 @@ pub fn (t Target) load_indirect(address Register, dst Register, width int) ![]u8
 	return x86_64.load_indirect(t.describe(address), t.describe(dst), width)
 }
 
+// load_indirect_unsigned is the same read of a one- or two-byte value with zero
+// above it rather than its sign, which is what reading an element of an
+// `unsigned char` or `unsigned short` array asks for.
+pub fn (t Target) load_indirect_unsigned(address Register, dst Register, width int) ![]u8 {
+	return x86_64.load_indirect_unsigned(t.describe(address), t.describe(dst), width)
+}
+
 pub fn (t Target) store_indirect(address Register, src Register, width int) ![]u8 {
 	return x86_64.store_indirect(t.describe(address), t.describe(src), width)
 }
@@ -469,6 +483,17 @@ pub fn (t Target) store_indirect(address Register, src Register, width int) ![]u
 // pointer is, because a pointer is the machine's word.
 pub fn (t Target) sign_extend_byte(reg Register) ![]u8 {
 	return x86_64.sign_extend_byte(t.describe(reg))
+}
+
+// sign_extend_half and zero_extend_half widen the low two bytes of a register
+// into the whole register, the sign kept and zero above it respectively, which is
+// what a value converted to a short or an unsigned short is narrowed with.
+pub fn (t Target) sign_extend_half(reg Register) ![]u8 {
+	return x86_64.sign_extend_half(t.describe(reg))
+}
+
+pub fn (t Target) zero_extend_half(reg Register) ![]u8 {
+	return x86_64.zero_extend_half(t.describe(reg))
 }
 
 pub fn (t Target) sign_extend_word(dst Register, src Register) ![]u8 {

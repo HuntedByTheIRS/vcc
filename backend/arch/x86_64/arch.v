@@ -835,25 +835,40 @@ pub const remainder_reg = 'edx'
 // load_slot and store_slot move a value between a register and the frame. The
 // displacement is written in the wide form always: the frame is still growing
 // while the body is emitted, so the length of an access must not depend on how
-// big it ends up. The width is the width of the value: four bytes for an int and
-// eight for a pointer, because a move at the other width would read or write a
-// neighbouring slot, and one byte for a char, which the machine has a byte move
-// for and a byte load that widens what it reads to the width of the register it
-// lands in. That load is where C's promotion of a char to an int happens, and it
-// is why a char read out of the frame can be added to an int as it stands.
+// big it ends up. The width is the width of the value: four bytes for an int,
+// eight for a pointer, one for a char and two for a short, and a move at any
+// other width would read or write a neighbouring slot. One byte is the machine's
+// byte move, two bytes is that move with the operand-size prefix, and one or two
+// bytes are read by the load that widens what it read to the width of the
+// register it lands in. That load is where C's promotion of a char or a short to
+// an int happens, and it is why such a value read out of the frame can be added
+// to an int as it stands.
+//
+// A load that widens reads its operand as a signed value: the bits above it
+// arrive as its sign, which is what a read of a char or a short is. A load of an
+// unsigned character type or an unsigned short is the same read with the other
+// extension, and that is load_slot_unsigned.
 pub fn load_slot(base Register, disp i32, dst Register, width int) ![]u8 {
-	return slot_move(base, disp, dst, width, false)
+	return slot_move(base, disp, dst, width, false, true)
+}
+
+// load_slot_unsigned is a load of a one- or two-byte value with its bits above
+// the value filled with zero rather than its sign, which is what reading an
+// `unsigned char` or an `unsigned short` asks for. A value four or eight bytes
+// wide fills the whole register either way, so those two read the same.
+pub fn load_slot_unsigned(base Register, disp i32, dst Register, width int) ![]u8 {
+	return slot_move(base, disp, dst, width, false, false)
 }
 
 pub fn store_slot(base Register, disp i32, src Register, width int) ![]u8 {
-	return slot_move(base, disp, src, width, true)
+	return slot_move(base, disp, src, width, true, true)
 }
 
-fn slot_move(base Register, disp i32, operand Register, width int, store bool) ![]u8 {
-	if width != 1 && width != 4 && width != 8 {
+fn slot_move(base Register, disp i32, operand Register, width int, store bool, signed bool) ![]u8 {
+	if width != 1 && width != 2 && width != 4 && width != 8 {
 		return error('${name}: a value of ${width} bytes is not one this machine moves through the frame')
 	}
-	mut out := []u8{cap: 8}
+	mut out := []u8{cap: 10}
 	mut rex := u8(0x40)
 	if width == 8 {
 		rex |= 0x08 // REX.W: the value is a wide one
@@ -863,6 +878,12 @@ fn slot_move(base Register, disp i32, operand Register, width int, store bool) !
 	}
 	if base.code >= 8 {
 		rex |= 0x01 // REX.B: the base is one of those too
+	}
+	// A two-byte store carries the operand-size prefix, which comes before the
+	// REX byte. A two-byte load that widens does not: the instruction names a
+	// four-byte destination and a two-byte source on its own.
+	if store && width == 2 {
+		out << u8(0x66)
 	}
 	// A byte operand is named by the low three bits of the register code, and
 	// without a REX byte those three bits name only the four byte registers of
@@ -874,13 +895,18 @@ fn slot_move(base Register, disp i32, operand Register, width int, store bool) !
 		out << rex
 	}
 	if store {
-		// A byte store, or a four- or eight-byte one.
+		// A byte store, a two-byte store, or a four- or eight-byte one.
 		out << u8(if width == 1 { 0x88 } else { 0x89 })
 	} else if width == 1 {
 		// Two bytes of opcode: the byte load that widens its operand, so that
 		// what lands in the register is the value the language means.
 		out << u8(0x0f)
-		out << u8(0xbe)
+		out << u8(if signed { 0xbe } else { 0xb6 })
+	} else if width == 2 {
+		// movsx or movzx r32, r/m16: a two-byte value widened into the register,
+		// which is the read a short of either signedness arrives as.
+		out << u8(0x0f)
+		out << u8(if signed { 0xbf } else { 0xb7 })
 	} else {
 		out << u8(0x8b) // the move, in one direction or the other
 	}
@@ -961,19 +987,26 @@ pub fn address_of_element(base Register, index Register, scale int, disp i32, ds
 
 // load_indirect and store_indirect move a value between a register and the
 // address in another register, which is what an element of an array is once its
-// address has been computed. A byte is loaded with the load that widens it, the
-// same one a frame slot uses, so an element of a char array arrives as the int
-// the language promotes it to.
+// address has been computed. A byte or a two-byte value is loaded with the load
+// that widens it, the same one a frame slot uses, so an element of a char or short
+// array arrives as the int the language promotes it to.
 pub fn load_indirect(address Register, dst Register, width int) ![]u8 {
-	return indirect_move(address, dst, width, false)
+	return indirect_move(address, dst, width, false, true)
+}
+
+// load_indirect_unsigned is that read of a one- or two-byte value with the bits
+// above it filled with zero rather than its sign, which is what reading an
+// element of an `unsigned char` or `unsigned short` array asks for.
+pub fn load_indirect_unsigned(address Register, dst Register, width int) ![]u8 {
+	return indirect_move(address, dst, width, false, false)
 }
 
 pub fn store_indirect(address Register, src Register, width int) ![]u8 {
-	return indirect_move(address, src, width, true)
+	return indirect_move(address, src, width, true, true)
 }
 
-fn indirect_move(address Register, operand Register, width int, store bool) ![]u8 {
-	if width != 1 && width != 4 && width != 8 {
+fn indirect_move(address Register, operand Register, width int, store bool, signed bool) ![]u8 {
+	if width != 1 && width != 2 && width != 4 && width != 8 {
 		return error('${name}: a value of ${width} bytes is not one this machine moves through an address')
 	}
 	low := address.code & 0x07
@@ -983,7 +1016,7 @@ fn indirect_move(address Register, operand Register, width int, store bool) ![]u
 		// zero written in would read the wrong memory.
 		return error('${name}: an address in ${address.name} cannot be named without a displacement')
 	}
-	mut out := []u8{cap: 5}
+	mut out := []u8{cap: 6}
 	mut rex := u8(0x40)
 	if width == 8 {
 		rex |= 0x08
@@ -994,6 +1027,11 @@ fn indirect_move(address Register, operand Register, width int, store bool) ![]u
 	if address.code >= 8 {
 		rex |= 0x01
 	}
+	// A two-byte store carries the operand-size prefix, which comes before the
+	// REX byte; a two-byte load that widens names its widths itself.
+	if store && width == 2 {
+		out << u8(0x66)
+	}
 	// The prefix rule for a byte operand is the one the frame moves follow: the
 	// low three bits name a different register when it is missing.
 	if width == 1 || rex != 0x40 {
@@ -1003,7 +1041,10 @@ fn indirect_move(address Register, operand Register, width int, store bool) ![]u
 		out << u8(if width == 1 { 0x88 } else { 0x89 })
 	} else if width == 1 {
 		out << u8(0x0f)
-		out << u8(0xbe)
+		out << u8(if signed { 0xbe } else { 0xb6 })
+	} else if width == 2 {
+		out << u8(0x0f)
+		out << u8(if signed { 0xbf } else { 0xb7 })
 	} else {
 		out << u8(0x8b)
 	}
@@ -1323,6 +1364,34 @@ pub fn movzx_byte(reg Register) ![]u8 {
 pub fn sign_extend_byte(reg Register) ![]u8 {
 	byte_operand(reg)!
 	return [u8(0x0f), 0xbe, u8(0xc0 | ((reg.code & 0x07) << 3) | (reg.code & 0x07))]
+}
+
+// sign_extend_half and zero_extend_half widen the low two bytes of a register
+// into the whole register, with the sign kept and with zero above the value
+// respectively. They are what a value converted to a short or an unsigned short
+// is narrowed with, the two-byte shape of sign_extend_byte and movzx_byte. A
+// register above the first eight needs the REX prefix that names it, since
+// neither instruction can reach one without.
+pub fn sign_extend_half(reg Register) ![]u8 {
+	return half_extension(reg, 0xbf)
+}
+
+pub fn zero_extend_half(reg Register) ![]u8 {
+	return half_extension(reg, 0xb7)
+}
+
+fn half_extension(reg Register, opcode u8) ![]u8 {
+	mut out := []u8{cap: 4}
+	// The source is the register's low three bits with REX.B, and the destination
+	// is the same register with REX.R, because movsx and movzx name one register
+	// in each field and both are this one.
+	if reg.code >= 8 {
+		out << u8(0x45) // REX.R | REX.B
+	}
+	out << u8(0x0f)
+	out << opcode
+	out << u8(0xc0 | ((reg.code & 0x07) << 3) | (reg.code & 0x07))
+	return out
 }
 
 // sign_extend_word widens a four-byte value into the whole register with its sign
