@@ -156,6 +156,11 @@ pub:
 	target string
 	index  ?Expr
 	field  ?Field
+	// subscript is the element an assignment writes to when its base is not a
+	// name the target fields can address, which is what `3[p] = 9` and
+	// `p[3] = 9` for a pointer p are. The element node is carried whole because
+	// the address it is stored through is computed from the base's value.
+	subscript ?Expr
 	// cond is the controlling expression of an if or a while: what has to be
 	// true for the branch to be taken, or for the loop to go round again.
 	cond ?Expr
@@ -230,14 +235,18 @@ pub:
 	col      int
 }
 
-// Index is one element of an array, written `a[i]`: the name of the array and
-// the expression that says which element. An element of a named array is the one
-// place a subscript is read and written; a general lvalue — a dereference, a
-// subscript of a subscript, or an array that is not a name — is a shape the tree
-// does not have, and the expression reader reports it where it stops.
+// Index is one element of an array or of the object a pointer addresses, written
+// `E1[E2]`. 6.5.2.1 defines it as `*((E1) + (E2))`, so the base is an expression
+// and not a name: a name, a member that is an array, another element, or a
+// pointer value such as `*pp` or a call.
+//
+// Which of the two operands holds the address is settled while they are read.
+// Addition commutes, so `3[p]` is `p[3]`, and the base here is always the operand
+// whose type is the array or the pointer. `typ` is the type of the element that
+// base names.
 pub struct Index {
 pub:
-	name  string
+	base  Expr
 	index Expr
 	typ   types.Type
 	line  int

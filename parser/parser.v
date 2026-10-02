@@ -283,7 +283,7 @@ fn (mut p Parser) report_undeclared(unit ast.TranslationUnit) {
 
 fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map[string]bool) {
 	for stmt in stmts {
-		if stmt.kind == .assign {
+		if stmt.kind == .assign && stmt.target != '' {
 			// The name an assignment writes to is a use of it: `missing = 1;`
 			// names a missing declaration just as reading the name does.
 			p.check_undeclared_name(stmt.target, stmt.line, stmt.col, mut reported)
@@ -296,6 +296,9 @@ fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map
 		}
 		if index := stmt.index {
 			p.check_undeclared_expression(index, mut reported)
+		}
+		if subscript := stmt.subscript {
+			p.check_undeclared_expression(subscript, mut reported)
 		}
 		if cond := stmt.cond {
 			p.check_undeclared_expression(cond, mut reported)
@@ -322,7 +325,7 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			}
 		}
 		ast.Index {
-			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			p.check_undeclared_expression(expr.base, mut reported)
 			p.check_undeclared_expression(expr.index, mut reported)
 		}
 		ast.Field {
@@ -740,7 +743,7 @@ fn (p Parser) aggregate_bytes(declared types.Type) int {
 fn describe_operand(expr ast.Expr) string {
 	return match expr {
 		ast.Ident { expr.name }
-		ast.Index { '${expr.name}[...]' }
+		ast.Index { '${describe_operand(expr.base)}[...]' }
 		ast.Field { '${expr.name}.${expr.member}' }
 		ast.IntLit { expr.text }
 		ast.FloatLit { expr.text }
@@ -875,22 +878,137 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	return p.parse_postfix()
 }
 
-// parse_postfix reads a name, a call, an element or a member and then the
-// postfix operators that follow it: `x++` and `x--`. A postfix operator binds to
-// what comes before it, so it is read here, after parse_primary has built the
-// operand, and before parse_binary is given a chance to read a binary operator
-// at the same position.
+// parse_postfix reads a primary expression and then the postfix operators that
+// follow it, left to right: `x++`, `x--`, and the subscript `x[i]` of 6.5.2.1.
+// A postfix operator binds to what comes before it, so it is read here, after
+// parse_primary has built the operand, and before parse_binary is given a chance
+// to read a binary operator at the same position.
+//
+// The subscript is here rather than in parse_primary because its left operand is
+// an expression and not a name: `3[p]`, `(*row)[2]` and `arr[0][1]` are all the
+// same shape, and a postfix loop is what lets one routine read every base.
 //
 // The loop takes every operator that follows, because `x++++` is two steps in
 // the grammar; the second operand is an expression that is not a name and is
 // refused by inc_dec, which is where the refusal belongs.
 fn (mut p Parser) parse_postfix() !ast.Expr {
 	mut expr := p.parse_primary()!
-	for p.peek().kind == .punct && (p.peek().text == '++' || p.peek().text == '--') {
-		op := p.next()
-		expr = p.inc_dec(op, expr, true)!
+	for {
+		t := p.peek()
+		if t.kind == .punct && (t.text == '++' || t.text == '--') {
+			op := p.next()
+			expr = p.inc_dec(op, expr, true)!
+			continue
+		}
+		if t.kind == .punct && t.text == '[' {
+			expr = p.parse_subscript(expr)!
+			continue
+		}
+		// A member of an element: `s[i].a` reads the member from the element
+		// the index names, so the Field carries the index and the member is
+		// read from that element. A member is read from an object with a place
+		// in the frame or in the image, so the object has to be a name; an
+		// element of anything else is refused here by name.
+		if t.kind == .punct && (t.text == '.' || t.text == '->') && expr is ast.Index {
+			at := expr as ast.Index
+			if at.base is ast.Ident {
+				name := (at.base as ast.Ident).name
+				base_at := tokenize.Token{
+					kind: .identifier
+					text: name
+					line: at.base.line
+					col:  at.base.col
+				}
+				expr = ast.Expr(p.parse_member_path(name, base_at, t.text == '->', at.index)!)
+				continue
+			}
+			// A member path is named as it was written even when the array
+			// member's address was taken: the object is what the reader sees.
+			mut object := describe_operand(at.base)
+			if at.base is ast.Unary {
+				addressed := at.base as ast.Unary
+				if addressed.op == '&' && addressed.expr is ast.Field {
+					path := addressed.expr as ast.Field
+					object = '${path.name}.${path.member}[...]'
+				}
+			}
+			p.error_at(t, 'unsupported: a member is read from an element, and the object is ${object} rather than a name')
+			return error('member of an element')
+		}
+		break
 	}
 	return expr
+}
+
+// parse_subscript reads `[E2]` after a primary expression and builds the element
+// 6.5.2.1 defines as `*((E1) + (E2))`. The index is an expression of its own, so
+// `a[i + 1]` and `a[b[0]]` are both the shape this reads.
+fn (mut p Parser) parse_subscript(base ast.Expr) !ast.Expr {
+	at := p.next() // [
+	index := p.parse_expression()!
+	if !p.at_punct(']') {
+		p.error_at(p.peek(), 'unsupported: expected ] after the index of an element, found ${describe(p.peek())}')
+		return error('expected ]')
+	}
+	p.next()
+	return p.element(base, index, at)
+}
+
+// element builds the node for one subscript. Which of the two operands holds the
+// address is a question about their types: an array or a pointer is the one the
+// index is added to, and 6.5.2.1 makes the other one the index. Addition
+// commutes, so `3[p]` is read as `p[3]` and the base of the node is always the
+// operand that is the array or the pointer.
+//
+// A base that is a member and of an array type is addressable storage rather than
+// a value - the member's own read would hand the index the bytes of the first
+// element - so its address is taken here, which is the `&` an array's name stands
+// for everywhere else.
+fn (mut p Parser) element(base ast.Expr, index ast.Expr, at tokenize.Token) !ast.Expr {
+	mut address := base
+	mut count := index
+	mut element := types.Type{}
+	if base.typ.is_array() || base.typ.is_pointer() {
+		element = p.element_type(base.typ, base, at) or { return error('no element type') }
+	} else if index.typ.is_array() || index.typ.is_pointer() {
+		address = index
+		count = base
+		element = p.element_type(index.typ, index, at) or { return error('no element type') }
+	} else {
+		p.error_at(at, 'unsupported: neither ${describe_operand(base)} nor ${describe_operand(index)} is an array or a pointer, so this is not an element of one')
+		return error('no array or pointer operand')
+	}
+	if address is ast.Field && address.typ.is_array() {
+		address = ast.Expr(ast.Unary{
+			op:   '&'
+			expr: address
+			typ:  address.typ
+			line: address.line
+			col:  address.col
+		})
+	}
+	return ast.Expr(ast.Index{
+		base:  address
+		index: count
+		typ:   element
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// element_type is the type of one element of an array or of one pointed-to value:
+// `a[i]` has the element type of what a was declared as, and `p[i]` the type p
+// points at. A name that is neither an array nor a pointer has no element to be
+// one of, which is refused where the operator that asked for one was written.
+fn (mut p Parser) element_type(t types.Type, operand ast.Expr, at tokenize.Token) ?types.Type {
+	if t.is_array() {
+		return t.element() or { types.Type{} }
+	}
+	if t.is_pointer() {
+		return t.pointee() or { types.Type{} }
+	}
+	p.error_at(at, 'unsupported: ${describe_operand(operand)} is neither an array nor a pointer, so it has no element to subscript')
+	return none
 }
 
 // inc_dec builds the node for `++` or `--` on a name, and refuses every other
@@ -1082,32 +1200,6 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 				col:  t.col
 			})
 		}
-		if p.at_punct('[') {
-			// One element of an array, read where a value is expected. The
-			// subscript is an expression of its own, so `a[i + 1]` and
-			// `a[b[0]]` are both the shape this reads.
-			p.next()
-			index := p.parse_expression()!
-			if !p.at_punct(']') {
-				p.error_at(p.peek(), 'unsupported: expected ] after the index of an element, found ${describe(p.peek())}')
-				return error('expected ]')
-			}
-			p.next()
-			element := p.index_type(t)
-			if p.at_punct('.') || p.at_punct('->') {
-				// A member of an element of an array: the object is the element
-				// the index names, so the path carries the index and the stride
-				// between elements is the size of one element's type.
-				return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'), index)!)
-			}
-			return ast.Expr(ast.Index{
-				name:  t.text
-				index: index
-				typ:   element
-				line:  t.line
-				col:   t.col
-			})
-		}
 		if p.at_punct('.') || p.at_punct('->') {
 			return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'), ?ast.Expr(none))!)
 		}
@@ -1216,24 +1308,6 @@ fn string_literal_type(text string, value string) types.Type {
 		return types.Type{}
 	}
 	return types.array_of(types.char_type(), value.len + 1)
-}
-
-// index_type is the type of one element of an array or of one pointed-to value:
-// `a[i]` has the element type of what a was declared as, and `p[i]` the type p
-// points at. The lookup is the one the name was declared with, which is what
-// makes a subscript of a name the shape this reader can type. A name that is
-// neither an array nor a pointer has no element to be one of, and that is
-// refused here rather than left unresolved.
-fn (mut p Parser) index_type(at tokenize.Token) types.Type {
-	declared := p.resolve(at.text)
-	if declared.is_array() {
-		return declared.element() or { types.Type{} }
-	}
-	if declared.is_pointer() {
-		return declared.pointee() or { types.Type{} }
-	}
-	p.error_at(at, 'unsupported: ${at.text} is neither an array nor a pointer, so it has no element to subscript')
-	return types.Type{}
 }
 
 // signature is the function type a name declares, following a pointer to a

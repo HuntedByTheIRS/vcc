@@ -210,7 +210,8 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			out << '${indent}string ${expr.text} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
 		ast.Index {
-			out << '${indent}element ${expr.name}[] at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			out << '${indent}element[] at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			dump_expression(expr.base, depth + 1, mut out)
 			dump_expression(expr.index, depth + 1, mut out)
 		}
 		ast.Field {
