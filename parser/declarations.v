@@ -2173,45 +2173,68 @@ fn (mut params Params) note_problem(problem string, at tokenize.Token) {
 	}
 }
 
-// parse_array_suffix reads `[ ... ]`. The bound is a constant expression, and
-// the first one a system header offers is `sizeof (int)`, which this compiler
-// cannot read as an expression yet. So the region is scanned to its bracket and
-// nothing in it is evaluated; what matters is that the suffix ends where it
-// says it ends.
+// unreadable_bound is what parse_array_suffix answers for a bound that was
+// written in the brackets and is not an integer constant expression this reader
+// evaluated. It is negative, so a step whose bound was a size stays positive and
+// a pair of empty brackets stays zero, which is the answer the reader of a
+// deduced size reads. The value says which of the two happened, because the
+// question differs by context: a body's bound that is not constant is a
+// variable-length array this compiler does not implement, and a file-scope
+// object's is a constraint violation, while a struct member's is a member that
+// still compiles.
+const unreadable_bound = -1
+
+// parse_array_suffix reads `[ ... ]`. A bound written in the brackets is an
+// integer constant expression and its value is what the array's type is built
+// from, so it is evaluated here rather than scanned past. `sizeof` is an
+// operator the expression reader already turns into the number it names, so a
+// real header's bound reaches this reader as arithmetic over constants:
+// `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]` is worth 8. A bound
+// that evaluates to nothing a size can be is unreadable_bound, which the caller
+// reads as "no size this reader read".
+//
+// A pair of empty brackets answers zero without parsing anything, which is what
+// it answered before and what a size deduced from an initializer hooks into. A
+// region that does not evaluate is skipped to its bracket as it always was, so
+// the suffix still ends where it says it ends.
 fn (mut p Parser) parse_array_suffix() !i64 {
 	open := p.next() // [
-	if p.peek().kind == .number {
-		// The size of an array as it is written in a body is a number: the
-		// preprocessor has already replaced the names that stand for one, so
-		// what arrives here is the number itself.
-		size := p.next()
+	if p.at_punct(']') {
+		p.next()
+		return 0
+	}
+	// The bound is read as an expression so that it can be evaluated. Nothing the
+	// trial read is kept if it does not end at the bracket: the cursor, the
+	// diagnostics it produced, the depth it counted and the type the declarator
+	// is being built from are all restored, and the region is skipped instead.
+	saved_pos := p.pos
+	saved_diagnostics := p.diagnostics.len
+	saved_depth := p.depth
+	saved_base := p.pending_base
+	saved_storage := p.pending_storage
+	mut read := ?ast.Expr(none)
+	if expr := p.parse_expression() {
+		read = expr
+	}
+	p.depth = saved_depth
+	p.pending_base = saved_base
+	p.pending_storage = saved_storage
+	if expr := read {
 		if p.at_punct(']') {
 			p.next()
-			value := parse_integer_literal(size.text) or {
-				p.error_at(size, err.msg())
-				return error('bad array size')
-			}
+			value := p.constant_value(expr) or { return unreadable_bound }
 			if value > 0 {
 				return value
 			}
-			// A size that is written and cannot be held — `int a[0]` — reads as
-			// no size at all, and the reader that asked for one says so.
+			// A size written and not held — `int a[0]`, `int a[2 - 5]` — reads
+			// as no size at all, and the reader that asked for one says so.
 			return 0
 		}
-		// The bound goes on after the number, so it is an expression, and an
-		// expression is not a size this reader reads: the region is scanned to
-		// its bracket and the size is left unread. A body reports that as an
-		// array without one, and a declaration in a header is skipped, which is
-		// what makes `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]`
-		// read as the member of a struct that it is.
-		p.skip_balanced(open)!
-		return 0
 	}
-	// An empty pair of brackets, or a bound that is not a number at all: the
-	// region is read past, and the reader that asked for the size decides
-	// whether it needed one.
+	p.pos = saved_pos
+	p.diagnostics = p.diagnostics[..saved_diagnostics]
 	p.skip_balanced(open)!
-	return 0
+	return unreadable_bound
 }
 
 // skip_to_separator consumes the rest of a declaration that is scanned rather
