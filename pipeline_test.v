@@ -339,6 +339,30 @@ fn test_a_constant_stored_into_a_wider_member_is_widened() {
 	os.rm(binary) or {}
 }
 
+// 6.7.8 initializes the first member of a union, wherever the union type was
+// reached from: a tagged type, a typedef of an anonymous union, an anonymous
+// union in the declaration itself, and a first member narrower than the value
+// written into it. The value goes at the beginning of the object, which is where
+// the first member sits. Measured on gcc 16.2.1, these programs return 4, 4, 4
+// and 65.
+fn test_a_brace_initializer_for_a_union_stores_into_its_first_member() {
+	programs := [
+		'union U { int i; char c[4]; };\nint main(void) { union U u = { 0x01020304 }; return u.c[0]; }\n',
+		'typedef union { int i; char c[4]; } T;\nint main(void) { T u = { 0x01020304 }; return u.c[0]; }\n',
+		'int main(void) { union { int i; char c[4]; } u = { 0x01020304 }; return u.c[0]; }\n',
+		'union U { char c; int i; };\nint main(void) { union U u = { 65 }; return u.c; }\n',
+	]
+	expected := [4, 4, 4, 65]
+	for index, program in programs {
+		source := scratch('union_init_${index}.c')
+		binary := scratch('union_init_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == expected[index]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 // typeof is read by the parser and answered by the emitter as the type behind
 // it: a program that declares an object through typeof compiles and runs, and
 // the exit status is what the types decided. Measured on gcc 16.2.1, the same
