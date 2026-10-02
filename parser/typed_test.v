@@ -355,6 +355,39 @@ fn test_a_string_literal_is_an_array_of_char_with_room_for_the_terminator() {
 	assert argument.typ.describe() == 'char[4]'
 }
 
+fn test_a_wide_string_literal_is_an_array_of_wchar_t() {
+	// `L"hello"` is an array of six wchar_t: five characters and the terminator
+	// the literal does not write. On this target wchar_t is an int, four bytes
+	// wide, so the argument decays to an `int *` and the array is twenty-four
+	// bytes. Measured on gcc 16.2.1, sizeof(L"hello") is 24.
+	//
+	// The bytes kept are the characters as wchar_t: four little-endian bytes
+	// each, so `h` is `61 00 00 00` and the fifth character starts at byte 16.
+	result := checked('int wants(int *s);\nint main() { wants(L"hello"); return 0; }')
+	statement := result.unit.decls[1].body[0]
+	call_expr := statement.expr or {
+		assert false
+		return
+	}
+	call := call_expr as ast.Call
+	argument := call.args[0] as ast.StrLit
+	assert argument.unit == 4
+	assert argument.typ.describe() == 'int[6]'
+	bytes := argument.value.bytes()
+	assert bytes.len == 20
+	assert bytes[0] == `h` && bytes[1] == 0 && bytes[2] == 0 && bytes[3] == 0
+	assert bytes[16] == `o` && bytes[17] == 0 && bytes[18] == 0 && bytes[19] == 0
+}
+
+// A `u`- or `U`-prefixed literal names char16_t or char32_t, which are header
+// types this compiler has not read, and the refusal says which prefix it was
+// rather than calling every prefixed literal wide.
+fn test_a_u_prefixed_string_literal_is_refused_by_name() {
+	result := parsed('int main() { return 0; } int f() { return u"x"[0]; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('u-prefixed string literal')
+}
+
 fn test_an_element_of_an_array_carries_the_element_type() {
 	result := checked('char name[8];\nint main() { return name[1]; }')
 	returned := result.unit.decls[0].body[0].expr or {

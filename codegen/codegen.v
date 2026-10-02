@@ -3879,10 +3879,20 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		}
 		ast.StrLit {
 			// A string is the address of its bytes: the image holds the bytes
-			// and the instruction says where they landed.
-			e.intern(expr.value)
-			register := e.accumulator(expr.line, expr.col)!
-			e.reference(e.target.address_of(register, 0), .take_address, expr.value, e.target.name_of(register))
+			// and the instruction says where they landed. A wide literal's
+			// bytes are picked out of their own table, because the same run of
+			// bytes can be a narrow literal's as well.
+			if expr.unit == 4 {
+				e.intern_wide(expr.value)
+				register := e.accumulator(expr.line, expr.col)!
+				e.reference(e.target.address_of(register, 0), .take_wide_address, expr.value,
+					e.target.name_of(register))
+			} else {
+				e.intern(expr.value)
+				register := e.accumulator(expr.line, expr.col)!
+				e.reference(e.target.address_of(register, 0), .take_address, expr.value,
+					e.target.name_of(register))
+			}
 		}
 		ast.Unary {
 			e.emit_unary(expr, depth)!
@@ -5508,7 +5518,10 @@ fn (e Emitter) pointed_size(expr ast.Expr) ?int {
 		return e.representation.size_of(pointee)
 	}
 	if expr is ast.StrLit {
-		return 1
+		// A string is scaled by the size of one of its characters: a byte for an
+		// ordinary string and four for a wide one, whose elements are wchar_t.
+		element := expr.typ.element() or { return none }
+		return e.representation.size_of(element)
 	}
 	return none
 }
@@ -8071,6 +8084,23 @@ fn (mut e Emitter) intern(text string) {
 	e.program.strings[text] = e.program.string_blob.len
 	e.program.string_blob << text.bytes()
 	e.program.string_blob << u8(0) // the terminator a library function reads to
+}
+
+// intern_wide puts a wide string literal into the image's read-only data once,
+// keyed by the bytes of its characters, and ends the entry with a zero wchar_t,
+// which is four zero bytes. It is a table of its own because those bytes can also
+// be a narrow literal's, and the two are different objects: a narrow literal's
+// entry ends with one zero byte and its object is a byte longer than the wide
+// one's, so one table would hand one of them the other's entry.
+fn (mut e Emitter) intern_wide(value string) {
+	if value in e.program.wide_strings {
+		return
+	}
+	e.program.wide_strings[value] = e.program.string_blob.len
+	e.program.string_blob << value.bytes()
+	for _ in 0 .. 4 {
+		e.program.string_blob << u8(0)
+	}
 }
 
 // float_key is the key one double is interned under: the text of the eight bytes

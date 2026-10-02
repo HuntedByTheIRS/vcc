@@ -80,6 +80,29 @@ fn test_a_redeclaration_in_one_scope_answers_with_the_earlier_declaration() {
 	assert !typedef.defined
 }
 
+// The type a declarator could not finish is completed by what follows it: an
+// array's size comes from a string literal initializer written after the
+// brackets, and the name has to answer with that size wherever it is used.
+fn test_a_declared_type_can_be_completed_after_its_declarator() {
+	mut table := new_table()
+	table.declare(symbol('s', array_of(char_type(), -1)))
+	incomplete := table.lookup('s') or {
+		assert false
+		return
+	}
+	assert !incomplete.typ.is_complete()
+	table.complete_type('s', array_of(char_type(), 4))
+	completed := table.lookup('s') or {
+		assert false
+		return
+	}
+	assert completed.typ.is_complete()
+	assert completed.typ.count == 4
+	// A name no scope holds is left alone rather than declared by the call.
+	table.complete_type('missing', int_type())
+	assert table.lookup('missing') == none
+}
+
 fn test_a_definition_keeps_the_name_defined_across_a_later_declaration() {
 	mut table := new_table()
 	table.declare(Symbol{

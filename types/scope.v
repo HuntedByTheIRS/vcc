@@ -143,6 +143,23 @@ pub fn (mut t Table) declare_at_file_scope(symbol Symbol) ?Symbol {
 	return t.declare_at(0, symbol)
 }
 
+// complete_type replaces the type a name was declared with, which is how a
+// declaration whose type its declarator could not finish is completed by what
+// follows the declarator: an array's size is not known when the brackets are
+// read, and a string literal initializer written after them is what gives it
+// one. Only the innermost scope is touched, because the name being completed is
+// the one the declaration just wrote there. A name no scope holds is left
+// alone, which is the same silence a use of it gets.
+pub fn (mut t Table) complete_type(name string, typ Type) {
+	index := t.scopes.len - 1
+	if symbol := t.scopes[index].symbols[name] {
+		t.scopes[index].symbols[name] = Symbol{
+			...symbol
+			typ: typ
+		}
+	}
+}
+
 // declare_at records a declaration in one scope and answers with the declaration
 // it replaces there, if there was one. A second declaration of a name does not
 // un-define it: a declaration that promises and a definition that follows are one

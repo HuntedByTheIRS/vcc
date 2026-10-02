@@ -433,10 +433,18 @@ pub:
 // resolved — what the program will actually read — and text is the literal as
 // written, quotes included, for diagnostics and for printing a tree. Its type is
 // an array of char, with room for the terminator the literal does not write.
+//
+// unit is how many bytes one character of the literal takes in that object: one
+// for an ordinary string, whose elements are chars, and four for a wide one,
+// whose elements are the wchar_t this target gives, an int. value holds the
+// characters encoded in units of that width, so a wide literal's bytes are its
+// characters written little-endian, and the terminator the literal does not write
+// is a zero unit wide.
 pub struct StrLit {
 pub:
 	value string
 	text  string
+	unit  int
 	typ   types.Type
 	line  int
 	col   int

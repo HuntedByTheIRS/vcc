@@ -347,7 +347,7 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 			.call_import {
 				replacement = target.call_slot(disp)
 			}
-			.take_address {
+			.take_address, .take_wide_address {
 				register := target.reg(fixup.register) or {
 					return error('no register named ${fixup.register} to compute an address into')
 				}
@@ -428,6 +428,11 @@ fn referent_of(program image.Program, sections Sections, fixup image.Fixup) !int
 		.take_address {
 			return sections.strings + (program.strings[fixup.name] or {
 				return error('no string ${fixup.name} in the image')
+			})
+		}
+		.take_wide_address {
+			return sections.strings + (program.wide_strings[fixup.name] or {
+				return error('no wide string ${fixup.name} in the image')
 			})
 		}
 		.float_constant, .single_constant {

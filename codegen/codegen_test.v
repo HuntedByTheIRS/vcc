@@ -1260,6 +1260,18 @@ fn test_an_int_local_and_a_pointer_local_keep_their_widths() {
 	assert result.output.contains('widths')
 }
 
+// A wide string literal is an array of wchar_t and decays to a pointer to its
+// first element, which on this target is an `int *` because wchar_t is an int.
+// Its elements are four bytes apart, so a step of one lands on the next
+// character rather than inside the first one, and the terminator the literal does
+// not write is a zero wchar_t. Measured on gcc 16.2.1, this program exits 42.
+fn test_a_wide_string_literal_decays_to_a_wide_pointer() {
+	emitted := emit(translation_unit('int main() { int *p = L"hi"; if (sizeof(L"hi") != 12) return 1; if (p[0] != \'h\') return 2; if (p[1] != \'i\') return 3; if (p[2] != 0) return 4; if ((L"abcd" + 1)[0] != \'b\') return 5; return 42; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 42
+}
+
 // A function that takes both a pointer and an int and calls the library itself.
 // The call to it is written before its definition, which is where a call has to
 // bind forward, and the variadic call inside it formats a value computed from

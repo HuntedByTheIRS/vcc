@@ -262,21 +262,38 @@ fn parse_escape(rest string) !i64 {
 	}
 }
 
+// StringLiteral is the object a string literal names: the bytes of its
+// characters with the escapes resolved, how wide one character is in those
+// bytes, and how many characters the literal holds before the terminator it does
+// not write. A narrow literal's characters are bytes one wide; a wide one's are
+// the wchar_t this target gives, four bytes each, held little-endian.
+struct StringLiteral {
+	value string
+	unit  int
+	count int
+}
+
 // parse_string_literal reads a string literal into the bytes it names, with the
 // escapes resolved. The spelling stays with the caller; what comes back is what
 // the program would read.
-fn parse_string_literal(text string) !string {
+fn parse_string_literal(text string) !StringLiteral {
 	mut body := text
+	mut unit := 1
 	if body.len > 0 && body[0] != `"` {
 		// A prefixed literal: u8"x", L"x", u"x", U"x". The narrow prefix names
-		// the same bytes; the wide ones name an array of something this
-		// compiler does not have, and guessing at it is worse than saying so.
+		// the same bytes, `L` names a wide literal whose characters are the
+		// wchar_t this target gives, and `u` and `U` name char16_t and char32_t,
+		// which are header types this compiler does not have and are refused by
+		// name rather than guessed at.
 		mut quote := 0
 		for quote < body.len && body[quote] != `"` {
 			quote++
 		}
-		if body[..quote] != 'u8' {
-			return error('${text}: wide string literals are not implemented')
+		prefix := body[..quote]
+		if prefix == 'L' {
+			unit = 4
+		} else if prefix != 'u8' {
+			return error('${text}: a ${prefix}-prefixed string literal names a type this compiler does not have')
 		}
 		body = body[quote..]
 	}
@@ -284,6 +301,9 @@ fn parse_string_literal(text string) !string {
 		return error('${text}: not a string constant')
 	}
 	inner := body[1..body.len - 1]
+	if unit == 4 {
+		return parse_wide_string(text, inner)
+	}
 	mut bytes := []u8{}
 	mut i := 0
 	for i < inner.len {
@@ -308,7 +328,99 @@ fn parse_string_literal(text string) !string {
 		bytes << u8(value)
 		i = next
 	}
-	return bytes.bytestr()
+	return StringLiteral{
+		value: bytes.bytestr()
+		unit:  1
+		count: bytes.len
+	}
+}
+
+// parse_wide_string reads the characters of a wide literal into the wchar_t
+// values they name, each written as the four little-endian bytes the target
+// reads. An escape names a character by its value directly, and a source
+// character is decoded from UTF-8, which is the encoding gcc reads a wide
+// literal's plain characters in: measured on gcc 16.2.1, the two source bytes
+// of an e-acute are one wchar_t of 233, and so is the hex escape `\xe9`.
+//
+// A value that does not fit the signed 32-bit wchar_t this target gives is
+// reported here rather than truncated into some other character.
+fn parse_wide_string(text string, inner string) !StringLiteral {
+	mut bytes := []u8{}
+	mut count := 0
+	mut i := 0
+	for i < inner.len {
+		c := inner[i]
+		mut value := i64(0)
+		if c == `\\` {
+			if i + 1 < inner.len && inner[i + 1] == `\n` {
+				i += 2
+				continue
+			}
+			parsed, next := parse_string_escape(inner, i + 1) or {
+				return error('${text}: ${err.msg()}')
+			}
+			value = parsed
+			i = next
+		} else {
+			decoded, next := decode_utf8(inner, i) or {
+				return error('${text}: ${err.msg()}')
+			}
+			value = decoded
+			i = next
+		}
+		if value < 0 || value > max_wchar {
+			return error('${text}: the character ${value} does not fit in the wchar_t this target gives, a signed 32-bit int')
+		}
+		for shift in 0 .. 4 {
+			bytes << u8((u64(value) >> (8 * shift)) & 0xff)
+		}
+		count++
+	}
+	return StringLiteral{
+		value: bytes.bytestr()
+		unit:  4
+		count: count
+	}
+}
+
+// max_wchar is the largest value the signed 32-bit wchar_t this target gives
+// holds, which is the largest a wide character may be.
+const max_wchar = i64(0x7fffffff)
+
+// decode_utf8 reads one character of the source, which is UTF-8, and answers the
+// code point it names and where the next character starts. A byte that cannot
+// begin a sequence, or a continuation byte that is not one, is reported rather
+// than read as a value the source did not write.
+fn decode_utf8(text string, at int) !(i64, int) {
+	b := text[at]
+	if b < 0x80 {
+		return i64(b), at + 1
+	}
+	mut need := 0
+	mut value := i64(0)
+	if b >= 0xc2 && b <= 0xdf {
+		need = 1
+		value = i64(b & 0x1f)
+	} else if b >= 0xe0 && b <= 0xef {
+		need = 2
+		value = i64(b & 0x0f)
+	} else if b >= 0xf0 && b <= 0xf4 {
+		need = 3
+		value = i64(b & 0x07)
+	} else {
+		return error('the byte 0x${b:02x} does not start a UTF-8 character')
+	}
+	if at + need >= text.len {
+		return error('a UTF-8 character in the literal is cut short')
+	}
+	for k in 1 .. need + 1 {
+		cont := text[at + k]
+		if cont < 0x80 || cont > 0xbf {
+			return error('the byte 0x${cont:02x} does not continue a UTF-8 character')
+		}
+		value = i64((u64(value) << 6) | u64(cont & 0x3f))
+	}
+	return value, at + need + 1
 }
 
 // parse_string_escape reads the escape that starts at `at`, the byte after the

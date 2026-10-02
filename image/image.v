@@ -23,9 +23,15 @@ pub:
 }
 
 pub enum FixupKind {
-	call_local       // a call to a function this translation unit defines
-	call_import      // a call to a symbol the loader resolves out of a library
-	take_address     // the address of a string in the image
+	call_local   // a call to a function this translation unit defines
+	call_import  // a call to a symbol the loader resolves out of a library
+	take_address // the address of a string in the image
+	// take_wide_address is the same address for a wide string literal, whose
+	// characters are wider than a byte. The bytes live in the same read-only
+	// data and the offset is looked up in the wide table, because the same run
+	// of bytes can be a narrow literal in one program and a wide one in
+	// another and the two are different objects.
+	take_wide_address
 	jump_local       // a jump to a label inside the function being emitted
 	branch_zero      // the same jump, taken when the value last tested was zero
 	branch_nonzero   // and when it was not
@@ -89,6 +95,12 @@ pub mut:
 	// starts in it.
 	string_blob []u8
 	strings     map[string]int
+	// wide_strings is where each wide string literal starts in the same
+	// read-only data, behind string_blob's own table. It is a second table
+	// because a wide literal's bytes and a narrow one's can be the same run of
+	// bytes with a different length and a different meaning, so one table
+	// cannot hold both without one entry answering for the other.
+	wide_strings map[string]int
 	// doubles is the same storage again for the eight bytes of a floating
 	// constant, keyed by the bit pattern rather than by the bytes, so that two
 	// constants that are the same double are one entry the way two identical

@@ -1133,6 +1133,17 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						}
 					}
 				}
+			} else if p.peek().kind == .string && d.is_array() {
+				// 6.7.8p14: a string literal initializes an array of
+				// character type, and a wide literal one of this target's
+				// wchar_t. A literal whose element type is not the array's is
+				// not this initializer, and the missing size is reported
+				// below.
+				if literal := p.read_array_string_literal() {
+					if array_takes_string(d, declared, literal) {
+						init = ast.Expr(literal)
+					}
+				}
 			} else {
 				init = p.parse_expression() or {
 					p.skip_declaration()
@@ -1152,16 +1163,49 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				}
 			}
 		}
-		// An array declaration needs a size, and a brace list is one for an
-		// array whose brackets were empty: `int a[] = {1, 2, 3};` declares a of
-		// three. A list the reader refused has already been named and the size
-		// is not reported a second time.
-		if d.is_array() && d.array_count() <= 0 && !brace {
+		// The elements a string literal writes into an array: one per character
+		// and the terminator the literal does not write. They are the same
+		// stores a brace list makes, so a literal and a list reach the back end
+		// as one thing. An array whose brackets wrote no size takes its size
+		// from the literal; a size that was written is used instead, and a
+		// literal too long for it is the constraint violation gcc 16.2.1
+		// refuses, reported at the literal.
+		mut from_string := false
+		if initializer := init {
+			if initializer is ast.StrLit {
+				if array_takes_string(d, declared, initializer) {
+					from_string = true
+					elements = string_elements_at(initializer, d.name_at)
+					characters := elements.len - 1
+					if d.array_sized() && d.array_count() < characters {
+						// `char c[2] = "abc"` holds two and writes four, and
+						// `char c[0] = "abc"` is the same refusal into none.
+						p.error_span(initializer.line, initializer.col, 'a constraint violation: ${d.name} holds ${d.array_count()} elements and its initializer writes ${elements.len} characters')
+						p.skip_declaration()
+						return stmts
+					}
+					// The literal is not a value written into the object: the
+					// stores below are the initialization.
+					init = none
+				}
+			}
+		}
+		// An array declaration needs a size, and a brace list or a string
+		// literal is one for an array whose brackets were empty: `int a[] = {1,
+		// 2, 3};` declares a of three. A list the reader refused has already
+		// been named and the size is not reported a second time.
+		if d.is_array() && d.array_count() <= 0 && !brace && !from_string {
 			p.error_at(d.array_at(), 'unsupported: an array declaration in a body needs a size that is a number and more than zero')
 			p.skip_declaration()
 			return stmts
 		}
-		count := if d.array_count() > 0 { d.array_count() } else { elements.len }
+		// A size that was written is used as it was written, including a written
+		// zero; only a pair of empty brackets takes its size from the literal,
+		// which is the elements the literal writes.
+		mut count := if d.array_count() > 0 { d.array_count() } else { elements.len }
+		if from_string && d.array_sized() {
+			count = d.array_count()
+		}
 		// A union's initializer is the store into its first member written
 		// below, and a struct's is the stores into its members, so the
 		// declaration itself starts as storage and carries no initializer.
@@ -1272,12 +1316,20 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				}
 			}
 		}
+		if from_string && !d.array_sized() {
+			// The size came from the literal, so the name records the array it
+			// turned out to be: a later `sizeof` of it is a question about that
+			// count rather than about the brackets that wrote none.
+			element := declared.element() or { spec.clause }
+			p.scopes.complete_type(d.name, types.array_of(element, count))
+		}
 		// A list for an array is the stores the initialization makes at the
 		// point of the declaration: one per value the list wrote, and a zero for
 		// each the list did not, because the rest of a partly initialized array
 		// is the zeros C says it holds. The frame slot starts as whatever was
-		// there, so the unwritten elements have to be written.
-		if brace && list_ok && d.is_array() {
+		// there, so the unwritten elements have to be written. A string literal
+		// writes its own elements the same way.
+		if ((brace && list_ok) || from_string) && d.is_array() {
 			for i in 0 .. count {
 				value := if i < elements.len {
 					elements[i]

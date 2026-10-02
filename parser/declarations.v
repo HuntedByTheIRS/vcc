@@ -288,8 +288,13 @@ struct DeclStep {
 	kind  DeclStepKind
 	quals types.Qualifiers
 	// count is how many elements an array step asked for, and zero when the
-	// brackets named no size this reader could read.
+	// brackets named no size this reader could read. unreadable_bound is a
+	// bound that was written and could not be evaluated, which is not zero.
 	count int
+	// sized says the brackets wrote something: a number, or an expression
+	// this reader read. Empty brackets wrote nothing, and that is the only
+	// pair a later reader may take a size for from an initializer.
+	sized bool
 	// at is where the step was written.
 	at tokenize.Token
 	// bound_name, with its line and column, is the first name a written bound
@@ -358,6 +363,17 @@ fn (d Declarator) array_count() int {
 	}
 	count := d.steps.last().count
 	return if count > 0 { count } else { 0 }
+}
+
+// array_sized says the array's brackets wrote something, which tells a pair of
+// empty brackets from a size that was written and could not be read. Only empty
+// brackets may take a size from an initializer, so a reader that has an
+// initializer asks.
+fn (d Declarator) array_sized() bool {
+	if !d.is_array() {
+		return false
+	}
+	return d.steps.last().sized
 }
 
 // array_at is where the array the name has was written, and the zero token when
@@ -652,6 +668,11 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut data_stars := 0
 	mut data_count := 0
 	mut data_clause := types.Type{}
+	// data_complete is the type of an array whose size its initializer gave it,
+	// which the declarator could not: the brackets wrote none, and the string
+	// literal after them is what says how many. It is set once the initializer
+	// has been read, and the name is completed with it after it is declared.
+	mut data_complete := ?types.Type(none)
 	mut data_init := ?i64(none)
 	// data_init_float is the same initializer when it was written as a floating
 	// constant. The two are kept apart while the declaration is read because the
@@ -680,6 +701,11 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// not reach are the zeros the storage starts as.
 	mut data_struct_brace := false
 	mut data_member_inits := []ast.MemberInit{}
+	// data_string says the initializer was a string literal that was read, which
+	// is a declaration with storage even when the array it initializes holds no
+	// element: `char s[0] = "";` writes none, and the report for an initializer
+	// that is not a number is not about it.
+	mut data_string := false
 	// data_problem says a brace initializer was read and refused for its size,
 	// which is a declaration the image does not lay out: the program is already
 	// refused, and storage for an object whose initializer is wrong is storage
@@ -889,6 +915,35 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						}
 					}
 					literal_refused = true
+				} else if p.peek().kind == .string && d.is_array() {
+					// 6.7.8p14: an array of character type may be
+					// initialized by a string literal. The elements become
+					// the same constants a brace list writes, so the image
+					// lays them out along the path a brace-initialized
+					// array already takes. A literal whose element type is
+					// not the array's is not this initializer, and the
+					// report below names the declaration.
+					if literal := p.read_array_string_literal() {
+						declared := p.declared_type(spec.clause, d)
+						if array_takes_string(d, declared, literal) {
+							written := p.file_scope_string_initializer(d, declared, data_name,
+								literal)
+							if written.ok {
+								data_inits = written.inits
+								data_count = written.count
+								data_complete = written.complete
+								data_string = true
+							} else {
+								// The literal was too long for the size that
+								// was written; it has been named at its own
+								// location and nothing is laid out.
+								data_problem = true
+								literal_refused = true
+							}
+						}
+					} else {
+						literal_refused = true
+					}
 				} else {
 					constant := p.file_scope_constant()
 					data_init = constant.integer
@@ -987,7 +1042,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if data_defined && data_init == none && data_init_float == none && data_inits.len == 0
-			&& data_init_floats.len == 0 {
+			&& data_init_floats.len == 0 && !data_string {
 			// Either way the definition is refused. When the initializer was a
 			// shape the reader reported, it has already been named at its own
 			// location and this report would be a second message about the
@@ -1019,10 +1074,18 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		// and the reason neither of these needs a diagnostic of its own.
 		init, init_float := initializer_for(data_type, data_init, data_init_float)
 		p.declare_name(data_name, data_clause, data_at, true)
+		if completed := data_complete {
+			// The name was declared with the size-less array its declarator
+			// wrote, and the string literal that followed is what gives it a
+			// size: the symbol is completed here so a later `sizeof` answers
+			// with the size the initializer fixed rather than with the brackets
+			// that wrote none.
+			p.scopes.complete_type(data_name, completed)
+		}
 		p.globals << ast.Global{
 			name:        data_name
 			typ:         data_type
-			resolved:    data_clause
+			resolved:    if completed := data_complete { completed } else { data_clause }
 			count:       data_count
 			init:        init
 			init_float:  init_float
@@ -2094,10 +2157,11 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 	for {
 		if p.at_punct('[') {
 			at := p.peek()
-			count := p.parse_array_suffix()!
+			suffix := p.parse_array_suffix(d.name)!
 			steps.prepend(DeclStep{
 				kind:            .array_step
-				count:           int(count)
+				count:           suffix.count_as_step()
+				sized:           suffix.bound != .empty
 				at:              at
 				bound_name:      p.bound_name
 				bound_name_line: p.bound_name_line
@@ -2477,39 +2541,251 @@ fn (mut params Params) note_problem(problem string, at tokenize.Token) {
 	}
 }
 
-// unreadable_bound is what parse_array_suffix answers for a bound that was
+// unreadable_bound is what a declarator step carries for a bound that was
 // written in the brackets and is not an integer constant expression this reader
 // evaluated. It is negative, so a step whose bound was a size stays positive and
-// a pair of empty brackets stays zero, which is the answer the reader of a
-// deduced size reads. The value says which of the two happened, because the
-// question differs by context: a body's bound that is not constant is a
+// a pair of empty brackets stays zero; array_sized says which of those a zero
+// was. The value says which of the two kinds of unread step happened, because
+// the question differs by context: a body's bound that is not constant is a
 // variable-length array this compiler does not implement, and a file-scope
 // object's is a constraint violation, while a struct member's is a member that
 // still compiles.
 const unreadable_bound = -1
+
+// ArrayBound is what one pair of brackets said about an array's size. The four
+// answers are kept apart because a caller has to tell them apart: an initializer
+// may give a size to empty brackets and to nothing else, and a bound that was
+// written and read as no positive size is a different thing from one this
+// reader could not evaluate at all.
+enum ArrayBound {
+	// empty is a pair of brackets with nothing between them: `int a[]`. An
+	// initializer may be what gives the array its size.
+	empty
+	// held is a bound this reader evaluated to a positive size.
+	held
+	// unheld is a bound that was written and evaluated to something that is
+	// not a size: `int a[0]`, `int a[2 - 5]`. A negative one is reported where
+	// it is read and reaches the caller as this same case.
+	unheld
+	// unreadable is a bound that was written and this reader could not
+	// evaluate, as in `int a[n]` where n is a name.
+	unreadable
+}
+
+// ArraySuffix is what one pair of brackets answered: which of the four shapes it
+// was, and the size when it read one. The kind beside the size is what keeps the
+// two distinctions a caller needs in one answer: empty brackets may take a size
+// from an initializer, and any bound that was written may not, whether it read
+// as a size or not.
+struct ArraySuffix {
+	bound ArrayBound
+	count i64
+}
+
+// count_as_step is the size a declarator step carries for this suffix: the size
+// when one was read, zero when the brackets wrote no size or one that did not
+// read as a size, and unreadable_bound when a bound was written and could not be
+// evaluated at all.
+fn (s ArraySuffix) count_as_step() int {
+	if s.bound == .unreadable {
+		return unreadable_bound
+	}
+	return int(s.count)
+}
+
+// array_takes_string says whether a string literal initializes the array a
+// declarator declared: an array of character type by an ordinary literal and an
+// array of this target's wchar_t, an int, by a wide one. Measured on gcc 16.2.1,
+// `signed char a[] = "x"` and `unsigned char a[] = "x"` are accepted while
+// `int a[] = "x"` and `unsigned int a[] = L"x"` are not, so the element type has
+// to be the literal's own.
+fn array_takes_string(d Declarator, declared types.Type, literal ast.StrLit) bool {
+	if !d.is_array() {
+		return false
+	}
+	element := declared.element() or { return false }
+	return element_takes_literal(element, literal.unit)
+}
+
+// element_takes_literal is the element type a string literal of this width
+// initializes: an ordinary literal an array of character type - char, signed
+// char or unsigned char - and a wide one an array of wchar_t, which this target
+// gives as an int.
+fn element_takes_literal(element types.Type, unit int) bool {
+	if unit == 4 {
+		return element.kind == .int_
+	}
+	return element.kind in [.char_, .signed_char, .unsigned_char]
+}
+
+// read_array_string_literal reads the string literal at the cursor as one object:
+// a run of adjacent literals is one literal (6.4.5p5), which is what
+// `char s[] = "one" "two";` relies on. Every piece has to be of the literal's own
+// width, and a piece that cannot be read is named where it is written and answers
+// none.
+fn (mut p Parser) read_array_string_literal() ?ast.StrLit {
+	token := p.next()
+	first := parse_string_literal(token.text) or {
+		p.error_at(token, err.msg())
+		return none
+	}
+	mut value := first.value
+	mut characters := first.count
+	for p.peek().kind == .string {
+		next := p.next()
+		piece := parse_string_literal(next.text) or {
+			p.error_at(next, err.msg())
+			return none
+		}
+		if piece.unit != first.unit {
+			p.error_at(next, 'unsupported: adjacent string literals of different widths, ${token.text} and ${next.text}')
+			return none
+		}
+		value += piece.value
+		characters += piece.count
+	}
+	return ast.StrLit{
+		value: value
+		text:  token.text
+		unit:  first.unit
+		typ:   string_literal_type(token.text, StringLiteral{
+			value: value
+			unit:  first.unit
+			count: characters
+		})
+		line:  token.line
+		col:   token.col
+	}
+}
+
+// string_elements is the elements a string literal writes into an array: one per
+// character, and the terminator the literal does not write as the last of them. A
+// wide literal's value holds four little-endian bytes a character and a narrow
+// one's holds one byte a character, so how a character is read off the literal is
+// what its unit says.
+fn string_elements(literal ast.StrLit) []i64 {
+	mut values := []i64{}
+	if literal.unit == 4 {
+		mut i := 0
+		for i + 3 < literal.value.len {
+			mut value := u64(0)
+			for k in 0 .. 4 {
+				value |= u64(literal.value[i + k]) << (8 * k)
+			}
+			values << i64(value)
+			i += 4
+		}
+	} else {
+		for byte in literal.value.bytes() {
+			values << i64(byte)
+		}
+	}
+	values << 0
+	return values
+}
+
+// string_elements_at is the elements string_elements answers, written as the
+// integer constants a brace list writes, at the position of the declaration that
+// holds them. A literal and a list then reach the back end as one thing.
+fn string_elements_at(literal ast.StrLit, at tokenize.Token) []ast.Expr {
+	mut elements := []ast.Expr{}
+	for value in string_elements(literal) {
+		elements << ast.Expr(ast.IntLit{
+			value: value
+			text:  '${value}'
+			typ:   types.int_type()
+			line:  at.line
+			col:   at.col
+		})
+	}
+	return elements
+}
+
+// ArrayString is what a string literal that initializes a file-scope array
+// writes: the element constants, how many elements the array turned out to have,
+// and the type the name is completed with. ok is false when the literal or its
+// size was refused, and the declaration is then not laid out.
+struct ArrayString {
+	inits    []i64
+	count    int
+	complete types.Type
+	ok       bool
+}
+
+// file_scope_string_initializer reads the string literal that initializes a
+// file-scope array and answers the elements it writes. 6.7.8p14 lets an array of
+// character type be initialized by a string literal: each character initializes
+// one element, and the terminating zero the literal does not write is an element
+// when the array has room for it.
+//
+// An array whose brackets wrote no size is exactly the literal including its
+// terminator. A written bound is used instead, and a literal too long for it is
+// the constraint violation gcc 16.2.1 refuses as `initializer-string for array of
+// 'char' is too long`: `char s[2] = "abc";` holds two and writes four, and
+// `char s[0] = "abc";` is the same refusal into none, because a bound was written
+// and the size is not taken from the literal. A bound exactly the characters
+// keeps no terminating zero, which gcc accepts and this accepts too.
+fn (mut p Parser) file_scope_string_initializer(d Declarator, declared types.Type,
+	name string, literal ast.StrLit) ArrayString {
+	values := string_elements(literal)
+	characters := values.len - 1
+	element := declared.element() or { declared }
+	if d.array_sized() {
+		written := d.array_count()
+		if written < characters {
+			p.error_span(literal.line, literal.col, 'a constraint violation: ${name} holds ${written} elements and its initializer writes ${values.len} characters')
+			return ArrayString{}
+		}
+		limit := if written < values.len { written } else { values.len }
+		return ArrayString{
+			inits:    values[..limit]
+			count:    written
+			complete: types.array_of(element, written)
+			ok:       true
+		}
+	}
+	return ArrayString{
+		inits:    values
+		count:    values.len
+		complete: types.array_of(element, values.len)
+		ok:       true
+	}
+}
 
 // parse_array_suffix reads `[ ... ]`. A bound written in the brackets is an
 // integer constant expression and its value is what the array's type is built
 // from, so it is evaluated here rather than scanned past. `sizeof` is an
 // operator the expression reader already turns into the number it names, so a
 // real header's bound reaches this reader as arithmetic over constants:
-// `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]` is worth 8. A bound
-// that evaluates to nothing a size can be is unreadable_bound, which the caller
-// reads as "no size this reader read".
+// `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]` is worth 8.
 //
-// A pair of empty brackets answers zero without parsing anything, which is what
-// it answered before and what a size deduced from an initializer hooks into. A
-// region that does not evaluate is skipped to its bracket as it always was, so
-// the suffix still ends where it says it ends.
-fn (mut p Parser) parse_array_suffix() !i64 {
+// A pair of empty brackets answers `.empty` without parsing anything, which is
+// what tells it from a bound that was written; a bound that evaluated to
+// something that is not a positive size answers `.unheld`, and one this reader
+// could not evaluate answers `.unreadable`. A region that does not evaluate is
+// skipped to its bracket as it always was, so the suffix still ends where it
+// says it ends.
+//
+// A written bound that is negative is a constraint violation (6.7.5.2p1) and is
+// reported here, where the value is known, rather than left to a reader that
+// would only see that no positive size was read. Measured on gcc 16.2.1,
+// `int x[2 - 5];`, `int x[-1];` and `int x[~0];` are all `size of array 'x' is
+// negative` and rejected under `-std=gnu99` and under `-std=c99
+// -pedantic-errors`, as a file-scope object, a struct member or a parameter.
+// Zero is not that case: `int x[0];` is a zero-size array, which gcc accepts
+// under `-std=gnu99`, and empty brackets are a size the initializer may give.
+fn (mut p Parser) parse_array_suffix(name string) !ArraySuffix {
 	open := p.next() // [
 	p.bound_name = ''
 	p.bound_name_line = 0
 	p.bound_name_col = 0
 	if p.at_punct(']') {
 		p.next()
-		return 0
+		return ArraySuffix{
+			bound: .empty
+		}
 	}
+	bound_at := p.peek()
 	// The bound is read as an expression so that it can be evaluated. Nothing the
 	// trial read is kept if it does not end at the bracket: the cursor, the
 	// diagnostics it produced, the depth it counted and the type the declarator
@@ -2542,20 +2818,35 @@ fn (mut p Parser) parse_array_suffix() !i64 {
 					p.bound_name_line = ident.line
 					p.bound_name_col = ident.col
 				}
-				return unreadable_bound
+				return ArraySuffix{
+					bound: .unreadable
+				}
 			}
 			if value > 0 {
-				return value
+				return ArraySuffix{
+					bound: .held
+					count: value
+				}
 			}
-			// A size written and not held — `int a[0]`, `int a[2 - 5]` — reads
-			// as no size at all, and the reader that asked for one says so.
-			return 0
+			if value < 0 {
+				who := if name.len > 0 { name } else { 'an array' }
+				p.error_span(bound_at.line, bound_at.col, 'a constraint violation: the bound of ${who} is ${value}, and 6.7.5.2p1 makes a size that was written one that is not negative')
+			}
+			// A size written and not held — `int a[0]`, `int a[2 - 5]` —
+			// reads as no size at all, and the reader that asked for one says
+			// so. It was written, though, so it is not a pair a size may be
+			// taken for from an initializer.
+			return ArraySuffix{
+				bound: .unheld
+			}
 		}
 	}
 	p.pos = saved_pos
 	p.diagnostics = p.diagnostics[..saved_diagnostics]
 	p.skip_balanced(open)!
-	return unreadable_bound
+	return ArraySuffix{
+		bound: .unreadable
+	}
 }
 
 // skip_to_separator consumes the rest of a declaration that is scanned rather
