@@ -79,9 +79,10 @@ const supported_types = ['int', 'char', 'void', 'double', 'long', 'long long', '
 const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .char_, .double, .long, .unsigned_long,
 	.long_long, .unsigned_long_long]
 
-// max_expression_depth bounds parenthesised nesting. The C standard asks a
-// compiler for 63 levels; past this the parser reports instead of following the
-// recursion until the stack runs out.
+// max_expression_depth bounds how deep one expression nests: the parenthesised
+// kind, the prefix kind and the cast kind all write one expression inside
+// another. The C standard asks a compiler for 63 levels; past this the parser
+// reports instead of following the recursion until the stack runs out.
 const max_expression_depth = 200
 
 // parse reads a token stream into a translation unit, for the machine this binary
@@ -852,7 +853,7 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	// the same function that reads the operand of a cast.
 	if t.kind == .punct && (t.text == '++' || t.text == '--') {
 		p.next()
-		operand := p.parse_unary()!
+		operand := p.parse_prefix_operand(t)!
 		return p.inc_dec(t, operand, false)
 	}
 	// `&` and `*` are here with the other prefix operators: the address of a
@@ -863,7 +864,7 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	// type lookup.
 	if t.kind == .punct && t.text in ['-', '+', '!', '~', '&', '*'] {
 		p.next()
-		operand := p.parse_unary()!
+		operand := p.parse_prefix_operand(t)!
 		return ast.Expr(ast.Unary{
 			op:   t.text
 			expr: operand
@@ -873,6 +874,31 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 		})
 	}
 	return p.parse_postfix()
+}
+
+// parse_prefix_operand reads what a prefix operator applies to, and counts the
+// nesting while it does.
+//
+// A chain of prefix operators is one expression written inside another, so it is
+// the same count parenthesised nesting uses: `!!!!x` is four levels. Without the
+// count, this reader follows the chain until the stack runs out, which is not
+// hypothetical - measured on an 8 MB stack, a chain of six thousand `!` takes
+// signal 11, and so does a chain of six thousand casts, because both come back
+// through parse_unary. The standard asks a compiler for sixty-three levels, so
+// refusing past two hundred costs a program nothing it is owed.
+fn (mut p Parser) parse_prefix_operand(op tokenize.Token) !ast.Expr {
+	p.depth++
+	if p.depth > max_expression_depth {
+		p.depth--
+		p.error_at(op, 'expression is nested more than ${max_expression_depth} levels deep')
+		return error('expression nested too deeply')
+	}
+	operand := p.parse_unary() or {
+		p.depth--
+		return error('the operand of ${op.text}')
+	}
+	p.depth--
+	return operand
 }
 
 // parse_postfix reads a name, a call, an element or a member and then the
@@ -944,7 +970,7 @@ fn (mut p Parser) parse_cast(at tokenize.Token) !ast.Expr {
 		p.error_at(at, 'unsupported: a conversion to void throws its operand away, and this compiler reads a conversion as a value')
 		return error('a conversion to void')
 	}
-	operand := p.parse_unary()!
+	operand := p.parse_prefix_operand(at)!
 	return ast.Expr(ast.Cast{
 		spelling: name.spelling
 		expr:     operand
