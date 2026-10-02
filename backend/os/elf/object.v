@@ -198,17 +198,26 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 					call:   true
 				}
 			}
-			.take_address, .float_constant, .single_constant {
+			.take_address, .take_wide_address, .float_constant, .single_constant {
 				// A string and a floating constant are both read-only data at
 				// an offset, so they are the same reference: .rodata at the
-				// offset the emitter interned them at.
-				where := if fixup.kind == .take_address {
-					program.strings[fixup.name] or {
-						return error('no string ${fixup.name} in the object')
+				// offset the emitter interned them at. A wide string is the
+				// same reference again, out of its own table.
+				where := match fixup.kind {
+					.take_address {
+						program.strings[fixup.name] or {
+							return error('no string ${fixup.name} in the object')
+						}
 					}
-				} else {
-					program.doubles[fixup.name] or {
-						return error('no floating constant ${fixup.name} in the object')
+					.take_wide_address {
+						program.wide_strings[fixup.name] or {
+							return error('no wide string ${fixup.name} in the object')
+						}
+					}
+					else {
+						program.doubles[fixup.name] or {
+							return error('no floating constant ${fixup.name} in the object')
+						}
 					}
 				}
 				relocations << ObjectRelocation{
