@@ -3719,6 +3719,9 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.append(e.target.load_double_indirect(register, double_register)!)
 				return
 			}
+			if expr.bitfield {
+				return e.load_bitfield(register, expr, width)
+			}
 			e.load_indirect_value(register, register, e.written_is_unsigned(expr.spelling), width)!
 		}
 		ast.StrLit {
@@ -4429,6 +4432,37 @@ fn (mut e Emitter) load_indirect_value(address backend.Register, destination bac
 		return
 	}
 	e.append(e.target.load_indirect(address, destination, width)!)
+}
+
+// load_bitfield reads a bitfield member's own bits out of the storage unit it
+// shares with the members around it. The unit is read at its full width and the
+// field is shifted down to the bottom of the register, then extended back to the
+// width of the register: a signed field keeps its sign, and an unsigned one is
+// filled with zero. The shift pair that extends it also clears the bits above the
+// field, so no separate mask is needed, and that is what makes the read agree
+// with gcc for a field narrower than its storage unit. The unit is read zero-
+// filled because the field's bits are then cut out of the low end of it: reading
+// it with its sign would put ones above the unit that no mask below the field
+// could tell from the field's own sign.
+fn (mut e Emitter) load_bitfield(register backend.Register, field ast.Field, width int) !void {
+	unit := if field.unit_width > 0 { field.unit_width } else { width }
+	if unit <= 0 || unit > 8 {
+		e.diagnostics << problem(field.line, field.col, 'unsupported: the bitfield ${field.name}.${field.member} lies in a storage unit this back end has no load for')
+		return error('unsupported bitfield unit')
+	}
+	e.append(e.target.load_indirect_unsigned(register, register, unit)!)
+	if field.bit_offset > 0 {
+		e.append(e.target.shift_right_word(register, u8(field.bit_offset))!)
+	}
+	if field.bit_width > 0 && field.bit_width < 64 {
+		extend := u8(64 - field.bit_width)
+		e.append(e.target.shift_left_word(register, extend)!)
+		if e.written_is_unsigned(field.spelling) {
+			e.append(e.target.shift_right_word(register, extend)!)
+		} else {
+			e.append(e.target.shift_right_arithmetic(register, extend)!)
+		}
+	}
 }
 
 // eight_byte_integer says whether a type is one of the four 64-bit integer types,
