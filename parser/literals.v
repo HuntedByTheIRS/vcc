@@ -262,6 +262,76 @@ fn parse_escape(rest string) !i64 {
 	}
 }
 
+// parse_ucn reads the universal character name `\uXXXX` or `\UXXXXXXXX` whose
+// `u` or `U` sits at `at` in the literal's inner text, and answers the code
+// point it names and where the text after it starts. C99 6.4.3 makes the two
+// spellings four and eight hexadecimal digits; a name with fewer is not a name
+// and is reported in gcc 16.2.1's own words, `incomplete universal character
+// name \u00E`. A name that stands for no character, which is the surrogate
+// range and everything past the largest the conversion holds, is reported the
+// same way gcc reports it in a literal: `\uD800 is not a valid universal
+// character`. Both messages are measured against gcc 16.2.1 one input at a time.
+fn parse_ucn(inner string, at int) !(u32, int) {
+	width := if inner[at] == `u` { 4 } else { 8 }
+	mut spelling := '\\' + inner[at].ascii_str()
+	mut value := u32(0)
+	mut i := at + 1
+	mut seen := 0
+	for seen < width && i < inner.len {
+		c := inner[i]
+		if c == `\n` {
+			break
+		}
+		digit := digit_value(c, 16) or { break }
+		value = value * 16 + u32(digit)
+		spelling += c.ascii_str()
+		seen++
+		i++
+	}
+	if seen < width {
+		return error('incomplete universal character name ${spelling}')
+	}
+	if (value >= 0xD800 && value <= 0xDFFF) || value > 0x7FFFFFFF {
+		return error('${spelling} is not a valid universal character')
+	}
+	return value, i
+}
+
+// encode_utf8 writes a code point in UTF-8, the execution character set every
+// mainstream toolchain uses for a narrow literal. The carries run to six bytes
+// rather than four because gcc accepts a UCN up to \U7FFFFFFF and encodes it
+// anyway; measured, `"\U7FFFFFFF"` is `fd bf bf bf bf bf`.
+fn encode_utf8(cp u32) []u8 {
+	if cp < 0x80 {
+		return [u8(cp)]
+	}
+	mut len := 2
+	if cp >= 0x4000000 {
+		len = 6
+	} else if cp >= 0x200000 {
+		len = 5
+	} else if cp >= 0x10000 {
+		len = 4
+	} else if cp >= 0x800 {
+		len = 3
+	}
+	mut out := []u8{len: len}
+	lead := match len {
+		2 { u8(0xC0) }
+		3 { u8(0xE0) }
+		4 { u8(0xF0) }
+		5 { u8(0xF8) }
+		else { u8(0xFC) }
+	}
+	mut shift := (len - 1) * 6
+	out[0] = lead | u8((cp >> shift) & u32(0x3F))
+	for k in 1 .. len {
+		shift = (len - 1 - k) * 6
+		out[k] = u8(0x80) | u8((cp >> shift) & u32(0x3F))
+	}
+	return out
+}
+
 // StringLiteral is the object a string literal names: the bytes of its
 // characters with the escapes resolved, how wide one character is in those
 // bytes, and how many characters the literal holds before the terminator it does
@@ -317,6 +387,18 @@ fn parse_string_literal(text string) !StringLiteral {
 			// A backslash before the newline joins the two lines, and the pair
 			// produces no byte at all.
 			i += 2
+			continue
+		}
+		if i + 1 < inner.len && (inner[i + 1] == `u` || inner[i + 1] == `U`) {
+			// A universal character name names one character, and a narrow
+			// literal writes it in the execution character set, which is
+			// UTF-8, so one name can be several bytes. Measured on gcc
+			// 16.2.1: "\u00E9" is c3 a9 and "\U0001F600" is f0 9f 98 80.
+			name, next := parse_ucn(inner, i + 1) or {
+				return error('${text}: ${err.msg()}')
+			}
+			bytes << encode_utf8(name)
+			i = next
 			continue
 		}
 		value, next := parse_string_escape(inner, i + 1) or {

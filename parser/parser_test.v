@@ -466,6 +466,43 @@ fn test_an_escape_that_names_more_than_a_byte_is_reported() {
 	assert result.diagnostics[0].msg.contains('not a byte')
 }
 
+fn test_a_universal_character_name_in_a_string_literal_is_utf8() {
+	// C99 6.4.3: a universal character name is one character, and a narrow
+	// literal writes it in the execution character set, which is UTF-8.
+	// Measured on gcc 16.2.1: "\u00E9" is c3 a9, "\U0001F600" is
+	// f0 9f 98 80, and a literal can mix them with ordinary characters.
+	result := parsed('int main() { return "\\u00E9\\U0001F600"; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	literal := expr as ast.StrLit
+	assert literal.value == '\xc3\xa9\xf0\x9f\x98\x80'
+	assert literal.value.len == 6
+}
+
+fn test_an_incomplete_universal_character_name_is_reported() {
+	// Measured on gcc 16.2.1: a name with fewer than the four hex digits \u
+	// takes, or eight that \U takes, is `incomplete universal character name
+	// \u00E`. The refusal names it where it is written.
+	result := parsed('int main() { return "\\u00E"; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('incomplete universal character name \\u00E')
+}
+
+fn test_a_universal_character_name_that_names_no_character_is_reported() {
+	// The surrogate range and values past the largest character name no
+	// character. Measured on gcc 16.2.1: `\uD800` and `\U80000000` are
+	// reported as `<spelling> is not a valid universal character`.
+	surrogate := parsed('int main() { return "\\uD800"; }')
+	assert surrogate.diagnostics.len == 1
+	assert surrogate.diagnostics[0].msg.contains('\\uD800 is not a valid universal character')
+	big := parsed('int main() { return "\\U80000000"; }')
+	assert big.diagnostics.len == 1
+	assert big.diagnostics[0].msg.contains('\\U80000000 is not a valid universal character')
+}
+
 fn test_a_bad_integer_literal_is_reported() {
 	result := parsed('int main() { return 0x; }')
 	assert result.diagnostics.len == 1
