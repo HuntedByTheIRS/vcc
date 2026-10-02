@@ -1779,3 +1779,29 @@ fn test_a_float_top_level_object_is_read_and_written_at_four_bytes() {
 		os.rm(binary) or {}
 	}
 }
+
+// A top-level float written by its initializer is four bytes of the value and not
+// the low four bytes of the double of it: the low half of the double of 1.5 is
+// zeros, so a top-level float written with the double bytes came out as 0.0f with
+// no diagnostic at all. The array and the single object are both here because the
+// initializer writes one element at a time, at the width of the element.
+//
+// Measured on gcc 16.2.1: every program below exits 1.
+fn test_a_float_top_level_initializer_is_written_as_four_bytes() {
+	cases := [
+		'static float g = 1.5f;\nint main(void) { return g == 1.5f; }',
+		'static float g = 0.1f;\nint main(void) { return g != 0.1 && g == 0.1f; }',
+		'static float g = 2.25f;\nint main(void) { return g == 2.25f; }',
+		'static float a[3] = { 1.5f, 0.1f, 2.25f };\nint main(void) { return a[0] == 1.5f && a[1] == 0.1f && a[2] == 2.25f; }',
+		'static float a[3] = { 1.5f, 0.1f, 2.25f };\nint main(void) { return a[1] != 0.1; }',
+	]
+	answers := [1, 1, 1, 1, 1]
+	for i, source_text in cases {
+		source := scratch('single_initializer_${i}.c')
+		binary := scratch('single_initializer_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}

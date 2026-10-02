@@ -5761,6 +5761,19 @@ fn put_integer(mut blob []u8, at int, value i64, width int) {
 	}
 }
 
+// put_single writes a float into a blob as the four bytes of its value, which is
+// the same little-endian image the instruction that reads one expects. It is not
+// put_double at a narrower width: the low four bytes of the double of 1.5 are
+// zeros, and the four bytes of the float 1.5 are not. A float array at the top
+// level written with the double bytes came out all zeros, which is the wrong
+// value with no diagnostic.
+fn put_single(mut blob []u8, at int, value f64) {
+	bits := math.f32_bits(f32(value))
+	for i in 0 .. 4 {
+		blob[at + i] = u8((bits >> (8 * i)) & 0xff)
+	}
+}
+
 // put_double writes a double into a blob as the eight bytes of its value, which
 // is the same little-endian image the instruction that reads one expects.
 fn put_double(mut blob []u8, at int, value f64, width int) {
@@ -5820,8 +5833,13 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 	}
 	offset := e.program.globals_blob.len
 	e.program.globals_blob << []u8{len: count * element, init: u8(0)}
+	single := e.writes_a_float(object.typ)
 	if value := object.init_float {
-		put_double(mut e.program.globals_blob, offset, value, element)
+		if single {
+			put_single(mut e.program.globals_blob, offset, value)
+		} else {
+			put_double(mut e.program.globals_blob, offset, value, element)
+		}
 	}
 	if value := object.init {
 		put_integer(mut e.program.globals_blob, offset, value, element)
@@ -5834,7 +5852,11 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		if index >= count {
 			break
 		}
-		put_double(mut e.program.globals_blob, offset + index * element, value, element)
+		if single {
+			put_single(mut e.program.globals_blob, offset + index * element, value)
+		} else {
+			put_double(mut e.program.globals_blob, offset + index * element, value, element)
+		}
 	}
 	for index, value in object.inits {
 		if index >= count {
