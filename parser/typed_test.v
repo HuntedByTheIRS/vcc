@@ -1138,3 +1138,101 @@ fn test_a_call_to_a_function_the_128_bit_type_is_written_on_is_read_against_its_
 	}
 	assert (initializer as ast.Call).typ.same(types.int128_type())
 }
+
+// The star inside the parentheses is the whole difference between the two
+// meanings, and the two declarations below use the same tokens in two orders.
+// Measured on gcc 16.2.1 under `-std=c99`: `int *p[5]` is 40 bytes and each
+// `p[i]` is an int *, while `int (*q)[5]` is 8 bytes and `(*q)[i]` is an int.
+fn test_a_parenthesised_pointer_is_a_pointer_to_what_it_wraps() {
+	arrays := checked('int main(void) { int *p[5]; return 0; }')
+	array_decl := arrays.unit.decls[0].body[0]
+	assert array_decl.kind == .var_decl
+	assert array_decl.resolved.kind == .array
+	assert array_decl.resolved.count == 5
+	assert array_decl.resolved.base.kind == .pointer
+	assert array_decl.resolved.base.base.same(types.int_type())
+
+	pointers := checked('int main(void) { int (*q)[5]; return 0; }')
+	pointer_decl := pointers.unit.decls[0].body[0]
+	assert pointer_decl.kind == .var_decl
+	assert pointer_decl.resolved.kind == .pointer
+	assert pointer_decl.resolved.base.kind == .array
+	assert pointer_decl.resolved.base.count == 5
+	assert pointer_decl.resolved.base.base.same(types.int_type())
+}
+
+// A suffix between the parentheses and the star binds to the star and not to
+// the name: `int (*fp[3])(void)` is an array of three pointers to functions,
+// measured on gcc 16.2.1 as 24 bytes, and `int (*p)[5]` is one pointer.
+fn test_a_suffix_inside_the_parentheses_binds_before_the_stars() {
+	row := checked('int main(void) { int (*fp[3])(void); return 0; }')
+	fp := row.unit.decls[0].body[0]
+	assert fp.kind == .var_decl
+	assert fp.resolved.kind == .array
+	assert fp.resolved.count == 3
+	assert fp.resolved.base.kind == .pointer
+	assert fp.resolved.base.base.kind == .function
+}
+
+// A declaration whose star is outside the parentheses around the function
+// suffix keeps that star: `int (*(*fp)(void))[3]` is a pointer to a function
+// returning a pointer to an array of three ints, which gcc 16.2.1 sizes at 8
+// bytes. The reader applies the suffixes to the base before the star around
+// them, so the whole order is the type.
+fn test_the_stars_and_the_suffixes_take_the_order_the_parentheses_wrote() {
+	result := checked('int main(void) { int (*(*fp)(void))[3]; return 0; }')
+	fp := result.unit.decls[0].body[0]
+	assert fp.kind == .var_decl
+	assert fp.resolved.kind == .pointer
+	assert fp.resolved.base.kind == .function
+	assert fp.resolved.base.base.kind == .pointer
+	assert fp.resolved.base.base.base.kind == .array
+	assert fp.resolved.base.base.base.count == 3
+	assert fp.resolved.base.base.base.base.same(types.int_type())
+}
+
+// A typedef names the type its declarator wrote, and a parameter list in that
+// declarator is part of the type rather than a change to the declaration around
+// it. Measured on gcc 16.2.1, `__compar_fn_t` and `__sighandler_t` are eight
+// bytes each, so `cmp c` declares a parameter that can be called through.
+fn test_a_typedef_of_a_pointer_to_a_function_is_a_pointer() {
+	result := parsed('typedef int (*cmp)(const void *, const void *);\nint f(cmp c) { return 0; }')
+	assert result.diagnostics.len == 0
+	param := result.unit.decls[0].params[0]
+	assert param.resolved.kind == .pointer
+	assert param.resolved.base.kind == .function
+}
+
+// The same two meanings with the bracket outside the name: `int *g(void)` is a
+// function that returns a pointer, `int (*f)(void)` is a pointer to a function.
+// Measured on gcc 16.2.1 under -std=c99, the first takes no storage and the
+// second is 8 bytes.
+fn test_a_function_returning_a_pointer_and_a_pointer_to_a_function_differ() {
+	pointing := checked('int main(void) { int (*f)(void); return 0; }')
+	f := pointing.unit.decls[0].body[0]
+	assert f.kind == .var_decl
+	assert f.resolved.kind == .pointer
+	assert f.resolved.base.kind == .function
+
+	returning := checked('int *g(void);\nint main(void) { return 0; }')
+	assert returning.diagnostics.len == 0
+	g := returning.unit.decls[0]
+	assert g.name == 'g'
+	assert g.ret_type.kind == .pointer
+	assert g.ret_type.base.same(types.int_type())
+}
+
+// A two-dimensional declarator is an array of arrays, read from the name out:
+// `int a[2][3]` is two rows of three ints and not two ints, which gcc 16.2.1
+// sizes at 24 with `sizeof a[0]` at 12. The row is the element type, so it is
+// what a row passed to a `const int *` parameter decays from.
+fn test_a_two_dimensional_declarator_is_an_array_of_arrays() {
+	result := checked('int a[2][3];')
+	g := result.unit.globals[0]
+	assert g.name == 'a'
+	assert g.resolved.kind == .array
+	assert g.resolved.count == 2
+	assert g.resolved.base.kind == .array
+	assert g.resolved.base.count == 3
+	assert g.resolved.base.base.same(types.int_type())
+}
