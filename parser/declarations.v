@@ -1032,11 +1032,12 @@ fn (mut p Parser) constant_expr(constant NumberConstant) ast.Expr {
 // is set, and it is the one the object's type asks for. An object with no
 // initializer answers with neither, which is the storage a definition starts
 // zeroed. A floating initializer for an integer object and an integer one for a
-// double are both conversions the language makes, so neither is reported.
+// double are both conversions the language makes, so neither is reported, and a
+// float object takes a floating initializer the same way a double does.
 fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
 	mut value := integer
 	mut fraction := floating
-	if written == 'double' {
+	if written == 'double' || written == 'float' {
 		if number := integer {
 			return none, f64(number)
 		}
@@ -1060,7 +1061,7 @@ fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
 // two answers is non-empty, for the same reason the scalar pair is split: how the
 // element's bytes are written is a question about the class.
 fn initializer_list_for(written string, values []NumberConstant) ([]i64, []f64) {
-	if written == 'double' {
+	if written == 'double' || written == 'float' {
 		mut floats := []f64{cap: values.len}
 		for value in values {
 			_, fraction := initializer_for(written, value.number.integer, value.number.floating)

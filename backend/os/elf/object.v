@@ -198,7 +198,7 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 					call:   true
 				}
 			}
-			.take_address, .float_constant {
+			.take_address, .float_constant, .single_constant {
 				// A string and a floating constant are both read-only data at
 				// an offset, so they are the same reference: .rodata at the
 				// offset the emitter interned them at.

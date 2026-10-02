@@ -1755,3 +1755,285 @@ fn test_the_optimizer_keeps_a_switch_and_a_goto_whole() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// A float is four bytes and its value is the four-byte one. The whole reason a
+// float is not a double is that `0.1f` and `0.1` are different numbers, so a
+// compiler that read the first as the second would answer 0 where this answers
+// 1. The width shows in a layout as well: a char and a float in one object are
+// eight bytes with a float's alignment.
+//
+// Every answer in this test and the four after it was measured on gcc 16.2.1 on
+// this target, by compiling the same source with `gcc -std=c99 -w` and reading
+// the exit status of the binary it produced.
+fn test_a_float_is_four_bytes_and_its_value_is_the_four_byte_one() {
+	cases := [
+		'int main(void) { return sizeof(float); }',
+		'int main(void) { return 0.1f != 0.1; }',
+		'int main(void) { return 1.5f == 1.5; }',
+		'int main(void) { return 1.5F == 1.5; }',
+		'int main(void) { return 1e10f == 1e10; }',
+		'int main(void) { return 0.1f == 0.1; }',
+		'struct S { char c; float f; }; int main(void) { return sizeof(struct S); }',
+	]
+	answers := [4, 1, 1, 1, 1, 0, 8]
+	for i, source_text in cases {
+		source := scratch('single_width_${i}.c')
+		binary := scratch('single_width_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+	// The hexadecimal spelling of a float is refused by name rather than read as
+	// the double of the same digits.
+	text := 'int main(void) { return 0x1.8p3f; }\n'
+	lexed := tokenize.lex(text)
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 1
+	assert parsed.diagnostics[0].msg.contains('hexadecimal floating constants are not implemented')
+}
+
+// The arithmetic happens at four bytes. A float step rounds where a double one of
+// the same numbers does not, and the difference is in the answer rather than in
+// the instruction count: `1.0f / 3.0f` widened is not `1.0 / 3.0`, and ten steps
+// of `0.1f` do not add up to `1.0f`. Two of the cases are the other way round,
+// where four bytes and eight agree, so that neither answer alone can pass.
+fn test_a_float_expression_is_computed_at_four_bytes() {
+	cases := [
+		'int main(void) { float a = 1.0f; float b = 3.0f; return a / b != 1.0 / 3.0; }',
+		'int main(void) { float a = 1.0f; float b = 3.0f; return (double)(a / b) == (double)a / (double)b; }',
+		'int main(void) { float x = 16777216.0f; return x + 1.0f == x; }',
+		'int main(void) { float k = 0.0f; int i; for (i = 0; i < 10; i++) { k = k + 0.1f; } return k == 1.0f; }',
+		'int main(void) { float e = 0.1f; e = e * 3.0f; return e == 0.30000001f; }',
+		'int main(void) { float e = 0.1f; e = e * 3.0f; return e != 0.3; }',
+		'int main(void) { return (double)(1.0f + 2.0) == 3.0; }',
+		'int main(void) { return (double)(1.5f + 1) == 2.5; }',
+		'int main(void) { float f = 1.5f; return f + f == 3.0f && f * 2.0f == 3.0f; }',
+		'int main(void) { float f = 7.0f; return f - 3.0f == 4.0f; }',
+	]
+	answers := [1, 0, 1, 0, 1, 1, 1, 1, 1, 1]
+	for i, source_text in cases {
+		source := scratch('single_step_${i}.c')
+		binary := scratch('single_step_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A float widened to a double is exact and a double narrowed to a float rounds,
+// which is one test written two ways: the double of 0.1f is not 0.1, and it is
+// the double of 0.1f. An integer converts to a float the way it converts to a
+// double for every value within an int's range.
+//
+// The unsigned 32-bit conversions are deliberately not here: `(double)3000000000u`
+// and `(unsigned int)3000000000.0` answer 0 and 2147483648 where gcc answers 1 and
+// 3000000000, and they answer that on the commit this lane started from as well, so
+// what that gap belongs to is the double conversions and not this type.
+fn test_a_float_converts_to_and_from_the_other_widths() {
+	cases := [
+		'int main(void) { double d = 0.1; float f = (float)d; return f == 0.1f; }',
+		'int main(void) { float f = 0.1f; double d = f; return d == 0.1; }',
+		'int main(void) { float f = 0.1f; double d = f; return d == (double)0.1f; }',
+		'int main(void) { float f = 0.1f; return (double)f != 0.1 && (double)f == (double)0.1f; }',
+		'int main(void) { return (int)2.75f; }',
+		'int main(void) { return (int)-2.75f == -2; }',
+		'int main(void) { float f = 3.9f; return (int)f; }',
+		'int main(void) { return (float)5 == 5.0f; }',
+		'int main(void) { float f = 7.0f; return (int)f; }',
+		'int main(void) { float f = 0.1f; return (double)f == (double)0.1f; }',
+	]
+	answers := [1, 0, 1, 1, 2, 1, 3, 1, 7, 1]
+	for i, source_text in cases {
+		source := scratch('single_convert_${i}.c')
+		binary := scratch('single_convert_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A float is stored and read back as four bytes in every place storage is: a
+// local, an element of an array of them, an element written through a subscript,
+// a member, a member reached through a pointer and a member of a top-level
+// object. The value 0.1f is the sharp end of it: a relabelled double would
+// compare equal to 0.1 and a four-byte float does not. One case answers 0, where
+// a float narrowed from a double and a float written directly are the same
+// number, so the test is not a check that every float differs from every double.
+fn test_a_float_is_stored_and_read_back_as_four_bytes() {
+	cases := [
+		'int main(void) { float f = 0.1f; return f == 0.1f && f != 0.1; }',
+		'int main(void) { float a[2]; a[0] = 0.1f; return a[0] != 0.1 && a[0] == 0.1f; }',
+		'struct S { float f; };\nint main(void) { struct S s; s.f = 0.1f; return s.f == 0.1f && s.f != 0.1; }',
+		'struct S { float f; };\nint main(void) { struct S s; struct S *p = &s; p->f = 1.5f; return s.f == 1.5f; }',
+		'struct S { float f; };\nstruct S g;\nint main(void) { g.f = 0.1f; return g.f != 0.1; }',
+		'struct S { float f; double d; };\nint main(void) { struct S s; s.f = 0.1f; s.d = 0.1; return s.f == 0.1f && s.f != (float)s.d; }',
+		'int main(void) { float f = 1.5f; return -f == -1.5f && -0.1f != 0.1f; }',
+		'struct S { char c; float f; };\nint main(void) { struct S s; s.f = 0.1f; return s.f == 0.1f && s.f != 0.1; }',
+	]
+	answers := [1, 1, 1, 1, 1, 0, 1, 1]
+	for i, source_text in cases {
+		source := scratch('single_storage_${i}.c')
+		binary := scratch('single_storage_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A function hands a float over as four bytes, in a parameter and in a return,
+// and a float argument is promoted to a double where the parameter is one or is
+// not known: `id(0.1f)` widened is not 0.1, and a float returned from a function
+// whose body computed a double is the float it was rounded to.
+fn test_a_float_is_passed_and_returned_as_four_bytes() {
+	cases := [
+		'float half(float x) { return x / 2.0f; }\nint main(void) { return half(1.5f) == 0.75f; }',
+		'float half(float x) { return x / 2.0f; }\nint main(void) { return half(0.1f) == 0.1f / 2.0f; }',
+		'int takes(float x) { return x == 0.1f; }\nint main(void) { return takes(0.1f); }',
+		'float id(float x) { return x; }\nint main(void) { float f = 0.1f; return (double)id(f) == 0.1; }',
+		'float id(float x) { return x; }\nint main(void) { float f = 0.1f; return (double)id(f) == (double)0.1f; }',
+		'float third(void) { return 1.0 / 3.0; }\nint main(void) { return (double)third() == 1.0 / 3.0; }',
+		'float f2(float x) { return x; }\nint main(void) { return f2(1) == 1.0f; }',
+		'double d2(double x) { return x; }\nint main(void) { float f = 0.1f; return d2(f) == (double)0.1f; }',
+		'float sum3(float a, float b, float c) { return a + b + c; }\nint main(void) { return sum3(0.1f, 0.2f, 0.3f) == 0.1f + 0.2f + 0.3f; }',
+		'int six(float a, float b, float c) { return a == 0.1f && b == 0.2f && c == 0.3f; }\nint main(void) { return six(0.1f, 0.2f, 0.3f); }',
+	]
+	answers := [1, 1, 1, 0, 1, 0, 1, 1, 1, 1]
+	for i, source_text in cases {
+		source := scratch('single_call_${i}.c')
+		binary := scratch('single_call_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A float asked as a question is compared at four bytes against zero, so a float
+// that is zero is false and a negative zero is false too, and a float compared
+// with an integer or another float is a four-byte comparison rather than the
+// eight-byte one the same instruction has in its other form. If the test of a
+// float compared eight bytes, `if (0.0f)` would read the register's upper half
+// and answer true.
+fn test_a_float_asked_as_a_question_is_compared_at_four_bytes() {
+	cases := [
+		'int main(void) { float z = 0.0f; if (z) { return 1; } return 0; }',
+		'int main(void) { float z = 0.1f; if (z) { return 1; } return 0; }',
+		'int main(void) { float z = -0.0f; if (z) { return 1; } return 0; }',
+		'int main(void) { float z = 0.0f; z = z - 1.0f; if (z) { return 1; } return 0; }',
+		'int main(void) { float z = 0.0f; while (z) { return 1; } return 0; }',
+		'int main(void) { float z = 0.1f; return z > 0.0f && z < 0.2f && !(z > 0.1f) && z >= 0.1f; }',
+		'int main(void) { float f = 1.5f; return f > 1 && f < 2 && f != 2 && f == 1.5f; }',
+	]
+	answers := [0, 1, 0, 1, 0, 1, 1]
+	for i, source_text in cases {
+		source := scratch('single_test_${i}.c')
+		binary := scratch('single_test_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A suffix the compiler does not implement is refused by name where it is written
+// rather than dropped: `L` names a long double, which is its own machine class on
+// this target, and a letter that names nothing is not a suffix at all.
+fn test_a_floating_suffix_that_is_not_read_is_refused_by_name() {
+	refusals := [
+		['int main(void) { return 1.5L; }', 'long double literal'],
+		['int main(void) { return 1.5l; }', 'long double literal'],
+		['int main(void) { return 1.5q; }', 'not part of a floating constant'],
+		['int main(void) { return 1.5fq; }', 'not part of a floating constant'],
+	]
+	for pair in refusals {
+		lexed := tokenize.lex(pair[0])
+		parsed := parser.parse(lexed.tokens)
+		assert parsed.diagnostics.len == 1
+		assert parsed.diagnostics[0].msg.contains(pair[1])
+		assert parsed.diagnostics[0].line == 1
+	}
+}
+
+// A top-level object that holds a float is read and written at four bytes: the
+// shape of the object carries which of the two floating widths its storage is,
+// and that is what the load and the store of the name are picked from. The value
+// here is written at run time rather than in the initializer, so what this checks
+// is the load and the store of a name and not the bytes of a constant.
+//
+// Measured on gcc 16.2.1: every program below exits 1.
+fn test_a_float_top_level_object_is_read_and_written_at_four_bytes() {
+	cases := [
+		'static float g;\nint main(void) { g = 1.5f; return g == 1.5f; }',
+		'static float g;\nint main(void) { g = 0.1f; return g != 0.1 && g == 0.1f; }',
+		'static float g;\nint main(void) { g = 0.1f; g = g * 2.0f; return g == 0.2f; }',
+		'static float g;\nint main(void) { float f = 2.5f; g = f; return g == 2.5f; }',
+	]
+	answers := [1, 1, 1, 1]
+	for i, source_text in cases {
+		source := scratch('single_global_${i}.c')
+		binary := scratch('single_global_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A top-level float written by its initializer is four bytes of the value and not
+// the low four bytes of the double of it: the low half of the double of 1.5 is
+// zeros, so a top-level float written with the double bytes came out as 0.0f with
+// no diagnostic at all. The array and the single object are both here because the
+// initializer writes one element at a time, at the width of the element.
+//
+// Measured on gcc 16.2.1: every program below exits 1.
+fn test_a_float_top_level_initializer_is_written_as_four_bytes() {
+	cases := [
+		'static float g = 1.5f;\nint main(void) { return g == 1.5f; }',
+		'static float g = 0.1f;\nint main(void) { return g != 0.1 && g == 0.1f; }',
+		'static float g = 2.25f;\nint main(void) { return g == 2.25f; }',
+		'static float a[3] = { 1.5f, 0.1f, 2.25f };\nint main(void) { return a[0] == 1.5f && a[1] == 0.1f && a[2] == 2.25f; }',
+		'static float a[3] = { 1.5f, 0.1f, 2.25f };\nint main(void) { return a[1] != 0.1; }',
+	]
+	answers := [1, 1, 1, 1, 1]
+	for i, source_text in cases {
+		source := scratch('single_initializer_${i}.c')
+		binary := scratch('single_initializer_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A condition that is a floating value is asked whether it is zero at its own
+// width, and the two sides of a short circuit are asked the same question. The
+// value is the condition directly rather than a comparison of it, so what this
+// checks is the test the emitter writes and not the comparison: a floating
+// condition tested as an integer would answer from whatever the general register
+// happened to hold, since the value lives in the floating-point one.
+//
+// Measured on gcc 16.2.1: the answers below are what it exits with.
+fn test_a_floating_value_asked_as_a_question_is_compared_as_one() {
+	cases := [
+		'int main(void) { double d = 1.5; if (d) { return 1; } return 0; }',
+		'int main(void) { double d = 0.0; if (d) { return 1; } return 0; }',
+		'int main(void) { double d = -0.0; if (d) { return 1; } return 0; }',
+		'int main(void) { double d = 1.5; while (d) { return 0; } return 1; }',
+		'int main(void) { double d = 1.5; return d && 1; }',
+		'int main(void) { double d = 0.0; return d || 1; }',
+		'int main(void) { float z = 1.5f; double d = (double)z; return d == 1.5 && z != 0.0f; }',
+	]
+	answers := [1, 0, 0, 0, 1, 1, 1]
+	for i, source_text in cases {
+		source := scratch('floating_question_${i}.c')
+		binary := scratch('floating_question_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}

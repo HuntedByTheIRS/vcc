@@ -990,3 +990,135 @@ fn test_the_unsigned_orders_are_the_bytes_the_machine_reads() {
 	assert target.set_condition(.above, rdi) or { []u8{} }.len == 0
 	assert target.widen_byte(rdi) or { []u8{} }.len == 0
 }
+
+// The single-precision instructions, held to the bytes gas produces for them the
+// same way the slot moves are. Each one is its double-precision counterpart with
+// the F3 prefix instead of F2, except the comparison, which is Comiss: the same
+// instruction as Comisd without the 66 prefix. Measured with
+//
+//   gcc -c enc.s -o enc.o && objdump -d -M intel enc.o
+//
+// over `movss`, `addss`, `comiss`, `cvtsi2ss`, `cvttss2si`, `cvtss2sd` and
+// `cvtsd2ss`.
+fn test_the_float_instructions_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	rbp := target.reg('rbp') or { panic('the target description has no such name') }
+	eax := target.reg('eax') or { panic('the target description has no such name') }
+	rax := target.reg('rax') or { panic('the target description has no such name') }
+	xmm0 := target.float_reg('xmm0') or { panic('the target description has no such name') }
+	xmm1 := target.float_reg('xmm1') or { panic('the target description has no such name') }
+	// movss xmm0, xmm1
+	assert target.move_float(xmm0, xmm1) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x0f,
+		0x10,
+		0xc1,
+	]
+	// addss xmm0, xmm1
+	assert target.float_arithmetic('+', xmm0, xmm1) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x0f,
+		0x58,
+		0xc1,
+	]
+	// comiss xmm0, xmm1
+	assert x86_64.compare_float(target.describe(xmm0), target.describe(xmm1)) or {
+		panic('the target description has no such name')
+	} == [u8(0x0f), 0x2f, 0xc1]
+	// cvtsi2ss xmm0, eax
+	assert target.int_to_float(xmm0, eax) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x0f,
+		0x2a,
+		0xc0,
+	]
+	// cvttss2si eax, xmm0
+	assert target.float_to_int(eax, xmm0) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x0f,
+		0x2c,
+		0xc0,
+	]
+	// cvtss2sd xmm0, xmm1 / cvtsd2ss xmm0, xmm1
+	assert target.float_to_double(xmm0, xmm1) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x0f,
+		0x5a,
+		0xc1,
+	]
+	assert target.double_to_float(xmm0, xmm1) or { panic('the target description has no such name') } == [
+		u8(0xf2),
+		0x0f,
+		0x5a,
+		0xc1,
+	]
+	// movss xmm0, [rbp-8] / movss [rbp-8], xmm0
+	assert target.load_float_slot(rbp, -8, xmm0) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x0f,
+		0x10,
+		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	assert target.store_float_slot(rbp, -8, xmm0) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x0f,
+		0x11,
+		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	// movss xmm0, [rip+0]
+	assert target.load_float_constant(xmm0, 0) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x0f,
+		0x10,
+		0x05,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+	]
+	// negating a float: movq rax, xmm0 / btc eax, 31 / movq xmm0, rax. The middle
+	// instruction is the one that says which bit the sign is: the double's form of
+	// it is the same two bytes with a REX.W in front and 63 for the bit, and that
+	// one flips bit 63 of the register, which a float does not have a sign at.
+	assert target.negate_single(xmm0, eax) or { panic('the target description has no such name') } == [
+		u8(0x66),
+		0x48,
+		0x0f,
+		0x7e,
+		0xc0,
+		0x0f,
+		0xba,
+		0xf8,
+		0x1f,
+		0x66,
+		0x48,
+		0x0f,
+		0x6e,
+		0xc0,
+	]
+	assert target.negate_double(xmm0, rax) or { panic('the target description has no such name') } == [
+		u8(0x66),
+		0x48,
+		0x0f,
+		0x7e,
+		0xc0,
+		0x48,
+		0x0f,
+		0xba,
+		0xf8,
+		0x3f,
+		0x66,
+		0x48,
+		0x0f,
+		0x6e,
+		0xc0,
+	]
+}

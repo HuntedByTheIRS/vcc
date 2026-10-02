@@ -73,10 +73,12 @@ mut:
 // supported_types are the ones the back end can emit today. The 8-byte integer
 // spellings are here because the emitter moves eight bytes for a pointer already
 // and computes at that width for the 128-bit pair, so a value of one of them is
-// the width it already has. `unsigned` and `unsigned int` are one type, and so are
-// the three ways of writing each of the long types, which is why the spellings are
-// listed and not the kinds: the check is against what the file wrote.
-const supported_types = ['int', 'char', 'void', 'double', 'long', 'long long', 'unsigned',
+// the width it already has. `float` is here because the emitter has the
+// four-byte instructions for one, which are the eight-byte ones with the other
+// prefix. `unsigned` and `unsigned int` are one type, and so are the three ways
+// of writing each of the long types, which is why the spellings are listed and
+// not the kinds: the check is against what the file wrote.
+const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long long', 'unsigned',
 	'unsigned int', 'unsigned long', 'unsigned long long']
 
 // emitted_kinds are the kinds those spellings name, which is the question a
@@ -85,8 +87,8 @@ const supported_types = ['int', 'char', 'void', 'double', 'long', 'long long', '
 // more spellings of a kind already listed, and a typedef resolves to a spelling
 // that may be any of them. A type is one the emitter has a form for when the words
 // name one of these.
-const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .char_, .double, .long, .unsigned_long,
-	.long_long, .unsigned_long_long]
+const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .char_, .double, .float, .long,
+	.unsigned_long, .long_long, .unsigned_long_long]
 
 // max_expression_depth bounds how deep one expression nests: the parenthesised
 // kind, the prefix kind and the cast kind all write one expression inside
@@ -1259,11 +1261,13 @@ fn (mut p Parser) constant_type(at tokenize.Token, value i64) types.Type {
 }
 
 // floating_type is the type a floating constant has. 6.4.4.2 makes that a
-// question about the suffix: a constant with no suffix is a double, and the two
-// suffixes name types this compiler does not have, so the reader refuses them
-// where the constant is written rather than choosing between three types here.
-// A constant with no suffix is therefore a double, which is the type this
-// compiler emits.
+// question about the suffix: a constant with no suffix is a double, one written
+// with an `f` is a float, and `l` names a long double this compiler has no value
+// for, which the literal reader refuses where the constant is written.
+//
+// The value arrives already rounded to the width the suffix named, so nothing
+// here changes it; this only says which of the two floating types the constant
+// is.
 fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 	if value != value {
 		// A NaN is what a conversion that ran out of range produces, and the
@@ -1271,6 +1275,9 @@ fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 		// the constant is better than emitting a NaN where a number was.
 		p.error_at(at, '${at.text}: the constant is out of range for a double')
 		return types.Type{}
+	}
+	if at.text.len > 0 && (at.text[at.text.len - 1] == `f` || at.text[at.text.len - 1] == `F`) {
+		return types.float_type()
 	}
 	return types.double_type()
 }

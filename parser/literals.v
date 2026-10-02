@@ -95,21 +95,26 @@ fn is_floating_constant(text string) bool {
 	return text.contains('.') || text.contains('e') || text.contains('E')
 }
 
-// parse_floating_literal reads a decimal floating constant into the double it
-// names. A suffix is refused by name rather than dropped, because the two
-// suffixes that exist name types this compiler does not have yet, and reading
-// `1.5f` as a double would give the program a type it did not ask for. The
-// value itself is converted exactly: the digits between the point and the
-// exponent are the sign of a decimal fraction, and the conversion is the one
-// that rounds to nearest.
+// parse_floating_literal reads a decimal floating constant into the value it
+// names. The suffix decides the type, and this answers with the value that type
+// holds: a constant written with an `f` is a float, so the digits are rounded to
+// single precision here and the answer is the double that float is. That is the
+// whole point of the suffix: `0.1f` and `0.1` are different values, and reading
+// the first as a double would give the program a number it did not write.
+//
+// The `l` suffix names a long double, which this compiler has no value for, so
+// it is refused by name. Any other suffix is refused by the character scan
+// below, because a constant this reader does not take is reported rather than
+// read as the part it recognises.
 fn parse_floating_literal(text string) !f64 {
 	mut body := text
+	mut single := false
 	if body.len > 0 {
 		last := body[body.len - 1]
 		if last == `f` || last == `F` {
-			return error('${text}: a float literal names a type this compiler does not implement, and reading it as a double would change its value')
-		}
-		if last == `l` || last == `L` {
+			single = true
+			body = body[..body.len - 1]
+		} else if last == `l` || last == `L` {
 			return error('${text}: a long double literal names a type this compiler does not implement')
 		}
 	}
@@ -169,6 +174,13 @@ fn parse_floating_literal(text string) !f64 {
 		}
 	}
 	value := strconv.atof64(body) or { return error('${text}: not a floating constant') }
+	if single {
+		// Rounded once, here, so that the value the tree carries is the value a
+		// float holds. Every later use of it - a store, a conversion, the
+		// bytes written into the image - is then exactly that value, and no
+		// two of them can round it differently.
+		return f64(f32(value))
+	}
 	return value
 }
 
