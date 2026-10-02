@@ -342,9 +342,11 @@ fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
 // It is the shape a macro that wraps its argument in parentheses writes: the
 // corpus reaches `int c99_slot_7 = (7);` through `C99_DECLARE(7)`. Measured on
 // gcc 16.2.1, `int c99_slot_7 = (7); int g = (-3);` returns 4 for
-// `c99_slot_7 + g`, which is 7 + (-3). A parenthesized expression with anything
-// around it is not a shape this folds and is still refused by name: measured,
-// gcc accepts `int g = (7) + 1;` and this compiler refuses it.
+// `c99_slot_7 + g`, which is 7 + (-3). An operator after the pair makes the
+// initializer an expression, and an expression that is an integer constant
+// expression is folded like any other: `int g = (7) + 1;` is 8 to gcc. A comma is
+// not an operator a constant expression may have (6.6p3), so `(7, 8)` stays
+// refused.
 fn test_a_file_scope_parenthesized_constant_is_the_number_in_them() {
 	result := declarations_of('int c99_slot_7 = (7);')
 	assert result.diagnostics.len == 0
@@ -361,37 +363,64 @@ fn test_a_file_scope_parenthesized_constant_is_the_number_in_them() {
 		return
 	}
 	assert signed_value == -3
-	// The pair has to end the declaration: an operator or a second operand after
-	// it is an expression this does not fold, and it stays refused.
-	for refused_source in ['int g = (7) + 1;', 'int g = (7, 8);'] {
-		refused := declarations_of(refused_source)
-		assert refused.diagnostics.len == 1
-		assert refused.diagnostics[0].msg.contains('is initialized with something that is not a number')
+	summed := declarations_of('int g = (7) + 1;')
+	assert summed.diagnostics.len == 0
+	summed_value := summed.unit.globals[0].init or {
+		assert false
+		return
 	}
+	assert summed_value == 8
+	// A comma is not an operator an integer constant expression may have, so the
+	// pair with one after it stays refused by name.
+	refused := declarations_of('int g = (7, 8);')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('is initialized with something that is not a number')
 }
 
-// A pointer at the top level is a relocation this compiler does not write yet,
-// so the definition is reported instead of laid out as a wrong number.
-// An initializer that is an expression is a shape this reads no part of. Reading
-// its first number and stopping was silent, and the value defined was that first
-// number: `int g = 2 + 3;` defined g as 2, `int g = 1 << 3;` as 1, `char g = 2 + 3;`
-// as 2, `double g = 1.5 + 1.5;` as 1, and `__int128 g = 0 - 100;` as 0, each with a
-// working image behind it and no diagnostic. The whole expression now reads as
-// nothing, which is the case the definition reports by name.
-fn test_a_file_scope_initializer_that_is_an_expression_is_reported() {
-	expressions := [
-		'int g = 2 + 3;',
-		'int g = 1 << 3;',
-		'char g = 2 + 3;',
+// A file-scope scalar may be initialized by an integer constant expression, and
+// the folder that evaluates a bound evaluates one here too. Measured on gcc
+// 16.2.1 under `-std=c99`, `int g = 2 + 3;` is 5, `int g = 1 << 3;` is 8,
+// `char g = 2 + 3;` is 5 and `int y = 12 * sizeof(int) - 5 * sizeof(void *);` is
+// 8. Reading the first number and stopping defined those as 2 and 1 with no
+// diagnostic; refusing them was the same gap as a bound the folder could not
+// fold, which is why the file-scope reader now asks the folder before it asks for
+// a number.
+//
+// A shape that is not an integer constant expression is still refused by name: a
+// floating constant expression, a name and a call are not constants this reader
+// writes into the image, and the whole expression reads as nothing rather than as
+// its first term.
+fn test_a_file_scope_initializer_that_is_an_integer_constant_expression_is_folded() {
+	values := {
+		'int g = 2 + 3;':                                 5
+		'int g = 1 << 3;':                                8
+		'char g = 2 + 3;':                                5
+		'int y = 12 * sizeof(int) - 5 * sizeof(void *);': 8
+		'int g = 1 ? 5 : 6;':                             5
+		'__int128 g = 0 - 100;':                          -100
+		'__int128 g = -100 + 0;':                         -100
+	}
+	for source, expected in values {
+		result := declarations_of(source)
+		assert result.diagnostics.len == 0
+		assert result.unit.globals.len == 1
+		value := result.unit.globals[0].init or {
+			assert false
+			return
+		}
+		assert value == expected
+	}
+	// The expressions that are not integer constant expressions stay refused.
+	refused := [
 		'double g = 1.5 + 1.5;',
-		'__int128 g = 0 - 100;',
-		'__int128 g = -100 + 0;',
+		'int n = 4;\nint g = n;',
+		'int f(void);\nint g = f();',
+		'int g = (1, 2);',
 	]
-	for source in expressions {
+	for source in refused {
 		result := declarations_of(source)
 		assert result.diagnostics.len == 1
 		assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
-		assert result.unit.globals.len == 0
 	}
 	// A single number is still read, and its sign with it, which is the shape the
 	// language puts in the image.
@@ -629,4 +658,138 @@ fn test_a_non_constant_bound_at_file_scope_is_a_constraint_violation() {
 	body := declarations_of('int main(void) { int n = 3; int a[n]; return 0; }')
 	assert body.diagnostics.len == 1
 	assert body.diagnostics[0].msg.contains('an array declaration in a body needs a size')
+}
+
+// The conditional operator is an operator 6.6p3 leaves in a constant expression,
+// so a bound written with one is an integer constant expression and the object is
+// the size the arm the condition selects names. Measured on gcc 16.2.1 under
+// `-std=c99`, `int x[1 ? 2 : 3];` is two ints, `int x[0 ? 2 : 7];` is seven, and
+// `int x[1 ? 2 : n]` is two with n a variable because 6.5.15 does not evaluate
+// the arm it does not take. The whole expression still has to have an integer
+// type: `int x[1 ? 2 : 3.5];` is refused by gcc as `size of array has non-integer
+// type`, and the fold answers none for it here as well.
+fn test_a_conditional_bound_is_an_integer_constant_expression() {
+	taken := declarations_of('int x[1 ? 2 : 3];')
+	assert taken.diagnostics.len == 0
+	assert taken.unit.globals.len == 1
+	assert taken.unit.globals[0].count == 2
+	perhaps := declarations_of('int x[0 ? 2 : 7];')
+	assert perhaps.diagnostics.len == 0
+	assert perhaps.unit.globals[0].count == 7
+	// The arm that does not run does not have to be a constant: this is the
+	// short-circuit 6.5.15 makes and gcc confirms, so the count is the then arm.
+	short := declarations_of('int n = 4;\nint x[1 ? 5 : n];')
+	assert short.diagnostics.len == 0
+	assert short.unit.globals[1].count == 5
+	// An arm of a floating type makes the conditional a double, which no array
+	// size is: the fold answers none and the file-scope check refuses the bound.
+	floating := declarations_of('int x[1 ? 2 : 3.5];')
+	assert floating.diagnostics.len == 1
+	assert floating.diagnostics[0].msg.contains('is not an integer constant expression')
+}
+
+// 6.6p3 excludes assignment, increment, decrement, function call and comma from a
+// constant expression and leaves everything else in, so the shifts, the four
+// comparisons, the two equalities, the three bitwise operators, the two logical
+// operators and the prefix `~` and `!` all fold. Measured one at a time against
+// gcc 16.2.1 under `-std=c99`, each bound here is the size of the value it names:
+// `4 && 1` and `4 > 1` and `4 == 4` and `!0` are one, `16 >> 2` and `1 << 2` are
+// four, `2 | 1` is three, `6 ^ 3` is five and `6 & 3` is two.
+fn test_a_bitwise_relational_or_logical_bound_is_an_integer_constant_expression() {
+	controls := [
+		'int x[4 && 1];',
+		'int x[4 > 1];',
+		'int x[4 == 4];',
+		'int x[!0];',
+		'int x[16 >> 2];',
+		'int x[1 << 2];',
+		'int x[2 | 1];',
+		'int x[6 ^ 3];',
+		'int x[6 & 3];',
+	]
+	expected := [1, 1, 1, 1, 4, 4, 3, 5, 2]
+	for index, source in controls {
+		result := declarations_of(source)
+		assert result.diagnostics.len == 0
+		assert result.unit.globals[0].count == expected[index]
+	}
+	// `~` and `!` are prefix operators over a constant: `(~0 & 3) + 1` is four
+	// and `!7 + 3` is three, and both are positive so the count is the value.
+	prefix := declarations_of('int x[(~0 & 3) + 1];\nint y[!7 + 3];')
+	assert prefix.diagnostics.len == 0
+	assert prefix.unit.globals[0].count == 4
+	assert prefix.unit.globals[1].count == 3
+	// A logical operator does not evaluate the operand its result does not need,
+	// which gcc confirms: `1 || f()` and `0 && n` are accepted at file scope with
+	// f a function and n a variable, while `2 && f()` has to read f() and is
+	// refused.
+	short := declarations_of('int f(void);\nint n = 4;\nint x[1 || f()];\nint y[0 && n];')
+	assert short.diagnostics.len == 0
+	// globals holds the objects in order: n, then x, then y. `1 || f()` is one and
+	// `0 && n` is zero, and neither read the operand the result does not need.
+	assert short.unit.globals.len == 3
+	assert short.unit.globals[1].count == 1
+	assert short.unit.globals[2].count == 0
+	needed := declarations_of('int f(void);\nint x[2 && f()];')
+	assert needed.diagnostics.len == 1
+	assert needed.diagnostics[0].msg.contains('is not an integer constant expression')
+	// Division by zero is still not a value this reader answers, so a bound
+	// written with one leaves the object without a size and is refused.
+	divided := declarations_of('int x[4 / 0];')
+	assert divided.diagnostics.len == 1
+	assert divided.diagnostics[0].msg.contains('is not an integer constant expression')
+}
+
+// 6.6p6 admits a floating constant to an integer constant expression as the
+// immediate operand of a cast to an integer type, which is the one floating shape
+// an array size may be built from. Measured on gcc 16.2.1 under `-std=c99`, `int
+// x[(int) 3.5];` is three elements and `int x[(char) 300.9];` is 44, because the
+// conversion truncates toward zero and then narrows. A floating constant that is
+// not the operand of a cast is not an operand at all - `int x[1.5];` is `size of
+// array has non-integer type` to gcc - and a cast whose target is not an integer
+// type is refused the same way, so the fold answers none for both.
+fn test_a_floating_constant_as_the_immediate_operand_of_a_cast_is_a_bound() {
+	whole := declarations_of('int x[(int) 3.5];')
+	assert whole.diagnostics.len == 0
+	assert whole.unit.globals[0].count == 3
+	narrowed := declarations_of('int x[(char) 300.9];')
+	assert narrowed.diagnostics.len == 0
+	assert narrowed.unit.globals[0].count == 44
+	// A sign in front of the floating constant is the same operand: `(int) -0.5`
+	// is zero, which gcc gives `int x[(int) -0.5];` too.
+	signed := declarations_of('int x[(int) -0.5 + 4];')
+	assert signed.diagnostics.len == 0
+	assert signed.unit.globals[0].count == 4
+	// Not under a cast: no.
+	loose := declarations_of('int x[1.5];')
+	assert loose.diagnostics.len == 1
+	assert loose.diagnostics[0].msg.contains('is not an integer constant expression')
+	// A cast to a floating type is one 6.6p6 does not allow.
+	target := declarations_of('int x[(double) 3];')
+	assert target.diagnostics.len == 1
+	assert target.diagnostics[0].msg.contains('is not an integer constant expression')
+}
+
+// A file-scope bound that names something the file declares nowhere is that
+// name's failure and not the object's. This reader does not declare enumeration
+// constants, so `enum { N = 4 }; int x[N];` fails because N has no declaration;
+// reporting the bound as not an integer constant expression would name a cause
+// the compiler cannot show, and a wrong cause is worse than a narrower message.
+// Whether the name is declared is asked once the whole file has been read, so a
+// name declared after the bound still gets the object's own report.
+fn test_a_bound_that_names_an_undeclared_name_is_reported_as_that_name() {
+	missing := declarations_of('enum { N = 4 };\nint x[N];')
+	assert missing.diagnostics.len == 1
+	assert missing.diagnostics[0].msg.contains('N is used here and nothing in this file declares it')
+	assert !missing.diagnostics[0].msg.contains('is not an integer constant expression')
+	assert missing.diagnostics[0].line == 2
+	// A name the file declares later is a bound that is not constant, and the
+	// report says that, because the question is asked with the whole file read.
+	later := declarations_of('int x[n];\nint n = 4;')
+	assert later.diagnostics.len == 1
+	assert later.diagnostics[0].msg.contains('is not an integer constant expression')
+	// A name the file already declares is the same report, and it is not held.
+	earlier := declarations_of('int n = 4;\nint x[n];')
+	assert earlier.diagnostics.len == 1
+	assert earlier.diagnostics[0].msg.contains('is not an integer constant expression')
 }

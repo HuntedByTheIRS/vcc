@@ -292,6 +292,14 @@ struct DeclStep {
 	count int
 	// at is where the step was written.
 	at tokenize.Token
+	// bound_name, with its line and column, is the first name a written bound
+	// carried that the scope at that point did not have, when there was one. It is
+	// what tells a bound that is not a constant expression from a bound whose
+	// operand is a name nothing declares, which the file-scope report needs to
+	// name the right failure.
+	bound_name      string
+	bound_name_line int
+	bound_name_col  int
 	// params, variadic and prototyped are a function step's parameter list.
 	params     []ast.Param
 	variadic   bool
@@ -375,6 +383,24 @@ fn (d Declarator) array_bound_is_unreadable() bool {
 		}
 	}
 	return false
+}
+
+// array_bound_ident is the name a written bound carried that the scope at that
+// point did not have, when there was one. It is what distinguishes a bound that is
+// not an integer constant expression from a bound whose operand is declared
+// nowhere: the first is the object's problem, the second is the name's, and the
+// report says which.
+fn (d Declarator) array_bound_ident() ?ast.Ident {
+	for step in d.steps {
+		if step.kind == .array_step && step.count == unreadable_bound && step.bound_name.len > 0 {
+			return ast.Ident{
+				name: step.bound_name
+				line: step.bound_name_line
+				col:  step.bound_name_col
+			}
+		}
+	}
+	return none
 }
 
 // array_dims counts the array steps, which is how many sizes the declarator
@@ -737,7 +763,25 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// and not in the suffix reader because the same suffix is read for a
 			// struct member, whose bound may be one this compiler cannot fold.
 			if !spec.is_typedef && d.is_array() && d.array_bound_is_unreadable() {
-				p.error_at(d.array_at(), 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
+				if ident := d.array_bound_ident() {
+					// The bound named something the scope did not have. Whether
+					// the file declares that name anywhere is a question only the
+					// end of the file answers, so the report waits: `int x[n];
+					// int n = 4;` names a variable declared later and its bound is
+					// not a constant expression, while `enum { N = 4 }; int x[N];`
+					// names nothing at all, and calling the second non-constant
+					// would name a cause the compiler cannot show.
+					p.pending_bounds << PendingBound{
+						object:    d.name
+						name:      ident.name
+						name_line: ident.line
+						name_col:  ident.col
+						at_line:   d.array_at().line
+						at_col:    d.array_at().col
+					}
+				} else {
+					p.error_at(d.array_at(), 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
+				}
 				p.skip_declaration()
 				return decls
 			}
@@ -1033,12 +1077,16 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 	}
 }
 
-// file_scope_constant reads the initializer a file-scope definition may have: a
-// number, signed, which is the only shape this folds.
-// Anything else - a string, an expression - reads as none, and the caller reports
-// it: what is written into the image is a constant, and a constant is what can be
-// written. A brace list is read by `parse_brace_initializer` before this is
-// reached, so it never arrives here.
+// file_scope_constant reads the initializer a file-scope definition may have: an
+// integer constant expression, or a written number with a sign. The expression is
+// read first, because the folder takes the operators 6.6 gives a constant
+// expression and the reader that names a number takes only the shapes the folder
+// does not: a floating constant, and a literal it refuses.
+//
+// Anything else - a string, a name, a call - reads as none, and the caller
+// reports it: what is written into the image is a constant, and a constant is
+// what can be written. A brace list is read by `parse_brace_initializer` before
+// this is reached, so it never arrives here.
 //
 // A number the literal reader refuses is reported by `number_constant`, at the
 // literal as it was written, which is where the expression path reports the same
@@ -1050,18 +1098,22 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 	// A parenthesized constant, `(7)`, is the number the one pair of parentheses
 	// holds, which is the shape a macro that wraps its argument in them writes:
 	// the corpus reaches `int c99_slot_7 = (7);` through `C99_DECLARE(7)`.
-	// Only exactly that shape is read. `(7) + 1` and `(7, 8)` are expressions
-	// this does not fold, and `is_parenthesized_constant` answers false for
-	// them, so they stay refused by the report below rather than taking the
-	// first number and stopping.
 	if p.is_parenthesized_constant() {
 		p.next()
 		constant := p.number_constant() or { return FileConstant{} }
 		p.next()
 		return constant.number
 	}
+	// An integer constant expression is the other shape an integer initializer
+	// has, and the folder reads one here rather than the reader that names a
+	// number: measured on gcc 16.2.1 under `-std=c99`, `int y = 12 * sizeof(int)
+	// - 5 * sizeof(void *);` is 8 and `int y = 2 + 3;` is 5, and this reader
+	// refused both while the same expression in a body was folded.
+	if constant := p.folded_file_initializer() {
+		return constant
+	}
 	// The number is the initializer or the initializer is not one this reads. An
-	// expression is a shape this does not fold, and reading its first term and
+	// expression this folder does not evaluate and reading its first term and
 	// stopping was silent: `int g = 2 + 3;` defined g as 2, `int g = 1 << 3;` as
 	// 1, `char g = 2 + 3;` as 2, `double g = 1.5 + 1.5;` as 1, and
 	// `__int128 g = 0 - 100;` as 0, each with no diagnostic and an image written.
@@ -1072,6 +1124,50 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 		return FileConstant{}
 	}
 	return constant.number
+}
+
+// folded_file_initializer reads the initializer as an expression and answers the
+// integer constant expression it is worth. Its operand and operator set is the
+// folder's, which is 6.6's, so the same expressions are constants here as in a
+// bound: measured on gcc 16.2.1 under `-std=c99`, `int y = 12 * sizeof(int) - 5 *
+// sizeof(void *);` is 8, `int y = 2 + 3;` is 5 and `int y = 1 << 3;` is 8, and
+// this reader refused all three while a body's copy of the first was folded by
+// the same folder.
+//
+// Nothing is kept of a read that does not fold: the cursor, the diagnostics, the
+// depth and the specifier state go back, and the reader that names a number
+// answers for the shapes this one does not take - a floating constant, a bad
+// literal, a name and a call among them.
+fn (mut p Parser) folded_file_initializer() ?FileConstant {
+	saved_pos := p.pos
+	saved_diagnostics := p.diagnostics.len
+	saved_depth := p.depth
+	saved_base := p.pending_base
+	saved_storage := p.pending_storage
+	expr := p.parse_expression() or {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		p.depth = saved_depth
+		p.pending_base = saved_base
+		p.pending_storage = saved_storage
+		return none
+	}
+	p.depth = saved_depth
+	p.pending_base = saved_base
+	p.pending_storage = saved_storage
+	if !p.at_punct(',') && !p.at_punct(';') {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	value := p.constant_value(expr) or {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	return FileConstant{
+		integer: value
+	}
 }
 
 // is_parenthesized_constant answers whether the next tokens are one pair of
@@ -1870,9 +1966,12 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			at := p.peek()
 			count := p.parse_array_suffix()!
 			steps.prepend(DeclStep{
-				kind:  .array_step
-				count: int(count)
-				at:    at
+				kind:            .array_step
+				count:           int(count)
+				at:              at
+				bound_name:      p.bound_name
+				bound_name_line: p.bound_name_line
+				bound_name_col:  p.bound_name_col
 			})
 			continue
 		}
@@ -2268,6 +2367,9 @@ const unreadable_bound = -1
 // the suffix still ends where it says it ends.
 fn (mut p Parser) parse_array_suffix() !i64 {
 	open := p.next() // [
+	p.bound_name = ''
+	p.bound_name_line = 0
+	p.bound_name_col = 0
 	if p.at_punct(']') {
 		p.next()
 		return 0
@@ -2291,7 +2393,21 @@ fn (mut p Parser) parse_array_suffix() !i64 {
 	if expr := read {
 		if p.at_punct(']') {
 			p.next()
-			value := p.constant_value(expr) or { return unreadable_bound }
+			value := p.constant_value(expr) or {
+				// A bound that did not fold may name something this scope does not
+				// have. That name is kept so the file-scope report can tell a
+				// bound that is not a constant expression from one whose operand
+				// is declared nowhere, which is a different failure and a
+				// different message. Whether the name is declared anywhere is a
+				// question only the end of the file can answer, so the report
+				// waits; see `pending_bounds`.
+				if ident := p.unresolved_name(expr) {
+					p.bound_name = ident.name
+					p.bound_name_line = ident.line
+					p.bound_name_col = ident.col
+				}
+				return unreadable_bound
+			}
 			if value > 0 {
 				return value
 			}

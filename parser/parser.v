@@ -15,6 +15,19 @@ pub:
 	diagnostics []tokenize.Diagnostic
 }
 
+// PendingBound is a file-scope array bound that named something this reader did
+// not resolve, with where the bound and the name were written. The report waits
+// until the whole file has been read, because whether a name is declared anywhere
+// is a question only the end of the file can answer.
+struct PendingBound {
+	object    string
+	name      string
+	name_line int
+	name_col  int
+	at_line   int
+	at_col    int
+}
+
 struct Parser {
 mut:
 	tokens      []tokenize.Token
@@ -58,6 +71,21 @@ mut:
 	// is a set of names rather than the scope table because that check is about
 	// the unit and not about which block a name was visible in.
 	declared map[string]bool
+	// pending_bounds is a file-scope array bound whose expression names something
+	// this reader did not resolve. Its report waits until the whole file has been
+	// read, because whether a name is declared anywhere is a question only the end
+	// of the file can answer: `int x[n]; int n = 4;` names a variable declared
+	// later, and the bound is not an integer constant expression, while
+	// `enum { N = 4 }; int x[N];` names nothing at all because this reader does
+	// not declare enumeration constants. Reporting the second as a bound that is
+	// not constant would name a cause the compiler cannot show.
+	pending_bounds []PendingBound
+	// bound_name is the first name a bound written in brackets carried that the
+	// scope at that point did not have, with where it was written. The suffix
+	// reader fills it for the declaration reader to keep on its step.
+	bound_name      string
+	bound_name_line int
+	bound_name_col  int
 	// file is the source the tokens being read came from, which the preprocessor
 	// fills in for every file it reads. A diagnostic raised inside an included
 	// file names that file: reporting a header's line number against the name of
@@ -129,6 +157,10 @@ pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 		declared:       map[string]bool{}
 	}
 	unit := p.parse_unit()
+	// A file-scope bound that named something the scope did not have is answered
+	// now, because the whole file has been read and whether the name is declared
+	// anywhere is a question only this point can answer.
+	p.report_pending_bounds()
 	// Every name the tree carries has to be a name this file declares. A name
 	// that is not is refused here, once the whole unit has been read, because
 	// whether a name is declared is a question only the end of the file can
@@ -276,6 +308,25 @@ fn (p Parser) with_declared_types(stmts []ast.Stmt) []ast.Stmt {
 		out << stmt
 	}
 	return out
+}
+
+// report_pending_bounds answers each file-scope bound that named something the
+// scope did not have, now that the whole file has been read. A name the file
+// declares somewhere leaves the object without an integer constant expression,
+// which is the constraint 6.6 makes for an object at file scope; a name the file
+// declares nowhere is that name's own failure and is reported as one, at the name.
+// The distinction matters because the two are different constructs: this reader
+// does not declare enumeration constants, so `enum { N = 4 }; int x[N];` fails
+// because N has no declaration, not because a declared N turned out not to be
+// constant.
+fn (mut p Parser) report_pending_bounds() {
+	for bound in p.pending_bounds {
+		if bound.name in p.declared {
+			p.error_span(bound.at_line, bound.at_col, 'a constraint violation: the bound of ${bound.object} is not an integer constant expression, and an object at file scope needs a size that is one')
+			continue
+		}
+		p.error_span(bound.name_line, bound.name_col, 'unsupported: ${bound.name} is used here and nothing in this file declares it')
+	}
 }
 
 // report_undeclared refuses every name the tree carries that nothing in the unit
@@ -891,6 +942,59 @@ fn (p Parser) is_unresolved(expr ast.Expr) bool {
 		return true
 	}
 	return false
+}
+
+// unresolved_name is the first name an expression carries that the scope at this
+// point does not have, or none. It is asked of a bound that did not fold: a name
+// the file declares nowhere is a different failure from an expression that is not
+// an integer constant expression, and a report that names the wrong one is a
+// message about a construct the compiler never saw.
+//
+// Which names the scope has is what is asked here, not which names the file has:
+// `int x[n]; int n = 4;` has no n at this point, and the caller that wants the
+// file's answer waits until the end of the file to ask it.
+fn (p Parser) unresolved_name(expr ast.Expr) ?ast.Ident {
+	match expr {
+		ast.Ident {
+			if is_keyword(expr.name) {
+				return none
+			}
+			if _ := p.scopes.lookup(expr.name) {
+				return none
+			}
+			return expr
+		}
+		ast.Unary {
+			return p.unresolved_name(expr.expr)
+		}
+		ast.Cast {
+			return p.unresolved_name(expr.expr)
+		}
+		ast.Binary {
+			if found := p.unresolved_name(expr.left) {
+				return found
+			}
+			return p.unresolved_name(expr.right)
+		}
+		ast.Conditional {
+			if found := p.unresolved_name(expr.cond) {
+				return found
+			}
+			if found := p.unresolved_name(expr.then_expr) {
+				return found
+			}
+			return p.unresolved_name(expr.else_expr)
+		}
+		ast.Index {
+			if found := p.unresolved_name(expr.base) {
+				return found
+			}
+			return p.unresolved_name(expr.index)
+		}
+		else {
+			return none
+		}
+	}
 }
 
 fn (mut p Parser) parse_unary() !ast.Expr {
@@ -1615,14 +1719,19 @@ fn (p Parser) is_null_constant(expr ast.Expr) bool {
 
 // constant_value is the value of an integer constant expression this reader
 // evaluates while it reads: a literal, a literal with a sign in front of it, a
-// cast of one to an integer type, and the arithmetic of two values. The five
-// arithmetic operators are the ones it folds, which is the arithmetic the bounds
-// a real header writes reach for: measured with `vcc -E`, glibc's `stdio.h`
-// declares `char _unused2[12 * sizeof (int) - 5 * sizeof (void *)]` and
-// `sys/select.h` declares `char data[1024 / (8 * (int) sizeof (__fd_mask))]`.
-// `sizeof` is an operator the expression reader turns into its value, so the
-// arithmetic arrives here as integer constants and the cast is the one node kind
-// the folder was missing.
+// cast of one to an integer type, the arithmetic of two values, the shifts, the
+// comparisons, the bitwise and logical operators, the prefix operators, and the
+// conditional. The set is 6.6's rather than the shapes a header happens to
+// write: 6.6p3 excludes assignment, increment, decrement, a function call and a
+// comma from a constant expression and leaves everything else in, so `1 ? 2 : 3`
+// and `4 > 1` and `1 << 2` are integer constant expressions and gcc 16.2.1
+// accepts them at file scope under `-std=c99` where this folder answered none.
+// The
+// arithmetic is what the bounds a real header writes reach for: measured with
+// `vcc -E`, glibc's `stdio.h` declares `char _unused2[12 * sizeof (int) - 5 *
+// sizeof (void *)]` and `sys/select.h` declares `char data[1024 / (8 * (int)
+// sizeof (__fd_mask))]`. `sizeof` is an operator the expression reader turns into
+// its value, so the arithmetic arrives here as integer constants.
 //
 // An expression that is not one of those answers none, which says that this is not
 // a constant expression the compiler can evaluate - not that it has no value. A
@@ -1641,25 +1750,60 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 		if expr.op == '+' {
 			return operand
 		}
+		if expr.op == '~' {
+			return ~operand
+		}
+		if expr.op == '!' {
+			return if operand == 0 { i64(1) } else { i64(0) }
+		}
 		return none
 	}
 	if expr is ast.Cast {
 		// 6.6 makes a cast of an integer constant to an integer type an integer
-		// constant expression, and the value is the one the conversion makes:
-		// `(char) 300` is 44 here as it is at run time, because a value that
-		// narrows keeps what the target type can hold.
-		operand := p.constant_value(expr.expr) or { return none }
+		// constant expression, and 6.6p6 allows only that: a cast whose target is
+		// not an integer type answers none, so `(double) 3` is not an operand an
+		// array size may be built from.
 		if !expr.typ.kind.is_integer() {
 			return none
 		}
-		if expr.typ.kind == .bool_ {
-			return if operand != 0 { i64(1) } else { i64(0) }
+		// The value is the one the conversion makes: `(char) 300` is 44 here as it
+		// is at run time, because a value that narrows keeps what the target type
+		// can hold.
+		if operand := p.constant_value(expr.expr) {
+			return p.converted_constant(expr.typ, operand)
 		}
-		size := p.representation.size_of(expr.typ) or { return none }
-		return truncate_integer(operand, size, expr.typ.kind.is_unsigned())
+		// 6.6p6 names the other operand an integer constant expression may have
+		// from a floating constant: one that is the immediate operand of a cast.
+		// `(int) 3.5` is an integer constant expression whose value is three, and
+		// gcc 16.2.1 under `-std=c99` accepts `int x[(int) 3.5];` as three
+		// elements where this folder answered none and the bound was refused.
+		if value := floating_operand(expr.expr) {
+			return p.converted_float_constant(expr.typ, value)
+		}
+		return none
 	}
 	if expr is ast.Binary {
 		left := p.constant_value(expr.left) or { return none }
+		// `&&` and `||` are operators 6.6p3 leaves in a constant expression, and
+		// the operand the result does not need is not evaluated. Measured on gcc
+		// 16.2.1 under `-std=c99`, `int x[1 || f()]` and `int x[0 && n]` are
+		// accepted at file scope while `int x[2 && f()]` is `variably modified`,
+		// so the right operand is read only when the left one leaves the answer
+		// open.
+		if expr.op == '&&' {
+			if left == 0 {
+				return i64(0)
+			}
+			right := p.constant_value(expr.right) or { return none }
+			return if right != 0 { i64(1) } else { i64(0) }
+		}
+		if expr.op == '||' {
+			if left != 0 {
+				return i64(1)
+			}
+			right := p.constant_value(expr.right) or { return none }
+			return if right != 0 { i64(1) } else { i64(0) }
+		}
 		right := p.constant_value(expr.right) or { return none }
 		match expr.op {
 			'+' {
@@ -1683,12 +1827,116 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 				}
 				return left % right
 			}
+			'<<' {
+				if right < 0 || right >= 64 {
+					return none
+				}
+				return left << right
+			}
+			'>>' {
+				if right < 0 || right >= 64 {
+					return none
+				}
+				return left >> right
+			}
+			'<' {
+				return if left < right { i64(1) } else { i64(0) }
+			}
+			'>' {
+				return if left > right { i64(1) } else { i64(0) }
+			}
+			'<=' {
+				return if left <= right { i64(1) } else { i64(0) }
+			}
+			'>=' {
+				return if left >= right { i64(1) } else { i64(0) }
+			}
+			'==' {
+				return if left == right { i64(1) } else { i64(0) }
+			}
+			'!=' {
+				return if left != right { i64(1) } else { i64(0) }
+			}
+			'&' {
+				return left & right
+			}
+			'^' {
+				return left ^ right
+			}
+			'|' {
+				return left | right
+			}
 			else {
 				return none
 			}
 		}
 	}
+	if expr is ast.Conditional {
+		// 6.6p3 leaves the conditional operator in a constant expression and
+		// 6.5.15 evaluates one arm, so only the arm the condition selects has to
+		// be constant. Measured on gcc 16.2.1 under `-std=c99`, `int x[1 ? 2 :
+		// n]` and `int x[1 ? 2 : f()]` are accepted at file scope with n a
+		// variable and f a function, while `int x[1 ? 2 : 3.5]` is refused as
+		// `size of array has non-integer type`: the expression's own type has to
+		// be an integer type, and the arm that does not run does not have to be
+		// constant.
+		if !expr.typ.kind.is_integer() {
+			return none
+		}
+		condition := p.constant_value(expr.cond) or { return none }
+		if condition != 0 {
+			return p.constant_value(expr.then_expr) or { return none }
+		}
+		return p.constant_value(expr.else_expr) or { return none }
+	}
 	return none
+}
+
+// floating_operand is the value of a floating constant written as the operand of
+// a cast, with a sign in front of it allowed: 6.6p6 admits a floating constant to
+// an integer constant expression only as the immediate operand of a cast, and
+// `-3.5` is one constant with a sign on it. It is asked only from the cast arm, so
+// a floating constant anywhere else still has no value this folder will use.
+fn floating_operand(expr ast.Expr) ?f64 {
+	if expr is ast.FloatLit {
+		return expr.value
+	}
+	if expr is ast.Unary {
+		if operand := floating_operand(expr.expr) {
+			if expr.op == '-' {
+				return -operand
+			}
+			if expr.op == '+' {
+				return operand
+			}
+		}
+	}
+	return none
+}
+
+// converted_constant is one integer constant converted to an integer type: a
+// `_Bool` is one for any value that is not zero, a narrowing conversion keeps the
+// low bytes, and a type the target has no size for answers none.
+fn (p Parser) converted_constant(typ types.Type, operand i64) ?i64 {
+	if typ.kind == .bool_ {
+		return if operand != 0 { i64(1) } else { i64(0) }
+	}
+	size := p.representation.size_of(typ) or { return none }
+	return truncate_integer(operand, size, typ.kind.is_unsigned())
+}
+
+// converted_float_constant is a floating constant converted to an integer type,
+// the one floating operand 6.6p6 allows in an integer constant expression. The
+// conversion truncates toward zero, which is what the run-time one does and what
+// gcc 16.2.1 gives under `-std=c99`: `int x[(int) 3.5];` is three elements and
+// `int x[(int) -0.5];` is zero. A value no i64 holds, or a NaN, is not a
+// conversion this reader makes and answers none rather than wrapping to a number
+// that is not the one written.
+fn (p Parser) converted_float_constant(typ types.Type, value f64) ?i64 {
+	if value != value || value >= 9223372036854775808.0 || value < -9223372036854775808.0 {
+		return none
+	}
+	return p.converted_constant(typ, i64(value))
 }
 
 // truncate_integer is a constant converted to an integer type of size bytes: a
