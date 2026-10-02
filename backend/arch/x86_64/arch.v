@@ -783,6 +783,27 @@ pub fn call_rip_slot(disp i32) []u8 {
 		u8((value >> 24) & 0xff)]
 }
 
+// call_register calls the address a register holds, which is the form a call
+// written to an expression takes: the expression's value is read into a register
+// and the call goes there. The opcode is the indirect group with the mod field set
+// to the register itself, so no memory is read and there is no displacement to
+// write; r8 and up need a REX prefix for the same reason mov_imm32 does. A register
+// whose low three bits are 4 or 5 cannot be named without a SIB byte or a
+// displacement, and this form writes neither, so it is refused by name.
+pub fn call_register(reg Register) ![]u8 {
+	low := reg.code & 0x07
+	if low == 4 || low == 5 {
+		return error('${name}: a call through ${reg.name} cannot be named without a SIB byte or a displacement, and this form writes neither')
+	}
+	mut out := []u8{cap: 3}
+	if reg.code >= 8 {
+		out << u8(0x41) // REX.B: the r/m field names a wider register
+	}
+	out << u8(0xff)
+	out << u8(0xd0 | low) // mod 11, reg field 2: call r/m64
+	return out
+}
+
 // lea_rip computes the address of something at a displacement from the
 // instruction and writes it into the register. The register is named by its
 // 32-bit spelling because that is how the table lists it; the instruction writes

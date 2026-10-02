@@ -261,6 +261,13 @@ pub fn (t Target) call_slot(disp i32) []u8 {
 	return x86_64.call_rip_slot(disp)
 }
 
+// call_register calls the address a register holds: the indirect form, for a call
+// written to an expression rather than to a name. It carries no reference, because
+// the address is in the register rather than at a place in the image.
+pub fn (t Target) call_register(reg Register) ![]u8 {
+	return x86_64.call_register(t.describe(reg))
+}
+
 // call_relocation is the number an object file gives a call, for a reference the
 // linker still has to fill in: a call to a symbol this object does not define,
 // or one it leaves to the linker to route.
