@@ -356,7 +356,7 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert described_int_align == 4
 	assert description.representation.size_of(unsigned_int_type()) or { -1 } == 4
 	// Every other scalar kind is named as missing: the description carries no
-	// width for a short or an aggregate, and a question that needs one
+	// width for a `long double` or a complex type, and a question that needs one
 	// is refused rather than answered with a number that would be a machine
 	// fact in the wrong module.
 	//
@@ -366,16 +366,14 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	// compute with exactly those bytes. They left this list in the commit that
 	// gave the back end a value of that width.
 	//
-	// A char is carried, and the question that needs it is the layout of an
-	// aggregate: where the member after a char member starts is the char's width
-	// and nothing else's. The back end has a form for one already, since a char
-	// is a byte in its slot and an int when it is read, so the width is one the
-	// model can give out truthfully.
-	// A float is carried for the same reason the char is: the emitter has a
-	// four-byte form for one, so the model can give out its width truthfully.
-	// Measured the same way: `sizeof(float)` is 4 with an alignment of 4.
-	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .long, .unsigned_long, .long_long,
-		.unsigned_long_long]
+	// The character types, `_Bool` and `short` are carried, and they left the
+	// list the same way: the emitter loads and stores a one-byte value and a
+	// two-byte value, so a width the model gives out is one the back end moves.
+	// Measured the same way: `sizeof(_Bool)`, `sizeof(char)` and the two
+	// character types are 1 with an alignment of 1, and `short` and
+	// `unsigned short` are 2 with an alignment of 2.
+	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .signed_char, .unsigned_char,
+		.bool_, .short, .unsigned_short, .long, .unsigned_long, .long_long, .unsigned_long_long]
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in carried {

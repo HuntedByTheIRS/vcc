@@ -268,14 +268,17 @@ pub:
 // `printf("%zu", sizeof(long))` on gcc 16.2.1, `long`, `unsigned long`,
 // `long long` and `unsigned long long` are each 8 bytes with an alignment of 8
 // on this target, and the emitter's 64-bit instructions move exactly those eight
-// bytes. The types that are still left out are the ones the back end has no
-// instruction for. Measured before the 64-bit kinds were carried: `int main(void)
+// bytes. Measured before the 64-bit kinds were carried: `int main(void)
 // { return 4294967295 > 2147483647; }` was read as an int comparison and returned
 // 0 where ISO C and gcc return 1, which is why a width the description does not
-// carry is refused by name rather than guessed at with the nearest one. A
-// character constant is an int (6.4.4.4), so no rule here asks for a char's
-// width; the character types are added to the description with the kinds that
-// need them.
+// carry is refused by name rather than guessed at with the nearest one.
+//
+// The character types, `_Bool` and `short` are carried, and they left this table
+// only when the back end could move a value of their width: a char and a `_Bool`
+// live in one byte, a `short` in two, and the emitter loads and stores each of
+// them at that width. Before that they were missing for the same reason `long
+// double` still is, that a width the back end cannot move is a width the model
+// must not hand out.
 //
 // A double is carried for the same reason the int is: the back end has the
 // instruction for it, so the model can answer a question about its width
@@ -298,13 +301,30 @@ pub fn from_target(target backend.Target) Description {
 	// The width every integer constant is written at, and the unsigned reading
 	// of the same four bytes: `4294967295U` is an unsigned int whose value the
 	// back end holds at that width.
-	// A char is one byte, which the back end already has a form for: a char lives
-	// in one byte of its slot and is an int when it is read. The width is asked
-	// for by the layout of an aggregate with a char member, where a member's
-	// width is what decides the offset of the member after it. Measured on this
-	// target with gcc 16.2.1, `sizeof(char)` is 1 with an alignment of 1.
+	//
+	// The character types and `short` are one and two bytes, which the back end
+	// moves now: it loads and stores a one-byte value with the instructions a
+	// char needs, and a two-byte value with the same instructions carrying the
+	// operand-size prefix. The width is asked for by the layout of an aggregate
+	// with a character or short member, where a member's width decides the
+	// offset of the member after it, and by the promotion of `unsigned short`,
+	// which turns on whether an int is wider than a short. Measured on this
+	// target with gcc 16.2.1: `sizeof(_Bool)`, `sizeof(char)`,
+	// `sizeof(signed char)` and `sizeof(unsigned char)` are each 1 with an
+	// alignment of 1, and `sizeof(short)` and `sizeof(unsigned short)` are each
+	// 2 with an alignment of 2.
+	sizes[Kind.bool_] = 1
+	aligns[Kind.bool_] = 1
 	sizes[Kind.char_] = 1
 	aligns[Kind.char_] = 1
+	sizes[Kind.signed_char] = 1
+	aligns[Kind.signed_char] = 1
+	sizes[Kind.unsigned_char] = 1
+	aligns[Kind.unsigned_char] = 1
+	sizes[Kind.short] = 2
+	aligns[Kind.short] = 2
+	sizes[Kind.unsigned_short] = 2
+	aligns[Kind.unsigned_short] = 2
 	sizes[Kind.int_] = 4
 	aligns[Kind.int_] = 4
 	sizes[Kind.unsigned_int] = 4
