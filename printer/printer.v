@@ -97,7 +97,11 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name}${elements} at ${stmt.line}:${stmt.col}${typed(stmt.resolved)}'
 			}
 			.assign {
-				out << '${indent}assignment to ${stmt.target} at ${stmt.line}:${stmt.col}'
+				if stmt.deref != none {
+					out << '${indent}assignment through a dereference at ${stmt.line}:${stmt.col}'
+				} else {
+					out << '${indent}assignment to ${stmt.target} at ${stmt.line}:${stmt.col}'
+				}
 			}
 			.if_stmt {
 				out << '${indent}if at ${stmt.line}:${stmt.col}'
@@ -121,6 +125,10 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 		if index := stmt.index {
 			out << '${indent}subscript'
 			dump_expression(index, depth + 1, mut out)
+		}
+		if deref := stmt.deref {
+			out << '${indent}through'
+			dump_expression(deref, depth + 1, mut out)
 		}
 		if init := stmt.init {
 			out << '${indent}initializer'

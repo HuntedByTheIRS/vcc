@@ -587,6 +587,69 @@ fn test_a_compound_assignment_is_the_assignment_it_means() {
 	assert binary.right is ast.IntLit
 }
 
+// `*p = 5` writes through the address p holds, so the tree keeps the
+// dereference as the target and has no name for it: the address is what the
+// store needs, and the expression the dereference reads through is where it
+// comes from.
+fn test_an_assignment_through_a_dereference_writes_what_the_pointer_points_at() {
+	result := parsed('int main() { int x = 1; int *p = &x; *p = 5; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[2].kind == .assign
+	assert body[2].target == ''
+	target := body[2].deref or {
+		assert false
+		return
+	}
+	assert target is ast.Unary
+	assert (target as ast.Unary).op == '*'
+	operand := (target as ast.Unary).expr
+	assert operand is ast.Ident
+	assert (operand as ast.Ident).name == 'p'
+}
+
+// The operand of the outer dereference is another dereference: `**pp = 7` is a
+// write through the address `*pp` reads.
+fn test_an_assignment_through_a_pointer_to_a_pointer_keeps_both_dereferences() {
+	result := parsed('int main() { int x = 1; int *p = &x; int **pp = &p; **pp = 7; return x; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	target := body[3].deref or {
+		assert false
+		return
+	}
+	assert target is ast.Unary
+	inner := (target as ast.Unary).expr
+	assert inner is ast.Unary
+	assert (inner as ast.Unary).op == '*'
+}
+
+// The pointer an assignment writes through is a use of the name, so a name
+// nothing declares is reported there the way it is anywhere else.
+fn test_an_assignment_through_an_undeclared_pointer_is_reported() {
+	result := parsed('int main() { *missing = 1; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('missing')
+}
+
+// A compound assignment through a dereference is refused by name: writing
+// `*p += 1` as `*p = *p + 1` would read the pointer twice, where C reads the
+// lvalue once, and this tree has no shape that reads it once.
+fn test_a_compound_assignment_through_a_dereference_is_refused_by_name() {
+	result := parsed('int main() { int x = 1; int *p = &x; *p += 1; return x; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('through a dereference')
+	assert result.diagnostics[0].msg.contains('not implemented')
+}
+
+// An assignment after an expression that is not a place is refused by name
+// rather than read as a store.
+fn test_an_assignment_to_something_that_is_not_a_place_is_refused() {
+	result := parsed('int main() { int x = 1; -x = 2; return x; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('writes to a name, an element, a member or a dereference')
+}
+
 // A condition is written with the operators C compares with, and they bind the
 // way C binds them: the arithmetic first, then the comparisons, then the two
 // that join conditions.

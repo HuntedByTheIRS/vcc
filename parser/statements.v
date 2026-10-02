@@ -108,11 +108,80 @@ fn (mut p Parser) parse_expression_statement() !ast.Stmt {
 	}
 	t := p.peek()
 	expr := p.parse_expression()!
+	// An assignment whose target is not a name. The expression reader reads
+	// `*p` as the value at an address and stops at the operator, because an
+	// assignment is not one of the binary operators; the operator that follows
+	// is what says the value that was read is the object the assignment writes
+	// to. A `=` after a name or an element never reaches here, because
+	// starts_assignment read that statement already.
+	if op := p.assignment_operator() {
+		p.next()
+		return p.parse_deref_assignment(t, expr, op)!
+	}
 	return ast.Stmt{
 		kind: .expr_stmt
 		expr: expr
 		line: t.line
 		col:  t.col
+	}
+}
+
+// assignment_operator is the assignment token at the cursor, or none where the
+// statement is not one. A compound spelling is one too, so the reader below is
+// the one that says which targets a compound assignment writes and which it
+// does not.
+fn (p Parser) assignment_operator() ?tokenize.Token {
+	t := p.peek()
+	if t.kind == .punct && t.text in assignment_operators {
+		return t
+	}
+	return none
+}
+
+// parse_deref_assignment reads the assignment whose target is a dereference:
+// `*p = v` writes the value at the address the pointer holds, and the address
+// is the one expression the store needs. `(*f()) = v` is the same shape, with
+// the address coming from a call, and `**pp = v` is a dereference of a
+// dereference: the operand of the outer one is itself a read through an
+// address, which is the address that store writes to.
+//
+// A compound spelling through a dereference is refused by name rather than read
+// as the compound assignment it names. `*p += 1` means `*p = *p + 1`, and
+// writing it that way evaluates the pointer expression twice where C evaluates
+// the lvalue once, which is a different program whenever the pointer has a side
+// effect. This tree has no shape that reads an lvalue once and uses it twice,
+// so the spelling stays unimplemented rather than half-working.
+//
+// Anything else the expression reader left in front of an assignment operator
+// is not a place a value can be written, and is refused by name.
+fn (mut p Parser) parse_deref_assignment(start tokenize.Token, target ast.Expr, op tokenize.Token) !ast.Stmt {
+	match target {
+		ast.Unary {
+			if target.op != '*' {
+				p.error_at(op, 'unsupported: the target of an assignment is ${describe_operand(target)}, and this compiler writes to a name, an element, a member or a dereference')
+				return error('assignment target is not a dereference')
+			}
+			if op.text != '=' {
+				p.error_at(op, 'unsupported: the compound assignment ${op.text} through a dereference is not implemented')
+				return error('compound assignment through a dereference')
+			}
+			value := p.parse_expression()!
+			// The object written to is the one the pointer points at, so the
+			// value converts to the pointed-at type the same way it does into
+			// a name.
+			p.check_assignment(target.typ, value, op)
+			return ast.Stmt{
+				kind:  .assign
+				deref: ast.Expr(target)
+				expr:  value
+				line:  start.line
+				col:   start.col
+			}
+		}
+		else {
+			p.error_at(op, 'unsupported: the target of an assignment is ${describe_operand(target)}, and this compiler writes to a name, an element, a member or a dereference')
+			return error('assignment target is not an lvalue')
+		}
 	}
 }
 

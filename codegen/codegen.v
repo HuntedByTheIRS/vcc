@@ -1011,6 +1011,9 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned without a value')
 		return error('assignment without a value')
 	}
+	if deref := stmt.deref {
+		return e.assign_deref(stmt, deref, expr)
+	}
 	if member := stmt.field {
 		return e.assign_member(stmt, member, expr)
 	}
@@ -1053,6 +1056,94 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt) !void {
 	}
 	e.emit_expr(expr)!
 	e.store_value(target, expr, stmt.line, stmt.col)!
+}
+
+// assign_deref writes through an address: the target is a dereference, so what
+// the store needs is the address the expression it reads through gives, and the
+// value is written at the width of the type the pointer points at. This is the
+// store side of the read emit_deref already makes, and it reuses the same
+// widths: a char is one byte, an int four, a pointer the machine's word, and a
+// double is written by the instruction that moves one.
+//
+// The address is computed first and parked in a value slot while the value is
+// read, which is the order the element and the member stores use: the value's
+// own expression can call a function, and the call would leave its result in the
+// register the address was in. The value is emitted one level down so it cannot
+// use the slot the address is waiting in.
+//
+// A value wider than the object written to, or narrower, is refused by name, and
+// so is a pointed-at type this back end has no store for: writing either at a
+// guessed width would take bytes from a neighbouring object. A char object is
+// the one exception, because the language stores an int value in a char by
+// taking its low byte, which is what makes `*cp = 1` one byte.
+fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr) !void {
+	unary := target as ast.Unary
+	// The address is the value of the expression the dereference reads
+	// through: `*p` writes at the address p holds, and `**pp` writes at the
+	// address the outer read gives, which is the value of `*pp`.
+	e.emit_expr_at(unary.expr, 1)!
+	address := e.value_slot(0)
+	e.store_accumulator(address, stmt.line, stmt.col)!
+	if unary.typ.kind == .double {
+		return e.assign_double_at(stmt, address, expr)
+	}
+	width := e.storage_width(unary.typ) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: *p is assigned through an address of ${unary.typ.describe()}, and this back end writes ints, chars, doubles and pointers only')
+		return error('unsupported pointed-at type')
+	}
+	e.emit_expr_at(expr, 1)!
+	address_register := e.scratch(stmt.line, stmt.col)!
+	if e.floating_of(expr) {
+		// A double written into an integer object converts first, because the
+		// store moves the integer the conversion produced and not the bits of
+		// the double.
+		e.convert_to_int(expr, stmt.line, stmt.col)!
+		value := e.accumulator(stmt.line, stmt.col)!
+		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+		e.append(e.target.store_indirect(address_register, value, width)!)
+		return
+	}
+	value_width := e.width_of(expr) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
+		return error('unknown width')
+	}
+	// The width check is the one store_value makes for a name: a constant is
+	// written at the width of the object because a constant says nothing about
+	// its own width, and any other value has to have it already. A char object
+	// is the exception, since the language stores an int in a char by taking
+	// its low byte.
+	if e.constant(expr) == none && value_width != width && !(width == 1 && value_width == 4) {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored through an address of ${unary.typ.describe()}, which holds ${width}')
+		return error('width mismatch')
+	}
+	if width == 8 {
+		// A value narrower than the object is widened into the whole register
+		// before it is written, which is what a store into a name of that
+		// width does: the store moves eight bytes, so an int whose upper half
+		// the load cleared would be written as its unsigned reading.
+		e.extend_operand_to_word(expr, stmt.line, stmt.col)!
+	}
+	value := e.accumulator(stmt.line, stmt.col)!
+	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.store_indirect(address_register, value, width)!)
+}
+
+// assign_double_at writes a double through an address, which is the floating
+// file's version of the store above: the eight bytes move with the instruction
+// that moves a double rather than with the integer store of the same width.
+// An integer value converts to a double first; a pointer is not converted into
+// one, and is refused by name rather than written as the bits of an address.
+fn (mut e Emitter) assign_double_at(stmt ast.Stmt, address Slot, expr ast.Expr) !void {
+	if !e.floating_of(expr) && e.is_a_pointer(expr) {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored through an address of double, and there is no conversion between them')
+		return error('pointer into a double')
+	}
+	e.emit_expr_at(expr, 1)!
+	e.convert_to_double(expr, stmt.line, stmt.col)!
+	value := e.float_accumulator(stmt.line, stmt.col)!
+	address_register := e.scratch(stmt.line, stmt.col)!
+	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.store_double_indirect(address_register, value)!)
 }
 
 // assign_object_local writes an object into a local object: the destination's

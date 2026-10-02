@@ -238,6 +238,85 @@ fn test_a_read_through_an_address_reads_the_value_at_it() {
 	assert run_image(signed.bytes) == 200
 }
 
+// A store through an address writes the object the pointer points at and not
+// the pointer itself: the ints below are told apart by the exit status, and an
+// implementation that wrote over the pointer's own slot would corrupt the frame
+// and answer with a different number. Measured with gcc 16.2.1, the first
+// program exits 109 and the second 191.
+fn test_a_store_through_an_address_writes_the_object_the_pointer_points_at() {
+	for source in [
+		'int main() { int a = 1; int b = 2; int *p = &b; *p = 9; return a * 100 + b; }',
+		'int main() { int a = 1; int b = 2; int *p = &b; int *q = &a; *p = 9; return a * 100 + b * 10 + *q; }',
+	] {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		answer := if source.contains('*q') { 191 } else { 109 }
+		assert run_image(emitted.bytes) == answer
+	}
+}
+
+// The width of the store is the width of what the pointer points at. A char
+// object takes one byte, so the bytes beside the one written keep their values
+// and the program can tell; a double takes eight, written by the instruction
+// that moves one. Measured with gcc 16.2.1, the two programs exit 1 and 6.
+fn test_a_store_through_an_address_writes_the_width_of_what_it_points_at() {
+	char_store := emit(translation_unit('int main() { char s[4]; s[0] = 1; s[1] = 2; s[2] = 3; s[3] = 4; char *cp = s; *cp = 9; return s[0] == 9 && s[1] == 2 && s[2] == 3 && s[3] == 4; }'),
+		Options{})
+	assert char_store.diagnostics.len == 0
+	assert run_image(char_store.bytes) == 1
+	double_store := emit(translation_unit('int main() { double d = 0.0; double *dp = &d; *dp = 1.5; return (int)(d * 4); }'),
+		Options{})
+	assert double_store.diagnostics.len == 0
+	assert run_image(double_store.bytes) == 6
+}
+
+// The address comes from an expression rather than a name: `(*f()) = v` calls a
+// function that returns the address and stores there. This is the shape the
+// corpus is written in, where `errno` is a macro that expands to a dereference
+// of a call. Measured with gcc 16.2.1, the program exits 7.
+fn test_a_store_through_an_address_a_call_returns() {
+	emitted := emit(translation_unit('int *__errno_location(void); int main(void) { (*__errno_location()) = 7; return (*__errno_location()); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
+}
+
+// A pointer to a pointer is a store through the address the outer dereference
+// reads: `**pp = 7` writes into x. Measured with gcc 16.2.1, the program exits 7.
+fn test_a_store_through_a_pointer_to_a_pointer_writes_where_it_points() {
+	emitted := emit(translation_unit('int main() { int x = 1; int *p = &x; int **pp = &p; **pp = 7; return x; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
+}
+
+// The value converts to the pointed-at type the way it does into a name: a
+// double stored through an address of int is the integer the conversion makes,
+// and a negative int constant stored through an address of long is sign-widened
+// into the whole word, which the comparison reads back a word at a time rather
+// than through the status byte. Measured with gcc 16.2.1, the two programs exit
+// 3 and 1.
+fn test_a_store_through_an_address_converts_to_what_it_points_at() {
+	converted := emit(translation_unit('int main() { int x = 0; int *p = &x; double d = 3.7; *p = d; return x; }'),
+		Options{})
+	assert converted.diagnostics.len == 0
+	assert run_image(converted.bytes) == 3
+	wide := emit(translation_unit('int main() { long x = 0; long *lp = &x; *lp = -5; return x == -5L; }'),
+		Options{})
+	assert wide.diagnostics.len == 0
+	assert run_image(wide.bytes) == 1
+}
+
+// A pointer stored through an address of pointer is written at the machine's
+// word, which is the width of both. Measured with gcc 16.2.1, the two addresses
+// compare equal and the program exits 1.
+fn test_a_store_through_an_address_of_a_pointer_keeps_the_whole_address() {
+	emitted := emit(translation_unit('int main() { char *c = 0; char **cpp = &c; char *s = "hi"; *cpp = s; return (int)s == (int)c; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+}
+
 fn test_a_read_through_something_that_is_not_an_address_is_reported() {
 	// The reader refuses it, so there is no tree to emit and no bytes to write:
 	// what the source says is checked without going through the emitter, which is
