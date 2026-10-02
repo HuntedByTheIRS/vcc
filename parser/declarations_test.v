@@ -230,6 +230,52 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	assert empty.diagnostics[0].msg.contains('empty brace initializer')
 }
 
+// A struct's brace initializer at file scope gives each value to a member in the
+// order the members were written, and each constant carries the byte the layout
+// gave that member. Measured on gcc 16.2.1, `struct S s = {5, 6};` returns 56 for
+// `s.a * 10 + s.b`, which is why each value has to reach its own member.
+fn test_a_file_scope_struct_brace_initializer_writes_each_member() {
+	result := declarations_of('struct S { int a; int b; };\nstruct S s = {5, 6};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	assert object.member_inits.len == 2
+	assert object.member_inits[0].offset == 0
+	assert object.member_inits[1].offset == 4
+	first := object.member_inits[0].init or {
+		assert false
+		return
+	}
+	second := object.member_inits[1].init or {
+		assert false
+		return
+	}
+	assert first == 5
+	assert second == 6
+}
+
+// A struct whose member is itself an aggregate takes a list of its own, which a
+// flat list does not write, so the declaration is refused by name rather than
+// laid out with a member written at a guessed offset. Measured, gcc 16.2.1
+// accepts `struct S s = {1, 2, 3};` for it by brace elision, so the refusal is
+// this reader's and it says which construct it is.
+fn test_a_file_scope_list_for_a_struct_with_an_aggregate_member_is_refused() {
+	result := declarations_of('struct T { int x; int y; };\nstruct S { struct T t; int n; };\nstruct S s = {1, 2, 3};')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('a value is not written into an object of that type')
+	assert result.unit.globals.len == 0
+}
+
+// A bitfield member is a value written into a field of a storage unit, and the
+// store this tree emits for a member writes the whole unit, so a value for one
+// is refused by name rather than written where the field is not.
+fn test_a_file_scope_list_for_a_struct_with_a_bitfield_member_is_refused() {
+	result := declarations_of('struct B { unsigned int a : 3; int n; };\nstruct B b = {5, 1};')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('bitfield')
+	assert result.unit.globals.len == 0
+}
+
 // A character constant is a written constant too: 6.4.4.4 gives it the value of
 // the character it names and the type int, so `{ 'A' }` is the element `{ 65 }`
 // is. Measured on gcc 16.2.1, a program reading the first element of
@@ -240,18 +286,6 @@ fn test_a_character_constant_is_a_written_constant_in_a_brace_initializer() {
 	assert result.unit.globals.len == 1
 	assert result.unit.globals[0].inits.len == 1
 	assert result.unit.globals[0].inits[0] == 65
-}
-
-// An object of an aggregate type has a list of lists, which this reader does
-// not implement, so a file-scope brace initializer for one is refused rather
-// than laid out as the zeros it would otherwise silently be. Measured before
-// this was refused, `struct S s = {5, 6};` compiled and returned 0 where gcc
-// 16.2.1 returns 56.
-fn test_a_file_scope_brace_initializer_for_an_aggregate_is_refused() {
-	result := declarations_of('struct S { int a; int b; };\nstruct S s = {5, 6};')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('brace initializer for one is not implemented')
-	assert result.unit.globals.len == 0
 }
 
 // In a body a list is the stores the initialization makes at the declaration:
@@ -325,14 +359,62 @@ fn test_a_body_list_of_addresses_is_refused() {
 	assert result.diagnostics[0].msg.contains('written number')
 }
 
-// An object of an aggregate type in a body has a list of lists, which this
-// reader does not read, so the declaration is refused by name once and not
-// reported again by the scalar path as a value of the wrong type. Measured, gcc
-// 16.2.1 refuses `struct S s = {5, 6};` with `invalid initializer`.
-fn test_a_body_brace_initializer_for_an_aggregate_is_refused() {
+// A struct's brace initializer in a body is the stores the members make at the
+// point of the declaration, one per member the list wrote, at the member's own
+// offset. Measured on gcc 16.2.1, `struct S s = {5, 6};` returns 56 for
+// `s.a * 10 + s.b`.
+fn test_a_body_struct_brace_initializer_becomes_the_stores_of_the_members() {
 	result := declarations_of('struct S { int a; int b; };\nint main(void) { struct S s = {5, 6}; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 4
+	assert body[0].kind == .var_decl
+	assert body[1].kind == .assign
+	assert (body[1].field or {
+		assert false
+		return
+	}).member == 'a'
+	assert (body[2].field or {
+		assert false
+		return
+	}).member == 'b'
+	assert body[3].kind == .return_stmt
+}
+
+// A list shorter than the members leaves the rest zero (6.7.8p21), and the frame
+// slot is whatever was there, so the members the list did not write are stored
+// as zero. Measured on gcc 16.2.1, `struct S s = {5};` returns 5 for s.a and 0
+// for s.b.
+fn test_a_body_struct_brace_initializer_zeroes_the_members_it_did_not_write() {
+	result := declarations_of('struct S { int a; int b; };\nint main(void) { struct S s = {5}; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 4
+	assert body[1].kind == .assign
+	assert (body[1].field or {
+		assert false
+		return
+	}).member == 'a'
+	assert body[2].kind == .assign
+	assert (body[2].field or {
+		assert false
+		return
+	}).member == 'b'
+	zero := body[2].expr or {
+		assert false
+		return
+	}
+	assert zero is ast.IntLit
+	assert (zero as ast.IntLit).value == 0
+}
+
+// An object of a struct type in a body whose member is itself an aggregate takes
+// a list of its own, which a flat list does not write, so the declaration is
+// refused by name once rather than stored at a guessed offset.
+fn test_a_body_list_for_a_struct_with_an_aggregate_member_is_refused() {
+	result := declarations_of('struct T { int x; int y; };\nstruct S { struct T t; int n; };\nint main(void) { struct S s = {1, 2, 3}; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('brace initializer for one is not implemented')
+	assert result.diagnostics[0].msg.contains('a value is not written into an object of that type')
 }
 
 // A file-scope initializer that is a number the literal reader refuses gets the

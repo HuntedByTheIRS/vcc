@@ -106,8 +106,29 @@ pub:
 	// of a partly initialized array holds.
 	inits       []i64
 	init_floats []f64
-	line        int
-	col         int
+	// member_inits is a struct's brace initializer: one entry per member the
+	// list wrote, in the order written. A struct's members sit at successive
+	// offsets, so each constant carries the member it goes to and the members
+	// the list did not reach are the zeros the storage starts as (6.7.8p21).
+	member_inits []MemberInit
+	line         int
+	col          int
+}
+
+// MemberInit is one member a brace initializer wrote into an object at file
+// scope: where the member sits in the object, how wide it is, and the constant
+// written into it. The width and the spelling are the member's own type, because
+// a value written into a member is converted the way a store into a member
+// converts it, and at most one of init and init_float is set.
+pub struct MemberInit {
+pub:
+	offset   int
+	width    int
+	spelling string
+	init     ?i64
+	// init_float is the same constant when the member holds a floating value,
+	// the split a scalar and an array initializer already make.
+	init_float ?f64
 }
 
 pub enum StmtKind {

@@ -674,6 +674,12 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// the constant is written at the beginning of the storage, and the rest
 	// stays the zeros the object starts as.
 	mut data_union_first := false
+	// data_struct_brace says the brace initializer is a struct's, and
+	// data_member_inits is the constant for each member the list wrote, at the
+	// offset and width the layout gave that member. The members the list did
+	// not reach are the zeros the storage starts as.
+	mut data_struct_brace := false
+	mut data_member_inits := []ast.MemberInit{}
 	// data_problem says a brace initializer was read and refused for its size,
 	// which is a declaration the image does not lay out: the program is already
 	// refused, and storage for an object whose initializer is wrong is storage
@@ -811,10 +817,9 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					data_brace = true
 					if list := p.parse_brace_initializer() {
 						if !data_array {
-							// An object of a struct type is refused below by
-							// name, so the scalar question is not asked of it
-							// here: one declaration, one diagnostic. A union
-							// takes one value for its first member.
+							// A union takes one value for its first member
+							// and a struct one value per member; a scalar
+							// takes the one value in the braces.
 							if spec.clause.kind == .union_ {
 								// 6.7.8: a union's initializer initializes its
 								// first member, which sits at the beginning of
@@ -839,7 +844,20 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 										data_union_first = true
 									}
 								}
-							} else if spec.clause.kind != .struct_ {
+							} else if spec.clause.kind == .struct_ {
+								// A struct's brace initializer gives each
+								// value to a member in the order the members
+								// were written. A member that is itself an
+								// aggregate or a bitfield is refused by name
+								// in the helper, and the declaration is not
+								// laid out: there is nothing to write.
+								if layout := p.struct_brace_members(spec.clause, list, data_name) {
+									data_member_inits = p.struct_member_inits(spec.clause, list, layout)
+									data_struct_brace = true
+								} else {
+									data_problem = true
+								}
+							} else {
 								// One scalar in braces; a list of more
 								// values has no room in one object
 								// (6.7.8p2, measured on gcc 16.2.1:
@@ -925,14 +943,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				// named: there is nothing to lay out.
 				return decls
 			}
-			if data_brace && !data_union_first {
+			if data_brace && !data_union_first && !data_struct_brace {
 				// A brace initializer for an object of a struct type is a list
 				// of lists: a member may itself be an aggregate, and the
 				// designators and the nesting are not shapes this reader has.
-				// A union's one value initializes its first member and is
-				// written into the image below. Measured before this was
-				// refused, a file-scope `struct S s = {5, 6};` laid the object
-				// out as zeros and the program read 0 where gcc 16.2.1 reads 56.
+				// A union's one value initializes its first member and a
+				// struct's values initialize its members, both written into the
+				// image below. Measured before this was refused, a file-scope
+				// `struct S s = {5, 6};` laid the object out as zeros and the
+				// program read 0 where gcc 16.2.1 reads 56.
 				p.error_at(data_at, 'unsupported: ${data_name} is an object of the type ${spec.clause.describe()}, and a brace initializer for one is not implemented')
 				return decls
 			}
@@ -954,15 +973,16 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// holds, written at the beginning of the storage.
 			p.declare_name(data_name, data_clause, data_at, true)
 			p.globals << ast.Global{
-				name:       data_name
-				typ:        data_type
-				resolved:   spec.clause
-				count:      data_count
-				bytes:      bytes
-				init:       data_init
-				init_float: data_init_float
-				line:       data_at.line
-				col:        data_at.col
+				name:         data_name
+				typ:          data_type
+				resolved:     spec.clause
+				count:        data_count
+				bytes:        bytes
+				init:         data_init
+				init_float:   data_init_float
+				member_inits: data_member_inits
+				line:         data_at.line
+				col:          data_at.col
 			}
 			return decls
 		}
@@ -1378,6 +1398,60 @@ fn initializer_list_for(written string, values []NumberConstant) ([]i64, []f64) 
 		integers << (integer or { i64(0) })
 	}
 	return integers, []f64{}
+}
+
+// struct_brace_members checks a struct's brace initializer and answers the
+// object's layout when the list is one this reader places. 6.7.8p17 gives the
+// values to the members in the order the members were written, and the members
+// after the last value are zero (6.7.8p21).
+//
+// A struct is read here only when every member is a complete scalar. A bitfield
+// member takes a value written into a field of a storage unit and a member that
+// is itself an aggregate takes a value written into a sub-object, neither of
+// which is a store this tree places; each is refused by name rather than written
+// at a guessed offset, because a wrong value is worse than a refusal. A list
+// longer than the members is the constraint gcc 16.2.1 reports as `excess
+// elements in struct initializer`.
+fn (mut p Parser) struct_brace_members(aggregate types.Type, list BraceList, name string) ?types.Layout {
+	for member in aggregate.members {
+		if member.bitfield {
+			p.error_at(list.at, 'unsupported: ${name} has a bitfield member ${member.name}, and a value is not written into a bitfield here')
+			return none
+		}
+		if member.typ.kind in [types.Kind.struct_, .union_, .array] || member.typ.kind == .unknown {
+			p.error_at(list.at, 'unsupported: ${name} has a member ${member.name} of the type ${member.typ.describe()}, and a value is not written into an object of that type here')
+			return none
+		}
+	}
+	if list.values.len > aggregate.members.len {
+		p.error_at(list.at, 'a constraint violation: ${name} has ${aggregate.members.len} members and its initializer writes ${list.values.len}')
+		return none
+	}
+	layout := p.representation.layout(aggregate) or {
+		p.error_at(list.at, 'unsupported: the layout of ${aggregate.describe()} is not one this compiler knows')
+		return none
+	}
+	return layout
+}
+
+// struct_member_inits makes each value a struct's brace initializer wrote the
+// constant the image holds for that member: the conversion the member's own type
+// makes, at the offset and width the layout gave the member.
+fn (mut p Parser) struct_member_inits(aggregate types.Type, list BraceList, layout types.Layout) []ast.MemberInit {
+	mut members := []ast.MemberInit{cap: list.values.len}
+	for i in 0 .. list.values.len {
+		member := aggregate.members[i]
+		init, init_float := initializer_for(member.typ.describe(), list.values[i].number.integer,
+			list.values[i].number.floating)
+		members << ast.MemberInit{
+			offset:     layout.offsets[i]
+			width:      p.representation.size_of(member.typ) or { 0 }
+			spelling:   member.typ.describe()
+			init:       init
+			init_float: init_float
+		}
+	}
+	return members
 }
 
 // check_definition reports what keeps a definition from being emitted. A
