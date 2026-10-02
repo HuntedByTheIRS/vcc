@@ -1414,16 +1414,16 @@ fn test_the_low_word_is_refused_for_a_floating_slot() {
 }
 
 fn test_a_local_of_a_type_with_no_instruction_is_reported() {
-	// `float` is the type here rather than `double`, which this back end now has
-	// instructions for: what this checks is the refusal, so it names a type the
-	// emitter still has no form for.
+	// `long double` is the type here rather than `float`, which this back end now
+	// has instructions for: what this checks is the refusal, so it names a type
+	// the emitter still has no form for.
 	body := [
-		declaration('f', 'float', int_argument(1)),
+		declaration('f', 'long double', int_argument(1)),
 		return_statement(0),
 	]
 	emitted := emit(program(body), Options{})
 	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('float')
+	assert emitted.diagnostics[0].msg.contains('long double')
 	assert emitted.bytes.len == 0
 }
 

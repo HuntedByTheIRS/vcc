@@ -367,8 +367,8 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	// A float is carried for the same reason the char is: the emitter has a
 	// four-byte form for one, so the model can give out its width truthfully.
 	// Measured the same way: `sizeof(float)` is 4 with an alignment of 4.
-	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .long, .unsigned_long,
-		.long_long, .unsigned_long_long]
+	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .long, .unsigned_long, .long_long,
+		.unsigned_long_long]
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in carried {
