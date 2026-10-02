@@ -87,35 +87,19 @@ fn test_the_integer_promotions_of_6_3_1_1() {
 }
 
 // Whether an int can hold every unsigned short value is the one promotion that is
-// a width question. The description this compiler gets carries the width of an
-// int and of a short, so the question is answered and the answer is int. A
-// description missing the short leaves the question unanswerable, and the
-// refusal names what it would have to carry.
+// a width question, so a description that does not carry the widths gets a
+// refusal that names what it would have to carry. The description carries the
+// width of an int, so what is missing here is the width of a short, and the
+// refusal names that one.
 fn test_the_unsigned_short_promotion_is_decided_by_the_widths() {
-	promoted := integer_promotion(unsigned_short_type(), measured.partial()) or {
-		assert false
-		return
-	}
-	assert promoted.kind == .int_
 	assert promote(unsigned_short_type()) == 'int'
-	refused := integer_promotion(unsigned_short_type(), without_short()) or {
+	refused := integer_promotion(unsigned_short_type(), measured.partial()) or {
 		assert err.msg().contains('unsigned short')
 		assert err.msg().contains('width of short')
 		assert err.msg().contains('carries no short')
 		return
 	}
 	assert refused.kind == .unknown
-}
-
-// without_short is the description the compiler carries with the entry for
-// `short` taken out, which is how the tests ask for the refusal a width the
-// target does not describe produces. The compiler's own description carries the
-// entry now, so a test of that refusal builds the description it needs.
-fn without_short() Representation {
-	mut rep := measured.partial()
-	rep.sizes.delete(Kind.short)
-	rep.aligns.delete(Kind.short)
-	return rep
 }
 
 // Every line of the measured table above, one assertion each.
@@ -167,9 +151,8 @@ fn test_a_conversion_this_milestone_has_no_arithmetic_for_is_refused() {
 		return
 	}
 	assert unknown_sum.kind == .unknown
-	// unsigned short + int needs a promotion that needs the widths, and a
-	// description missing the short refuses it.
-	refused := usual_arithmetic_conversions(unsigned_short_type(), int_type(), without_short()) or {
+	// unsigned short + int needs a promotion that needs the widths.
+	refused := usual_arithmetic_conversions(unsigned_short_type(), int_type(), measured.partial()) or {
 		assert err.msg().contains('width')
 		return
 	}
@@ -323,9 +306,9 @@ fn test_a_narrowing_integer_conversion_is_not_value_preserving() {
 		return
 	}
 	// A width the description does not carry is a refusal rather than a guess.
-	// The 64-bit kinds are carried now, and so is the short, so a description
-	// with the short taken out is what asks for that refusal.
-	refused := value_preserving(unsigned_short_type(), int_type(), without_short()) or {
+	// The 64-bit kinds are carried now, so the width that is missing here is a
+	// short's.
+	refused := value_preserving(unsigned_short_type(), int_type(), measured.partial()) or {
 		assert err.msg().contains('width')
 		return
 	}

@@ -273,12 +273,11 @@ pub:
 // 0 where ISO C and gcc return 1, which is why a width the description does not
 // carry is refused by name rather than guessed at with the nearest one.
 //
-// The character types, `_Bool` and `short` are carried, and they left this table
-// only when the back end could move a value of their width: a char and a `_Bool`
-// live in one byte, a `short` in two, and the emitter loads and stores each of
-// them at that width. Before that they were missing for the same reason `long
-// double` still is, that a width the back end cannot move is a width the model
-// must not hand out.
+// The character types and `_Bool` are carried, and they left this table only when
+// the back end could move a value of their width: a char and a `_Bool` live in one
+// byte, and the emitter loads and stores each of them at that width. Before that
+// they were missing for the same reason `long double` still is, that a width the
+// back end cannot move is a width the model must not hand out.
 //
 // A double is carried for the same reason the int is: the back end has the
 // instruction for it, so the model can answer a question about its width
@@ -302,17 +301,14 @@ pub fn from_target(target backend.Target) Description {
 	// of the same four bytes: `4294967295U` is an unsigned int whose value the
 	// back end holds at that width.
 	//
-	// The character types and `short` are one and two bytes, which the back end
-	// moves now: it loads and stores a one-byte value with the instructions a
-	// char needs, and a two-byte value with the same instructions carrying the
-	// operand-size prefix. The width is asked for by the layout of an aggregate
-	// with a character or short member, where a member's width decides the
-	// offset of the member after it, and by the promotion of `unsigned short`,
-	// which turns on whether an int is wider than a short. Measured on this
-	// target with gcc 16.2.1: `sizeof(_Bool)`, `sizeof(char)`,
+	// The character types and `_Bool` are one byte, which the back end moves now:
+	// it loads and stores a one-byte value with the instructions a char needs,
+	// and a read of one widens it to the int the promotion makes it. The width is
+	// asked for by the layout of an aggregate with a member of one of those
+	// types, where a member's width decides the offset of the member after it.
+	// Measured on this target with gcc 16.2.1: `sizeof(_Bool)`, `sizeof(char)`,
 	// `sizeof(signed char)` and `sizeof(unsigned char)` are each 1 with an
-	// alignment of 1, and `sizeof(short)` and `sizeof(unsigned short)` are each
-	// 2 with an alignment of 2.
+	// alignment of 1.
 	sizes[Kind.bool_] = 1
 	aligns[Kind.bool_] = 1
 	sizes[Kind.char_] = 1
@@ -321,10 +317,6 @@ pub fn from_target(target backend.Target) Description {
 	aligns[Kind.signed_char] = 1
 	sizes[Kind.unsigned_char] = 1
 	aligns[Kind.unsigned_char] = 1
-	sizes[Kind.short] = 2
-	aligns[Kind.short] = 2
-	sizes[Kind.unsigned_short] = 2
-	aligns[Kind.unsigned_short] = 2
 	sizes[Kind.int_] = 4
 	aligns[Kind.int_] = 4
 	sizes[Kind.unsigned_int] = 4
