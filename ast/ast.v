@@ -430,9 +430,11 @@ pub:
 	col   int
 }
 
-// Field is one member of an aggregate object, written `x.a`. The object is named
-// rather than held as a nested expression: a member is read from an object with a
-// place in the frame, and the name is that place.
+// Field is one member of an aggregate object, written `x.a`. The object is a name
+// when it has one, and the name is the place a member is read from. An object
+// written as an expression - a call's result, a chained `->`, a parenthesised
+// pointer, an element of an array - is held in base instead, and the member is
+// read from the address that expression is worth.
 //
 // offset is where the member sits in the object, which is a fact about the
 // target's layout that the model answered when the member was read. spelling is
@@ -445,6 +447,12 @@ pub:
 pub struct Field {
 pub:
 	name string
+	// base is the object's own expression when the object is not a name:
+	// `f()->m`, `(p)->m`, `a->b->c` and `arr[i].m` all hold it here. The member
+	// is read from the address the expression is worth, or, when
+	// through_pointer is set, from the pointer value it is worth. It is none
+	// for an object named by a name, which is the shape `x.a` and `p->a` keep.
+	base ?Expr
 	// index is set when the object is one element of an array, which is what
 	// `s[i].a` writes: the member is read from the element the index names, so
 	// the address of the object is the address of that element and the stride
