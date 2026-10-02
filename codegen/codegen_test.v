@@ -240,6 +240,37 @@ fn test_a_read_through_an_address_reads_the_value_at_it() {
 	assert run_image(signed.bytes) == 200
 }
 
+// A pointer object declared at the top level is storage in the image, and the
+// object it points at is reached through the address it holds rather than
+// answered from its own bytes. Measured with gcc 16.2.1, the programs below
+// exit 7 and 71.
+fn test_a_top_level_pointer_holds_the_address_it_was_given() {
+	for source in [
+		'int g = 7; int *p; int main(void) { p = &g; return *p; }',
+		'static int g = 7; static int *p; int main(void) { p = &g; return *p * 10 + (p == &g); }',
+	] {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		answer := if source.contains('* 10') { 71 } else { 7 }
+		assert run_image(emitted.bytes) == answer
+	}
+}
+
+// A member read through a pointer at the top level is read from the object the
+// pointer holds the address of, not from the pointer's own storage, and the
+// same is true of a store into that member. Measured with gcc 16.2.1, the
+// programs below exit 7 and 59.
+fn test_a_member_read_through_a_top_level_pointer_reads_the_object() {
+	read := emit(translation_unit('struct S { int a; }; static struct S v; static struct S *p; int main(void) { p = &v; v.a = 7; return p->a; }'),
+		Options{})
+	assert read.diagnostics.len == 0
+	assert run_image(read.bytes) == 7
+	written := emit(translation_unit('struct S { int a; int b; }; static struct S v; static struct S *p; int main(void) { p = &v; p->a = 5; p->b = 9; return p->a * 10 + p->b; }'),
+		Options{})
+	assert written.diagnostics.len == 0
+	assert run_image(written.bytes) == 59
+}
+
 // A store through an address writes the object the pointer points at and not
 // the pointer itself: the ints below are told apart by the exit status, and an
 // implementation that wrote over the pointer's own slot would corrupt the frame

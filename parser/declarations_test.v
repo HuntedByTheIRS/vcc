@@ -703,11 +703,17 @@ fn test_a_file_scope_initializer_that_is_an_integer_constant_expression_is_folde
 	assert zero.diagnostics.len == 0
 }
 
-fn test_a_pointer_defined_at_the_top_level_is_reported() {
+// A pointer object at the top level is one word of storage whatever it points
+// at, so a declaration of one is laid out rather than refused, and a null
+// pointer constant is the number written into it.
+fn test_a_pointer_defined_at_the_top_level_is_storage() {
 	result := declarations_of('char *message = 0;')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('pointer')
-	assert result.unit.globals.len == 0
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	assert object.name == 'message'
+	assert object.count == 0
+	assert (object.init or { i64(-1) }) == 0
 }
 
 fn test_a_definition_keeps_its_parameters() {

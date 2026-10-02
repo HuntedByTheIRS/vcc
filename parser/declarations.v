@@ -980,10 +980,12 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// somewhere else, and this compiler has no storage to give it.
 			return decls
 		}
-		if data_stars > 0 {
-			p.error_at(data_at, 'unsupported: ${data_name} is a pointer, and a pointer defined at the top level is storage this compiler does not lay out yet')
-			return decls
-		}
+		// A pointer object at the top level is one word of storage, and what it
+		// points at does not decide how wide it is: 6.2.5 lets a pointer name an
+		// incomplete type, and the back end sizes a pointer from its star rather
+		// than from the type under it. It takes the value path below rather than
+		// the aggregate one, whatever the type under the star is.
+		//
 		// The type of an object defined at the top level is the same question a
 		// definition's return type is: storage the program has to find room for,
 		// so the answer is the same helper. A prototype can promise anything; a
@@ -992,7 +994,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.error_at(data_at, 'unsupported type ${offender}')
 			return decls
 		}
-		if spec.clause.kind in [types.Kind.struct_, .union_] {
+		if data_stars == 0 && spec.clause.kind in [types.Kind.struct_, .union_] {
 			if data_problem {
 				// The list was refused for its size and has already been
 				// named: there is nothing to lay out.

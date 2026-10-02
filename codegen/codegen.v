@@ -1705,15 +1705,22 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 	slot := e.lookup(name) or {
 		// A top-level object: it has no slot in the frame, so the address of the
 		// member is the address of the object in the image plus the byte the
-		// layout gave the member. A pointer at the top level is storage the tree
-		// does not lay out, so an arrow on one cannot be reached from here.
-		// `global_of` also lays the storage out the first time the name is
-		// used, which is what an address of it needs: a reference the layout
-		// fills in is meaningless until there is an object to point at.
-		if _ := e.global_of(name) {
+		// layout gave the member. `global_of` also lays the storage out the
+		// first time the name is used, which is what an address of it needs: a
+		// reference the layout fills in is meaningless until there is an object
+		// to point at.
+		if object := e.global_of(name) {
 			register := e.accumulator(line, col)!
 			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
-			if offset != 0 && !through_pointer {
+			if through_pointer {
+				// The name is a pointer at the top level, so what is in the
+				// image is the address of the object: read it out of the
+				// storage and the member's byte is added to that. Reading
+				// through the address of the storage itself would answer from
+				// the object's own bytes, which is the wrong object.
+				e.load_indirect_value(register, register, object.unsigned, e.target.word_size)!
+			}
+			if offset != 0 {
 				e.append(e.target.add_immediate(register, offset))
 			}
 			return
