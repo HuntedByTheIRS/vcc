@@ -404,6 +404,7 @@ fn test_a_table_of_imported_function_pointers_is_resolved_by_the_loader() {
 	assert mixed.diagnostics.len == 0
 	assert run_image(mixed.bytes) == 12
 }
+
 // A bare name that is a scalar object is its value, and a value is not a
 // constant a file-scope initializer may hold, so the address of the storage is
 // not written in its place. gcc 16.2.1 rejects the same program with
