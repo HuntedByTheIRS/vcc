@@ -843,7 +843,7 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	// multiplying. Which of the two a `(` opens - a type name or an expression -
 	// is the token after it: a specifier word or a name this file declared as a
 	// type is a conversion, and a name that is not is a value in parentheses.
-	if t.kind == .punct && t.text == '(' && p.starts_declaration(p.peek_at(1)) {
+	if t.kind == .punct && t.text == '(' && p.starts_type_name(p.peek_at(1)) {
 		return p.parse_cast(t)
 	}
 	// `++` and `--` are prefix operators here: what follows is the operand they
