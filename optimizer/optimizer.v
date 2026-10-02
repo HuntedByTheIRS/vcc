@@ -429,6 +429,19 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			// there is nothing inside the node to rewrite.
 			return expr
 		}
+		ast.Conditional {
+			// All three operands are rewritten: a builtin call can sit in the
+			// condition as much as in either arm. The clause travels with the
+			// node, since which arm runs does not change the type they share.
+			return ast.Expr(ast.Conditional{
+				cond:      rewrite(expr.cond, opts, depth + 1)
+				then_expr: rewrite(expr.then_expr, opts, depth + 1)
+				else_expr: rewrite(expr.else_expr, opts, depth + 1)
+				typ:       expr.typ
+				line:      expr.line
+				col:       expr.col
+			})
+		}
 	}
 }
 

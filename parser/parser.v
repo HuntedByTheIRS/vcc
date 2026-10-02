@@ -343,6 +343,13 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			// a missing declaration just as reading the name does.
 			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
 		}
+		ast.Conditional {
+			// All three operands are read, because all three can name
+			// something: the condition as much as either arm.
+			p.check_undeclared_expression(expr.cond, mut reported)
+			p.check_undeclared_expression(expr.then_expr, mut reported)
+			p.check_undeclared_expression(expr.else_expr, mut reported)
+		}
 		ast.IntLit, ast.StrLit, ast.FloatLit {}
 	}
 }
@@ -389,7 +396,133 @@ fn (mut p Parser) skip_statement() {
 }
 
 fn (mut p Parser) parse_expression() !ast.Expr {
-	return p.parse_binary(0)
+	condition := p.parse_binary(0)!
+	if !p.at_punct('?') {
+		return condition
+	}
+	return p.parse_conditional(condition)
+}
+
+// parse_conditional reads a `? then : else` after the condition it selects on.
+//
+// The conditional operator binds looser than every binary operator and tighter
+// than an assignment, so it is read after the precedence climbing has taken
+// every operator that binds tighter: `a || b ? c : d` selects on `a || b`. It
+// is right-associative, and the third operand is read as an expression again,
+// which is what makes `a ? b : c ? d : e` read as `a ? b : (c ? d : e)`. The
+// middle operand is the whole expression before the `:`, so it is read the same
+// way.
+//
+// The GNU spelling with the middle operand left out, `a ?: b`, is not C99, and
+// the standard reading of those tokens is not the same as the extension's: the
+// extension repeats the condition, and this compiler refuses it by name rather
+// than reading the condition as the middle operand.
+fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
+	question := p.next() // ?
+	if p.at_punct(':') {
+		p.error_at(question, 'unsupported: `?:` with the middle operand left out is a GNU extension and not C99, and this compiler reads the middle operand')
+		return error('omitted middle operand')
+	}
+	// A chain of conditionals nests through its operands: the third of
+	// `a ? b : c ? d : e` is another conditional and the second of
+	// `a ? b ? c : d : e` is one too, so the reader recurses once per link.
+	// The count that bounds parenthesised nesting bounds this one, so a chain
+	// thousands of links long is refused rather than run out of stack.
+	p.depth++
+	if p.depth > max_expression_depth {
+		p.depth--
+		p.error_at(question, 'expression is nested more than ${max_expression_depth} levels deep')
+		return error('expression nested too deeply')
+	}
+	then_expr := p.parse_expression() or {
+		p.depth--
+		return error('a conditional expression')
+	}
+	if !p.expect_punct(':') {
+		p.depth--
+		return error('a conditional expression without its colon')
+	}
+	else_expr := p.parse_expression() or {
+		p.depth--
+		return error('a conditional expression')
+	}
+	p.depth--
+	return ast.Expr(ast.Conditional{
+		cond:      condition
+		then_expr: then_expr
+		else_expr: else_expr
+		typ:       p.conditional_type(question, then_expr, else_expr)
+		line:      question.line
+		col:       question.col
+	})
+}
+
+// conditional_type is the type a conditional expression has, which 6.5.15
+// decides from its two arms and never from its condition. Two arithmetic arms
+// give the type the usual arithmetic conversions put them both in, two void
+// arms give void, and two pointers give the pointer both arms convert to: a
+// pointer to void takes over from a pointer to an object type, and a pointer
+// beside an integer constant of value zero is that pointer's type, which is the
+// null pointer constant rule.
+//
+// The answer is a question about the arms and not about which one runs, so it
+// is asked while the expression is read and not where the branch is emitted.
+// `sizeof(1 ? 1 : 1.0)` is the shape that needs it: the size is eight because
+// the arm that is not an int makes the conditional a double.
+//
+// A pair the clause has no answer for is a constraint violation and is reported
+// at the `?`. An arm whose type the reader did not resolve was refused where it
+// was written, and the conditional is left unresolved rather than reported a
+// second time.
+fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_expr ast.Expr) types.Type {
+	a := p.value_type(then_expr)
+	b := p.value_type(else_expr)
+	if a.kind == .unknown || b.kind == .unknown {
+		return types.Type{}
+	}
+	if a.is_arithmetic() && b.is_arithmetic() {
+		return types.usual_arithmetic_conversions(a, b, p.representation) or {
+			p.error_at(op, err.msg())
+			return types.Type{}
+		}
+	}
+	if a.is_void() && b.is_void() {
+		return types.void_type()
+	}
+	if a.is_pointer() && b.is_pointer() {
+		if a.same(b) {
+			return a
+		}
+		left := a.pointee() or { types.Type{} }
+		right := b.pointee() or { types.Type{} }
+		// 6.5.15: a pointer to void beside a pointer to an object type gives
+		// a pointer to void, whichever side it was written on.
+		if left.kind == .void_ {
+			return a
+		}
+		if right.kind == .void_ {
+			return b
+		}
+		// 6.5.15: two pointers to compatibly qualified versions of one type
+		// give a pointer to the composite type, which keeps both qualifiers.
+		// `current != NULL ? current : "C"` for a `const char *current` is the
+		// shape: the string literal is `char *`, and the result is const.
+		if types.unqualified(left).compatible(types.unqualified(right)) {
+			return types.pointer_to(types.qualified(left, right.quals))
+		}
+		p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and they do not point to compatible types')
+		return types.Type{}
+	}
+	// 6.5.15: a pointer beside an integer constant of value zero is that
+	// pointer, the same pairing an initializer and an assignment allow.
+	if a.is_pointer() && is_null_constant(else_expr) {
+		return a
+	}
+	if b.is_pointer() && is_null_constant(then_expr) {
+		return b
+	}
+	p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and 6.5.15 pairs two arithmetic types, two void types, or two pointers')
+	return types.Type{}
 }
 
 // parse_binary is precedence climbing: read a unary expression, then keep taking
@@ -617,6 +750,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Cast { 'a value converted to ${expr.spelling}' }
 		ast.Binary { 'a value of ${expr.op}' }
 		ast.IncDec { 'a value with ${expr.op} applied to ${expr.name}' }
+		ast.Conditional { 'a conditional value' }
 	}
 }
 

@@ -195,6 +195,27 @@ pub type Expr = Binary
 	| Index
 	| Field
 	| IncDec
+	| Conditional
+
+// Conditional is the conditional operator, `cond ? then_expr : else_expr`. It is
+// worth a value rather than an effect: the value of whichever arm the condition
+// selects, converted to the type the two arms have in common, so `int x = a ? b
+// : c;` and `sizeof(1 ? 1 : 1.0)` are shapes it is read in. Only the arm the
+// condition selects is evaluated, which is the part of 6.5.15 a reader cannot
+// see from the types.
+//
+// `typ` is the type 6.5.15 gives the two arms together and not either arm's own.
+// The condition's type is not part of that answer: a pointer, a double and an
+// int condition all select between the same two arms.
+pub struct Conditional {
+pub:
+	cond      Expr
+	then_expr Expr
+	else_expr Expr
+	typ       types.Type
+	line      int
+	col       int
+}
 
 // Cast is a conversion written as a type name in parentheses, `(char *)p`. The
 // type is what the operand is converted to and what the node is worth; spelling
