@@ -336,10 +336,10 @@ fn test_a_written_zero_bound_is_zero_for_a_string_initializer() {
 }
 
 // A shape the reader does not implement is refused by name: a nested list, a
-// designator, an element that is not a written number, and an empty pair of
-// braces. Measured on gcc 16.2.1, `int a[] = {};` under `-std=gnu99` is `ISO C
-// forbids empty initializer braces before C23` and `zero or negative size
-// array`.
+// designator, an element that does not begin with a written number or an
+// address, and an empty pair of braces. Measured on gcc 16.2.1, `int a[] = {};`
+// under `-std=gnu99` is `ISO C forbids empty initializer braces before C23` and
+// `zero or negative size array`.
 fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	nested := declarations_of('static int a[2][2] = {{1, 2}, {3, 4}};')
 	assert nested.diagnostics.len == 1
@@ -347,7 +347,16 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	designated := declarations_of('int a[3] = {[1] = 5};')
 	assert designated.diagnostics.len == 1
 	assert designated.diagnostics[0].msg.contains('designator')
-	element := declarations_of('int a[2] = {name};')
+	// A name is read as an address, which is what a pointer's initializer is, so
+	// on an object that holds no address the element is named for that: gcc
+	// 16.2.1 rejects `int a[2] = {name};` as an undeclared name, and this reader
+	// refuses the address the name stands for.
+	addressed := declarations_of('int a[2] = {name};')
+	assert addressed.diagnostics.len == 1
+	assert addressed.diagnostics[0].msg.contains('does not hold addresses')
+	// The element that is neither a written number nor an address is a
+	// parenthesized constant, which gcc 16.2.1 accepts and this reader does not.
+	element := declarations_of('int a[2] = {(1)};')
 	assert element.diagnostics.len == 1
 	assert element.diagnostics[0].msg.contains('written number')
 	empty := declarations_of('int a[] = {};')
@@ -511,9 +520,9 @@ fn test_a_body_scalar_in_braces_is_the_number_in_them() {
 }
 
 // The refusals are the same in a body: a nested list, a designator, an element
-// that is not a written number, and a list too long for the array. Each is one
-// diagnostic that names the construct, and the declaration after the list is
-// still read where it starts.
+// that does not begin with a written number or an address, and a list too long
+// for the array. Each is one diagnostic that names the construct, and the
+// declaration after the list is still read where it starts.
 fn test_a_body_brace_initializer_shape_that_is_not_implemented_is_named() {
 	nested := declarations_of('int main(void) { int a[2] = {{1}, {2}}; return 0; }')
 	assert nested.diagnostics.len == 1
@@ -521,7 +530,10 @@ fn test_a_body_brace_initializer_shape_that_is_not_implemented_is_named() {
 	designated := declarations_of('int main(void) { int a[3] = {[1] = 5}; return 0; }')
 	assert designated.diagnostics.len == 1
 	assert designated.diagnostics[0].msg.contains('designator')
-	element := declarations_of('int main(void) { int a[2] = {name}; return 0; }')
+	// A name is read as an address now, so the element that is neither a written
+	// number nor an address is a parenthesized constant, which gcc 16.2.1
+	// accepts and this reader does not.
+	element := declarations_of('int main(void) { int a[2] = {(1)}; return 0; }')
 	assert element.diagnostics.len == 1
 	assert element.diagnostics[0].msg.contains('written number')
 	excess := declarations_of('int main(void) { int a[2] = {1, 2, 3}; return 0; }')
@@ -529,12 +541,14 @@ fn test_a_body_brace_initializer_shape_that_is_not_implemented_is_named() {
 	assert excess.diagnostics[0].msg.contains('holds 2 elements')
 }
 
-// A pointer array is a list of addresses, which are not the written constants
-// this reader takes, so its list is refused rather than written as numbers.
+// A pointer array in a body is a list of addresses, and storage in a frame is
+// initialized by stores: a store writes a constant, and an address is a
+// reference the layout resolves rather than bytes a store can write. So the
+// list is refused by name rather than written as numbers.
 fn test_a_body_list_of_addresses_is_refused() {
 	result := declarations_of('int main(void) { int v = 1; int *p[2] = {&v, 0}; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('written number')
+	assert result.diagnostics[0].msg.contains('an address in a brace initializer inside a body is not implemented')
 }
 
 // A struct's brace initializer in a body is the stores the members make at the
