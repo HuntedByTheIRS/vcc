@@ -1112,3 +1112,18 @@ fn test_a_bound_that_names_an_undeclared_name_is_reported_as_that_name() {
 	assert earlier.diagnostics.len == 1
 	assert earlier.diagnostics[0].msg.contains('is not an integer constant expression')
 }
+
+// A declaration inside a body may write a type and no object, which is what
+// `struct point { int x; };` and `enum { A = 5, B = 6 };` do: 6.7 makes the
+// declarator list optional, and the declaration is still the one that declares
+// the tag and, for an enum, the names with their values. The body that follows
+// uses the names, so a name the declaration failed to make is reported as a name
+// nothing declares.
+fn test_a_declaration_in_a_body_may_write_a_tag_and_no_object() {
+	aggregate := declarations_of('int main(void) { struct point { int x; }; return 0; }')
+	assert aggregate.diagnostics.len == 0
+	enumeration := declarations_of('int main(void) { enum { A = 5, B = 6, C = 7 }; return A + B + C; }')
+	assert enumeration.diagnostics.len == 0
+	tagged := declarations_of('int main(void) { enum colour { RED = 1, GREEN }; return GREEN; }')
+	assert tagged.diagnostics.len == 0
+}
