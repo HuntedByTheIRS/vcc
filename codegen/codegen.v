@@ -7961,6 +7961,19 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 	}
 	offset := e.program.globals_blob.len
 	e.program.globals_blob << []u8{len: count * element, init: u8(0)}
+	// The slot is registered before its initializer is written, because an
+	// initializer that is an address may name the object itself (`int *p =
+	// &p;`) and asking for its storage again has to find this slot rather than
+	// lay it out a second time and never stop.
+	slot := image.GlobalSlot{
+		offset:   offset
+		width:    element
+		count:    shape.count
+		floating: shape.floating
+		single:   shape.single
+		unsigned: shape.unsigned
+	}
+	e.program.globals[name] = slot
 	single := e.writes_a_float(object.typ)
 	if value := object.init_float {
 		if single {
@@ -7994,16 +8007,65 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		put_integer(mut e.program.globals_blob, offset + index * element,
 			e.normalize_a_bool_constant(object.typ, value), element)
 	}
-	slot := image.GlobalSlot{
-		offset:   offset
-		width:    element
-		count:    shape.count
-		floating: shape.floating
-		single:   shape.single
-		unsigned: shape.unsigned
+	if address := object.address {
+		e.write_data_address(address, offset)
 	}
-	e.program.globals[name] = slot
 	return slot
+}
+
+// write_data_address records the eight bytes of a top-level object that hold the
+// address of something rather than a number. The address is not settled while the
+// bytes are written, so the bytes stay zero and a reference is recorded for the
+// layout, which runs after every definition has been read: that is what lets an
+// initializer name an object defined later or the object itself. The name is a
+// function this unit defines, a function the loader resolves, an object, or a
+// string literal, and the four are different references. A name that is none of
+// them is refused by name rather than written as an address that would be wrong.
+fn (mut e Emitter) write_data_address(address ast.AddressInit, at int) {
+	if address.string {
+		e.intern(address.name)
+		e.program.data_fixups << image.DataFixup{
+			offset: at
+			kind:   .take_address
+			name:   address.name
+		}
+		return
+	}
+	if address.name in e.program.defined {
+		e.program.data_fixups << image.DataFixup{
+			offset: at
+			kind:   .function_address
+			name:   address.name
+		}
+		return
+	}
+	if address.name in e.returns {
+		e.import_symbol(address.name)
+		e.program.data_fixups << image.DataFixup{
+			offset: at
+			kind:   .import_address
+			name:   address.name
+		}
+		return
+	}
+	if slot := e.global_of(address.name) {
+		if !address.explicit && slot.count == 0 && !slot.object {
+			// The bare name of a scalar object is its value, and a value is
+			// not a constant a file-scope initializer may hold. gcc 16.2.1
+			// rejects `static int x; static int *p = &x; static int *q = p;`
+			// with `initializer element is not constant`, so the address of
+			// the storage is not written in its place.
+			e.diagnostics << problem(address.line, address.col, 'unsupported: ${address.name} is a scalar object, and its bare name as a file-scope initializer is its value, which is not a constant expression')
+			return
+		}
+		e.program.data_fixups << image.DataFixup{
+			offset: at
+			kind:   .global_address
+			name:   address.name
+		}
+		return
+	}
+	e.diagnostics << problem(address.line, address.col, 'unsupported: ${address.name} is named where an address is wanted, and no declaration of it is in scope')
 }
 
 // assign_global writes a value into the storage of a top-level object: the

@@ -75,6 +75,29 @@ pub:
 	col      int
 }
 
+// AddressInit is one file-scope initializer whose value is an address rather
+// than a number: a function designator, the address of an object, or a string
+// literal. `name` is what it names - the function or object whose address it is,
+// or the bytes of the literal - and `string` says it was a literal, whose bytes
+// live in the image's read-only data rather than its code or its storage. Which
+// of a function and an object a name is is not decided here: the reader knows
+// the scope, not the definition, and the back end resolves the name against the
+// functions and the objects it holds.
+pub struct AddressInit {
+pub:
+	name   string
+	string bool
+	// explicit says the ampersand was written, `&name`, which is the address of
+	// the name whatever it names. A bare name is an address only when it names
+	// a function or an array: the bare name of a scalar object is its value,
+	// which is not a constant a file-scope initializer may hold (6.7.8p4), and
+	// the back end refuses it rather than writing the address of the storage the
+	// value sits in.
+	explicit bool
+	line     int
+	col      int
+}
+
 // Global is one object defined at the top level. The type is written the way a
 // declaration writes it and `resolved` is what it names, which a count above zero
 // makes an array of that many elements. The initializer is a constant, which is
@@ -98,6 +121,10 @@ pub:
 	bytes      int
 	init       ?i64
 	init_float ?f64
+	// address is the object's initializer when it is an address rather than a
+	// number, which is what a pointer defined at the top level has: a function
+	// designator, the address of an object, or a string literal.
+	address ?AddressInit
 	// inits and init_floats are a brace initializer for an array: one constant
 	// per element in the order written, the first list for an object whose
 	// elements are integers and the second for one whose elements are doubles,

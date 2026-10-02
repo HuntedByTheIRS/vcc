@@ -287,7 +287,7 @@ fn test_a_written_bound_is_not_filled_in_from_a_string_literal() {
 fn test_a_narrow_literal_does_not_initialize_an_int_array() {
 	result := declarations_of('int a[] = "xy";')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
+	assert result.diagnostics[0].msg.contains('is initialized with something this compiler cannot write')
 }
 
 // A written bound that is negative is a constraint violation (6.7.5.2p1).
@@ -598,9 +598,9 @@ fn test_a_body_list_for_a_struct_with_an_aggregate_member_is_refused() {
 // A file-scope initializer that is a number the literal reader refuses gets the
 // refusal the expression path gives it, at the literal as it was written, rather
 // than the report for an initializer that is not a number at all. Measured,
-// `int x = 0x1p3;` used to exit with `x is initialized with something that is
-// not a number and only a number can be written into the image so far`, which
-// names neither the construct nor where it is.
+// `int x = 0x1p3;` used to exit with a message that the object was initialized
+// with something that is not a number, which names neither the construct nor
+// where it is.
 fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
 	result := declarations_of('int x = 0x1p3;')
 	assert result.diagnostics.len == 1
@@ -646,7 +646,7 @@ fn test_a_file_scope_parenthesized_constant_is_the_number_in_them() {
 	// pair with one after it stays refused by name.
 	refused := declarations_of('int g = (7, 8);')
 	assert refused.diagnostics.len == 1
-	assert refused.diagnostics[0].msg.contains('is initialized with something that is not a number')
+	assert refused.diagnostics[0].msg.contains('is initialized with something this compiler cannot write')
 }
 
 // A file-scope scalar may be initialized by an integer constant expression, and
@@ -692,7 +692,7 @@ fn test_a_file_scope_initializer_that_is_an_integer_constant_expression_is_folde
 	for source in refused {
 		result := declarations_of(source)
 		assert result.diagnostics.len == 1
-		assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
+		assert result.diagnostics[0].msg.contains('is initialized with something this compiler cannot write')
 	}
 	// A single number is still read, and its sign with it, which is the shape the
 	// language puts in the image.

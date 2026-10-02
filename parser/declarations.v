@@ -706,6 +706,10 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// element: `char s[0] = "";` writes none, and the report for an initializer
 	// that is not a number is not about it.
 	mut data_string := false
+	// data_address is the initializer of an object whose value is an address
+	// rather than a number, which is what a pointer at the top level has: a
+	// function designator, the address of an object, or a string literal.
+	mut data_address := ?ast.AddressInit(none)
 	// data_problem says a brace initializer was read and refused for its size,
 	// which is a declaration the image does not lay out: the program is already
 	// refused, and storage for an object whose initializer is wrong is storage
@@ -836,10 +840,8 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				if p.at_punct('{') && d.pointer_count() == 0 {
 					// A brace initializer, read here because a list is
 					// what gives an array with empty brackets its size.
-					// A pointer's initializer is not read this way: a
-					// pointer at the top level is refused below, and
-					// reading its list first would report the same
-					// declaration twice.
+					// A pointer's list is read by the arm below, which
+					// knows the elements are addresses.
 					data_brace = true
 					if list := p.parse_brace_initializer() {
 						if !data_array {
@@ -915,6 +917,27 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						}
 					}
 					literal_refused = true
+				} else if d.pointer_count() > 0 {
+					// An object of pointer type takes an address: a
+					// function designator, the address of an object, or a
+					// string literal. A written number is a null pointer
+					// constant, which is the one value of an integer type
+					// a pointer takes, and it is written as the number it
+					// is. A list of addresses is a shape of its own.
+					if p.at_punct('{') {
+						p.error_at(p.peek(), 'unsupported: a brace initializer for an object of pointer type is not implemented')
+						literal_refused = true
+					} else if address := p.file_scope_address() {
+						data_address = address
+					} else if p.peek().kind == .number || p.at_punct('-') || p.at_punct('+') {
+						constant := p.file_scope_constant()
+						data_init = constant.integer
+						data_init_float = constant.floating
+						literal_refused = p.diagnostics.len > before
+					} else {
+						p.error_at(p.peek(), 'unsupported: the initializer of ${data_name} is not an address and not a number, and a pointer at the top level takes one of those')
+						literal_refused = true
+					}
 				} else if p.peek().kind == .string && d.is_array() {
 					// 6.7.8p14: an array of character type may be
 					// initialized by a string literal. The elements become
@@ -1044,13 +1067,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if data_defined && data_init == none && data_init_float == none && data_inits.len == 0
-			&& data_init_floats.len == 0 && !data_string {
+			&& data_init_floats.len == 0 && !data_string && data_address == none {
 			// Either way the definition is refused. When the initializer was a
 			// shape the reader reported, it has already been named at its own
 			// location and this report would be a second message about the
 			// same construct.
 			if !literal_refused {
-				p.error_at(data_at, 'unsupported: ${data_name} is initialized with something that is not a number, and only a number can be written into the image so far')
+				p.error_at(data_at, 'unsupported: ${data_name} is initialized with something this compiler cannot write into the image, and it is not a shape it reads')
 			}
 			return decls
 		}
@@ -1091,6 +1114,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			count:       data_count
 			init:        init
 			init_float:  init_float
+			address:     data_address
 			inits:       data_inits
 			init_floats: data_init_floats
 			line:        data_at.line
@@ -1225,6 +1249,62 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 		return FileConstant{}
 	}
 	return constant.number
+}
+
+// file_scope_address reads the initializer of an object whose value is an address
+// rather than a number: a function designator, the address of an object, or a
+// string literal. It answers none for anything else without consuming a token, so
+// a caller that finds no address can read the same place as a number instead, and
+// a null pointer constant is still a number.
+//
+// The name is kept rather than resolved. This reader knows the scope, and whether
+// a name is a function or an object is a question about the whole file's
+// definitions, which the back end asks where it lays the storage out.
+fn (mut p Parser) file_scope_address() ?ast.AddressInit {
+	if p.peek().kind == .string {
+		token := p.next()
+		literal := parse_string_literal(token.text) or {
+			p.error_at(token, err.msg())
+			return none
+		}
+		if literal.unit == 4 {
+			// A wide literal is a run of ints, and a pointer at the top level
+			// takes the literal of its own element's type: this reader has no
+			// wchar_t to compare the pointee against here, so it names the
+			// shape rather than writing the wrong address.
+			p.error_at(token, 'unsupported: a wide string literal does not initialize a pointer here')
+			return none
+		}
+		return ast.AddressInit{
+			name:   literal.value
+			string: true
+			line:   token.line
+			col:    token.col
+		}
+	}
+	if p.at_punct('&') {
+		amp := p.next()
+		if p.peek().kind != .identifier {
+			p.error_at(amp, 'unsupported: the operand of & in a file-scope initializer has to be a name')
+			return none
+		}
+		name := p.next()
+		return ast.AddressInit{
+			name:     name.text
+			explicit: true
+			line:     name.line
+			col:      name.col
+		}
+	}
+	if p.peek().kind == .identifier {
+		name := p.next()
+		return ast.AddressInit{
+			name: name.text
+			line: name.line
+			col:  name.col
+		}
+	}
+	return none
 }
 
 // folded_file_initializer reads the initializer as an expression and answers the

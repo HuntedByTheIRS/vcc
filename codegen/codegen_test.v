@@ -271,6 +271,46 @@ fn test_a_member_read_through_a_top_level_pointer_reads_the_object() {
 	assert run_image(written.bytes) == 59
 }
 
+// A top-level pointer whose initializer is an address holds that address in the
+// image: the address of an object, the bytes of a string literal, the address of
+// a function this unit defines, and the address of one the loader resolves, each
+// written where the program reads it. Measured with gcc 16.2.1, the four
+// programs below exit 7, 98, 11 and 42.
+fn test_a_top_level_pointer_holds_the_address_it_was_initialized_with() {
+	object := emit(translation_unit('int g = 7; int *p = &g; int main(void) { return *p; }'),
+		Options{})
+	assert object.diagnostics.len == 0
+	assert run_image(object.bytes) == 7
+	literal := emit(translation_unit('char *s = "abc"; int main(void) { return s[1]; }'), Options{})
+	assert literal.diagnostics.len == 0
+	assert run_image(literal.bytes) == 98
+	defined := emit(translation_unit('int inc(int x) { return x + 1; } int (*fp)(int) = inc; int main(void) { return fp(10); }'),
+		Options{})
+	assert defined.diagnostics.len == 0
+	assert run_image(defined.bytes) == 11
+	imported := emit(translation_unit('int atoi(const char *s); int (*fp)(const char *) = atoi; int main(void) { return fp("42"); }'),
+		Options{})
+	assert imported.diagnostics.len == 0
+	assert run_image(imported.bytes) == 42
+}
+
+// A bare name that is a scalar object is its value, and a value is not a
+// constant a file-scope initializer may hold, so the address of the storage is
+// not written in its place. gcc 16.2.1 rejects the same program with
+// `initializer element is not constant`, and the exit status of an accepted
+// program cannot be told from a refusal, so this checks the diagnostic.
+fn test_a_bare_scalar_name_as_an_address_is_refused() {
+	emitted := emit(translation_unit('int x = 5; int *p = &x; int *q = p; int main(void) { return *q; }'),
+		Options{})
+	mut refused := false
+	for diagnostic in emitted.diagnostics {
+		if diagnostic.msg.contains('is a scalar object') {
+			refused = true
+		}
+	}
+	assert refused
+}
+
 // A store through an address writes the object the pointer points at and not
 // the pointer itself: the ints below are told apart by the exit status, and an
 // implementation that wrote over the pointer's own slot would corrupt the frame
