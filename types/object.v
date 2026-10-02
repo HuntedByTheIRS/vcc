@@ -271,8 +271,15 @@ pub:
 // instruction for it, so the model can answer a question about its width
 // truthfully. Measured on this target with gcc 16.2.1, `sizeof(double)` is 8
 // with an alignment of 8, and `codegen`'s `movsd` moves exactly those eight
-// bytes. `float` and `long double` stay out because the back end emits neither,
-// and a width it cannot move is a width the model must not hand out.
+// bytes.
+//
+// A float is carried for the same reason and with the same measurement behind
+// it: `sizeof(float)` is 4 with an alignment of 4, and the emitter's
+// single-precision instructions move those four bytes. A float is not a double
+// of a smaller width: `0.1f` and `0.1` are different values, which is why the
+// model has to hand out four bytes for one. `long double` stays out because the
+// back end emits none of it, and a width it cannot move is a width the model
+// must not hand out.
 pub fn from_target(target backend.Target) Description {
 	mut sizes := map[Kind]int{}
 	mut aligns := map[Kind]int{}
@@ -304,6 +311,11 @@ pub fn from_target(target backend.Target) Description {
 	aligns[Kind.long_long] = 8
 	sizes[Kind.unsigned_long_long] = 8
 	aligns[Kind.unsigned_long_long] = 8
+	// A float is four bytes with an alignment of four, measured on gcc 16.2.1
+	// on this target, which is the width the emitter's single-precision
+	// instructions move.
+	sizes[Kind.float] = 4
+	aligns[Kind.float] = 4
 	sizes[Kind.double] = 8
 	aligns[Kind.double] = 8
 	// The 128-bit integers are carried for the questions that are about the

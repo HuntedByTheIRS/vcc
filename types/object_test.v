@@ -349,7 +349,7 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert described_int_align == 4
 	assert description.representation.size_of(unsigned_int_type()) or { -1 } == 4
 	// Every other scalar kind is named as missing: the description carries no
-	// width for a short, a float or an aggregate, and a question that needs one
+	// width for a short or an aggregate, and a question that needs one
 	// is refused rather than answered with a number that would be a machine
 	// fact in the wrong module.
 	//
@@ -364,8 +364,11 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	// and nothing else's. The back end has a form for one already, since a char
 	// is a byte in its slot and an int when it is read, so the width is one the
 	// model can give out truthfully.
-	carried := [Kind.int_, .unsigned_int, .double, .char_, .long, .unsigned_long, .long_long,
-		.unsigned_long_long]
+	// A float is carried for the same reason the char is: the emitter has a
+	// four-byte form for one, so the model can give out its width truthfully.
+	// Measured the same way: `sizeof(float)` is 4 with an alignment of 4.
+	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .long, .unsigned_long,
+		.long_long, .unsigned_long_long]
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in carried {
@@ -402,7 +405,8 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert measured.representation().size_of(double_type()) or { -1 } == 8
 	assert measured.representation().align_of(double_type()) or { -1 } == 8
 	assert description.representation.size_of(long_double_type()) == none
-	assert description.representation.size_of(float_type()) == none
+	assert description.representation.size_of(float_type()) or { -1 } == 4
+	assert description.representation.align_of(float_type()) or { -1 } == 4
 	// The description and the measured table agree about every entry both of
 	// them carry, which is what keeps the two numbers in the description from
 	// drifting away from what gcc says the target is.
