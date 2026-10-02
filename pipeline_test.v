@@ -124,6 +124,36 @@ fn test_a_call_through_a_function_pointer_is_the_address_it_holds() {
 	os.rm(binary) or {}
 }
 
+// A function whose return type is a pointer hands one word back in the register
+// an int comes back in, so the value needs no new machinery and it is usable
+// where the call is written: a local, a dereference, a subscript of the call, an
+// element of the array a pointer-to-array points at, and the callee of another
+// call. The chars stand in as their values so the program has no literals to
+// escape. Measured on gcc 16.2.1, which exits 0 from the same program.
+fn test_a_pointer_return_is_usable_where_the_call_is_written() {
+	source := scratch('pointer_return.c')
+	binary := scratch('pointer_return')
+	exit_status := compile_and_run([source, '-o', binary], 'static int answer = 42;\nstatic char text[] = "abcdef";\nstatic int three[3] = {7, 8, 9};\ntypedef int (*binop)(int, int);\nstatic char *greet(void) { return text; }\nstatic int *get_answer(void) { return &answer; }\nstatic void *get_void(void) { return &answer; }\nstatic int (*get_three(void))[3] { return &three; }\nstatic int add(int a, int b) { return a + b; }\nstatic binop get_fn(void) { return add; }\nint main(void) {\n    char *g = greet();\n    int *a = get_answer();\n    void *v = get_void();\n    if (g[1] != 98) { return 1; }\n    if (*a != 42) { return 2; }\n    if (*(int *)v != 42) { return 3; }\n    if (*get_answer() != 42) { return 4; }\n    if (greet()[2] != 99) { return 5; }\n    if (get_three()[0][2] != 9) { return 6; }\n    if (get_fn()(20, 22) != 42) { return 7; }\n    greet();\n    return 0;\n}\n')
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A call to a pointer-returning function the file only declares is not refused
+// by the compiler, because a declaration is a promise and nothing is emitted for
+// it. The name stays a symbol the image imports, so the loader refuses it by
+// name rather than the program reading an address from nothing: measured, the
+// image exits 127 with "symbol lookup error: ... undefined symbol: missing",
+// which is what the same shape returns when the function returns an int.
+fn test_a_pointer_return_declared_and_never_defined_stays_a_named_symbol() {
+	source := scratch('pointer_return_undefined.c')
+	binary := scratch('pointer_return_undefined')
+	exit_status := compile_and_run([source, '-o', binary], 'char *missing(void);\nint main(void) { char *p = missing(); return p == 0; }\n')
+	assert exit_status == 127
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_a_designator_naming_a_declared_function_is_its_address() {
 	// A function the file only declares has its code somewhere the image is not,
 	// so a designator naming it is a symbol the loader resolves: 6.3.2.1 makes it
