@@ -173,6 +173,30 @@ fn test_a_reference_to_a_string_is_against_the_read_only_section() {
 	assert relocation_offset(bytes, 1) == 6
 }
 
+// A wide string is the same reference against the same section, read out of the
+// wide table rather than the narrow one. The two tables hold one key at
+// different offsets, so an answer taken from the wrong table is visible: the
+// addend is the wide entry's offset and not the narrow one's.
+fn test_a_reference_to_a_wide_string_is_read_from_the_wide_table() {
+	mut program := one_call()
+	program.string_blob = []u8{len: 16, init: u8(0)}
+	program.strings['same'] = 0
+	program.wide_strings['same'] = 8
+	program.fixups << image.Fixup{
+		start:    5
+		length:   5
+		kind:     .take_wide_address
+		name:     'same'
+		register: 'eax'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	assert relocation_count(bytes) == 2
+	assert u32(relocation_info(bytes, 1) >> 32) == symbol_rodata_section
+	assert relocation_addend(bytes, 1) == 4 // 8 - 4, the wide entry and not 0 - 4
+}
+
 fn test_a_jump_inside_the_text_needs_no_relocation() {
 	mut program := image.Program{}
 	// A jump forward over one byte, and the label it goes to.

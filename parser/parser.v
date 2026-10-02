@@ -1321,14 +1321,15 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .string {
 		p.next()
-		value := parse_string_literal(t.text) or {
+		literal := parse_string_literal(t.text) or {
 			p.error_at(t, err.msg())
 			return error('bad string literal')
 		}
 		return ast.Expr(ast.StrLit{
-			value: value
+			value: literal.value
 			text:  t.text
-			typ:   string_literal_type(t.text, value)
+			unit:  literal.unit
+			typ:   string_literal_type(t.text, literal)
 			line:  t.line
 			col:   t.col
 		})
@@ -1413,14 +1414,19 @@ fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 }
 
 // string_literal_type is the type of a string literal: an array of char holding
-// the bytes and the terminator the literal does not write. A prefixed literal
-// names a wide or UTF-8 character type, which is a header's type and not one this
-// compiler has yet, so its clause is left unresolved.
-fn string_literal_type(text string, value string) types.Type {
+// the bytes and the terminator the literal does not write. An L-prefixed literal
+// names an array of wchar_t instead, which this target gives as an int, holding
+// one per character and the terminator. A literal with any other prefix names a
+// type laid out in a header this compiler has not read, so its clause is left
+// unresolved.
+fn string_literal_type(text string, literal StringLiteral) types.Type {
+	if literal.unit == 4 {
+		return types.array_of(types.int_type(), literal.count + 1)
+	}
 	if text.len > 0 && text[0] != `"` {
 		return types.Type{}
 	}
-	return types.array_of(types.char_type(), value.len + 1)
+	return types.array_of(types.char_type(), literal.value.len + 1)
 }
 
 // signature is the function type a name declares, following a pointer to a
