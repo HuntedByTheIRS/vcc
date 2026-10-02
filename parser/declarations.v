@@ -1049,6 +1049,22 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 	} else {
 		1
 	}
+	// A character constant is a written constant too, and 6.4.4.4 gives it the
+	// value of the character it names and the type int. `{ 'A' }` is the same
+	// element `{ 65 }` is, and the corpus reaches one, so the reader takes both.
+	if p.peek().kind == .character {
+		t := p.next()
+		value := parse_character_literal(t.text) or {
+			p.error_at(t, err.msg())
+			return none
+		}
+		return NumberConstant{
+			number: FileConstant{
+				integer: sign * value
+			}
+			at:     t
+		}
+	}
 	if p.peek().kind != .number {
 		return none
 	}
@@ -1206,7 +1222,9 @@ struct BraceList {
 }
 
 // parse_brace_initializer reads `{ v, v, ... }`, the list of constants that
-// initializes an object. One element is one written number with its sign.
+// initializes an object. One element is one written number with its sign, or a
+// character constant, which 6.4.4.4 gives the value of the character and the
+// type int.
 //
 // A shape this reader does not read is refused by name and at its own location
 // rather than read as a shorter list, because a list that wrote three values and
@@ -1282,6 +1300,18 @@ fn (mut p Parser) parse_brace_initializer() !BraceList {
 // against the object the same way a written assignment does.
 fn (mut p Parser) constant_expr(constant NumberConstant) ast.Expr {
 	if value := constant.number.integer {
+		// A character constant has the type int whatever it was written as,
+		// and its spelling is not the spelling of a number, so the type is
+		// asked of the token rather than read off the text.
+		if constant.at.kind == .character {
+			return ast.Expr(ast.IntLit{
+				value: value
+				text:  constant.at.text
+				typ:   types.int_type()
+				line:  constant.at.line
+				col:   constant.at.col
+			})
+		}
 		return ast.Expr(ast.IntLit{
 			value: value
 			text:  constant.at.text

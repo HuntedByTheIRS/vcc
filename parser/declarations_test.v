@@ -230,6 +230,18 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	assert empty.diagnostics[0].msg.contains('empty brace initializer')
 }
 
+// A character constant is a written constant too: 6.4.4.4 gives it the value of
+// the character it names and the type int, so `{ 'A' }` is the element `{ 65 }`
+// is. Measured on gcc 16.2.1, a program reading the first element of
+// `int a[1] = { 'A' };` returns 65.
+fn test_a_character_constant_is_a_written_constant_in_a_brace_initializer() {
+	result := declarations_of("int a[1] = { 'A' };")
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	assert result.unit.globals[0].inits.len == 1
+	assert result.unit.globals[0].inits[0] == 65
+}
+
 // An object of an aggregate type has a list of lists, which this reader does
 // not implement, so a file-scope brace initializer for one is refused rather
 // than laid out as the zeros it would otherwise silently be. Measured before
