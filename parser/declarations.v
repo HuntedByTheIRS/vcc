@@ -717,7 +717,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				// read.
 				p.scopes.enter()
 				p.declare_parameters(d.function_params())
+				// The function-name spellings inside the body name this
+				// function, so its name is carried while the body is read and
+				// the one before it is given back after.
+				previous_function := p.current_function
+				p.current_function = d.name
 				body := p.parse_block()
+				p.current_function = previous_function
 				p.scopes.leave()
 				statements := body or { return decls }
 				// A definition with no name has been reported and has no

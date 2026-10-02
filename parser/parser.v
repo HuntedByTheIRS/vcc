@@ -72,6 +72,13 @@ mut:
 	// is a set of names rather than the scope table because that check is about
 	// the unit and not about which block a name was visible in.
 	declared map[string]bool
+	// current_function is the name of the function whose body is being read, and
+	// empty outside one. The function-name spellings read it: 6.4.2.2 makes
+	// `__func__` a static array holding the name of the enclosing function, and
+	// gcc's `__FUNCTION__` and `__PRETTY_FUNCTION__` are the same name. glibc's
+	// assert hands `__PRETTY_FUNCTION__` to __assert_fail under a GNU dialect,
+	// so the C this compiler has to compile reads one.
+	current_function string
 	// pending_bounds is a file-scope array bound whose expression names something
 	// this reader did not resolve. Its report waits until the whole file has been
 	// read, because whether a name is declared anywhere is a question only the end
@@ -1616,6 +1623,16 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
+		// The function-name spellings name the function the expression is
+		// written in: `__func__` is C99's (6.4.2.2), and `__FUNCTION__` and
+		// `__PRETTY_FUNCTION__` are gcc's spellings of the same name. What
+		// they are worth is a string holding it, so they are read as the
+		// string literal they describe rather than as a name nothing
+		// declares. glibc's assert passes `__PRETTY_FUNCTION__` to
+		// __assert_fail, which is why the tree reads one.
+		if t.text in ['__func__', '__FUNCTION__', '__PRETTY_FUNCTION__'] {
+			return p.function_name_expression(t)!
+		}
 		// The reserved `__builtin_` spellings are reads of their own and not
 		// calls: their arguments are types as often as expressions, and the
 		// value is settled while the tokens are read. The list is in
@@ -1805,6 +1822,27 @@ fn (p Parser) assignment_target(stmt ast.Stmt) ?ast.Expr {
 		typ:  p.resolve(stmt.target)
 		line: stmt.line
 		col:  stmt.col
+	})
+}
+
+// function_name_expression reads one of the function-name spellings,
+// `__func__`, `__FUNCTION__` or `__PRETTY_FUNCTION__`, as the string it names:
+// the name of the function whose body is being read. 6.4.2.2 makes `__func__` a
+// static array of char holding that name and its terminator, and the two GNU
+// spellings are the same name. A use outside a function body has no function to
+// name, so it is refused by name rather than given an empty string.
+fn (mut p Parser) function_name_expression(at tokenize.Token) !ast.Expr {
+	name := p.current_function
+	if name.len == 0 {
+		p.error_at(at, 'unsupported: ${at.text} is read outside a function body, and it names the function it is written in')
+		return error('function name outside a function')
+	}
+	return ast.Expr(ast.StrLit{
+		value: name
+		text:  '"${name}"'
+		typ:   types.array_of(types.char_type(), name.len + 1)
+		line:  at.line
+		col:   at.col
 	})
 }
 
