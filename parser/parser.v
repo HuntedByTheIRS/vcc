@@ -40,8 +40,12 @@ mut:
 	// the specifiers resolved to is held here for the declarator to use.
 	pending_base    ?types.Type
 	pending_storage types.Storage
-	// depth counts open parentheses. The grammar recurses only through them, so
-	// this is the one number that keeps a hostile file from running the stack out.
+	// depth counts how deep the expression being read is nested. The expression
+	// grammar comes back on itself through more than one spelling - a
+	// parenthesis, a prefix operator, a cast, a `?:`, a `[` index, a call's
+	// argument list and a `sizeof` operand - and every one of them raises this
+	// count, so it is the one number that keeps a hostile file from running the
+	// stack out.
 	depth int
 	// globals is every object this file defined at the top level, in the order
 	// the definitions were read. A declaration returns functions, because only
@@ -90,10 +94,11 @@ const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long
 const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .char_, .double, .float, .long,
 	.unsigned_long, .long_long, .unsigned_long_long]
 
-// max_expression_depth bounds how deep one expression nests: the parenthesised
-// kind, the prefix kind and the cast kind all write one expression inside
-// another. The C standard asks a compiler for 63 levels; past this the parser
-// reports instead of following the recursion until the stack runs out.
+// max_expression_depth bounds how deep one expression nests: a parenthesis, a
+// prefix operator, a cast, a `?:`, a `[` index, a call's argument list and a
+// `sizeof` operand each write one expression inside another. The C standard
+// asks a compiler for 63 levels; past this the parser reports instead of
+// following the recursion until the stack runs out.
 const max_expression_depth = 200
 
 // parse reads a token stream into a translation unit, for the machine this binary
@@ -955,6 +960,28 @@ fn (mut p Parser) parse_prefix_operand(op tokenize.Token) !ast.Expr {
 	return operand
 }
 
+// parse_nested reads an expression one level inside the expression being read,
+// and charges that level to the nesting count.
+//
+// A `[` index and a call's argument list are each an expression written inside
+// another, and neither is read through parse_primary or parse_prefix_operand,
+// so without this count they follow the chain until the stack runs out: measured
+// on an 8 MB stack, `a[a[...]]` and `f(f(...))` nested twenty thousand deep each
+// take signal 11. The count is left where it was found on every return, a failed
+// one included, so a diagnostic about nesting does not push the next expression
+// over the limit as well.
+fn (mut p Parser) parse_nested(at tokenize.Token) !ast.Expr {
+	p.depth++
+	defer {
+		p.depth--
+	}
+	if p.depth > max_expression_depth {
+		p.error_at(at, 'expression is nested more than ${max_expression_depth} levels deep')
+		return error('expression nested too deeply')
+	}
+	return p.parse_expression()
+}
+
 // parse_postfix reads a primary expression and then the postfix operators that
 // follow it, left to right: `x++`, `x--`, and the subscript `x[i]` of 6.5.2.1.
 // A postfix operator binds to what comes before it, so it is read here, after
@@ -1022,7 +1049,7 @@ fn (mut p Parser) parse_postfix() !ast.Expr {
 // `a[i + 1]` and `a[b[0]]` are both the shape this reads.
 fn (mut p Parser) parse_subscript(base ast.Expr) !ast.Expr {
 	at := p.next() // [
-	index := p.parse_expression()!
+	index := p.parse_nested(at)!
 	if !p.at_punct(']') {
 		p.error_at(p.peek(), 'unsupported: expected ] after the index of an element, found ${describe(p.peek())}')
 		return error('expected ]')
@@ -1330,7 +1357,7 @@ fn (mut p Parser) parse_arguments() ![]ast.Expr {
 		return args
 	}
 	for {
-		args << p.parse_expression()!
+		args << p.parse_nested(p.peek())!
 		if p.at_punct(',') {
 			p.next()
 			continue
