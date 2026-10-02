@@ -503,6 +503,21 @@ fn test_a_universal_character_name_that_names_no_character_is_reported() {
 	assert big.diagnostics[0].msg.contains('\\U80000000 is not a valid universal character')
 }
 
+fn test_a_universal_character_name_in_a_wide_literal_is_its_code_point() {
+	// A wide literal writes the character as the wchar_t this target gives,
+	// four bytes little-endian, rather than as its UTF-8 bytes. Measured on
+	// gcc 16.2.1: L"\u00E9\U0001F600" is two wchar_t, 0xE9 and 0x1F600.
+	result := parsed('int take(int *p);\nint main() { take(L"\\u00E9\\U0001F600"); return 0; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[1].body[0].expr or {
+		assert false
+		return
+	}
+	literal := (expr as ast.Call).args[0] as ast.StrLit
+	assert literal.unit == 4
+	assert literal.value == '\xe9\x00\x00\x00\x00\xf6\x01\x00'
+}
+
 fn test_a_bad_integer_literal_is_reported() {
 	result := parsed('int main() { return 0x; }')
 	assert result.diagnostics.len == 1

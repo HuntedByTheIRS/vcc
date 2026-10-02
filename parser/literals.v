@@ -438,11 +438,23 @@ fn parse_wide_string(text string, inner string) !StringLiteral {
 				i += 2
 				continue
 			}
-			parsed, next := parse_string_escape(inner, i + 1) or {
-				return error('${text}: ${err.msg()}')
+			if i + 1 < inner.len && (inner[i + 1] == `u` || inner[i + 1] == `U`) {
+				// A universal character name in a wide literal is the code
+				// point itself, written into one wchar_t, not its UTF-8
+				// bytes. Measured on gcc 16.2.1: L"\u00E9\U0001F600" is two
+				// wchar_t, 0xE9 and 0x1F600.
+				name, after := parse_ucn(inner, i + 1) or {
+					return error('${text}: ${err.msg()}')
+				}
+				value = i64(name)
+				i = after
+			} else {
+				parsed, next := parse_string_escape(inner, i + 1) or {
+					return error('${text}: ${err.msg()}')
+				}
+				value = parsed
+				i = next
 			}
-			value = parsed
-			i = next
 		} else {
 			decoded, next := decode_utf8(inner, i) or {
 				return error('${text}: ${err.msg()}')
