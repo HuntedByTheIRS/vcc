@@ -87,6 +87,11 @@ pub struct AddressInit {
 pub:
 	name   string
 	string bool
+	// number is a written integer where an element of a pointer initializer is a
+	// null pointer constant rather than an address. It is none for an address,
+	// and the two are told apart because one writes bytes and the other records a
+	// reference.
+	number ?i64
 	// explicit says the ampersand was written, `&name`, which is the address of
 	// the name whatever it names. A bare name is an address only when it names
 	// a function or an array: the bare name of a scalar object is its value,
@@ -133,6 +138,13 @@ pub:
 	// of a partly initialized array holds.
 	inits       []i64
 	init_floats []f64
+	// address_inits is a brace initializer for an array whose elements are
+	// addresses: one initializer per element in the order written, each either an
+	// address or a written number, which is a null pointer constant. It is what a
+	// table of function pointers at the top level is, and it is separate from
+	// inits because an element that is an address is a reference the layout
+	// resolves rather than bytes written here.
+	address_inits []AddressInit
 	// member_inits is a struct's brace initializer: one entry per member the
 	// list wrote, in the order written. A struct's members sit at successive
 	// offsets, so each constant carries the member it goes to and the members
@@ -156,6 +168,12 @@ pub:
 	// init_float is the same constant when the member holds a floating value,
 	// the split a scalar and an array initializer already make.
 	init_float ?f64
+	// address is the member's initializer when it is an address rather than a
+	// number, which is what a member of pointer type has: a function designator,
+	// the address of an object, or a string literal. It is separate from the two
+	// constants because an address is a reference the layout resolves rather than
+	// bytes written here.
+	address ?AddressInit
 }
 
 pub enum StmtKind {

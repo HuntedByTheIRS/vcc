@@ -7909,9 +7909,24 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		offset := e.program.globals_blob.len
 		space := if object.count > 0 { object.count * object.bytes } else { object.bytes }
 		e.program.globals_blob << []u8{len: space, init: u8(0)}
+		// The slot is registered before its initializer is written, because an
+		// initializer that is an address may name the object itself
+		// (`struct S { struct S *next; } s = {&s};`) and asking for its storage
+		// again has to find this slot rather than lay it out a second time and
+		// never stop.
+		slot := image.GlobalSlot{
+			offset:   offset
+			width:    object.bytes
+			count:    object.count
+			object:   true
+			unsigned: e.written_is_unsigned(object.typ)
+		}
+		e.program.globals[name] = slot
 		// A union initialized in braces holds that value in its first member,
 		// which sits at the beginning of the object: the constant is written
 		// there at the member's width and the rest of the union stays zero.
+		// An address initializing a pointer first member is written at the
+		// same byte, as a reference the layout resolves.
 		if object.resolved.kind == .union_ && object.resolved.members.len > 0 {
 			first := object.resolved.members[0]
 			member_width := e.type_width(first.typ.describe()) or { object.bytes }
@@ -7931,7 +7946,8 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		// own width, which is the width a store into that member writes. The
 		// members the list did not reach are the zeros the storage started as
 		// (6.7.8p21). The value is converted the way the member's own store
-		// converts it, `_Bool` included.
+		// converts it, `_Bool` included. A member that holds an address gets a
+		// reference the layout resolves instead of bytes written here.
 		for member in object.member_inits {
 			if value := member.init_float {
 				if member.spelling == 'float' {
@@ -7944,15 +7960,13 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 				put_integer(mut e.program.globals_blob, offset + member.offset,
 					e.normalize_a_bool_constant(member.spelling, value), member.width)
 			}
+			if address := member.address {
+				e.write_data_address(address, offset + member.offset)
+			}
 		}
-		slot := image.GlobalSlot{
-			offset:   offset
-			width:    object.bytes
-			count:    object.count
-			object:   true
-			unsigned: e.written_is_unsigned(object.typ)
+		if address := object.address {
+			e.write_data_address(address, offset)
 		}
-		e.program.globals[name] = slot
 		return slot
 	}
 	count := if shape.count > 0 { shape.count } else { 1 }
@@ -8006,6 +8020,20 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		}
 		put_integer(mut e.program.globals_blob, offset + index * element,
 			e.normalize_a_bool_constant(object.typ, value), element)
+	}
+	// A table whose elements are addresses writes each element the way a scalar
+	// one is written, at one element's offset into the storage: a written number
+	// is the null pointer constant it is, and an address is a reference the
+	// layout resolves, which is why it is not bytes here.
+	for index, address in object.address_inits {
+		if index >= count {
+			break
+		}
+		if value := address.number {
+			put_integer(mut e.program.globals_blob, offset + index * element, value, element)
+			continue
+		}
+		e.write_data_address(address, offset + index * element)
 	}
 	if address := object.address {
 		e.write_data_address(address, offset)
