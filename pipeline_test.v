@@ -1805,3 +1805,32 @@ fn test_a_float_top_level_initializer_is_written_as_four_bytes() {
 		os.rm(binary) or {}
 	}
 }
+
+// A condition that is a floating value is asked whether it is zero at its own
+// width, and the two sides of a short circuit are asked the same question. The
+// value is the condition directly rather than a comparison of it, so what this
+// checks is the test the emitter writes and not the comparison: a floating
+// condition tested as an integer would answer from whatever the general register
+// happened to hold, since the value lives in the floating-point one.
+//
+// Measured on gcc 16.2.1: the answers below are what it exits with.
+fn test_a_floating_value_asked_as_a_question_is_compared_as_one() {
+	cases := [
+		'int main(void) { double d = 1.5; if (d) { return 1; } return 0; }',
+		'int main(void) { double d = 0.0; if (d) { return 1; } return 0; }',
+		'int main(void) { double d = -0.0; if (d) { return 1; } return 0; }',
+		'int main(void) { double d = 1.5; while (d) { return 0; } return 1; }',
+		'int main(void) { double d = 1.5; return d && 1; }',
+		'int main(void) { double d = 0.0; return d || 1; }',
+		'int main(void) { float z = 1.5f; double d = (double)z; return d == 1.5 && z != 0.0f; }',
+	]
+	answers := [1, 0, 0, 0, 1, 1, 1]
+	for i, source_text in cases {
+		source := scratch('floating_question_${i}.c')
+		binary := scratch('floating_question_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
