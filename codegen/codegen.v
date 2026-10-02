@@ -4135,6 +4135,15 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 		register := e.accumulator(expr.line, expr.col)!
 		e.element_address(base, register, slot.width, slot.offset, slot.wide, name, expr.line,
 			expr.col)!
+		if expr.typ.is_array() {
+			// The element is itself an array, so reading it is not a load: its
+			// value is the address of its first element, which is what
+			// element_address left in the accumulator. Loading the bytes of the
+			// whole row would answer with the first element's value as though
+			// the row were a scalar, and stepping an index by that value is a
+			// wrong address.
+			return
+		}
 		if slot.wide {
 			e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 			return error('128-bit element')
@@ -4170,6 +4179,11 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 	e.reference(e.target.address_of(base, 0), .global_address, name, e.target.name_of(base))
 	wide := !object.object && object.width == wide_bytes
 	e.element_address(base, register, object.width, 0, wide, name, expr.line, expr.col)!
+	if expr.typ.is_array() {
+		// The element is an array, so its value is the address of its first
+		// element, which is what element_address left in the accumulator.
+		return
+	}
 	if wide {
 		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 		return error('128-bit element')
@@ -8003,7 +8017,20 @@ fn (e Emitter) global_shape(name string) ?image.GlobalSlot {
 					count:  global.count
 				}
 			}
-			element := e.type_width(global.typ) or { return none }
+			// The width of one element is the size of the element's own type, which
+			// for an array of arrays is the row and not the scalar at the bottom:
+			// `int a[2][3]` steps by twelve bytes per row, and reading the written
+			// spelling `int` would give four and overlap the rows. A scalar element
+			// resolves to the same answer the spelling does.
+			element := if global.count > 0 {
+				if elem := global.resolved.element() {
+					e.representation.size_of(elem) or { e.type_width(global.typ) or { return none } }
+				} else {
+					e.type_width(global.typ) or { return none }
+				}
+			} else {
+				e.type_width(global.typ) or { return none }
+			}
 			return image.GlobalSlot{
 				offset:   0
 				width:    element

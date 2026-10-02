@@ -3363,3 +3363,19 @@ fn test_a_member_is_read_from_an_expression() {
 	assert large.diagnostics.len == 0
 	assert run_image(large.bytes) == 3
 }
+
+// A subscript of a two-dimensional object names a row, whose value is the
+// address of its first element rather than the bytes of the row read as a
+// scalar. Before this, `a[i][j]` over a named object loaded the row's first
+// element and scaled the next index by that value, which is a wrong address:
+// measured on gcc 16.2.1 the two programs below exit 6 and 42.
+fn test_a_row_of_a_two_dimensional_object_is_the_address_of_its_first_element() {
+	store := emit(translation_unit('static int a[2][3]; int main(void) { a[1][2] = 6; return a[1][2]; }'),
+		Options{})
+	assert store.diagnostics.len == 0
+	assert run_image(store.bytes) == 6
+	both := emit(translation_unit('static int a[2][3]; int main(void) { a[0][1] = 4; a[1][0] = 2; return a[0][1] * 10 + a[1][0]; }'),
+		Options{})
+	assert both.diagnostics.len == 0
+	assert run_image(both.bytes) == 42
+}
