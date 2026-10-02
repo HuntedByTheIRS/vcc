@@ -751,20 +751,19 @@ fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type(
 	assert parameter.diagnostics[0].msg.contains('unsupported type short')
 }
 
-fn test_the_float_family_is_refused_by_name_and_by_location() {
-	// DELIVERABLE 2's own test: a float the back end has no form for is refused
-	// by name and location rather than misread as something the emitter does
-	// have a form for.
+fn test_a_float_definition_is_read_and_a_long_double_one_is_refused_by_name() {
+	// DELIVERABLE 2's own test, carried forward: a type the back end has no form
+	// for is refused by name and location rather than misread as something the
+	// emitter does have a form for.
 	//
-	// `double` is no longer in this list, and that is a change in what is true
-	// rather than in what is checked: the back end has instructions for a
-	// double, so a definition that returns one is a definition and not a
-	// refusal. `float` is still refused, by the same reader, at the same place.
-	result := parsed('float f(void) { return 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg == 'unsupported type float'
-	assert result.diagnostics[0].line == 1
-	assert result.diagnostics[0].col == 1
+	// `double` left this list first and `float` leaves it now, and that is a
+	// change in what is true rather than in what is checked: the back end has
+	// instructions for both of them, so a definition that returns one is a
+	// definition and not a refusal. `long double` is still refused, by the same
+	// reader, at the same place.
+	narrow := parsed('float f(void) { return 0; }')
+	assert narrow.diagnostics.len == 0
+	assert narrow.unit.decls[0].ret_type.same(types.float_type())
 	// The type is one this reader has a spelling and a width for, which is what
 	// makes it the back end's to refuse and not the reader's.
 	widened := parsed('double f(void) { return 0; }')

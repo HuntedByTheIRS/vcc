@@ -64,10 +64,12 @@ mut:
 // supported_types are the ones the back end can emit today. The 8-byte integer
 // spellings are here because the emitter moves eight bytes for a pointer already
 // and computes at that width for the 128-bit pair, so a value of one of them is
-// the width it already has. `unsigned` and `unsigned int` are one type, and so are
-// the three ways of writing each of the long types, which is why the spellings are
-// listed and not the kinds: the check is against what the file wrote.
-const supported_types = ['int', 'char', 'void', 'double', 'long', 'long long', 'unsigned',
+// the width it already has. `float` is here because the emitter has the
+// four-byte instructions for one, which are the eight-byte ones with the other
+// prefix. `unsigned` and `unsigned int` are one type, and so are the three ways
+// of writing each of the long types, which is why the spellings are listed and
+// not the kinds: the check is against what the file wrote.
+const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long long', 'unsigned',
 	'unsigned int', 'unsigned long', 'unsigned long long']
 
 // emitted_kinds are the kinds those spellings name, which is the question a
@@ -76,8 +78,8 @@ const supported_types = ['int', 'char', 'void', 'double', 'long', 'long long', '
 // more spellings of a kind already listed, and a typedef resolves to a spelling
 // that may be any of them. A type is one the emitter has a form for when the words
 // name one of these.
-const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .char_, .double, .long, .unsigned_long,
-	.long_long, .unsigned_long_long]
+const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .char_, .double, .float, .long,
+	.unsigned_long, .long_long, .unsigned_long_long]
 
 // max_expression_depth bounds parenthesised nesting. The C standard asks a
 // compiler for 63 levels; past this the parser reports instead of following the

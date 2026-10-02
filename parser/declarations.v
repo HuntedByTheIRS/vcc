@@ -1061,7 +1061,7 @@ fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
 // two answers is non-empty, for the same reason the scalar pair is split: how the
 // element's bytes are written is a question about the class.
 fn initializer_list_for(written string, values []NumberConstant) ([]i64, []f64) {
-	if written == 'double' {
+	if written == 'double' || written == 'float' {
 		mut floats := []f64{cap: values.len}
 		for value in values {
 			_, fraction := initializer_for(written, value.number.integer, value.number.floating)
