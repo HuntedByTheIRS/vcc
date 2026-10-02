@@ -319,6 +319,19 @@ fn test_a_store_through_an_address_of_a_pointer_keeps_the_whole_address() {
 	assert run_image(emitted.bytes) == 1
 }
 
+// A pointer is tested against the null pointer at the width of an address and
+// not at the width of an int. The low four bytes of a pointer whose only set bit
+// is above them are zero, so a four-byte test answers that a pointer which is not
+// null is null. The program below builds such a pointer through its own storage,
+// because a cast of the constant above an int does not carry it here yet, and
+// measured with gcc 16.2.1 it exits 0; the emitted four-byte test exited 1.
+fn test_a_pointer_is_tested_against_null_at_the_width_of_an_address() {
+	emitted := emit(translation_unit('int main() { int *p = 0; long *lp = (long *)&p; *lp = 1; *lp = *lp << 32; if (p) { return 0; } return 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_a_read_through_something_that_is_not_an_address_is_reported() {
 	// The reader refuses it, so there is no tree to emit and no bytes to write:
 	// what the source says is checked without going through the emitter, which is

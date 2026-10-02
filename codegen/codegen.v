@@ -2924,7 +2924,14 @@ fn (mut e Emitter) emit_test(value ast.Expr, line int, col int) !void {
 			e.append(e.target.double_comparison('!=', floating, zero, register, other)!)
 		}
 	}
-	if e.eight_byte_integer(value.typ) {
+	if e.eight_byte_integer(value.typ) || e.is_a_pointer(value) {
+		// A pointer is tested at the width of an address and not at the width
+		// of an int, because the low four bytes of 0x100000000 are zero: a
+		// four-byte test calls that pointer, which is not null, equal to the
+		// null pointer. Measured with gcc 16.2.1, `int *p =
+		// (int *)0x100000000ULL; if (p)` takes the branch there; a four-byte
+		// test here did not, and a truth value for a pointer is the answer
+		// this tree treats as its worst bug rather than a near miss.
 		e.append(e.target.test_word(register)!)
 	} else {
 		e.append(e.target.test(register)!)
