@@ -356,7 +356,7 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert described_int_align == 4
 	assert description.representation.size_of(unsigned_int_type()) or { -1 } == 4
 	// Every other scalar kind is named as missing: the description carries no
-	// width for a short or an aggregate, and a question that needs one
+	// width for an aggregate, and a question that needs one
 	// is refused rather than answered with a number that would be a machine
 	// fact in the wrong module.
 	//
@@ -374,8 +374,15 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	// A float is carried for the same reason the char is: the emitter has a
 	// four-byte form for one, so the model can give out its width truthfully.
 	// Measured the same way: `sizeof(float)` is 4 with an alignment of 4.
-	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .long, .unsigned_long, .long_long,
-		.unsigned_long_long]
+	//
+	// The two-byte integers are carried for the same reason the char is: a
+	// union with a `short` member has no size until the model knows the short's
+	// width, and `sizeof` of that union is a question the model answers. A
+	// declaration of a short object is still refused in the reader, because the
+	// back end has no instruction that writes two bytes; what is carried here is
+	// the width a layout and a promotion need, not a value.
+	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .short, .unsigned_short, .long,
+		.unsigned_long, .long_long, .unsigned_long_long]
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in carried {
@@ -390,10 +397,17 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert !description.missing.contains(Kind.long_long)
 	assert !description.missing.contains(Kind.unsigned_long)
 	assert !description.missing.contains(Kind.unsigned_long_long)
+	assert !description.missing.contains(Kind.short)
+	assert !description.missing.contains(Kind.unsigned_short)
 	// Measured with gcc 16.2.1 on this target: `sizeof(char)` is 1 with an
 	// alignment of 1.
 	assert description.representation.size_of(char_type()) or { -1 } == 1
 	assert description.representation.align_of(char_type()) or { -1 } == 1
+	// Measured the same way: `sizeof(short)` is 2 with an alignment of 2.
+	assert description.representation.size_of(short_type()) or { -1 } == 2
+	assert description.representation.align_of(short_type()) or { -1 } == 2
+	assert description.representation.size_of(unsigned_short_type()) or { -1 } == 2
+	assert description.representation.align_of(unsigned_short_type()) or { -1 } == 2
 	// `sizeof(long)` and `sizeof(long long)` are 8 with an alignment of 8, and
 	// case_00 prints the whole table: `long 8/8  unsigned long 8/8  long long
 	// 8/8  unsigned long long 8/8`.
