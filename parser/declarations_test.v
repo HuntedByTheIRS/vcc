@@ -464,6 +464,21 @@ fn test_a_variadic_definition_is_reported() {
 	assert result.diagnostics[0].msg.contains('variadic')
 }
 
+// `<stdarg.h>` declares the compiler's own spelling of the argument list and
+// typedefs the name a program writes from it, so a `va_list` in a program is
+// the calling convention's argument list written out. It resolves to a pointer,
+// which is what makes a declaration of one a single word of storage and what
+// lets a `va_list` be handed to a library function as the address of the tag.
+fn test_the_argument_list_resolves_from_the_compiler_spelling() {
+	result := declarations_of('typedef __builtin_va_list va_list; int f(int a) { va_list ap; return a; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 2
+	assert body[0].kind == .var_decl
+	assert body[0].decl_type.contains('*')
+	assert body[0].decl_type.contains('__va_list_tag')
+}
+
 fn test_an_array_parameter_of_a_definition_is_reported() {
 	result := declarations_of('int f(char s[10]) { return 0; }')
 	assert result.diagnostics.len == 1

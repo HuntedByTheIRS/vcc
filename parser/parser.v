@@ -2,6 +2,7 @@ module parser
 
 import ast
 import backend
+import backend.abi
 import tokenize
 import types
 
@@ -124,6 +125,7 @@ pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 		representation: representation_of(target)
 		declared:       map[string]bool{}
 	}
+	p.declare_argument_list()
 	unit := p.parse_unit()
 	// Every name the tree carries has to be a name this file declares. A name
 	// that is not is refused here, once the whole unit has been read, because
@@ -134,6 +136,25 @@ pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 		unit:        unit
 		diagnostics: p.diagnostics
 	}
+}
+
+// declare_argument_list puts the type a header's `__builtin_va_list` names into
+// the file scope before anything is read.
+//
+// `<stdarg.h>` declares it as a typedef of a compiler's own spelling, and the
+// two typedefs a program sees - `__gnuc_va_list` and `va_list` - resolve
+// through it, so a `va_list` in a program is this type written out. The type is
+// the argument list the calling convention walks, which is a fact about the
+// target, so it comes from `backend/abi` and is not spelled here.
+fn (mut p Parser) declare_argument_list() {
+	p.declared['__builtin_va_list'] = true
+	p.scopes.declare_at_file_scope(types.Symbol{
+		name:    '__builtin_va_list'
+		typ:     abi.argument_list_type()
+		storage: types.Storage.typedef_
+		line:    1
+		col:     1
+	})
 }
 
 // representation_of is what the description says about the C types: the width of a
