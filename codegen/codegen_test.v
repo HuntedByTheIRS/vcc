@@ -508,11 +508,24 @@ fn test_a_long_constant_chain_folds() {
 	assert run_image(emitted.bytes) == int(expected)
 }
 
-fn test_division_by_zero_is_a_diagnostic_and_not_a_crash() {
+// A division by zero is refused where a constant expression is required and
+// nowhere else, which is what C99 6.6 says and what gcc 16.2.1 does: it compiles
+// a division by zero in a program, and only a constant context makes it complain.
+// These two are the side of that boundary this emitter used to get wrong - it
+// refused `1 / 0` and `1 ? 2 : (1 / 0)` outright, which rejected programs gcc
+// accepts. The other side is not tested here because it is not the emitter's: a
+// static initializer that is not a constant is refused while the declaration is
+// read.
+fn test_a_division_by_zero_at_run_time_is_emitted_and_not_refused() {
 	emitted := emit(translation_unit('int main() { return 1 / 0; }'), Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('division by zero')
-	assert emitted.bytes.len == 0
+	assert emitted.diagnostics.len == 0
+	assert emitted.bytes.len > 0
+}
+
+fn test_a_division_by_zero_in_an_untaken_arm_is_not_evaluated() {
+	emitted := emit(translation_unit('int main() { return 1 ? 2 : (1 / 0); }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 2
 }
 
 fn test_a_non_constant_return_is_reported_with_the_name() {
