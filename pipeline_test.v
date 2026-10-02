@@ -1754,3 +1754,28 @@ fn test_a_floating_suffix_that_is_not_read_is_refused_by_name() {
 		assert parsed.diagnostics[0].line == 1
 	}
 }
+
+// A top-level object that holds a float is read and written at four bytes: the
+// shape of the object carries which of the two floating widths its storage is,
+// and that is what the load and the store of the name are picked from. The value
+// here is written at run time rather than in the initializer, so what this checks
+// is the load and the store of a name and not the bytes of a constant.
+//
+// Measured on gcc 16.2.1: every program below exits 1.
+fn test_a_float_top_level_object_is_read_and_written_at_four_bytes() {
+	cases := [
+		'static float g;\nint main(void) { g = 1.5f; return g == 1.5f; }',
+		'static float g;\nint main(void) { g = 0.1f; return g != 0.1 && g == 0.1f; }',
+		'static float g;\nint main(void) { g = 0.1f; g = g * 2.0f; return g == 0.2f; }',
+		'static float g;\nint main(void) { float f = 2.5f; g = f; return g == 2.5f; }',
+	]
+	answers := [1, 1, 1, 1]
+	for i, source_text in cases {
+		source := scratch('single_global_${i}.c')
+		binary := scratch('single_global_${i}')
+		exit_status := compile_and_run([source, '-o', binary], '${source_text}\n')
+		assert exit_status == answers[i]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}

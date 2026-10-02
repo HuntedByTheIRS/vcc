@@ -5847,6 +5847,7 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		width:    element
 		count:    shape.count
 		floating: shape.floating
+		single:   shape.single
 	}
 	e.program.globals[name] = slot
 	return slot
