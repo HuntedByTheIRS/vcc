@@ -4230,11 +4230,16 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 			return error('operator on a floating value')
 		}
 	} else if width := e.width_of(unary.expr) {
-		if width != 4 && unary.op != '+' {
+		if width != 4 && unary.op != '+' && unary.op != '!' {
 			if !e.eight_byte_integer(unary.expr.typ) {
 				// Eight bytes that are not an integer is the width of a pointer
 				// and the only other width this back end has, so the diagnostic
-				// can say what it is.
+				// can say what it is. The three operators that reach here are
+				// the sign change, the unary plus and the complement: the last
+				// two compute on an integer, and the sign change is refused on
+				// a pointer by gcc 16.2.1 as well. The logical not is not one of
+				// them, because 6.5.3.3 gives it a scalar operand and a pointer
+				// is a scalar.
 				e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes an int, and this one is a pointer')
 				return error('non-int operand')
 			}
@@ -4242,7 +4247,10 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 	}
 	e.emit_expr_at(unary.expr, depth + 1)!
 	register := e.accumulator(unary.line, unary.col)!
-	wide := e.eight_byte_integer(unary.expr.typ)
+	// A pointer is eight bytes and is asked whether it is the null pointer by
+	// the same word-wide not a 64-bit integer is: a four-byte test would call a
+	// pointer null whose only set bit is above the four bytes.
+	wide := e.eight_byte_integer(unary.expr.typ) || e.is_a_pointer(unary.expr)
 	match unary.op {
 		'+' {}
 		'-' {

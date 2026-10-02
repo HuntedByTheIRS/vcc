@@ -1393,6 +1393,29 @@ fn test_a_pointer_short_circuit_skips_the_side_it_can_settle() {
 	assert run_image(emitted.bytes) == 0
 }
 
+// The logical not takes a scalar operand, so a pointer is one, and it answers
+// whether that pointer is the null pointer. The pointer below is built through
+// its own storage so that its low four bytes are zero, which is what tells the
+// word-wide question apart from a four-byte one, and measured with gcc 16.2.1
+// the program exits 6: !p is 0 for the non-null p and !q is 1 for the null q.
+fn test_logical_not_of_a_pointer_asks_whether_it_is_null() {
+	emitted := emit(translation_unit('int main() { int *p = 0; long *lp = (long *)&p; *lp = 1; *lp = *lp << 32; int *q = 0; return (!p ? 8 : 0) + (q ? 0 : 4) + (!q ? 2 : 0); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 6
+}
+
+// A function designator is a scalar operand of the logical operators too: it
+// converts to a pointer, which is not null, so `fn && "f"` is true and `!fn` is
+// 0. Measured with gcc 16.2.1 the program exits 0, and this compiler refused the
+// designator as a pointer operand before.
+fn test_a_function_designator_is_a_scalar_operand() {
+	emitted := emit(translation_unit('int fn(void) { return 1; } int main() { return (fn && "f") && !(!fn) ? 0 : 3; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 // A tree with a frame produces the same bytes every time it is emitted, which is
 // what the layout being a sequence is for.
 fn test_a_tree_with_a_frame_produces_the_same_bytes() {
