@@ -2901,7 +2901,15 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 		ast.Call {
 			// A call that hands an object back hands its bytes over in the
 			// register its class names, so the floating class is the same answer
-			// as a function that returns a double or a float.
+			// as a function that returns a double or a float. The clause the
+			// reader resolved is the answer where there is one, which is what
+			// types a call this emitter has no name for: a call the reader built
+			// itself from the compiler's own spellings is not a call to a
+			// function the program declares, and its clause is the only thing
+			// that says whether the value it hands over is a floating one.
+			if expr.typ.kind != .unknown {
+				return expr.typ.is_floating()
+			}
 			e.returns[expr.name] == 'double' || e.returns[expr.name] == 'float'
 				|| e.return_classes[expr.name].first_floating
 		}
@@ -2963,6 +2971,11 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 			e.writes_a_float(expr.spelling)
 		}
 		ast.Call {
+			// The same question at four bytes, and the reader's clause is the
+			// answer where it has one.
+			if expr.typ.kind != .unknown {
+				return expr.typ.kind == .float
+			}
 			e.returns[expr.name] == 'float'
 		}
 		ast.Conditional {
