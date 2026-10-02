@@ -844,6 +844,18 @@ pub fn (t Target) double_to_unsigned_int(dst Register, src Register) ![]u8 {
 	return x86_64.double_to_unsigned_int(t.describe(dst), t.describe(src))
 }
 
+// signed_word_to_double and unsigned_word_to_double are the same conversion where
+// the source is eight bytes wide. The signed one is the four-byte conversion at
+// eight bytes; the unsigned one is the range split, which gives the source a
+// second register to fold its low bit into and the word above it.
+pub fn (t Target) signed_word_to_double(dst Register, src Register) ![]u8 {
+	return x86_64.signed_word_to_double(t.describe(dst), t.describe(src))
+}
+
+pub fn (t Target) unsigned_word_to_double(dst Register, src Register, scratch Register) ![]u8 {
+	return x86_64.unsigned_word_to_double(t.describe(dst), t.describe(src), t.describe(scratch))
+}
+
 // The jumps. The distance is filled in once the whole function is laid out,
 // which is why a jump is written here with a displacement the emitter will patch.
 pub fn (t Target) jump(disp i32) []u8 {

@@ -2970,12 +2970,29 @@ fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
 	}
 	integer := e.accumulator(line, col)!
 	double_register := e.float_accumulator(line, col)!
-	if expr.typ.kind.is_unsigned() && (e.storage_width(expr.typ) or { 0 }) == 4 {
+	width := e.storage_width(expr.typ) or { 0 }
+	if width == 8 {
+		if expr.typ.kind.is_unsigned() {
+			// An eight-byte unsigned value fills the whole register, so there
+			// is no upper half to clear and the four-byte fix does not carry.
+			// The value is split at 2^63, which is a sequence the machine
+			// composes and which needs a second register for the shifted word.
+			scratch := e.scratch(line, col)!
+			e.append(e.target.unsigned_word_to_double(double_register, integer, scratch)!)
+			return
+		}
+		// An eight-byte signed value converts at eight bytes. The four-byte
+		// conversion would read the low half and call the top bit of it a
+		// sign, which a long or a long long is not a four-byte value for.
+		e.append(e.target.signed_word_to_double(double_register, integer)!)
+		return
+	}
+	if expr.typ.kind.is_unsigned() && width == 4 {
 		// A four-byte unsigned value can be at or above 2^31, which is where the
 		// signed conversion reads the top bit as a sign. A narrower unsigned type
-		// is already below that boundary, and a source eight bytes wide needs a
-		// conditional this back end has not got, so only the four-byte case takes
-		// the zero-extending conversion.
+		// is already below that boundary, and a source eight bytes wide is the
+		// range split above, so only the four-byte case takes the zero-extending
+		// conversion.
 		e.append(e.target.unsigned_int_to_double(double_register, integer)!)
 		return
 	}

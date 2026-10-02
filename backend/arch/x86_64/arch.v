@@ -263,6 +263,68 @@ pub fn unsigned_int_to_double(dst Register, src Register) ![]u8 {
 	return out
 }
 
+// signed_word_to_double converts an eight-byte signed integer to a double. It is
+// the signed conversion of int_to_double at eight bytes: the same F2 0F 2A with
+// REX.W in front of it, which is what makes the general register an eight-byte
+// one rather than a four-byte one. Measured on gcc 16.2.1 at -O0, whose
+// `(double)l` for a long is `cvtsi2sdq %rax, %xmm0`.
+pub fn signed_word_to_double(dst Register, src Register) ![]u8 {
+	if dst.width != 16 {
+		return error('${name}: an integer is converted into a double register, and ${dst.name} is not one')
+	}
+	if src.width != 4 {
+		return error('${name}: a double comes from an eight-byte integer, and ${src.name} is not a four-byte register name')
+	}
+	return double_conversion_widened(double_int_convert, dst, src)
+}
+
+// unsigned_word_to_double converts an eight-byte unsigned integer to a double.
+// The signed conversion of int_to_double reads the top bit as a sign and an
+// eight-byte source fills the whole register, so there is no upper half to clear
+// and the fix the four-byte case uses does not carry: 18000000000000000000
+// reaches the signed conversion as a negative value.
+//
+// The value is split at 2^63, which is the boundary the signed conversion reads
+// as a sign. Below it the value converts as it stands. At or above it the low bit
+// is folded into the word above it (`(value >> 1) | (value & 1)`), which brings
+// the value below 2^63 so the signed conversion reads the magnitude, and the
+// result is doubled. Doubling a double is exact, and the folded bit is what keeps
+// the last place right: dropping it would round the halfway case up where the
+// language rounds to even. Measured on gcc 16.2.1 at -O0, whose `(double)u` for an
+// unsigned long is this test, this shift and or, and an `addsd %xmm0, %xmm0`.
+//
+// Subtracting 2^63 from the value, converting the difference and adding 2^63 to
+// the double is the shape that reads better and is wrong: the difference is
+// rounded to a double first, so adding 2^63 rounds a second time. Read bit for
+// bit, `(double)0x80ad45e641aac401` is 0x43e015a8bcc83559 and the two-step form
+// gives 0x43e015a8bcc83558, one place low.
+pub fn unsigned_word_to_double(dst Register, src Register, scratch Register) ![]u8 {
+	if dst.width != 16 {
+		return error('${name}: an integer is converted into a double register, and ${dst.name} is not one')
+	}
+	if src.width != 4 || scratch.width != 4 {
+		return error('${name}: converting an eight-byte unsigned integer names two four-byte registers, and ${src.name} and ${scratch.name} are not both that')
+	}
+	if src.code & 0x07 == scratch.code & 0x07 {
+		return error('${name}: converting ${src.name} needs a second register for the shifted word, and ${scratch.name} is the same one')
+	}
+	mut high := mov_reg64(scratch, src)!
+	high << shr_reg64(scratch, 1)!
+	high << and_immediate(src, 1)!
+	high << or_reg64(src, scratch)!
+	high << double_conversion_widened(double_int_convert, dst, src)
+	high << double_arithmetic(double_add, dst, dst)!
+	low := double_conversion_widened(double_int_convert, dst, src)
+	mut out := test_reg64(src)!
+	// The two jumps are the distance to the next part of this one operation, so
+	// each displacement is known here and no label has to be filled in later.
+	out << jump_sign_rel32(i32(low.len + 5))
+	out << low
+	out << jump_rel32(i32(high.len))
+	out << high
+	return out
+}
+
 pub fn double_to_int(dst Register, src Register) ![]u8 {
 	if dst.width != 4 {
 		return error('${name}: a double is truncated into a four-byte integer, and ${dst.name} is not one')
@@ -1072,6 +1134,22 @@ pub fn add_immediate(dst Register, value i32) []u8 {
 	return out
 }
 
+// and_immediate masks a register with a constant, which is how the low bit of a
+// value is reached on its own. It is the same group opcode as add_immediate with
+// /4 in the reg field, and the constant is written in the four bytes that keep
+// the instruction's length from depending on its value.
+pub fn and_immediate(dst Register, value i32) ![]u8 {
+	mut out := []u8{cap: 7}
+	out << if dst.code >= 8 { u8(0x49) } else { u8(0x48) } // REX.W, with B when the code needs it
+	out << u8(0x81) // the group opcode, with /4 for the and
+	out << u8(0xe0 | (dst.code & 0x07))
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
 // add_reg64 adds one register into another at the full width of an address. An
 // element of an aggregate array cannot be scaled by the stride when that stride is
 // not a power of two, so the index is multiplied and this adds the array's address.
@@ -1398,6 +1476,13 @@ pub fn jump_zero_rel32(disp i32) []u8 {
 
 pub fn jump_nonzero_rel32(disp i32) []u8 {
 	return conditional_jump(0x85, disp)
+}
+
+// jump_sign_rel32 goes to the distance it carries when the sign flag the last
+// operation set says the value was negative, which is how the range split above
+// asks whether an integer has its top bit set.
+pub fn jump_sign_rel32(disp i32) []u8 {
+	return conditional_jump(0x88, disp)
 }
 
 // conditional_jump is the two-byte opcode form: 0F, then the opcode the condition

@@ -2194,6 +2194,55 @@ fn test_an_unsigned_integer_converts_to_a_double() {
 	}
 }
 
+// An eight-byte integer converts to a double with its value kept, signed and
+// unsigned. gcc 16.2.1 answers every one of these programs with 0. Before this
+// the finite conversion took its four-byte form for all four of the 64-bit
+// types, so 18000000000000000000 arrived as a negative value and a long's low
+// half was converted as though the top of it were a sign. The values sit on both
+// sides of 2^63 and 2^53 and at the top of the range, so a fix that special-cased
+// one constant would fail the rest.
+fn test_an_eight_byte_integer_converts_to_a_double_with_its_value() {
+	cases := [
+		'unsigned long u = 18000000000000000000UL; double d = (double)u; return d == 18000000000000000000.0 ? 0 : 1;',
+		'unsigned long u = 9223372036854775808UL; double d = (double)u; return d == 9223372036854775808.0 ? 0 : 1;',
+		'unsigned long u = 9223372036854775809UL; double d = (double)u; return d == 9223372036854775808.0 ? 0 : 1;',
+		'unsigned long u = 18446744073709551615UL; double d = (double)u; return d == 18446744073709551616.0 ? 0 : 1;',
+		'unsigned long long u = 18446744073709551615ULL; double d = (double)u; return d == 18446744073709551616.0 ? 0 : 1;',
+		'long x = 4611686018427387904L; double d = (double)x; return d == 4611686018427387904.0 ? 0 : 1;',
+		'long long x = 9007199254740993LL; double d = (double)x; return d == 9007199254740992.0 ? 0 : 1;',
+		'unsigned long u = 0UL; double d = (double)u; return d == 0.0 ? 0 : 1;',
+	]
+	for index, body in cases {
+		source := scratch('uconv64_source_${index}.c')
+		binary := scratch('uconv64_source_${index}')
+		exit_status := compile_and_run([source, '-o', binary], 'int main(void) { ${body} }\n')
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// The same conversion where the value is not cast but converted for a store, a
+// parameter or a return: each reads the destination's type rather than the
+// expression's, so a fix at the cast alone would leave them wrong.
+fn test_an_eight_byte_integer_reaches_a_double_wherever_it_is_asked_for() {
+	programs := [
+		'int main(void){ unsigned long u = 18000000000000000000UL; double d = 0; d = u; return d == 18000000000000000000.0 ? 0 : 1; }\n',
+		'int main(void){ long x = 4611686018427387904L; double d = 0; d = x; return d == 4611686018427387904.0 ? 0 : 1; }\n',
+		'double f(unsigned long u){ return u; }\nint main(void){ return f(18000000000000000000UL) == 18000000000000000000.0 ? 0 : 1; }\n',
+		'double f(long x){ return x; }\nint main(void){ return f(4611686018427387904L) == 4611686018427387904.0 ? 0 : 1; }\n',
+		'int main(void){ double a[1]; unsigned long u = 18446744073709551615UL; a[0] = u; return a[0] == 18446744073709551616.0 ? 0 : 1; }\n',
+	]
+	for index, program in programs {
+		source := scratch('uconv64_place_${index}.c')
+		binary := scratch('uconv64_place_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == 0
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
 // A double converts to an unsigned integer with its value kept. gcc 16.2.1 answers
 // each of these with 0; before the unsigned conversion existed this back end
 // answered 1 for all of them, because `cvttsd2si r32, xmm` saturates at 2^31.
