@@ -151,6 +151,12 @@ fn (mut p Parser) parse_expression_statement() !ast.Stmt {
 	if p.peek().kind == .punct && p.peek().text in assignment_operators && expr is ast.Index {
 		return p.parse_subscript_assignment(expr as ast.Index)!
 	}
+	// A member whose object is an expression rather than a name is the same
+	// shape: `s[i].m = v` and `p->m->n = v` write through a member the back
+	// end addresses from the object, so the member node is carried whole.
+	if p.peek().kind == .punct && p.peek().text in assignment_operators && expr is ast.Field {
+		return p.parse_member_assignment(expr as ast.Field)!
+	}
 	// An assignment whose target is not a name. The expression reader reads
 	// `*p` as the value at an address and stops at the operator, because an
 	// assignment is not one of the binary operators; the operator that follows
@@ -331,6 +337,16 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 		arrow = p.at_punct('->')
 		field = p.parse_member_path(t.text, t, arrow, ?ast.Expr(none))!
 	}
+	// A path that goes on past a pointer member is an object of its own rather
+	// than a byte inside the name, so the rest of the path is read as member
+	// accesses on the target and the whole chain is carried as the member the
+	// assignment writes.
+	if member := field {
+		if p.at_punct('.') || p.at_punct('->') {
+			chain := p.parse_member_chain(ast.Expr(member))!
+			return p.parse_member_assignment(chain as ast.Field)!
+		}
+	}
 	op := p.next() // = or a compound spelling
 	if op.text == '=' {
 		expr := p.parse_expression()!
@@ -402,6 +418,28 @@ fn (mut p Parser) parse_subscript_assignment(index ast.Index) !ast.Stmt {
 		expr:      value
 		line:      index.line
 		col:       index.col
+	}
+}
+
+// parse_member_assignment reads `E.m = value` where the object of the member is
+// an expression rather than a name, which is what `s[i].m = v` and
+// `p->m->n = v` are. The member node is carried whole so the back end can
+// compute the address the value is stored through. A compound spelling is
+// refused by name: this tree has no shape that reads a member twice.
+fn (mut p Parser) parse_member_assignment(member ast.Field) !ast.Stmt {
+	op := p.next()
+	if op.text != '=' {
+		p.error_at(op, 'unsupported: the compound assignment ${op.text} to the member ${member.name}.${member.member} is not implemented')
+		return error('compound assignment to a member')
+	}
+	value := p.parse_expression()!
+	p.check_assignment(member.typ, value, op)
+	return ast.Stmt{
+		kind:  .assign
+		field: member
+		expr:  value
+		line:  member.line
+		col:   member.col
 	}
 }
 

@@ -1646,8 +1646,7 @@ fn (mut e Emitter) address_of_object(expr ast.Expr, depth int) !void {
 		return
 	}
 	if expr is ast.Field {
-		e.address_of_member(expr.name, expr.index, expr.offset, expr.through_pointer, depth, expr.line,
-			expr.col)!
+		e.field_address(expr, depth, expr.line, expr.col)!
 		return
 	}
 	if expr is ast.Index {
@@ -1656,8 +1655,76 @@ fn (mut e Emitter) address_of_object(expr ast.Expr, depth int) !void {
 		e.emit_element_address(expr, depth)!
 		return
 	}
+	if expr is ast.Unary {
+		if expr.op == '*' {
+			// The address of what a pointer points at is the pointer's own
+			// value, which is what the operand is worth.
+			e.emit_expr_at(expr.expr, depth)!
+			return
+		}
+	}
 	e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: an object handed over by value has to be a name, an element or a member, and this expression is not one')
 	return error('not an object')
+}
+
+// field_address leaves the address of a member in the accumulator, whatever the
+// object it is read from. A member of a name is addressed by address_of_member,
+// which knows where the frame and the image keep the object. A member whose
+// object is an expression - a call's result, a chained arrow, a parenthesised
+// pointer, an element of an array - is addressed from the object's own address,
+// or, when the access is written with `->`, from the pointer value the object is
+// worth. The member's own offset into the object is added either way.
+fn (mut e Emitter) field_address(field ast.Field, depth int, line int, col int) !void {
+	if base := field.base {
+		if field.through_pointer {
+			e.emit_expr_at(base, depth + 1)!
+		} else {
+			e.field_object_address(base, depth + 1)!
+		}
+		register := e.accumulator(line, col)!
+		if field.offset != 0 {
+			e.append(e.target.add_immediate(register, field.offset))
+		}
+		return
+	}
+	return e.address_of_member(field.name, field.index, field.offset, field.through_pointer, depth, line, col)
+}
+
+// field_object_address leaves in the accumulator the address of the object a
+// member is read from, when that object is not a name. It is address_of_object
+// with one more shape: an object handed back by a call. A call of more than two
+// eightbytes writes its result into the storage the caller lent it, so the
+// address is that storage's. A smaller object comes back in the registers, so it
+// is spilled into a slot of its own first and the member is read from there.
+fn (mut e Emitter) field_object_address(expr ast.Expr, depth int) !void {
+	if expr is ast.Call {
+		if class := e.call_return_class(expr) {
+			if class.count > 2 {
+				e.emit_expr_at(expr, depth + 1)!
+				register := e.accumulator(expr.line, expr.col)!
+				frame := e.frame_pointer(expr.line, expr.col)!
+				e.append(e.target.address_of_slot(frame, e.hidden.offset, register))
+				return
+			}
+			temp := e.reserve(align(class.bytes, e.target.word_size))
+			e.emit_expr_at(expr, depth + 1)!
+			base := e.scratch(expr.line, expr.col)!
+			frame := e.frame_pointer(expr.line, expr.col)!
+			e.append(e.target.address_of_slot(frame, temp.offset, base))
+			e.store_return_eightbyte(base, 0, e.target.word_size, class.first_floating, expr.line,
+				expr.col)!
+			if class.count == 2 {
+				e.append(e.target.add_immediate(base, e.target.word_size))
+				e.store_return_eightbyte(base, 1, class.bytes - e.target.word_size,
+					class.second_floating, expr.line, expr.col)!
+			}
+			register := e.accumulator(expr.line, expr.col)!
+			home := e.frame_pointer(expr.line, expr.col)!
+			e.append(e.target.address_of_slot(home, temp.offset, register))
+			return
+		}
+	}
+	return e.address_of_object(expr, depth)
 }
 
 // address_of_member leaves the address of a member in the accumulator. An object
@@ -1767,8 +1834,7 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 		// of the type does, through the member's own address: the object the
 		// member lies in may be a pointer's target or a top-level object, so the
 		// store cannot be an offset from the frame.
-		e.address_of_member(member.name, member.index, member.offset, member.through_pointer, depth + 1,
-			stmt.line, stmt.col)!
+		e.field_address(member, depth + 1, stmt.line, stmt.col)!
 		address := e.value_slot(depth)
 		e.store_accumulator(address, stmt.line, stmt.col)!
 		return e.store_wide_at(address, expr, stmt.line, stmt.col, depth)
@@ -1777,7 +1843,7 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, floats, doubles and pointers only')
 		return error('unsupported member type')
 	}
-	e.address_of_member(member.name, member.index, member.offset, member.through_pointer, depth + 1, stmt.line, stmt.col)!
+	e.field_address(member, depth + 1, stmt.line, stmt.col)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	e.emit_expr_at(expr, depth + 1)!
@@ -3937,7 +4003,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores ints, chars, floats, doubles and pointers only')
 				return error('unsupported member type')
 			}
-			e.address_of_member(expr.name, expr.index, expr.offset, expr.through_pointer, depth, expr.line, expr.col)!
+			e.field_address(expr, depth, expr.line, expr.col)!
 			register := e.accumulator(expr.line, expr.col)!
 			if e.writes_a_float(expr.spelling) {
 				float_register := e.float_accumulator(expr.line, expr.col)!
@@ -4241,8 +4307,7 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 		// The member's address is the object's address plus the byte the layout
 		// put the member at, which is the same computation a member read makes
 		// and stops short of the read.
-		e.address_of_member(unary.expr.name, unary.expr.index, unary.expr.offset,
-			unary.expr.through_pointer, 0, unary.line, unary.col)!
+		e.field_address(unary.expr, 0, unary.line, unary.col)!
 		return
 	}
 	if unary.expr is ast.Index {
