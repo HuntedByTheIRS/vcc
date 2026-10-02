@@ -2976,7 +2976,14 @@ fn (mut e Emitter) emit_test(value ast.Expr, line int, col int) !void {
 			e.append(e.target.double_comparison('!=', floating, zero, register, other)!)
 		}
 	}
-	if e.eight_byte_integer(value.typ) {
+	if e.eight_byte_integer(value.typ) || e.is_a_pointer(value) {
+		// A pointer is tested at the width of an address and not at the width
+		// of an int, because the low four bytes of 0x100000000 are zero: a
+		// four-byte test calls that pointer, which is not null, equal to the
+		// null pointer. Measured with gcc 16.2.1, `int *p =
+		// (int *)0x100000000ULL; if (p)` takes the branch there; a four-byte
+		// test here did not, and a truth value for a pointer is the answer
+		// this tree treats as its worst bug rather than a near miss.
 		e.append(e.target.test_word(register)!)
 	} else {
 		e.append(e.target.test(register)!)
@@ -4291,11 +4298,16 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 			return error('operator on a floating value')
 		}
 	} else if width := e.width_of(unary.expr) {
-		if width != 4 && unary.op != '+' {
+		if width != 4 && unary.op != '+' && unary.op != '!' {
 			if !e.eight_byte_integer(unary.expr.typ) {
 				// Eight bytes that are not an integer is the width of a pointer
 				// and the only other width this back end has, so the diagnostic
-				// can say what it is.
+				// can say what it is. The three operators that reach here are
+				// the sign change, the unary plus and the complement: the last
+				// two compute on an integer, and the sign change is refused on
+				// a pointer by gcc 16.2.1 as well. The logical not is not one of
+				// them, because 6.5.3.3 gives it a scalar operand and a pointer
+				// is a scalar.
 				e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes an int, and this one is a pointer')
 				return error('non-int operand')
 			}
@@ -4303,7 +4315,10 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 	}
 	e.emit_expr_at(unary.expr, depth + 1)!
 	register := e.accumulator(unary.line, unary.col)!
-	wide := e.eight_byte_integer(unary.expr.typ)
+	// A pointer is eight bytes and is asked whether it is the null pointer by
+	// the same word-wide not a 64-bit integer is: a four-byte test would call a
+	// pointer null whose only set bit is above the four bytes.
+	wide := e.eight_byte_integer(unary.expr.typ) || e.is_a_pointer(unary.expr)
 	match unary.op {
 		'+' {}
 		'-' {
@@ -6211,8 +6226,15 @@ fn (mut e Emitter) divide_operands(other backend.Register, wide bool, unsigned b
 // right side is evaluated at all, which is what the language promises and what
 // the machine gets for free: a jump skips over the side that is not needed, and
 // the answer as a value of int width is written on both ways out.
+//
+// The operands are scalars. 6.5.13 and 6.5.14 give both operators an operand of
+// scalar type, which is an arithmetic type or a pointer, and each side is asked
+// whether it is zero by emit_test. A pointer's question is its comparison with
+// the null pointer, which is the word-wide test emit_test writes, so a pointer
+// is an operand here rather than an int that did not arrive: gcc 16.2.1 compiles
+// `p && "message"` and `q || "message"` for both a null and a non-null pointer,
+// and the int-operand check this call used to make refused all of them.
 fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
-	e.check_int_operands(binary)!
 	result := e.accumulator(binary.line, binary.col)!
 	settles := e.label()
 	end := e.label()

@@ -332,6 +332,19 @@ fn test_a_store_through_an_address_of_a_pointer_keeps_the_whole_address() {
 	assert run_image(emitted.bytes) == 1
 }
 
+// A pointer is tested against the null pointer at the width of an address and
+// not at the width of an int. The low four bytes of a pointer whose only set bit
+// is above them are zero, so a four-byte test answers that a pointer which is not
+// null is null. The program below builds such a pointer through its own storage,
+// because a cast of the constant above an int does not carry it here yet, and
+// measured with gcc 16.2.1 it exits 0; the emitted four-byte test exited 1.
+fn test_a_pointer_is_tested_against_null_at_the_width_of_an_address() {
+	emitted := emit(translation_unit('int main() { int *p = 0; long *lp = (long *)&p; *lp = 1; *lp = *lp << 32; if (p) { return 0; } return 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_a_read_through_something_that_is_not_an_address_is_reported() {
 	// The reader refuses it, so there is no tree to emit and no bytes to write:
 	// what the source says is checked without going through the emitter, which is
@@ -1410,6 +1423,53 @@ fn test_and_and_or_do_not_evaluate_the_side_they_do_not_need() {
 	emitted := emit(program(body), Options{})
 	assert emitted.diagnostics.len == 0
 	assert run_image(emitted.bytes) == 1
+}
+
+// A pointer is an operand of && and ||: 6.5.13 and 6.5.14 give both operators
+// operands of scalar type, and a pointer's truth value is its comparison with the
+// null pointer. The string literal beside it is a pointer too. Measured with gcc
+// 16.2.1 the program exits 0, and this compiler refused every pointer operand of
+// both operators before.
+fn test_a_pointer_is_an_operand_of_and_and_or() {
+	emitted := emit(translation_unit('int main() { int x = 5; int *p = &x; int *q = 0; return (p && "live") && (q || "live") && !(q && "dead") ? 0 : 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// A pointer on the left of && or || settles the answer the same way an int does,
+// so the right side runs only when the pointer did not decide it. The counter
+// below is 2 under gcc 16.2.1: bump runs after the non-null left of && and after
+// the null left of ||, and the other two calls are skipped. An operator that
+// evaluated both sides would count 4 and this program would exit 14.
+fn test_a_pointer_short_circuit_skips_the_side_it_can_settle() {
+	emitted := emit(translation_unit('int calls = 0; int bump(void) { calls = calls + 1; return 1; } int main() { int x; int *p = &x; int *q = 0; int a = (p && bump()); int b = (q && bump()); int c = (p || bump()); int d = (q || bump()); if (calls != 2) { return 10 + calls; } return (a && !b && c && d) ? 0 : 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// The logical not takes a scalar operand, so a pointer is one, and it answers
+// whether that pointer is the null pointer. The pointer below is built through
+// its own storage so that its low four bytes are zero, which is what tells the
+// word-wide question apart from a four-byte one, and measured with gcc 16.2.1
+// the program exits 6: !p is 0 for the non-null p and !q is 1 for the null q.
+fn test_logical_not_of_a_pointer_asks_whether_it_is_null() {
+	emitted := emit(translation_unit('int main() { int *p = 0; long *lp = (long *)&p; *lp = 1; *lp = *lp << 32; int *q = 0; return (!p ? 8 : 0) + (q ? 0 : 4) + (!q ? 2 : 0); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 6
+}
+
+// A function designator is a scalar operand of the logical operators too: it
+// converts to a pointer, which is not null, so `fn && "f"` is true and `!fn` is
+// 0. Measured with gcc 16.2.1 the program exits 0, and this compiler refused the
+// designator as a pointer operand before.
+fn test_a_function_designator_is_a_scalar_operand() {
+	emitted := emit(translation_unit('int fn(void) { return 1; } int main() { return (fn && "f") && !(!fn) ? 0 : 3; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
 }
 
 // A tree with a frame produces the same bytes every time it is emitted, which is
