@@ -2156,9 +2156,80 @@ fn test_an_assignment_and_a_comma_expression_as_a_value_run() {
 	}
 }
 
+// A GNU statement expression is `({ ... })`: a brace-enclosed compound statement
+// written where a value is wanted, worth the value of its last statement when
+// that statement is an expression. gcc's `assert` expands to one under a GNU
+// dialect, so the C this compiler has to compile writes it. Each case below
+// returns 1 when the value and the statements' effects are what the source says;
+// every one was measured against gcc 16.2.1, which accepts it and answers the
+// same.
+fn test_a_gnu_statement_expression_compiles_and_runs() {
+	cases := [
+		// The value of the last expression statement, used as a value.
+		'int main(void) { int x = ({ 2 + 3; }); return x * 2 == 10; }',
+		// A declaration the body makes is visible to the value expression.
+		'int main(void) { int x = ({ int a = 4; a * 2; }); return x == 8; }',
+		// The value is an argument.
+		'static int f(int v) { return v + 1; }\nint main(void) { return f(({ 41; })) == 42; }',
+		// A statement expression inside a statement expression.
+		'int main(void) { int x = ({ int a = ({ 3 + 4; }); a * 2; }); return x == 14; }',
+		// gcc's marker, which is skipped before either a declaration or an
+		// expression is read, in front of the construct.
+		'int main(void) { int x = __extension__ ({ 7 * 6; }); return x == 42; }',
+		// A loop inside the body runs to its end before the value is read.
+		'int main(void) { int x = ({ int s = 0; for (int i = 1; i <= 4; i++) { s += i; } s; }); return x == 10; }',
+		'int main(void) { int x = ({ int s = 0; while (s < 3) { s++; } s; }); return x == 3; }',
+		// An if inside the body, and the effect of the statements before the
+		// value is visible after the construct.
+		'int main(void) { int n = 0; int x = ({ n = 7; n + 1; }); return n == 7 && x == 8; }',
+		// The body must not write over a value the expression around the
+		// construct is holding: `a` has to survive the body on the right.
+		'int main(void) { int a = 3; return (a + ({ int b = 4; b * 2; })) == 11; }',
+		// The value is thrown away where it is not wanted.
+		'int main(void) { int x = 0; ({ x = 3; }); return x == 3; }',
+		// An assignment is an expression in C, so a body ending in one is worth
+		// its value: gcc gives each of these the value shown.
+		'int main(void) { int a = 0; int x = ({ a = 5; }); return x == 5; }',
+		'int main(void) { int a = 1; int x = ({ a += 4; }); return x == 5; }',
+		'int main(void) { int a[2]; a[0] = 0; int x = ({ a[0] = 7; }); return x == 7; }',
+		'struct S { int m; };\nint main(void) { struct S s; s.m = 0; int x = ({ s.m = 9; }); return x == 9; }',
+		'int main(void) { int v = 0; int *p = &v; int x = ({ *p = 6; }); return x == 6; }',
+		// A body whose last statement is not an expression is void, so it is
+		// accepted where the value is thrown away and nowhere else.
+		'int main(void) { int x = 0; ({ if (1) { x = 4; } }); return x == 4; }',
+		// 6.4.2.2 and gcc: the function-name spellings hold the enclosing
+		// function name as a string. 'f' is 102 and 'm' ('main') is 109.
+		'static int f(void) { return __func__[0] == 102; }\nint main(void) { return f() && __PRETTY_FUNCTION__[0] == 109 && __FUNCTION__[0] == 109; }',
+	]
+	for source in cases {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
+// A statement expression whose last statement is not an expression has no value,
+// and one used where a value is wanted is refused by name rather than given a
+// plausible one. gcc refuses the same sources with `void value not ignored`,
+// which is the same verdict reached a different way.
+fn test_a_statement_expression_with_no_value_is_refused_where_a_value_is_wanted() {
+	cases := [
+		'int main(void) { int x = ({ int y = 4; }); return x; }',
+		'int main(void) { int x = ({ if (1) { } }); return x; }',
+		'int main(void) { int x = ({ while (0) { } }); return x; }',
+		'int main(void) { int x = ({ { 1 + 1; } }); return x; }',
+	]
+	for source in cases {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len >= 1
+		assert emitted.diagnostics[0].msg.contains('statement expression')
+	}
+}
+
+// A shift by a count as wide as the value is refused
 fn test_a_shift_by_a_count_as_wide_as_the_value_is_refused() {
 	cases := [
-		'int main() { int a = 1;\n\treturn a << 32; }',
+		'int main() { int a = 1;\n	return a << 32; }',
 		'int main() { int a = 1;\n\treturn a >> 32; }',
 		'int main() { __int128 a = 1;\n\treturn (int)(a << 128); }',
 		'int main() { __int128 a = 1;\n\treturn (int)(a >> 128); }',
