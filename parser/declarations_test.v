@@ -342,9 +342,11 @@ fn test_a_file_scope_initializer_the_literal_reader_refuses_is_named() {
 // It is the shape a macro that wraps its argument in parentheses writes: the
 // corpus reaches `int c99_slot_7 = (7);` through `C99_DECLARE(7)`. Measured on
 // gcc 16.2.1, `int c99_slot_7 = (7); int g = (-3);` returns 4 for
-// `c99_slot_7 + g`, which is 7 + (-3). A parenthesized expression with anything
-// around it is not a shape this folds and is still refused by name: measured,
-// gcc accepts `int g = (7) + 1;` and this compiler refuses it.
+// `c99_slot_7 + g`, which is 7 + (-3). An operator after the pair makes the
+// initializer an expression, and an expression that is an integer constant
+// expression is folded like any other: `int g = (7) + 1;` is 8 to gcc. A comma is
+// not an operator a constant expression may have (6.6p3), so `(7, 8)` stays
+// refused.
 fn test_a_file_scope_parenthesized_constant_is_the_number_in_them() {
 	result := declarations_of('int c99_slot_7 = (7);')
 	assert result.diagnostics.len == 0
@@ -361,37 +363,64 @@ fn test_a_file_scope_parenthesized_constant_is_the_number_in_them() {
 		return
 	}
 	assert signed_value == -3
-	// The pair has to end the declaration: an operator or a second operand after
-	// it is an expression this does not fold, and it stays refused.
-	for refused_source in ['int g = (7) + 1;', 'int g = (7, 8);'] {
-		refused := declarations_of(refused_source)
-		assert refused.diagnostics.len == 1
-		assert refused.diagnostics[0].msg.contains('is initialized with something that is not a number')
+	summed := declarations_of('int g = (7) + 1;')
+	assert summed.diagnostics.len == 0
+	summed_value := summed.unit.globals[0].init or {
+		assert false
+		return
 	}
+	assert summed_value == 8
+	// A comma is not an operator an integer constant expression may have, so the
+	// pair with one after it stays refused by name.
+	refused := declarations_of('int g = (7, 8);')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('is initialized with something that is not a number')
 }
 
-// A pointer at the top level is a relocation this compiler does not write yet,
-// so the definition is reported instead of laid out as a wrong number.
-// An initializer that is an expression is a shape this reads no part of. Reading
-// its first number and stopping was silent, and the value defined was that first
-// number: `int g = 2 + 3;` defined g as 2, `int g = 1 << 3;` as 1, `char g = 2 + 3;`
-// as 2, `double g = 1.5 + 1.5;` as 1, and `__int128 g = 0 - 100;` as 0, each with a
-// working image behind it and no diagnostic. The whole expression now reads as
-// nothing, which is the case the definition reports by name.
-fn test_a_file_scope_initializer_that_is_an_expression_is_reported() {
-	expressions := [
-		'int g = 2 + 3;',
-		'int g = 1 << 3;',
-		'char g = 2 + 3;',
+// A file-scope scalar may be initialized by an integer constant expression, and
+// the folder that evaluates a bound evaluates one here too. Measured on gcc
+// 16.2.1 under `-std=c99`, `int g = 2 + 3;` is 5, `int g = 1 << 3;` is 8,
+// `char g = 2 + 3;` is 5 and `int y = 12 * sizeof(int) - 5 * sizeof(void *);` is
+// 8. Reading the first number and stopping defined those as 2 and 1 with no
+// diagnostic; refusing them was the same gap as a bound the folder could not
+// fold, which is why the file-scope reader now asks the folder before it asks for
+// a number.
+//
+// A shape that is not an integer constant expression is still refused by name: a
+// floating constant expression, a name and a call are not constants this reader
+// writes into the image, and the whole expression reads as nothing rather than as
+// its first term.
+fn test_a_file_scope_initializer_that_is_an_integer_constant_expression_is_folded() {
+	values := {
+		'int g = 2 + 3;':                                 5
+		'int g = 1 << 3;':                                8
+		'char g = 2 + 3;':                                5
+		'int y = 12 * sizeof(int) - 5 * sizeof(void *);': 8
+		'int g = 1 ? 5 : 6;':                             5
+		'__int128 g = 0 - 100;':                          -100
+		'__int128 g = -100 + 0;':                         -100
+	}
+	for source, expected in values {
+		result := declarations_of(source)
+		assert result.diagnostics.len == 0
+		assert result.unit.globals.len == 1
+		value := result.unit.globals[0].init or {
+			assert false
+			return
+		}
+		assert value == expected
+	}
+	// The expressions that are not integer constant expressions stay refused.
+	refused := [
 		'double g = 1.5 + 1.5;',
-		'__int128 g = 0 - 100;',
-		'__int128 g = -100 + 0;',
+		'int n = 4;\nint g = n;',
+		'int f(void);\nint g = f();',
+		'int g = (1, 2);',
 	]
-	for source in expressions {
+	for source in refused {
 		result := declarations_of(source)
 		assert result.diagnostics.len == 1
 		assert result.diagnostics[0].msg.contains('is initialized with something that is not a number')
-		assert result.unit.globals.len == 0
 	}
 	// A single number is still read, and its sign with it, which is the shape the
 	// language puts in the image.

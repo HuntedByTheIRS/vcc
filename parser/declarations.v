@@ -993,12 +993,16 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 	}
 }
 
-// file_scope_constant reads the initializer a file-scope definition may have: a
-// number, signed, which is the only shape this folds.
-// Anything else - a string, an expression - reads as none, and the caller reports
-// it: what is written into the image is a constant, and a constant is what can be
-// written. A brace list is read by `parse_brace_initializer` before this is
-// reached, so it never arrives here.
+// file_scope_constant reads the initializer a file-scope definition may have: an
+// integer constant expression, or a written number with a sign. The expression is
+// read first, because the folder takes the operators 6.6 gives a constant
+// expression and the reader that names a number takes only the shapes the folder
+// does not: a floating constant, and a literal it refuses.
+//
+// Anything else - a string, a name, a call - reads as none, and the caller
+// reports it: what is written into the image is a constant, and a constant is
+// what can be written. A brace list is read by `parse_brace_initializer` before
+// this is reached, so it never arrives here.
 //
 // A number the literal reader refuses is reported by `number_constant`, at the
 // literal as it was written, which is where the expression path reports the same
@@ -1010,18 +1014,22 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 	// A parenthesized constant, `(7)`, is the number the one pair of parentheses
 	// holds, which is the shape a macro that wraps its argument in them writes:
 	// the corpus reaches `int c99_slot_7 = (7);` through `C99_DECLARE(7)`.
-	// Only exactly that shape is read. `(7) + 1` and `(7, 8)` are expressions
-	// this does not fold, and `is_parenthesized_constant` answers false for
-	// them, so they stay refused by the report below rather than taking the
-	// first number and stopping.
 	if p.is_parenthesized_constant() {
 		p.next()
 		constant := p.number_constant() or { return FileConstant{} }
 		p.next()
 		return constant.number
 	}
+	// An integer constant expression is the other shape an integer initializer
+	// has, and the folder reads one here rather than the reader that names a
+	// number: measured on gcc 16.2.1 under `-std=c99`, `int y = 12 * sizeof(int)
+	// - 5 * sizeof(void *);` is 8 and `int y = 2 + 3;` is 5, and this reader
+	// refused both while the same expression in a body was folded.
+	if constant := p.folded_file_initializer() {
+		return constant
+	}
 	// The number is the initializer or the initializer is not one this reads. An
-	// expression is a shape this does not fold, and reading its first term and
+	// expression this folder does not evaluate and reading its first term and
 	// stopping was silent: `int g = 2 + 3;` defined g as 2, `int g = 1 << 3;` as
 	// 1, `char g = 2 + 3;` as 2, `double g = 1.5 + 1.5;` as 1, and
 	// `__int128 g = 0 - 100;` as 0, each with no diagnostic and an image written.
@@ -1032,6 +1040,50 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 		return FileConstant{}
 	}
 	return constant.number
+}
+
+// folded_file_initializer reads the initializer as an expression and answers the
+// integer constant expression it is worth. Its operand and operator set is the
+// folder's, which is 6.6's, so the same expressions are constants here as in a
+// bound: measured on gcc 16.2.1 under `-std=c99`, `int y = 12 * sizeof(int) - 5 *
+// sizeof(void *);` is 8, `int y = 2 + 3;` is 5 and `int y = 1 << 3;` is 8, and
+// this reader refused all three while a body's copy of the first was folded by
+// the same folder.
+//
+// Nothing is kept of a read that does not fold: the cursor, the diagnostics, the
+// depth and the specifier state go back, and the reader that names a number
+// answers for the shapes this one does not take - a floating constant, a bad
+// literal, a name and a call among them.
+fn (mut p Parser) folded_file_initializer() ?FileConstant {
+	saved_pos := p.pos
+	saved_diagnostics := p.diagnostics.len
+	saved_depth := p.depth
+	saved_base := p.pending_base
+	saved_storage := p.pending_storage
+	expr := p.parse_expression() or {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		p.depth = saved_depth
+		p.pending_base = saved_base
+		p.pending_storage = saved_storage
+		return none
+	}
+	p.depth = saved_depth
+	p.pending_base = saved_base
+	p.pending_storage = saved_storage
+	if !p.at_punct(',') && !p.at_punct(';') {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	value := p.constant_value(expr) or {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	return FileConstant{
+		integer: value
+	}
 }
 
 // is_parenthesized_constant answers whether the next tokens are one pair of
