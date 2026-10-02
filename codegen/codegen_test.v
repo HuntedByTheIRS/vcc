@@ -30,6 +30,16 @@ fn translation_unit(source string) ast.TranslationUnit {
 	return parsed.unit
 }
 
+// translation_unit_refused is the same read without the clean-parse assert, for
+// a program the reader refuses: a refusal test carries diagnostics, and the
+// assert on the message is the test rather than something the helper may make
+// impossible.
+fn translation_unit_refused(source string) parser.Result {
+	lexed := tokenize.lex(source)
+	assert lexed.diagnostics.len == 0
+	return parser.parse(lexed.tokens)
+}
+
 // run_capturing writes an image the way main.v does and runs it, so these tests
 // check the artifact and not the intent behind it. The output is what a library
 // call was supposed to produce, and the exit status is what the returned
@@ -364,10 +374,11 @@ fn test_a_member_of_a_top_level_struct_holds_an_address() {
 // It is refused by name rather than stored as a zero, and the message names the
 // construct rather than a token inside it.
 fn test_an_address_table_inside_a_body_is_refused_by_name() {
-	emitted := emit(translation_unit('int main(void) { const char *const names[] = {"a", "b"}; return names[0][0]; }'),
-		Options{})
+	// The reader refuses the shape before the emitter is handed it: storage in
+	// a frame is initialized by stores, and a store writes a constant.
+	parsed := translation_unit_refused('int main(void) { const char *const names[] = {"a", "b"}; return names[0][0]; }')
 	mut refused := false
-	for diagnostic in emitted.diagnostics {
+	for diagnostic in parsed.diagnostics {
 		if diagnostic.msg.contains('an address in a brace initializer inside a body is not implemented') {
 			refused = true
 		}
@@ -379,10 +390,11 @@ fn test_an_address_table_inside_a_body_is_refused_by_name() {
 // name rather than converted, because the address of the storage is a value the
 // declaration did not write.
 fn test_an_address_into_a_member_that_is_not_a_pointer_is_refused() {
-	emitted := emit(translation_unit('union U { int n; int *p; }; int a = 3; static union U u = {&a}; int main(void) { return u.n; }'),
-		Options{})
+	// The reader refuses the shape: the first member holds a number, and an
+	// address is not converted to one.
+	parsed := translation_unit_refused('union U { int n; int *p; }; int a = 3; static union U u = {&a}; int main(void) { return u.n; }')
 	mut refused := false
-	for diagnostic in emitted.diagnostics {
+	for diagnostic in parsed.diagnostics {
 		if diagnostic.msg.contains('and its initializer writes an address') {
 			refused = true
 		}
