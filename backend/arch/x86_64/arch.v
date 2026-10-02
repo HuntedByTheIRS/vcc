@@ -178,6 +178,29 @@ fn double_conversion(opcode u8, reg_field Register, rm Register) []u8 {
 	return out
 }
 
+// double_conversion_widened is the same instruction with REX.W, which makes the
+// general-register operand eight bytes wide rather than four. The F2 prefix in
+// front of the escape is a legacy prefix and REX has to be the last prefix before
+// the opcode, so the order is F2 then REX then the escape; a REX written before
+// the F2 would sit where the machine does not read it and the instruction would
+// convert four bytes again.
+fn double_conversion_widened(opcode u8, reg_field Register, rm Register) []u8 {
+	mut out := []u8{cap: 5}
+	mut rex := u8(0x48) // REX.W: the general register is an eight-byte one
+	if reg_field.code >= 8 {
+		rex |= 0x04 // REX.R: the reg field names a wider register
+	}
+	if rm.code >= 8 {
+		rex |= 0x01 // REX.B: the r/m field names one
+	}
+	out << prefix_double
+	out << rex
+	out << u8(0x0f)
+	out << opcode
+	out << u8(0xc0 | ((reg_field.code & 0x07) << 3) | (rm.code & 0x07))
+	return out
+}
+
 pub fn int_to_double(dst Register, src Register) ![]u8 {
 	if dst.width != 16 {
 		return error('${name}: an integer is converted into a double register, and ${dst.name} is not one')
@@ -196,6 +219,22 @@ pub fn double_to_int(dst Register, src Register) ![]u8 {
 		return error('${name}: a double is truncated out of a double register, and ${src.name} is not one')
 	}
 	return double_conversion(double_int_truncate, dst, src)
+}
+
+// double_to_unsigned_int truncates a double into a four-byte unsigned integer.
+// The four-byte signed truncation saturates at 2^31, so 3000000000.0 arrives as
+// 2147483648. Every value a four-byte unsigned type can hold is below 2^63, so
+// the eight-byte form of the same truncation answers all of them exactly. Measured
+// on gcc 16.2.1 at -O0: `(unsigned int)d` is one `cvttsd2siq %xmm0, %rax`, and
+// `(int)d` is `cvttsd2sil %xmm0, %eax`.
+pub fn double_to_unsigned_int(dst Register, src Register) ![]u8 {
+	if dst.width != 4 {
+		return error('${name}: a double is truncated into a four-byte integer, and ${dst.name} is not one')
+	}
+	if src.width != 16 {
+		return error('${name}: a double is truncated out of a double register, and ${src.name} is not one')
+	}
+	return double_conversion_widened(double_int_truncate, dst, src)
 }
 
 // Movq, in both directions, between a general register and the low half of a

@@ -55,6 +55,12 @@ struct Slot {
 	// floating is set for a slot holding a double, which is a value the machine
 	// moves with a different instruction than an integer of the same width.
 	floating bool
+	// unsigned is set for a slot whose declared type is an unsigned integer one.
+	// The width does not answer it and neither does the spelling at the point a
+	// value is stored, so it travels with the slot: a double converted into an
+	// unsigned four-byte slot has to be converted at a width every value of that
+	// type fits in, and the same conversion into a signed one saturates.
+	unsigned bool
 	// bytes is the size of a slot that holds an object of an aggregate type, and
 	// zero for a slot that holds a scalar or an array: an object of a struct
 	// type has no spelling this back end can size, so the size the model laid
@@ -119,6 +125,11 @@ mut:
 	// The width cannot answer that on its own: a double is eight bytes and so is
 	// a pointer, and the two travel through different registers.
 	float_params map[string][]bool
+	// unsigned_params says, for the same functions, which parameters are of an
+	// unsigned integer type. It is what a double handed to such a parameter is
+	// truncated against: the destination's signedness is not on the double, and
+	// the parameter's type is the one place a call knows it.
+	unsigned_params map[string][]bool
 	// aggregate_params says, for the same functions, which parameters are
 	// objects of an aggregate type and how many bytes of one they are. An object
 	// of one eightbyte is handed over as its bytes in one register rather than
@@ -361,6 +372,7 @@ fn (mut e Emitter) build() ![]u8 {
 			e.program.defined[decl.name] = true
 			mut widths := []int{}
 			mut classes := []bool{}
+			mut unsigneds := []bool{}
 			mut aggregates := []abi.Class{}
 			mut wides := []bool{}
 			mut sized := true
@@ -379,6 +391,7 @@ fn (mut e Emitter) build() ![]u8 {
 				if class.bytes > 0 {
 					widths << class.bytes
 					classes << class.first_floating
+					unsigneds << false
 					aggregates << class
 					continue
 				}
@@ -386,12 +399,14 @@ fn (mut e Emitter) build() ![]u8 {
 				if width := e.type_width(param.typ) {
 					widths << width
 					classes << e.writes_a_double(param.typ)
+					unsigneds << e.written_is_unsigned(param.typ)
 				} else if e.writes_a_128(param.typ) {
 					// The object is sixteen bytes; the value is a pair. The
 					// width goes in the table so that the parameters beside
 					// this one keep their own positions and widths.
 					widths << wide_bytes
 					classes << false
+					unsigneds << false
 				} else {
 					sized = false
 				}
@@ -400,6 +415,7 @@ fn (mut e Emitter) build() ![]u8 {
 			if sized {
 				e.signatures[decl.name] = widths
 				e.float_params[decl.name] = classes
+				e.unsigned_params[decl.name] = unsigneds
 				e.aggregate_params[decl.name] = aggregates
 			}
 		}
@@ -926,7 +942,7 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 		return e.convert_to_double(expr, line, col)
 	}
 	if e.floating_of(expr) {
-		return e.convert_to_int(expr, line, col)
+		return e.convert_to_int(expr, e.written_is_unsigned(e.returning), line, col)
 	}
 	if e.returns_eight_byte_integer() {
 		// A function whose return type is a 64-bit integer leaves the whole
@@ -1367,7 +1383,7 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr)
 		return
 	}
 	if e.floating_of(expr) {
-		e.convert_to_int(expr, stmt.line, stmt.col)!
+		e.convert_to_int(expr, e.written_is_unsigned(member.spelling), stmt.line, stmt.col)!
 		value := e.accumulator(stmt.line, stmt.col)!
 		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 		e.append(e.target.store_indirect(address_register, value, width)!)
@@ -1464,7 +1480,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				return
 			}
 			if e.floating_of(expr) {
-				e.convert_to_int(expr, stmt.line, stmt.col)!
+				e.convert_to_int(expr, e.written_is_unsigned(e.global_written(stmt.target)), stmt.line, stmt.col)!
 				value := e.accumulator(stmt.line, stmt.col)!
 				e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 				e.append(e.target.store_indirect(address_register, value, object.width)!)
@@ -1521,7 +1537,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		return
 	}
 	if e.floating_of(expr) {
-		e.convert_to_int(expr, stmt.line, stmt.col)!
+		e.convert_to_int(expr, slot.unsigned, stmt.line, stmt.col)!
 		value := e.accumulator(stmt.line, stmt.col)!
 		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 		e.append(e.target.store_indirect(address_register, value, slot.width)!)
@@ -1726,6 +1742,7 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, li
 		width:    width
 		count:    count
 		floating: bytes == 0 && e.writes_a_double(written)
+		unsigned: e.written_is_unsigned(written)
 		bytes:    if wide { wide_bytes } else { bytes }
 		wide:     wide
 	}
@@ -1790,6 +1807,27 @@ fn (e Emitter) writes_a_128(written string) bool {
 	// object of 128 bits`. Every caller wants the type itself and not a pointer to
 	// it: parameters, returns, members, top-level objects and casts all read this.
 	return written.contains('__int128') && !written.contains('*')
+}
+
+// written_is_unsigned says whether a type as it was written names an unsigned
+// integer type. The reader has already resolved every spelling this asks about,
+// so this asks the same question it did and not a second reading of the text:
+// `unsigned` and `unsigned int` are one type, and neither is `unsigned long`.
+fn (e Emitter) written_is_unsigned(written string) bool {
+	typ := types.from_words(written.split(' ')) or { return false }
+	return typ.kind.is_unsigned()
+}
+
+// global_written is the type a top-level object was declared with, as it was
+// written. The object's storage in the image carries a width and not a type, so a
+// value stored into it reads the signedness off the declaration.
+fn (e Emitter) global_written(name string) string {
+	for global in e.unit.globals {
+		if global.name == name {
+			return global.typ
+		}
+	}
+	return ''
 }
 
 // align rounds a size up to the next multiple of the alignment, which is what
@@ -2157,12 +2195,21 @@ fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
 // value out of range is not reported, because the conversion's result is
 // undefined for one and the instruction's answer is what every compiler on this
 // machine gives.
-fn (mut e Emitter) convert_to_int(expr ast.Expr, line int, col int) !void {
+//
+// The destination's signedness is a parameter rather than something this can read
+// off the double: an unsigned four-byte destination can hold values at and above
+// 2^31, which the signed four-byte truncation saturates, while a signed one has no
+// such values and its conversion is the one the machine has.
+fn (mut e Emitter) convert_to_int(expr ast.Expr, unsigned_target bool, line int, col int) !void {
 	if !e.floating_of(expr) {
 		return
 	}
 	double_register := e.float_accumulator(line, col)!
 	integer := e.accumulator(line, col)!
+	if unsigned_target {
+		e.append(e.target.double_to_unsigned_int(integer, double_register)!)
+		return
+	}
 	e.append(e.target.double_to_int(integer, double_register)!)
 }
 
@@ -2315,7 +2362,7 @@ fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !voi
 		return
 	}
 	if floating {
-		e.convert_to_int(expr, line, col)!
+		e.convert_to_int(expr, slot.unsigned, line, col)!
 		e.store_accumulator(slot, line, col)!
 		return
 	}
@@ -3002,7 +3049,7 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and the conversion this back end has writes a value of four bytes')
 			return error('double to a 64-bit integer')
 		}
-		e.convert_to_int(cast.expr, cast.line, cast.col)!
+		e.convert_to_int(cast.expr, target.kind.is_unsigned(), cast.line, cast.col)!
 	}
 	register := e.accumulator(cast.line, cast.col)!
 	// The width of the value in the register now, which decides whether a
@@ -4805,7 +4852,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		// A double handed to a parameter that is not one is truncated to the
 		// integer the parameter holds, which is the conversion the language
 		// defines between the two classes.
-		e.convert_to_int(arg, line, col)!
+		e.convert_to_int(arg, e.argument_is_unsigned(call, i, arg), line, col)!
 		if e.parameter_wants_a_word(widths, i, arg) {
 			// The parameter is a 64-bit integer and the argument is narrower, so
 			// the value is widened into the whole register before it is parked:
@@ -5158,6 +5205,19 @@ fn (e Emitter) argument_is_double(call ast.Call, position int, arg ast.Expr) boo
 	return e.floating_of(arg)
 }
 
+// argument_is_unsigned says whether an argument is handed to an unsigned integer
+// parameter. A function this file defines says so itself, parameter by parameter;
+// a library function has no prototype here, so the argument's own type is the
+// answer, which is the same fallback argument_is_double makes.
+fn (e Emitter) argument_is_unsigned(call ast.Call, position int, arg ast.Expr) bool {
+	if unsigneds := e.unsigned_params[call.name] {
+		if position < unsigneds.len {
+			return unsigneds[position]
+		}
+	}
+	return arg.typ.kind.is_unsigned()
+}
+
 // pair_argument_registers are the two consecutive general registers that carry a
 // pair of words at argument position `position`, and none when this machine has
 // not got two of them there. A pair takes both registers at once rather than one
@@ -5474,7 +5534,8 @@ fn (mut e Emitter) assign_global(stmt ast.Stmt, object image.GlobalSlot, expr as
 		return e.store_wide_at(address, expr, stmt.line, stmt.col)
 	}
 	e.emit_expr_at(expr, 1)!
-	e.convert_for_global(expr, object, stmt.line, stmt.col)!
+	e.convert_for_global(expr, object, e.written_is_unsigned(e.global_written(stmt.target)), stmt.line,
+		stmt.col)!
 	address_register := e.scratch(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 	if object.floating {
@@ -5489,7 +5550,7 @@ fn (mut e Emitter) assign_global(stmt ast.Stmt, object image.GlobalSlot, expr as
 // convert_for_global makes a value the class of a top-level object's storage and
 // checks that the two can be one another at all. It is the same question a store
 // into a local asks, with a different shape to the storage.
-fn (mut e Emitter) convert_for_global(expr ast.Expr, object image.GlobalSlot, line int, col int) !void {
+fn (mut e Emitter) convert_for_global(expr ast.Expr, object image.GlobalSlot, unsigned_target bool, line int, col int) !void {
 	if object.floating {
 		if !e.floating_of(expr) && e.is_a_pointer(expr) {
 			e.diagnostics << problem(line, col, 'unsupported: a pointer is stored in a top-level object that holds a double, and there is no conversion between them')
@@ -5498,7 +5559,7 @@ fn (mut e Emitter) convert_for_global(expr ast.Expr, object image.GlobalSlot, li
 		return e.convert_to_double(expr, line, col)
 	}
 	if e.floating_of(expr) {
-		return e.convert_to_int(expr, line, col)
+		return e.convert_to_int(expr, unsigned_target, line, col)
 	}
 	if width := e.width_of(expr) {
 		if width != object.width && !(object.width == 1 && width == 4) {

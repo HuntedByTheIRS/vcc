@@ -990,3 +990,46 @@ fn test_the_unsigned_orders_are_the_bytes_the_machine_reads() {
 	assert target.set_condition(.above, rdi) or { []u8{} }.len == 0
 	assert target.widen_byte(rdi) or { []u8{} }.len == 0
 }
+
+// The conversion of a double to an unsigned four-byte integer. The signed
+// instruction saturates at 2^31, so 3000000000.0 reaches a four-byte result as
+// 2147483648. The unsigned form takes the eight-byte truncation, which holds every
+// value a four-byte unsigned type has. The bytes are what the machine's own
+// assembler produces for `cvttsd2siq %xmm0, %rax`.
+fn test_a_double_converts_to_an_unsigned_integer_at_the_width_it_needs() {
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	eax := target.reg('eax') or { panic('the target description has no such name') }
+	ecx := target.reg('ecx') or { panic('the target description has no such name') }
+	xmm0 := target.float_reg('xmm0') or { panic('the target description has no such name') }
+	xmm1 := target.float_reg('xmm1') or { panic('the target description has no such name') }
+	// The signed conversion, for contrast.
+	assert x86_64.double_to_int(target.describe(eax), target.describe(xmm0)) or { panic('the target description has no such name') } == [
+		u8(0xf2),
+		0x0f,
+		0x2c,
+		0xc0,
+	]
+	assert x86_64.double_to_unsigned_int(target.describe(eax), target.describe(xmm0)) or { panic('the target description has no such name') } == [
+		u8(0xf2),
+		0x48,
+		0x0f,
+		0x2c,
+		0xc0,
+	]
+	// A second register pair pins the ModRM fields: ecx is code 1 and xmm1 is 1.
+	assert x86_64.double_to_unsigned_int(target.describe(ecx), target.describe(xmm1)) or { panic('the target description has no such name') } == [
+		u8(0xf2),
+		0x48,
+		0x0f,
+		0x2c,
+		0xc9,
+	]
+	// The same goes through the target, which is the seam the emitter sees.
+	assert target.double_to_unsigned_int(eax, xmm0) or { panic('the target description has no such name') } == [
+		u8(0xf2),
+		0x48,
+		0x0f,
+		0x2c,
+		0xc0,
+	]
+}
