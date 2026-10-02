@@ -2488,3 +2488,80 @@ fn test_a_wide_condition_is_tested_at_the_width_of_the_value() {
 	assert zero.diagnostics.len == 0
 	assert run_image(zero.bytes) == 0
 }
+
+// Only the arm the condition selects is evaluated: the other is behind the
+// jump, so a side effect written in it does not happen. Measured with gcc
+// 16.2.1, `int i = 0; int n = (1 ? ++i : 3); return i * 100 + n;` exits 101,
+// and the false condition beside it exits 3.
+fn test_only_the_arm_a_conditional_selects_is_evaluated() {
+	taken := emit(translation_unit('int main(void) { int i = 0; int n = (1 ? ++i : 3); return i * 100 + n; }'),
+		Options{})
+	assert taken.diagnostics.len == 0
+	assert run_image(taken.bytes) == 101
+	skipped := emit(translation_unit('int main(void) { int i = 0; int n = (0 ? ++i : 3); return i * 100 + n; }'),
+		Options{})
+	assert skipped.diagnostics.len == 0
+	assert run_image(skipped.bytes) == 3
+	// The same question with a call in the arm that must not run: it writes a
+	// global, and the status is 20 when the call never happened and 21 when it
+	// did. Measured with gcc 16.2.1.
+	called := emit(translation_unit('int g = 0;\nint bumped(void) { g = 1; return 7; }\nint main(void) { int n = (1 ? 2 : bumped()); return n * 10 + g; }'),
+		Options{})
+	assert called.diagnostics.len == 0
+	assert run_image(called.bytes) == 20
+}
+
+// The value of a conditional is the arm's value converted to the type the two
+// arms share. An int arm beside a double one arrives as a double, so 1 is 1.0
+// and not the bits of an int read as one; and `sizeof(1 ? 1 : 1.0)` is the size
+// of a double although one arm is an int.
+fn test_a_conditional_converts_its_arm_to_the_type_the_two_arms_share() {
+	mixed := emit(translation_unit('int main(void) { return sizeof(1 ? 1 : 1.0) == sizeof(double); }'),
+		Options{})
+	assert mixed.diagnostics.len == 0
+	assert run_image(mixed.bytes) == 1
+	value := emit(translation_unit('int main(void) { double d = 1 ? 1 : 2.5; return d == 1.0 ? 1 : 0; }'),
+		Options{})
+	assert value.diagnostics.len == 0
+	assert run_image(value.bytes) == 1
+	// The arm that runs is the second one here, and it is converted too.
+	other := emit(translation_unit('int main(void) { double d = 0 ? 2.5 : 1; return d == 1.0 ? 1 : 0; }'),
+		Options{})
+	assert other.diagnostics.len == 0
+	assert run_image(other.bytes) == 1
+}
+
+// An arm narrower than the type the two arms share is widened with its own
+// signedness before the arms meet: an int -1 in a long conditional is -1 and
+// not 4294967295. Measured with gcc 16.2.1 on both programs.
+fn test_an_arm_is_widened_to_the_type_the_two_arms_share() {
+	first := emit(translation_unit('int main(void) { long v = 1 ? -1 : 0L; return v == -1L ? 1 : 0; }'),
+		Options{})
+	assert first.diagnostics.len == 0
+	assert run_image(first.bytes) == 1
+	// The other way round, with the narrow arm second.
+	second := emit(translation_unit('int main(void) { long v = 0 ? 2L : -1; return v == -1L ? 1 : 0; }'),
+		Options{})
+	assert second.diagnostics.len == 0
+	assert run_image(second.bytes) == 1
+	// An unsigned result keeps the value the conversion gives it: the int -1
+	// converted to an unsigned long is all ones.
+	unsigned_one := emit(translation_unit('int main(void) { unsigned long v = 1 ? -1 : 0UL; return v == 18446744073709551615UL ? 1 : 0; }'),
+		Options{})
+	assert unsigned_one.diagnostics.len == 0
+	assert run_image(unsigned_one.bytes) == 1
+}
+
+// A chain of conditionals inside the nesting limit is emitted and runs: 150
+// links, each the third operand of the one before it, which is the deep case
+// and not an interesting one.
+fn test_a_long_chain_of_conditionals_compiles_and_runs() {
+	mut source := 'int main(void) { return 1'
+	for _ in 0 .. 150 {
+		source += ' ? 1 : 1'
+	}
+	source += '; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+}

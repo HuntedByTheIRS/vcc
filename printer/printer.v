@@ -230,5 +230,13 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			form := if expr.postfix { 'postfix' } else { 'prefix' }
 			out << '${indent}${form} ${expr.op} ${expr.name} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
+		ast.Conditional {
+			// The three operands are printed in the order they were written,
+			// which is what makes the branch the emitter builds readable.
+			out << '${indent}conditional at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			dump_expression(expr.cond, depth + 1, mut out)
+			dump_expression(expr.then_expr, depth + 1, mut out)
+			dump_expression(expr.else_expr, depth + 1, mut out)
+		}
 	}
 }

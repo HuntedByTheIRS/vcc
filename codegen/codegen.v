@@ -2113,6 +2113,16 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 			// as a function that returns a double.
 			e.returns[expr.name] == 'double' || e.return_classes[expr.name].first_floating
 		}
+		ast.Conditional {
+			// The value is whichever arm ran, converted to the type the two
+			// arms have in common, so that type is the answer and not either
+			// arm's own.
+			if expr.typ.kind != .unknown {
+				expr.typ.is_floating()
+			} else {
+				e.floating_at(expr.then_expr, depth + 1) || e.floating_at(expr.else_expr, depth + 1)
+			}
+		}
 		else {
 			false
 		}
@@ -2526,6 +2536,9 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		}
 		ast.IncDec {
 			e.emit_inc_dec(expr, depth)!
+		}
+		ast.Conditional {
+			e.emit_conditional(expr, depth)!
 		}
 		ast.Call {
 			// A call's value arrives in the register the machine returns
@@ -4285,6 +4298,57 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 	e.place(end)
 }
 
+// emit_conditional writes the conditional operator as a branch rather than as a
+// computation. The condition is evaluated and tested, the arm it did not select
+// is jumped over, and both arms land at one label with their value in the
+// register a value lives in. Only the arm the condition selects is evaluated,
+// which is what `c99_side_effects == 3 ? 1 : c99_bump()` asks for: the call in
+// the arm that is not taken never runs.
+//
+// A conditional used as a value is the shape this is written for, `int x = a ?
+// b : c`, which a statement-level if cannot produce. The two arms are not two
+// statements that happen to share a result: the value one of them leaves has to
+// be read by whatever the conditional is an operand of, so both are converted
+// to the type the conditional is worth before they meet.
+fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !void {
+	if e.wide_value(ast.Expr(conditional)) {
+		// Two arms of a 128-bit type would each have to leave a pair of
+		// registers, and the branch machinery carries one value. Saying so
+		// keeps the arms from being emitted at a width nothing reads.
+		e.diagnostics << problem(conditional.line, conditional.col, 'unsupported: a conditional whose arms have a 128-bit type is not implemented')
+		return error('128-bit conditional')
+	}
+	e.emit_expr_at(conditional.cond, depth + 1)!
+	e.emit_test(e.floating_of(conditional.cond), e.eight_byte_integer(conditional.cond.typ), conditional.line, conditional.col)!
+	else_label := e.label()
+	end_label := e.label()
+	e.branch(.branch_zero, else_label, conditional.line, conditional.col)!
+	e.emit_conditional_arm(conditional.then_expr, conditional.typ, depth)!
+	e.jump(end_label)!
+	e.place(else_label)
+	e.emit_conditional_arm(conditional.else_expr, conditional.typ, depth)!
+	e.place(end_label)
+}
+
+// emit_conditional_arm writes one arm of a conditional and converts it to the
+// type the two arms have in common, which is the type the conditional is worth
+// and not the arm's own. An arm narrower than the result is widened here: a
+// double result converts the arm into the floating-point register, and a result
+// of eight bytes extends the arm into the whole general register with the arm's
+// own signedness, which is the conversion an int to a long makes. A four-byte
+// result is what the register already holds, since a char read into one arrives
+// as the int the language promotes it to.
+fn (mut e Emitter) emit_conditional_arm(arm ast.Expr, result types.Type, depth int) !void {
+	e.emit_expr_at(arm, depth + 1)!
+	if result.is_floating() {
+		e.convert_to_double(arm, expr_line(arm), expr_col(arm))!
+		return
+	}
+	if e.eight_byte_integer(result) {
+		e.extend_operand_to_word(arm, expr_line(arm), expr_col(arm))!
+	}
+}
+
 // move_to_scratch puts the accumulator into the scratch register, which is where
 // the operation that is about to be applied expects the right-hand value.
 fn (mut e Emitter) move_to_scratch(line int, col int) !void {
@@ -4441,6 +4505,12 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 			e.width_of(ast.Expr(ast.Ident{
 				name: expr.name
 			})) or { return none }
+		}
+		ast.Conditional {
+			// Both arms are converted to the type the conditional is worth
+			// before they meet, so the width is that type's and not the width
+			// of whichever arm the tree happens to hold first.
+			e.converted_width(expr.typ)
 		}
 	}
 }
@@ -5532,6 +5602,7 @@ fn expr_line(expr ast.Expr) int {
 		ast.Index { expr.line }
 		ast.Field { expr.line }
 		ast.IncDec { expr.line }
+		ast.Conditional { expr.line }
 	}
 }
 
@@ -5548,6 +5619,7 @@ fn expr_col(expr ast.Expr) int {
 		ast.Index { expr.col }
 		ast.Field { expr.col }
 		ast.IncDec { expr.col }
+		ast.Conditional { expr.col }
 	}
 }
 

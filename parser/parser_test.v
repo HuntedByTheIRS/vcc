@@ -1397,3 +1397,91 @@ fn test_an_increment_of_an_undeclared_name_is_reported_as_a_missing_declaration(
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('missing is used here and nothing in this file declares it')
 }
+
+// A conditional carries the type its two arms share and not either arm's own.
+// Two int arms are an int, and an int arm beside a double one is a double,
+// which is the answer `sizeof` reads and what makes `sizeof(1 ? 1 : 1.0)` eight.
+fn test_a_conditional_carries_the_type_its_two_arms_share() {
+	ints := parsed('int main(void) { int x = 1 ? 2 : 3; return 0; }')
+	assert ints.diagnostics.len == 0
+	init := ints.unit.decls[0].body[0].init or {
+		assert false
+		return
+	}
+	conditional := init as ast.Conditional
+	assert conditional.typ.kind == types.Kind.int_
+	mixed := parsed('int main(void) { return sizeof(1 ? 1 : 1.0); }')
+	assert mixed.diagnostics.len == 0
+	size := mixed.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (size as ast.IntLit).value == 8
+}
+
+// The middle operand is the whole expression before the `:` and the third is a
+// conditional expression, which is what makes the operator right-associative:
+// `a ? b : c ? d : e` is `a ? b : (c ? d : e)` and not `(a ? b : c) ? d : e`.
+fn test_a_conditional_is_right_associative() {
+	result := parsed('int f(int a, int b, int c, int d, int e) { return a ? b : c ? d : e; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	outer := expr as ast.Conditional
+	assert outer.then_expr is ast.Ident
+	assert outer.else_expr is ast.Conditional
+	inner := outer.else_expr as ast.Conditional
+	assert (inner.cond as ast.Ident).name == 'c'
+}
+
+// The conditional binds looser than every binary operator, so it is read after
+// the precedence climbing has taken them: `a || b ? c : d` selects on `a || b`.
+fn test_a_conditional_binds_looser_than_the_binary_operators() {
+	result := parsed('int f(int a, int b, int c, int d) { return a || b ? c : d; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	conditional := expr as ast.Conditional
+	assert conditional.cond is ast.Binary
+	assert (conditional.cond as ast.Binary).op == '||'
+	assert (conditional.then_expr as ast.Ident).name == 'c'
+	assert (conditional.else_expr as ast.Ident).name == 'd'
+}
+
+// The GNU spelling with the middle operand left out is refused by name: the
+// extension repeats the condition, and reading the tokens that way would be a
+// value the standard does not give them.
+fn test_the_omitted_middle_operand_is_refused_by_name() {
+	result := parsed('int main(void) { int a = 1; return a ?: 2; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('GNU extension')
+	assert result.diagnostics[0].msg.contains('not C99')
+}
+
+// Two pointers to compatibly qualified versions of one type give a pointer to
+// the composite type: a `const char *` arm beside a `char *` one is a
+// `const char *`, which is the shape `p != NULL ? p : "text"` has.
+fn test_a_conditional_between_two_qualified_pointers_keeps_the_qualifier() {
+	result := parsed('int main(void) { const char *c = "x"; const char *p = c ? c : "y"; return 0; }')
+	assert result.diagnostics.len == 0
+}
+
+// A chain of conditionals nests through its operands, so a long one is counted
+// against the same limit as parenthesised nesting and refused with a
+// diagnostic. Before the count was added, a chain of ten thousand `?:` - each
+// third operand another conditional - segfaulted the reader on a stack it had
+// run out of, which is a crash and not a refusal.
+fn test_a_long_chain_of_conditionals_is_refused_rather_than_run_out_of_stack() {
+	mut source := 'int main(void) { return 1'
+	for _ in 0 .. 10000 {
+		source += ' ? 1 : 1'
+	}
+	source += '; }'
+	result := parsed(source)
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('nested more than')
+}
