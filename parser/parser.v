@@ -1215,7 +1215,13 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 			return error('no size for the type')
 		}
 	} else {
-		operand := p.parse_unary()!
+		// The operand is a unary expression and not a full one: `sizeof x + 1`
+		// is one plus the size of x, so it binds where a prefix operator does.
+		// It is read through parse_prefix_operand, the same reader the prefix
+		// operators use, so a chain of `sizeof` raises the nesting count once
+		// per link: measured on an 8 MB stack, `sizeof sizeof ... x` nested
+		// twenty thousand deep took signal 11 before this.
+		operand := p.parse_prefix_operand(at)!
 		spelling = describe_operand(operand)
 		if p.is_unresolved(operand) {
 			// The operand was refused where it was written, and its type is
