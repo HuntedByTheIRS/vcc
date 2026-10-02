@@ -184,3 +184,47 @@ fn test_linkage_comes_from_the_storage_class_and_the_scope() {
 	assert linkage_for(.extern_, false, outside) == .internal
 	assert linkage_for(.extern_, true, outside) == .external
 }
+
+fn test_an_enumeration_constant_is_found_with_its_value() {
+	mut table := new_table()
+	assert table.lookup_constant('N') == none
+	table.declare_constant('N', 4)
+	value := table.lookup_constant('N') or {
+		assert false
+		return
+	}
+	assert value == 4
+	assert table.lookup_constant('M') == none
+}
+
+// A constant whose value is zero is a constant like any other: the name being
+// present is the question, not whether the number is true.
+fn test_a_constant_of_zero_is_still_found() {
+	mut table := new_table()
+	table.declare_constant('ZERO', 0)
+	value := table.lookup_constant('ZERO') or {
+		assert false
+		return
+	}
+	assert value == 0
+}
+
+// An inner enum hides an outer constant and gives it back when its block ends,
+// which is the same rule the symbols follow.
+fn test_an_inner_constant_shadows_an_outer_one_and_does_not_outlive_it() {
+	mut table := new_table()
+	table.declare_constant('N', 1)
+	table.enter()
+	table.declare_constant('N', 2)
+	inner := table.lookup_constant('N') or {
+		assert false
+		return
+	}
+	assert inner == 2
+	table.leave()
+	outer := table.lookup_constant('N') or {
+		assert false
+		return
+	}
+	assert outer == 1
+}

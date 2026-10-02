@@ -1,6 +1,7 @@
 module parser
 
 import ast
+import math
 import tokenize
 import types
 
@@ -24,6 +25,31 @@ fn builtin_value(source string) i64 {
 		return 0
 	}
 	return (expr as ast.IntLit).value
+}
+
+// builtin_nth_value is builtin_value for a body whose answer is not the first
+// statement, which is what a test that declares an object before asking about it
+// needs.
+fn builtin_nth_value(source string, index int) i64 {
+	result := builtin_read(source)
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[index].expr or {
+		assert false
+		return 0
+	}
+	return (expr as ast.IntLit).value
+}
+
+// builtin_float is the floating constant a builtin put in an initializer, which
+// is where the width it answered with can be read off the node.
+fn builtin_float(source string) ast.FloatLit {
+	result := builtin_read(source)
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].init or {
+		assert false
+		return ast.FloatLit{}
+	}
+	return expr as ast.FloatLit
 }
 
 // __builtin_types_compatible_p answers 1 for one type written twice and 0 for
@@ -221,4 +247,110 @@ fn test_a_deep_chain_of_choose_expr_is_refused_rather_than_followed() {
 	result := builtin_read('int main(void) { return ' + chain + '; }')
 	assert result.diagnostics.len >= 1
 	assert result.diagnostics[0].msg.contains('nested more than')
+}
+
+// The infinities and NaNs a math header builds HUGE_VAL, INFINITY and NAN from.
+// Each carries the width its spelling names, because the header asks the type
+// through __typeof: `isinf(HUGE_VALL)` only answers if __builtin_huge_vall() is
+// a long double. Measured on gcc 16.2.1, the value compares as infinite and the
+// width follows the last letter of the name.
+fn test_the_infinity_builtins_carry_their_width() {
+	double_inf := builtin_float('int main(void) { double d = __builtin_huge_val(); return 0; }')
+	assert double_inf.typ.same(types.double_type())
+	assert math.is_inf(double_inf.value, 1)
+	float_inf := builtin_float('int main(void) { float f = __builtin_huge_valf(); return 0; }')
+	assert float_inf.typ.same(types.float_type())
+	assert math.is_inf(float_inf.value, 1)
+	other := builtin_float('int main(void) { double d = __builtin_inf(); return 0; }')
+	assert other.typ.same(types.double_type())
+	assert math.is_inf(other.value, 1)
+	// A long double object cannot be declared yet - the reader has no size for
+	// the type - so the width of __builtin_huge_vall is asked through __typeof,
+	// which is the question the header itself asks it.
+	wide := builtin_value('int main(void) { return __builtin_types_compatible_p(__typeof(__builtin_huge_vall()), long double); }')
+	assert wide == 1
+}
+
+// A NaN is not equal to itself, which is the one property that tells it from
+// every other value; the payload the call is written with does not change that.
+fn test_the_nan_builtins_answer_a_nan_of_their_width() {
+	float_nan := builtin_float('int main(void) { float f = __builtin_nanf(""); return 0; }')
+	assert float_nan.typ.same(types.float_type())
+	assert math.is_nan(float_nan.value)
+	double_nan := builtin_float('int main(void) { double d = __builtin_nan(""); return 0; }')
+	assert double_nan.typ.same(types.double_type())
+	assert math.is_nan(double_nan.value)
+}
+
+// __builtin_classify_type answers a number for the type of its operand. The
+// numbers are gcc 16.2.1's, measured one per kind: every integer type answers 1,
+// float and double 8, a pointer 5, a struct 12 and a union 13. A null pointer
+// constant is an int and so answers 1, which is what makes the question "is this
+// a pointer" two questions rather than one.
+fn test_classify_type_answers_gccs_numbers() {
+	assert builtin_value('int main(void) { return __builtin_classify_type(42); }') == 1
+	assert builtin_value('int main(void) { return __builtin_classify_type(0); }') == 1
+	assert builtin_value('int main(void) { return __builtin_classify_type(1.5); }') == 8
+	assert builtin_value('int main(void) { return __builtin_classify_type((float)0); }') == 8
+	assert builtin_value('int main(void) { return __builtin_classify_type((void*)0); }') == 5
+	assert builtin_value('int main(void) { return __builtin_classify_type("x"); }') == 5
+}
+
+fn test_classify_type_counts_an_aggregate() {
+	structure := 'struct S { int a; };\nint main(void) { struct S s; return __builtin_classify_type(s); }'
+	assert builtin_nth_value(structure, 1) == 12
+	unionish := 'union U { int a; };\nint main(void) { union U u; return __builtin_classify_type(u); }'
+	assert builtin_nth_value(unionish, 1) == 13
+}
+
+// gcc has no number for a void operand and refuses one, so this reader refuses
+// it by name too rather than answering a number nothing computed.
+fn test_classify_type_refuses_a_type_gcc_has_no_number_for() {
+	result := builtin_read('int main(void) { return __builtin_classify_type((void)0); }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('__builtin_classify_type')
+}
+
+// __builtin_signbit is not `x < 0`: -0.0 compares equal to zero and still has its
+// sign bit set. Measured on gcc 16.2.1, __builtin_signbit(-0.0) is 1 and
+// __builtin_signbit(0.0) is 0, and a constant is folded here by the sign bit so
+// the two cannot be confused.
+fn test_signbit_folds_the_sign_of_a_constant() {
+	assert builtin_value('int main(void) { return __builtin_signbit(-0.0); }') == 1
+	assert builtin_value('int main(void) { return __builtin_signbit(0.0); }') == 0
+	assert builtin_value('int main(void) { return __builtin_signbit(-1.0); }') == 1
+	assert builtin_value('int main(void) { return __builtin_signbit(1.0); }') == 0
+}
+
+// A value that is not constant is classified at run time, so the answer is an
+// expression and not a constant: the tree is the comparison glibc's own fallback
+// writes.
+fn test_signbit_of_a_value_is_an_expression() {
+	result := builtin_read('int main(void) { double x = 1.0; return __builtin_signbit(x); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Binary
+}
+
+// __builtin_isinf_sign is 1 at positive infinity, -1 at negative infinity and 0
+// anywhere else, and a NaN answers 0 because it is equal to neither infinity.
+fn test_isinf_sign_answers_for_the_two_infinities() {
+	assert builtin_value('int main(void) { return __builtin_isinf_sign(__builtin_huge_val()); }') == 1
+	assert builtin_value('int main(void) { return __builtin_isinf_sign(-__builtin_huge_val()); }') == -1
+	assert builtin_value('int main(void) { return __builtin_isinf_sign(-__builtin_huge_vall()); }') == -1
+	assert builtin_value('int main(void) { return __builtin_isinf_sign(1.0); }') == 0
+	assert builtin_value('int main(void) { return __builtin_isinf_sign(__builtin_nan("")); }') == 0
+}
+
+fn test_isinf_sign_of_a_value_is_an_expression() {
+	result := builtin_read('int main(void) { double x = 1.0; return __builtin_isinf_sign(x); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Conditional
 }

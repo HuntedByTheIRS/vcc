@@ -54,6 +54,56 @@ fn builtins(target backend.Target) []Definition {
 		definitions << Definition{'__INT_MAX__', [], '0x7fffffff'}
 		definitions << Definition{'__LONG_MAX__', [], '0x7fffffffffffffffL'}
 		definitions << Definition{'__LONG_LONG_MAX__', [], '0x7fffffffffffffffLL'}
+		definitions << Definition{'__SCHAR_MAX__', [], '0x7f'}
+		definitions << Definition{'__SHRT_MAX__', [], '0x7fff'}
+		definitions << Definition{'__WCHAR_MAX__', [], '0x7fffffff'}
+		definitions << Definition{'__WCHAR_MIN__', [], '(-__WCHAR_MAX__ - 1)'}
+		definitions << Definition{'__WINT_MAX__', [], '0xffffffffU'}
+		definitions << Definition{'__WINT_MIN__', [], '0U'}
+		// The floating-point model. <float.h> defines FLT_RADIX, DBL_MAX
+		// and the rest of its names from these, so a header that branches
+		// on one is asking about the machine. The numbers are what gcc
+		// 16.2.1 prints for this target with `gcc -std=gnu99 -dM -E -x c
+		// /dev/null`, and the floating-point literals between them are the
+		// shortest decimal spellings that convert to gcc's value on the
+		// way this compiler reads a constant: the full-width spelling gcc
+		// writes for some of them rounds differently here, and a macro
+		// whose value is wrong is worse than one that is missing.
+		//
+		// The long-double-valued ones carry gcc's own spelling, with the
+		// `L` suffix: the reader has no long double arithmetic yet, so a
+		// use of one is refused where it is written rather than answered
+		// with a value this compiler did not compute.
+		definitions << Definition{'__FLT_RADIX__', [], '2'}
+		definitions << Definition{'__FLT_MANT_DIG__', [], '24'}
+		definitions << Definition{'__FLT_DIG__', [], '6'}
+		definitions << Definition{'__FLT_MIN_EXP__', [], '(-125)'}
+		definitions << Definition{'__FLT_MIN_10_EXP__', [], '(-37)'}
+		definitions << Definition{'__FLT_MAX_EXP__', [], '128'}
+		definitions << Definition{'__FLT_MAX_10_EXP__', [], '38'}
+		definitions << Definition{'__FLT_MAX__', [], '3.40282346638528859811704183484516925e+38F'}
+		definitions << Definition{'__FLT_EPSILON__', [], '1.19209289550781250000000000000000000e-7F'}
+		definitions << Definition{'__FLT_MIN__', [], '1.17549435082228750796873653722224568e-38F'}
+		definitions << Definition{'__FLT_EVAL_METHOD__', [], '0'}
+		definitions << Definition{'__DBL_MANT_DIG__', [], '53'}
+		definitions << Definition{'__DBL_DIG__', [], '15'}
+		definitions << Definition{'__DBL_MIN_EXP__', [], '(-1021)'}
+		definitions << Definition{'__DBL_MIN_10_EXP__', [], '(-307)'}
+		definitions << Definition{'__DBL_MAX_EXP__', [], '1024'}
+		definitions << Definition{'__DBL_MAX_10_EXP__', [], '308'}
+		definitions << Definition{'__DBL_MAX__', [], '1.79769313486231570814527423731704357e+308'}
+		definitions << Definition{'__DBL_EPSILON__', [], '2.22044604925031308084726333618164062e-16'}
+		definitions << Definition{'__DBL_MIN__', [], '2.2250738585072014e-308'}
+		definitions << Definition{'__LDBL_MANT_DIG__', [], '64'}
+		definitions << Definition{'__LDBL_DIG__', [], '18'}
+		definitions << Definition{'__LDBL_MIN_EXP__', [], '(-16381)'}
+		definitions << Definition{'__LDBL_MIN_10_EXP__', [], '(-4931)'}
+		definitions << Definition{'__LDBL_MAX_EXP__', [], '16384'}
+		definitions << Definition{'__LDBL_MAX_10_EXP__', [], '4932'}
+		definitions << Definition{'__LDBL_MAX__', [], '1.18973149535723176502126385303097021e+4932L'}
+		definitions << Definition{'__LDBL_EPSILON__', [], '1.08420217248550443400745280086994171e-19L'}
+		definitions << Definition{'__LDBL_MIN__', [], '3.36210314311209350626267781732175260e-4932L'}
+		definitions << Definition{'__DECIMAL_DIG__', [], '21'}
 	}
 	if target.os == 'linux' {
 		definitions << Definition{'__linux__', [], '1'}

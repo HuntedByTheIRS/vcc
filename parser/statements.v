@@ -997,6 +997,15 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		return stmts
 	}
 	if p.at_punct(';') {
+		if spec.tag_decl {
+			// A tag with no declarator, as in `struct S { int a; };` or
+			// `enum { A, B };` inside a body. 6.7 makes the declarator list
+			// optional, so the declaration writes a type and, for an enum, the
+			// values of its names, and declares no object: there is no
+			// statement here and nothing to report.
+			p.next()
+			return stmts
+		}
 		p.error_at(p.peek(), 'unsupported: expected a declarator, found ${describe(p.peek())}')
 		p.next()
 		return stmts

@@ -1939,9 +1939,10 @@ fn (mut p Parser) parse_tag_specifier(keyword tokenize.Token, depth int) !TagTyp
 	}
 	open := p.next()
 	if keyword.text == 'enum' {
-		// An enumerator list is names and constant expressions, and nothing in
-		// it is a declaration, so it is scanned as one bracketed region.
-		p.skip_balanced(open)!
+		// An enumerator list declares names and gives them values: each name is
+		// an integer constant, so reading it is what lets a use of it be the
+		// number the enum gave it rather than a name nothing declares.
+		p.parse_enumerator_list(open)!
 		clause := types.enum_type(tag)
 		p.scopes.declare_tag(spelling, clause)
 		return TagType{
@@ -1968,6 +1969,72 @@ fn tag_kind(keyword string) types.Kind {
 		'union' { types.Kind.union_ }
 		'enum' { types.Kind.enum_ }
 		else { types.Kind.struct_ }
+	}
+}
+
+// parse_enumerator_list reads the body of an enum: names, each optionally given a
+// value by a constant expression, separated by commas, with the closing brace
+// ending the list. The trailing comma C99 allows is read like any other.
+//
+// Every enumerator is declared where it is read, and its value is recorded with
+// it: 6.7.2.2 makes an enumeration constant an int, and a use of one is the number
+// the enum gave it rather than a read of storage that does not exist. An
+// enumerator written with no `=` is the one before it plus one, and the first is
+// zero, which is what `enum { A, B, C };` means and how a header counts a list it
+// cannot count itself.
+//
+// The value is folded with the reader's own integer constant expression
+// evaluator, the one an array bound goes through. An expression it cannot compute
+// is refused by name rather than guessed at: values like glibc's `_ISalpha` are
+// computed from `>>>` and `?:` in the enumerator list, and an enum is how a header
+// builds the masks a program compares against, so a number that is wrong is a
+// program that is wrong in silence.
+fn (mut p Parser) parse_enumerator_list(open tokenize.Token) ! {
+	mut next := i64(0)
+	for {
+		t := p.peek()
+		if t.kind == .eof {
+			p.error_at(open, 'unsupported: unterminated enum body, opened at ${open.line}:${open.col}')
+			return error('unterminated enum body')
+		}
+		if t.kind == .directive {
+			p.next()
+			continue
+		}
+		if t.kind == .punct && t.text == '}' {
+			p.next()
+			return
+		}
+		if t.kind != .identifier {
+			p.error_at(t, 'unsupported: an enumerator is a name, found ${describe(t)}')
+			return error('an enumerator name')
+		}
+		name := p.next()
+		mut value := next
+		if p.at_punct('=') {
+			p.next()
+			expression := p.parse_expression()!
+			value = p.constant_value(expression) or {
+				p.error_at(name, 'unsupported: the value of ${name.text} is not an integer constant expression this compiler can compute')
+				return error('an enumerator value')
+			}
+		}
+		// An enumeration constant is not an object, so nothing is declared that
+		// could be written to: only the number is recorded, and the name is
+		// marked declared for the check at the end of the unit.
+		p.scopes.declare_constant(name.text, value)
+		p.declared[name.text] = true
+		next = value + 1
+		if p.at_punct(',') {
+			p.next()
+			continue
+		}
+		if p.at_punct('}') {
+			p.next()
+			return
+		}
+		p.error_at(p.peek(), 'unsupported: expected , or } in an enumerator list, found ${describe(p.peek())}')
+		return error('an enumerator separator')
 	}
 }
 
