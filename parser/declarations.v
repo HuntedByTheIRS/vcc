@@ -361,6 +361,22 @@ fn (d Declarator) array_at() tokenize.Token {
 	return d.steps.last().at
 }
 
+// array_bound_is_unreadable says a bound the declarator wrote in its brackets is
+// not an integer constant expression this reader evaluated. It is the question a
+// reader asks where storage has to be sized while the file is read, which is the
+// top level: a file-scope object's size is a fact the image carries, and a bound
+// that is not constant is a constraint violation there (6.6). A struct member and
+// a parameter ask it of no one here, because this reader does not size their
+// storage: the same suffix is read for all three.
+fn (d Declarator) array_bound_is_unreadable() bool {
+	for step in d.steps {
+		if step.kind == .array_step && step.count == unreadable_bound {
+			return true
+		}
+	}
+	return false
+}
+
 // array_dims counts the array steps, which is how many sizes the declarator
 // wrote for one name.
 fn (d Declarator) array_dims() int {
@@ -706,6 +722,19 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				}
 			}
 		} else {
+			// An object at the top level is storage the image lays out, so its
+			// size has to be a fact by the time this file is read. A bound that
+			// is not an integer constant expression leaves the object without
+			// one, which 6.6 makes a constraint violation. Measured on gcc 16.2.1
+			// under `-std=c99`, `int a[1/0];` and `int n = 3;\nint a[n];` are both
+			// `variably modified 'a' at file scope` and exit 1. The check is here
+			// and not in the suffix reader because the same suffix is read for a
+			// struct member, whose bound may be one this compiler cannot fold.
+			if !spec.is_typedef && d.is_array() && d.array_bound_is_unreadable() {
+				p.error_at(d.array_at(), 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
+				p.skip_declaration()
+				return decls
+			}
 			if !data_seen {
 				data_seen = true
 				data_name = d.name

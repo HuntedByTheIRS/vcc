@@ -602,3 +602,31 @@ fn test_a_written_array_bound_is_evaluated_as_a_constant_expression() {
 	assert body.diagnostics.len == 0
 	assert body.unit.decls[0].body[0].decl_count == 8
 }
+
+// A bound that is not an integer constant expression leaves an object at the top
+// level without a size the image can carry, which 6.6 makes a constraint
+// violation. Measured on gcc 16.2.1 under `-std=c99`, `int a[1/0];` and
+// `int n = 3; int a[n];` are both `variably modified 'a' at file scope` and exit
+// 1. A body's bound that is not constant is a different thing and is left to the
+// body's own reader: this compiler does not implement a variable-length array and
+// refuses it there by name.
+fn test_a_non_constant_bound_at_file_scope_is_a_constraint_violation() {
+	divided := declarations_of('int a[1/0];')
+	assert divided.diagnostics.len == 1
+	assert divided.diagnostics[0].msg.contains('a constraint violation')
+	assert divided.diagnostics[0].msg.contains('is not an integer constant expression')
+	assert divided.unit.globals.len == 0
+	named := declarations_of('int n = 3;\nint a[n];')
+	assert named.diagnostics.len == 1
+	assert named.diagnostics[0].msg.contains('a constraint violation')
+	assert named.unit.globals.len == 1
+	// A dimension inside a written one is the same object and the same refusal.
+	inner := declarations_of('int n = 3;\nint a[3][n];')
+	assert inner.diagnostics.len == 1
+	assert inner.diagnostics[0].msg.contains('a constraint violation')
+	// A body's copy of the named bound stays the variable-length array this
+	// compiler refuses by name rather than the constraint violation.
+	body := declarations_of('int main(void) { int n = 3; int a[n]; return 0; }')
+	assert body.diagnostics.len == 1
+	assert body.diagnostics[0].msg.contains('an array declaration in a body needs a size')
+}
