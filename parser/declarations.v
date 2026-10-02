@@ -292,6 +292,14 @@ struct DeclStep {
 	count int
 	// at is where the step was written.
 	at tokenize.Token
+	// bound_name, with its line and column, is the first name a written bound
+	// carried that the scope at that point did not have, when there was one. It is
+	// what tells a bound that is not a constant expression from a bound whose
+	// operand is a name nothing declares, which the file-scope report needs to
+	// name the right failure.
+	bound_name      string
+	bound_name_line int
+	bound_name_col  int
 	// params, variadic and prototyped are a function step's parameter list.
 	params     []ast.Param
 	variadic   bool
@@ -375,6 +383,24 @@ fn (d Declarator) array_bound_is_unreadable() bool {
 		}
 	}
 	return false
+}
+
+// array_bound_ident is the name a written bound carried that the scope at that
+// point did not have, when there was one. It is what distinguishes a bound that is
+// not an integer constant expression from a bound whose operand is declared
+// nowhere: the first is the object's problem, the second is the name's, and the
+// report says which.
+fn (d Declarator) array_bound_ident() ?ast.Ident {
+	for step in d.steps {
+		if step.kind == .array_step && step.count == unreadable_bound && step.bound_name.len > 0 {
+			return ast.Ident{
+				name: step.bound_name
+				line: step.bound_name_line
+				col:  step.bound_name_col
+			}
+		}
+	}
+	return none
 }
 
 // array_dims counts the array steps, which is how many sizes the declarator
@@ -731,7 +757,25 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// and not in the suffix reader because the same suffix is read for a
 			// struct member, whose bound may be one this compiler cannot fold.
 			if !spec.is_typedef && d.is_array() && d.array_bound_is_unreadable() {
-				p.error_at(d.array_at(), 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
+				if ident := d.array_bound_ident() {
+					// The bound named something the scope did not have. Whether
+					// the file declares that name anywhere is a question only the
+					// end of the file answers, so the report waits: `int x[n];
+					// int n = 4;` names a variable declared later and its bound is
+					// not a constant expression, while `enum { N = 4 }; int x[N];`
+					// names nothing at all, and calling the second non-constant
+					// would name a cause the compiler cannot show.
+					p.pending_bounds << PendingBound{
+						object:    d.name
+						name:      ident.name
+						name_line: ident.line
+						name_col:  ident.col
+						at_line:   d.array_at().line
+						at_col:    d.array_at().col
+					}
+				} else {
+					p.error_at(d.array_at(), 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
+				}
 				p.skip_declaration()
 				return decls
 			}
@@ -1882,9 +1926,12 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 			at := p.peek()
 			count := p.parse_array_suffix()!
 			steps.prepend(DeclStep{
-				kind:  .array_step
-				count: int(count)
-				at:    at
+				kind:            .array_step
+				count:           int(count)
+				at:              at
+				bound_name:      p.bound_name
+				bound_name_line: p.bound_name_line
+				bound_name_col:  p.bound_name_col
 			})
 			continue
 		}
@@ -2280,6 +2327,9 @@ const unreadable_bound = -1
 // the suffix still ends where it says it ends.
 fn (mut p Parser) parse_array_suffix() !i64 {
 	open := p.next() // [
+	p.bound_name = ''
+	p.bound_name_line = 0
+	p.bound_name_col = 0
 	if p.at_punct(']') {
 		p.next()
 		return 0
@@ -2303,7 +2353,21 @@ fn (mut p Parser) parse_array_suffix() !i64 {
 	if expr := read {
 		if p.at_punct(']') {
 			p.next()
-			value := p.constant_value(expr) or { return unreadable_bound }
+			value := p.constant_value(expr) or {
+				// A bound that did not fold may name something this scope does not
+				// have. That name is kept so the file-scope report can tell a
+				// bound that is not a constant expression from one whose operand
+				// is declared nowhere, which is a different failure and a
+				// different message. Whether the name is declared anywhere is a
+				// question only the end of the file can answer, so the report
+				// waits; see `pending_bounds`.
+				if ident := p.unresolved_name(expr) {
+					p.bound_name = ident.name
+					p.bound_name_line = ident.line
+					p.bound_name_col = ident.col
+				}
+				return unreadable_bound
+			}
 			if value > 0 {
 				return value
 			}

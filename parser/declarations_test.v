@@ -769,3 +769,27 @@ fn test_a_floating_constant_as_the_immediate_operand_of_a_cast_is_a_bound() {
 	assert target.diagnostics.len == 1
 	assert target.diagnostics[0].msg.contains('is not an integer constant expression')
 }
+
+// A file-scope bound that names something the file declares nowhere is that
+// name's failure and not the object's. This reader does not declare enumeration
+// constants, so `enum { N = 4 }; int x[N];` fails because N has no declaration;
+// reporting the bound as not an integer constant expression would name a cause
+// the compiler cannot show, and a wrong cause is worse than a narrower message.
+// Whether the name is declared is asked once the whole file has been read, so a
+// name declared after the bound still gets the object's own report.
+fn test_a_bound_that_names_an_undeclared_name_is_reported_as_that_name() {
+	missing := declarations_of('enum { N = 4 };\nint x[N];')
+	assert missing.diagnostics.len == 1
+	assert missing.diagnostics[0].msg.contains('N is used here and nothing in this file declares it')
+	assert !missing.diagnostics[0].msg.contains('is not an integer constant expression')
+	assert missing.diagnostics[0].line == 2
+	// A name the file declares later is a bound that is not constant, and the
+	// report says that, because the question is asked with the whole file read.
+	later := declarations_of('int x[n];\nint n = 4;')
+	assert later.diagnostics.len == 1
+	assert later.diagnostics[0].msg.contains('is not an integer constant expression')
+	// A name the file already declares is the same report, and it is not held.
+	earlier := declarations_of('int n = 4;\nint x[n];')
+	assert earlier.diagnostics.len == 1
+	assert earlier.diagnostics[0].msg.contains('is not an integer constant expression')
+}

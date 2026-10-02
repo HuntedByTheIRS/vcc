@@ -15,6 +15,19 @@ pub:
 	diagnostics []tokenize.Diagnostic
 }
 
+// PendingBound is a file-scope array bound that named something this reader did
+// not resolve, with where the bound and the name were written. The report waits
+// until the whole file has been read, because whether a name is declared anywhere
+// is a question only the end of the file can answer.
+struct PendingBound {
+	object    string
+	name      string
+	name_line int
+	name_col  int
+	at_line   int
+	at_col    int
+}
+
 struct Parser {
 mut:
 	tokens      []tokenize.Token
@@ -54,6 +67,21 @@ mut:
 	// is a set of names rather than the scope table because that check is about
 	// the unit and not about which block a name was visible in.
 	declared map[string]bool
+	// pending_bounds is a file-scope array bound whose expression names something
+	// this reader did not resolve. Its report waits until the whole file has been
+	// read, because whether a name is declared anywhere is a question only the end
+	// of the file can answer: `int x[n]; int n = 4;` names a variable declared
+	// later, and the bound is not an integer constant expression, while
+	// `enum { N = 4 }; int x[N];` names nothing at all because this reader does
+	// not declare enumeration constants. Reporting the second as a bound that is
+	// not constant would name a cause the compiler cannot show.
+	pending_bounds []PendingBound
+	// bound_name is the first name a bound written in brackets carried that the
+	// scope at that point did not have, with where it was written. The suffix
+	// reader fills it for the declaration reader to keep on its step.
+	bound_name      string
+	bound_name_line int
+	bound_name_col  int
 	// file is the source the tokens being read came from, which the preprocessor
 	// fills in for every file it reads. A diagnostic raised inside an included
 	// file names that file: reporting a header's line number against the name of
@@ -120,6 +148,10 @@ pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 		declared:       map[string]bool{}
 	}
 	unit := p.parse_unit()
+	// A file-scope bound that named something the scope did not have is answered
+	// now, because the whole file has been read and whether the name is declared
+	// anywhere is a question only this point can answer.
+	p.report_pending_bounds()
 	// Every name the tree carries has to be a name this file declares. A name
 	// that is not is refused here, once the whole unit has been read, because
 	// whether a name is declared is a question only the end of the file can
@@ -267,6 +299,25 @@ fn (p Parser) with_declared_types(stmts []ast.Stmt) []ast.Stmt {
 		out << stmt
 	}
 	return out
+}
+
+// report_pending_bounds answers each file-scope bound that named something the
+// scope did not have, now that the whole file has been read. A name the file
+// declares somewhere leaves the object without an integer constant expression,
+// which is the constraint 6.6 makes for an object at file scope; a name the file
+// declares nowhere is that name's own failure and is reported as one, at the name.
+// The distinction matters because the two are different constructs: this reader
+// does not declare enumeration constants, so `enum { N = 4 }; int x[N];` fails
+// because N has no declaration, not because a declared N turned out not to be
+// constant.
+fn (mut p Parser) report_pending_bounds() {
+	for bound in p.pending_bounds {
+		if bound.name in p.declared {
+			p.error_span(bound.at_line, bound.at_col, 'a constraint violation: the bound of ${bound.object} is not an integer constant expression, and an object at file scope needs a size that is one')
+			continue
+		}
+		p.error_span(bound.name_line, bound.name_col, 'unsupported: ${bound.name} is used here and nothing in this file declares it')
+	}
 }
 
 // report_undeclared refuses every name the tree carries that nothing in the unit
@@ -870,6 +921,59 @@ fn (p Parser) is_unresolved(expr ast.Expr) bool {
 		return true
 	}
 	return false
+}
+
+// unresolved_name is the first name an expression carries that the scope at this
+// point does not have, or none. It is asked of a bound that did not fold: a name
+// the file declares nowhere is a different failure from an expression that is not
+// an integer constant expression, and a report that names the wrong one is a
+// message about a construct the compiler never saw.
+//
+// Which names the scope has is what is asked here, not which names the file has:
+// `int x[n]; int n = 4;` has no n at this point, and the caller that wants the
+// file's answer waits until the end of the file to ask it.
+fn (p Parser) unresolved_name(expr ast.Expr) ?ast.Ident {
+	match expr {
+		ast.Ident {
+			if is_keyword(expr.name) {
+				return none
+			}
+			if _ := p.scopes.lookup(expr.name) {
+				return none
+			}
+			return expr
+		}
+		ast.Unary {
+			return p.unresolved_name(expr.expr)
+		}
+		ast.Cast {
+			return p.unresolved_name(expr.expr)
+		}
+		ast.Binary {
+			if found := p.unresolved_name(expr.left) {
+				return found
+			}
+			return p.unresolved_name(expr.right)
+		}
+		ast.Conditional {
+			if found := p.unresolved_name(expr.cond) {
+				return found
+			}
+			if found := p.unresolved_name(expr.then_expr) {
+				return found
+			}
+			return p.unresolved_name(expr.else_expr)
+		}
+		ast.Index {
+			if found := p.unresolved_name(expr.base) {
+				return found
+			}
+			return p.unresolved_name(expr.index)
+		}
+		else {
+			return none
+		}
+	}
 }
 
 fn (mut p Parser) parse_unary() !ast.Expr {
