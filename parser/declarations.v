@@ -678,6 +678,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						ret_type: p.return_type(spec.clause, d)
 						resolved: p.declared_type(spec.clause, d)
 						params:   d.function_params()
+						defined:  true
 						body:     statements
 						line:     d.name_at.line
 						col:      d.name_at.col
