@@ -6972,6 +6972,23 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		offset := e.program.globals_blob.len
 		space := if object.count > 0 { object.count * object.bytes } else { object.bytes }
 		e.program.globals_blob << []u8{len: space, init: u8(0)}
+		// A union initialized in braces holds that value in its first member,
+		// which sits at the beginning of the object: the constant is written
+		// there at the member's width and the rest of the union stays zero.
+		if object.resolved.kind == .union_ && object.resolved.members.len > 0 {
+			first := object.resolved.members[0]
+			member_width := e.type_width(first.typ.describe()) or { object.bytes }
+			if value := object.init_float {
+				if first.typ.kind == .float {
+					put_single(mut e.program.globals_blob, offset, value)
+				} else {
+					put_double(mut e.program.globals_blob, offset, value, member_width)
+				}
+			}
+			if value := object.init {
+				put_integer(mut e.program.globals_blob, offset, value, member_width)
+			}
+		}
 		slot := image.GlobalSlot{
 			offset:   offset
 			width:    object.bytes

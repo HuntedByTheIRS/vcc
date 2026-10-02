@@ -643,6 +643,11 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// size of an array with empty brackets comes from the list.
 	mut data_array := false
 	mut data_brace := false
+	// data_union_first says the brace initializer is a union's, which
+	// initializes the union's first member rather than writing the whole object:
+	// the constant is written at the beginning of the storage, and the rest
+	// stays the zeros the object starts as.
+	mut data_union_first := false
 	// data_problem says a brace initializer was read and refused for its size,
 	// which is a declaration the image does not lay out: the program is already
 	// refused, and storage for an object whose initializer is wrong is storage
@@ -762,10 +767,35 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					data_brace = true
 					if list := p.parse_brace_initializer() {
 						if !data_array {
-							// An object of an aggregate type is refused below
-							// by name, so the scalar question is not asked of
-							// it here: one declaration, one diagnostic.
-							if spec.clause.kind !in [types.Kind.struct_, .union_] {
+							// An object of a struct type is refused below by
+							// name, so the scalar question is not asked of it
+							// here: one declaration, one diagnostic. A union
+							// takes one value for its first member.
+							if spec.clause.kind == .union_ {
+								// 6.7.8: a union's initializer initializes its
+								// first member, which sits at the beginning of
+								// the object. A first member that is itself an
+								// aggregate takes a list of its own, and a list of
+								// more than one value has no room in one object.
+								if list.values.len > 1 {
+									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.values.len}')
+									data_problem = true
+								} else if spec.clause.members.len == 0 {
+									p.error_at(list.at, 'unsupported: ${spec.clause.describe()} has no first member to initialize')
+									data_problem = true
+								} else {
+									first := spec.clause.members[0]
+									if first.typ.kind in [types.Kind.struct_, .union_, .array] {
+										p.error_at(list.at, 'unsupported: the first member of ${spec.clause.describe()} is an object of the type ${first.typ.describe()}, and a brace initializer for one is not implemented')
+										data_problem = true
+									} else {
+										element := list.values[0]
+										data_init, data_init_float = initializer_for(first.typ.describe(), element.number.integer,
+											element.number.floating)
+										data_union_first = true
+									}
+								}
+							} else if spec.clause.kind != .struct_ {
 								// One scalar in braces; a list of more
 								// values has no room in one object
 								// (6.7.8p2, measured on gcc 16.2.1:
@@ -846,22 +876,28 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if spec.clause.kind in [types.Kind.struct_, .union_] {
-			if data_brace {
-				// A brace initializer for an object of an aggregate type is a
-				// list of lists: a member may itself be an aggregate, and the
+			if data_problem {
+				// The list was refused for its size and has already been
+				// named: there is nothing to lay out.
+				return decls
+			}
+			if data_brace && !data_union_first {
+				// A brace initializer for an object of a struct type is a list
+				// of lists: a member may itself be an aggregate, and the
 				// designators and the nesting are not shapes this reader has.
-				// Measured before this was refused, a file-scope
-				// `struct S s = {5, 6};` laid the object out as zeros and the
-				// program read 0 where gcc 16.2.1 reads 56.
+				// A union's one value initializes its first member and is
+				// written into the image below. Measured before this was
+				// refused, a file-scope `struct S s = {5, 6};` laid the object
+				// out as zeros and the program read 0 where gcc 16.2.1 reads 56.
 				p.error_at(data_at, 'unsupported: ${data_name} is an object of the type ${spec.clause.describe()}, and a brace initializer for one is not implemented')
 				return decls
 			}
 			// An object of an aggregate type at the top level is storage in the
 			// image, and how much of it is a fact about the layout: the model
 			// answers the size once, here, and the image writer reserves that
-			// many zeroed bytes. Nothing in it is initialized by the
-			// definition, because an object with no initializer is the zeros
-			// the storage starts as.
+			// many zeroed bytes. A union's first member is the one thing a
+			// definition writes into that storage; with no initializer it is
+			// the zeros the storage starts as.
 			bytes := p.aggregate_bytes(spec.clause)
 			if bytes == 0 {
 				p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${spec.clause.describe()}, and its layout is not one this compiler knows')
@@ -870,16 +906,19 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// An array of aggregates is that many bytes per element and as many
 			// elements as the declarator wrote: the size travels here and the count
 			// travels beside it, which is what the image reserves and what an index
-			// scales by.
+			// scales by. A union's one value is the constant its first member
+			// holds, written at the beginning of the storage.
 			p.declare_name(data_name, data_clause, data_at, true)
 			p.globals << ast.Global{
-				name:     data_name
-				typ:      data_type
-				resolved: spec.clause
-				count:    data_count
-				bytes:    bytes
-				line:     data_at.line
-				col:      data_at.col
+				name:       data_name
+				typ:        data_type
+				resolved:   spec.clause
+				count:      data_count
+				bytes:      bytes
+				init:       data_init
+				init_float: data_init_float
+				line:       data_at.line
+				col:        data_at.col
 			}
 			return decls
 		}

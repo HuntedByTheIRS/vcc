@@ -1044,12 +1044,17 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		mut brace := false
 		mut list_ok := false
 		mut elements := []ast.Expr{}
+		// union_first is the member a union's brace initializer writes. 6.7.8
+		// initializes the first member of a union, so that initializer is a store
+		// into that member at the point of the declaration rather than the copy of
+		// a whole object the other initializers make.
+		mut union_first := ?types.Member(none)
 		if p.at_punct('=') {
 			p.next()
 			if p.at_punct('{') {
 				brace = true
-				if d.pointer_count() == 0 && spec.clause.kind in [types.Kind.struct_, .union_] {
-					// A list for an object of an aggregate type is a list of
+				if d.pointer_count() == 0 && spec.clause.kind == .struct_ {
+					// A list for an object of a struct type is a list of
 					// lists: a member may itself be an aggregate, and the
 					// designators and the nesting are not shapes this reader
 					// has. Measured, gcc 16.2.1 refuses `struct S s = {5, 6};`
@@ -1070,6 +1075,24 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 							p.error_at(list.at, 'a constraint violation: ${d.name} holds one value and its initializer writes ${list.values.len}')
 						}
 						init = p.constant_expr(list.values[0])
+						if d.pointer_count() == 0 && spec.clause.kind == .union_ {
+							// The value initializes the union's first member,
+							// which sits at the beginning of the object. A first
+							// member that is itself an aggregate takes a list of
+							// its own, which is not a shape this reader has.
+							if spec.clause.members.len == 0 {
+								p.error_at(p.peek(), 'unsupported: ${spec.clause.describe()} has no first member to initialize')
+								p.skip_declaration()
+								return stmts
+							}
+							first := spec.clause.members[0]
+							if first.typ.kind in [types.Kind.struct_, .union_, .array] {
+								p.error_at(p.peek(), 'unsupported: the first member of ${spec.clause.describe()} is an object of the type ${first.typ.describe()}, and a brace initializer for one is not implemented')
+								p.skip_declaration()
+								return stmts
+							}
+							union_first = first
+						}
 					} else {
 						// A written size smaller than the list is the same
 						// violation (measured, `int a[2] = {1, 2, 3};` is
@@ -1092,8 +1115,11 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				// 6.7.8 lets an array of characters be initialized by a string
 				// literal, which is not an assignment and not this constraint's
 				// business: it is the one initializer that is not a value written
-				// into an object.
-				if !(declared.is_array() && initializer is ast.StrLit) {
+				// into an object. A union's initializer is a value for its first
+				// member, so it is checked against that member and not the union.
+				if first := union_first {
+					p.check_initializer(first.typ, initializer)
+				} else if !(declared.is_array() && initializer is ast.StrLit) {
 					p.check_initializer(declared, initializer)
 				}
 			}
@@ -1108,9 +1134,16 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			return stmts
 		}
 		count := if d.array_count() > 0 { d.array_count() } else { elements.len }
+		// A union's initializer is the store into its first member written
+		// below, not the value of the whole object, so the declaration itself
+		// starts as storage and carries no initializer.
+		mut decl_init := init
+		if union_first != none {
+			decl_init = ?ast.Expr(none)
+		}
 		stmts << ast.Stmt{
 			kind:       .var_decl
-			init:       init
+			init:       decl_init
 			decl_name:  d.name
 			decl_type:  p.spelling_of(spec, d.pointer_count())
 			decl_count: count
@@ -1124,6 +1157,31 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			bytes:      p.aggregate_bytes(declared)
 			line:       d.name_at.line
 			col:        d.name_at.col
+		}
+		// A union's brace initializer is the one member it names, written at the
+		// beginning of the object: `union U u = {5};` stores 5 into u's first
+		// member, which is the same assignment `u.first = 5;` makes. The member
+		// is at offset zero, and every other byte of the union stays as the
+		// declaration left it.
+		if first := union_first {
+			if initializer := init {
+				stmts << ast.Stmt{
+					kind:   .assign
+					target: d.name
+					field:  ast.Field{
+						name:     d.name
+						member:   first.name
+						offset:   0
+						spelling: first.typ.describe()
+						typ:      first.typ
+						line:     d.name_at.line
+						col:      d.name_at.col
+					}
+					expr:   initializer
+					line:   d.name_at.line
+					col:    d.name_at.col
+				}
+			}
 		}
 		// A list for an array is the stores the initialization makes at the
 		// point of the declaration: one per value the list wrote, and a zero for

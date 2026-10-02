@@ -360,8 +360,10 @@ fn test_a_member_that_is_an_array_is_subscripted() {
 // of the object, so the address of any member is the address of the union, and
 // the size is the largest member's. A member is written and read at its own
 // width, which is what `u.ll = 0` then `u.i = 0x01020304` then reading
-// `u.bytes[0]` shows, and a double member is read by the instruction that moves
-// one. Measured on gcc 16.2.1, the same program returns 127.
+// `u.bytes[0]` shows: a constant stored into an eight-byte member is written at
+// the member's width and widened into the whole register, and a double member is
+// read by the instruction that moves one. Measured on gcc 16.2.1, the same
+// program returns 127.
 fn test_a_union_member_is_read_at_the_beginning_of_the_object() {
 	source := scratch('union_members.c')
 	binary := scratch('union_members')
@@ -385,6 +387,52 @@ fn test_a_constant_stored_into_a_wider_member_is_widened() {
 	assert exit_status == 104
 	os.rm(source) or {}
 	os.rm(binary) or {}
+}
+
+// 6.7.8 initializes the first member of a union, wherever the union type was
+// reached from: a tagged type, a typedef of an anonymous union, an anonymous
+// union in the declaration itself, and a first member narrower than the value
+// written into it. The value goes at the beginning of the object, which is where
+// the first member sits. Measured on gcc 16.2.1, these programs return 4, 4, 4
+// and 65.
+fn test_a_brace_initializer_for_a_union_stores_into_its_first_member() {
+	programs := [
+		'union U { int i; char c[4]; };\nint main(void) { union U u = { 0x01020304 }; return u.c[0]; }\n',
+		'typedef union { int i; char c[4]; } T;\nint main(void) { T u = { 0x01020304 }; return u.c[0]; }\n',
+		'int main(void) { union { int i; char c[4]; } u = { 0x01020304 }; return u.c[0]; }\n',
+		'union U { char c; int i; };\nint main(void) { union U u = { 65 }; return u.c; }\n',
+	]
+	expected := [4, 4, 4, 65]
+	for index, program in programs {
+		source := scratch('union_init_${index}.c')
+		binary := scratch('union_init_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == expected[index]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
+}
+
+// A union defined at the top level with an initializer has its first member
+// written into the image, at the beginning of the object, and the rest of the
+// union is the zeros the storage starts as. The tagged form and a typedef of an
+// anonymous union reach the same storage. Measured on gcc 16.2.1, these programs
+// return 4, 4 and 65.
+fn test_a_file_scope_union_initializer_writes_its_first_member() {
+	programs := [
+		'union U { int i; char c[4]; };\nunion U u = { 0x01020304 };\nint main(void) { return u.c[0]; }\n',
+		'typedef union { int i; char c[4]; } T;\nT u = { 0x01020304 };\nint main(void) { return u.c[0]; }\n',
+		'union U { char c; int i; };\nunion U u = { 65 };\nint main(void) { return u.c; }\n',
+	]
+	expected := [4, 4, 65]
+	for index, program in programs {
+		source := scratch('union_global_init_${index}.c')
+		binary := scratch('union_global_init_${index}')
+		exit_status := compile_and_run([source, '-o', binary], program)
+		assert exit_status == expected[index]
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
 }
 
 // typeof is read by the parser and answered by the emitter as the type behind
