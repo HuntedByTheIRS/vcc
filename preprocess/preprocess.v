@@ -241,10 +241,6 @@ mut:
 	counter int
 	// files are the files that were read, in the order they were first read.
 	files []SourceFile
-	// expanding is the stack of macro names being expanded right now. A name
-	// already on it is left alone, which is what keeps `#define A B` beside
-	// `#define B A` from expanding forever.
-	expanding []string
 	// expansion_depth is how deep in the expansion recursion the reader is, and
 	// expansion_reported says whether the depth limit has been reported once
 	// already, so the report does not repeat for every token after it.
