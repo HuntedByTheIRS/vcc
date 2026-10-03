@@ -2072,3 +2072,114 @@ fn test_a_cast_of_a_constant_is_an_integer_constant_expression() {
 	assert one.diagnostics.len == 1
 	assert one.diagnostics[0].msg.contains('integer constant of value zero')
 }
+
+// `__real__` and `__imag__` are what <tgmath.h> wraps its argument in when it
+// asks whether the argument is a floating type. With `__GNUC__` four the header
+// takes its pre-GCC-8 path, and every unary math macro is built on
+// `sizeof (+__real__ (Val))` and `__builtin_classify_type (__real__ (Val))`:
+// read as calls to functions nothing declares, the operand's type stays
+// unresolved and the whole header is refused.
+//
+// gcc 16.2.1 is the oracle, measured with programs that run: for a real operand
+// `__real__ x` is x - the same object, the same type, and `&__real__ x == &x` -
+// and `__imag__ x` is 0 of the operand's own type, char for a char and long long
+// for a long long. `__real__ (x + 1.0)` is 4.0 for x of 3.0.
+//
+// The operand is a cast expression and not a unary expression, so
+// `__real__ (double) 0` is the real part of `(double) 0` and not a type the
+// operator was handed. That is the spelling the header uses.
+fn test_the_real_part_of_a_real_value_is_the_value() {
+	result := parsed('int main(void) { double x = 3.0; double y = __real__ x; return 0; }')
+	assert result.diagnostics.len == 0
+	init := result.unit.decls[0].body[1].init or {
+		assert false
+		return
+	}
+	// `__real__ x` is x, so the initialiser is the name and not a new node.
+	assert init is ast.Ident
+	assert init.typ.kind == types.Kind.double
+}
+
+fn test_the_real_part_is_an_object_and_takes_an_address() {
+	result := parsed('int main(void) { double x = 3.0; int n = &__real__ x == &x; return 0; }')
+	assert result.diagnostics.len == 0
+}
+
+// `__real__ x` is x's own object, so a value written through it is written to x:
+// measured on gcc 16.2.1, `__real__ x = 5.0;` for a double x leaves x holding
+// 5.0. The statement is the write the name already is, with the prefix read past
+// the same way the expression reader reads it. `__imag__ x` is a value and not
+// an object, so gcc refuses to assign to it and so does this reader.
+fn test_the_real_part_of_a_name_is_the_object_an_assignment_writes() {
+	result := parsed('int main(void) { double x = 3.0; __real__ x = 5.0; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .assign
+	assert body[1].target == 'x'
+	refused := parsed('int main(void) { double x = 3.0; __imag__ x = 5.0; return 0; }')
+	assert refused.diagnostics.len >= 1
+}
+
+fn test_the_imaginary_part_of_a_real_value_is_a_zero_of_its_type() {
+	shapes := [
+		'int main(void) { double x = 3.0; double y = __imag__ x; return 0; }',
+		'int main(void) { int n = 7; int m = __imag__ n; return 0; }',
+	]
+	kinds := [types.Kind.double, types.Kind.int_]
+	for i, source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len == 0
+		init := result.unit.decls[0].body[1].init or {
+			assert false
+			return
+		}
+		if kinds[i] == types.Kind.double {
+			literal := init as ast.FloatLit
+			assert literal.value == 0.0
+		} else {
+			literal := init as ast.IntLit
+			assert literal.value == 0
+		}
+		assert init.typ.kind == kinds[i]
+	}
+}
+
+// The type is the operand's own and not a promoted one: gcc 16.2.1 answers 1 for
+// `__builtin_types_compatible_p (__typeof__ (__imag__ (char) 1), char)`, and
+// sizeof of the same is 1.
+fn test_the_imaginary_part_keeps_the_operands_own_type() {
+	result := parsed('int main(void) { int n = sizeof(__imag__ (char) 1); return 0; }')
+	assert result.diagnostics.len == 0
+	init := result.unit.decls[0].body[0].init or {
+		assert false
+		return
+	}
+	literal := init as ast.IntLit
+	assert literal.value == 1
+}
+
+// gcc 16.2.1 refuses `__real__ (void *) 0` with `wrong type argument to
+// __real__`, so an operand that has no real part is a constraint violation and
+// is named rather than read at the width of something else.
+fn test_a_real_part_of_a_value_that_is_not_arithmetic_is_a_constraint_violation() {
+	result := parsed('int main(void) { double *p = 0; double x = __real__ p; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('a constraint violation')
+	assert result.diagnostics[0].msg.contains('__real__ takes a value of an arithmetic type')
+	assert result.diagnostics[0].msg.contains('double *')
+}
+
+// The complex types are a pair of floating values and their arithmetic is the
+// back end milestone's, so the part of one is refused by name. This is the one
+// place the two names are answered with a message instead of a value.
+fn test_a_part_of_a_complex_value_is_refused_by_name() {
+	shapes := [
+		'int main(void) { double x = __real__ ((double _Complex) 0); return 0; }',
+		'int main(void) { float x = __imag__ ((float _Complex) 0); return 0; }',
+	]
+	for source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len == 1
+		assert result.diagnostics[0].msg.contains('is a pair of values whose arithmetic is the back end milestone')
+	}
+}
