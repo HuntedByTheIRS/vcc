@@ -174,6 +174,22 @@ pub:
 	bits     int
 	line     int
 	col      int
+	// promoted says this member is not one written in the aggregate's own
+	// body: it is a member of an unnamed struct or union that is itself a
+	// member of the aggregate, which 6.7.2.1p13 makes a member of the
+	// aggregate too. It takes no storage of its own - the unnamed aggregate it
+	// came from holds the bytes - and its offset is where that unnamed member
+	// sits plus the offset this member was given inside it, which `layout`
+	// reads out of those two numbers rather than walking a path.
+	promoted bool
+	// owner is the position, in the same member table, of the unnamed struct
+	// or union this member came from. It is meaningful only when promoted is
+	// true, and it names a member that is not itself promoted.
+	owner int
+	// inner_index is the position of this member in the member table of the
+	// unnamed aggregate it came from, which is where `layout` reads the byte
+	// and bit offset it was given there.
+	inner_index int
 }
 
 // Param is one parameter of a function type. A parameter written with an array
@@ -884,11 +900,16 @@ pub fn adjust_parameter(t Type) Type {
 // struct_type, union_type and enum_type are the aggregate types. An aggregate
 // with a body is complete; one whose tag was written with no body is not, which
 // is what lets `struct S *p;` be read before S is defined anywhere.
+//
+// The members are the ones the body wrote, with the members of an unnamed
+// struct or union member promoted among them: 6.7.2.1p13 makes them members of
+// the aggregate too, so a name written for one is found by `s.name` and by a
+// designator beside the aggregate's own members.
 pub fn struct_type(tag string, members []Member) Type {
 	return Type{
 		kind:     .struct_
 		tag:      tag
-		members:  members
+		members:  promote_anonymous(members)
 		complete: true
 	}
 }
@@ -897,9 +918,132 @@ pub fn union_type(tag string, members []Member) Type {
 	return Type{
 		kind:     .union_
 		tag:      tag
-		members:  members
+		members:  promote_anonymous(members)
 		complete: true
 	}
+}
+
+// ambiguous_marker is appended to the name of a member whose name more than one
+// member of the aggregate would answer to. It has a space in it, so no name
+// written in a C program can equal it: a lookup for the written name then finds
+// no member at all and refuses the access, which is the diagnostic an ambiguous
+// name has to get rather than a silent pick of the first one.
+const ambiguous_marker = ' (ambiguous)'
+
+// promote_anonymous is 6.7.2.1p13 for the member table of one aggregate: the
+// members of an unnamed struct or union member are members of the aggregate that
+// contains it. Each is copied into the enclosing table with the position of the
+// unnamed member it came from (`owner`) and the position it had inside it
+// (`inner_index`), which is all `layout` needs to give it the byte and bit
+// offset it already had inside the unnamed member. The copy takes no storage of
+// its own, so the enclosing aggregate is still sized and aligned around the
+// unnamed member alone.
+//
+// A member of the unnamed member that is itself an unnamed struct or union
+// contributes its own members the same way, and those are already in its member
+// table because it was promoted when that type was built, so this walks one
+// level and the recursion is the one that already happened. Only named members
+// are copied: an unnamed bitfield and a nested unnamed aggregate have no name to
+// be found by, and the bytes they hold are accounted for by the unnamed member
+// itself.
+fn promote_anonymous(members []Member) []Member {
+	// The common aggregate has no unnamed struct or union in it, and its
+	// member table is answered as it was written rather than copied, which
+	// keeps the reader's cost off every struct in a program that has none.
+	mut anonymous := false
+	for member in members {
+		if is_anonymous_aggregate(member) {
+			anonymous = true
+			break
+		}
+	}
+	if !anonymous {
+		return members
+	}
+	mut promoted := []Member{cap: members.len}
+	for member in members {
+		promoted << member
+		if !is_anonymous_aggregate(member) {
+			continue
+		}
+		owner := promoted.len - 1
+		for i, inner in member.typ.members {
+			if inner.name == '' {
+				continue
+			}
+			promoted << Member{
+				name:        inner.name
+				typ:         inner.typ
+				bitfield:    inner.bitfield
+				bits:        inner.bits
+				line:        inner.line
+				col:         inner.col
+				promoted:    true
+				owner:       owner
+				inner_index: i
+			}
+		}
+	}
+	return reject_ambiguous_names(promoted)
+}
+
+// is_anonymous_aggregate says whether a member is the unnamed struct or union
+// 6.7.2.1p13 is about: it carries no name of its own, it is not a bitfield, and
+// its type is a complete struct or union whose members are known. An aggregate
+// declared and never defined has no members to promote, and one with a name is
+// an ordinary member reached through that name.
+fn is_anonymous_aggregate(member Member) bool {
+	if member.name != '' || member.bitfield {
+		return false
+	}
+	if member.typ.kind !in [.struct_, .union_] {
+		return false
+	}
+	return member.typ.is_complete()
+}
+
+// reject_ambiguous_names applies the constraint 6.7.2.1p13 states beside the
+// promotion: the names of the members an unnamed struct or union contributes
+// have to be distinct from the names of the aggregate's other members, because
+// one name would otherwise name two members and an access could not say which.
+// A name with more than one member behind it is marked so that no lookup finds
+// it, and every reader that asks for it reports that the aggregate has no member
+// of that name rather than picking one of the two.
+fn reject_ambiguous_names(members []Member) []Member {
+	mut counts := map[string]int{}
+	for member in members {
+		if member.name != '' {
+			counts[member.name] = (counts[member.name] or { 0 }) + 1
+		}
+	}
+	mut ambiguous := map[string]bool{}
+	for name, count in counts {
+		if count > 1 {
+			ambiguous[name] = true
+		}
+	}
+	if ambiguous.len == 0 {
+		return members
+	}
+	mut out := []Member{cap: members.len}
+	for member in members {
+		if member.name != '' && member.name in ambiguous {
+			out << Member{
+				name:        member.name + ambiguous_marker
+				typ:         member.typ
+				bitfield:    member.bitfield
+				bits:        member.bits
+				line:        member.line
+				col:         member.col
+				promoted:    member.promoted
+				owner:       member.owner
+				inner_index: member.inner_index
+			}
+			continue
+		}
+		out << member
+	}
+	return out
 }
 
 // incomplete_tag is a tag that was declared and not defined: `struct _IO_FILE;`

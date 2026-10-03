@@ -178,3 +178,22 @@ fn test_a_positional_flat_list_still_elides_into_an_aggregate_member() {
 		assert field.typ.kind != .struct_
 	}
 }
+
+// A designator may name a member an anonymous struct contributes, because
+// 6.7.2.1p13 makes that member a member of the aggregate the initializer is for.
+// `err` and `value` are the members of the anonymous struct that sits after `ok`,
+// so `.err = 7` is a designator the enclosing struct's member table has to answer
+// and the write lands at the offset the promotion gives the member. Before the
+// member was recorded the reader refused `.err` by name.
+fn test_a_designator_names_a_member_an_anonymous_struct_contributes() {
+	result := compound_parsed('struct Q { int ok; struct { int err; int value; }; };\nint main(void) { struct Q q = { .ok = 1, .err = 7, .value = 9 }; return q.err; }')
+	assert result.diagnostics.len == 0
+}
+
+// The same designator read at file scope, where the initializer is not a
+// statement and the member is named among the parts of the object the image
+// holds. A promoted member is named the same way.
+fn test_a_file_scope_designator_names_a_promoted_member() {
+	result := compound_parsed('struct G { int x; union { int y; }; };\nstruct G g = { .x = 3, .y = 4 };\nint main(void) { return g.y; }')
+	assert result.diagnostics.len == 0
+}

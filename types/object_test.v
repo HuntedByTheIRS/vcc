@@ -465,3 +465,157 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert measured.representation().size_of(unsigned_int_type()) or { -1 } ==
 		description.representation.size_of(unsigned_int_type()) or { -1 }
 }
+
+// 6.7.2.1p13: the members of an unnamed struct or union member are members of
+// the aggregate that contains it, found by name and carrying the byte and bit
+// offset the layout gave them inside that unnamed member. These tests build the
+// aggregates the rule is about and read those offsets.
+//
+// The numbers are the ones gcc 16.2.1 printed on this target for the same
+// declarations, measured with `sizeof` and `offsetof`, which a member written
+// directly into the outer aggregate would print too: the promotion only changes
+// which names reach a member, not where it sits.
+fn member_named(t Type, name string) ?Member {
+	for m in t.members {
+		if m.name == name {
+			return m
+		}
+	}
+	return none
+}
+
+fn member_offset(t Type, name string) int {
+	layout := layout_of(t)
+	for i, m in t.members {
+		if m.name == name {
+			return layout.offsets[i]
+		}
+	}
+	assert false
+	return -1
+}
+
+fn member_bit(t Type, name string) int {
+	layout := layout_of(t)
+	for i, m in t.members {
+		if m.name == name {
+			return layout.bits[i]
+		}
+	}
+	assert false
+	return -1
+}
+
+// An unnamed union in a struct. Its members both sit where the union sits, which
+// is 8 because the long member aligns the union at 8; the members beside it are
+// at 0 and 16, so a lookup that answered the wrong index would be caught.
+// Measured on gcc 16.2.1: sizeof is 24, lead is 0, u8 and u64 are 8, tail is 16.
+fn test_an_unnamed_union_puts_its_members_in_the_enclosing_struct() {
+	u := union_type('', [member('u8', char_type()), member('u64', long_type())])
+	s := struct_type('P', [member('lead', char_type()), member('', u), member('tail', char_type())])
+	assert size_of(s) == 24
+	assert member_named(s, 'u8') != none && member_named(s, 'u64') != none
+	assert member_offset(s, 'lead') == 0
+	assert member_offset(s, 'u8') == 8
+	assert member_offset(s, 'u64') == 8
+	assert member_offset(s, 'tail') == 16
+}
+
+// An unnamed struct in a struct. Its members are at different offsets inside it,
+// so this is the row that tells a lookup answering the first member of the
+// unnamed aggregate from one answering the name it was asked for.
+// Measured on gcc 16.2.1: sizeof is 32, lead is 0, a is 8, b is 16, tail is 24.
+fn test_an_unnamed_struct_puts_its_members_in_the_enclosing_struct() {
+	inner := struct_type('', [member('a', char_type()), member('b', long_type())])
+	s := struct_type('S', [member('lead', char_type()), member('', inner), member('tail',
+		char_type())])
+	assert size_of(s) == 32
+	assert member_offset(s, 'a') == 8
+	assert member_offset(s, 'b') == 16
+	assert member_offset(s, 'tail') == 24
+}
+
+// The shape V's own definition of IError has: an unnamed struct carrying two
+// bitfields inside an unnamed union inside a struct. The bitfields are read
+// through the union, so their byte is the union's and their bits are the ones
+// the unnamed struct's layout gave them: _typ at bit 0 of 31 bits and
+// _object_is_boxed at bit 31. Measured on gcc 16.2.1: sizeof is 16, _object is
+// 0, _interface_meta, _typ and _object_is_boxed are all at 8, and writing _typ
+// and _object_is_boxed fills the low four bytes of the union.
+fn test_a_bitfield_of_an_unnamed_struct_inside_an_unnamed_union_keeps_its_bits() {
+	bits := struct_type('', [bitfield('_typ', unsigned_int_type(), 31), bitfield('_object_is_boxed',
+		unsigned_int_type(), 1)])
+	union_ := union_type('', [member('_interface_meta', pointer_to(int_type())), member('', bits)])
+	e := struct_type('IError', [member('_object', pointer_to(int_type())), member('', union_)])
+	assert size_of(e) == 16
+	assert member_offset(e, '_object') == 0
+	assert member_offset(e, '_interface_meta') == 8
+	assert member_offset(e, '_typ') == 8
+	assert member_offset(e, '_object_is_boxed') == 8
+	typ := member_named(e, '_typ') or {
+		assert false
+		return
+	}
+	assert typ.bitfield && typ.bits == 31
+	boxed := member_named(e, '_object_is_boxed') or {
+		assert false
+		return
+	}
+	assert boxed.bitfield && boxed.bits == 1
+	assert member_bit(e, '_typ') == 0
+	assert member_bit(e, '_object_is_boxed') == 31
+}
+
+// A named union member beside an unnamed one is an ordinary member: its own
+// members are reached through its name and are not promoted. Measured on gcc
+// 16.2.1: sizeof is 8, anon is 0, n is 4, and `n.inner` exists while a bare
+// `inner` does not.
+fn test_a_named_union_beside_an_unnamed_one_is_reached_through_its_name() {
+	anon_union := union_type('', [member('anon', int_type())])
+	named := union_type('Named', [member('inner', int_type())])
+	s := struct_type('C', [member('', anon_union), member('n', named)])
+	assert size_of(s) == 8
+	assert member_offset(s, 'anon') == 0
+	assert member_offset(s, 'n') == 4
+	assert member_named(s, 'inner') == none
+	n := member_named(s, 'n') or {
+		assert false
+		return
+	}
+	assert n.typ.kind == .union_
+}
+
+// The control the rule must not move: an aggregate with no unnamed struct or
+// union in it has exactly the members its body wrote, in order, none of them
+// promoted. This is the named path that must not be narrowed or shifted.
+fn test_an_aggregate_without_an_unnamed_member_is_unchanged() {
+	plain := struct_type('G', [member('a', int_type()), member('b', char_type())])
+	assert plain.members.len == 2
+	assert plain.members[0].name == 'a' && plain.members[0].promoted == false
+	assert plain.members[1].name == 'b' && plain.members[1].promoted == false
+	named_union := struct_type('F', [member('n', union_type('U', [member('a', int_type())]))])
+	assert named_union.members.len == 1
+	assert named_union.members[0].name == 'n' && named_union.members[0].promoted == false
+}
+
+// 6.7.2.1p13 makes the names an unnamed member contributes distinct from every
+// other name, and gcc 16.2.1 refuses `struct { union { int x; }; union { long x;
+// }; };` as `duplicate member 'x'`. A name two members would answer to is marked
+// here so that no lookup finds it, which is a refusal rather than a silent pick
+// of one of them.
+fn test_a_name_two_unnamed_members_would_both_answer_is_not_found() {
+	first := union_type('', [member('x', int_type())])
+	second := union_type('', [member('x', long_type())])
+	both := struct_type('D', [member('', first), member('', second)])
+	assert member_named(both, 'x') == none
+	assert both.members.any(it.name.contains('ambiguous'))
+}
+
+// The same collision between a member written in the body and one an unnamed
+// member contributes: the written name is not silently preferred.
+fn test_a_name_an_unnamed_member_collides_with_is_not_found() {
+	union_ := union_type('', [member('x', int_type())])
+	s := struct_type('E', [member('x', int_type()), member('', union_)])
+	assert member_named(s, 'x') == none
+	assert s.members.any(it.name.contains('ambiguous'))
+}

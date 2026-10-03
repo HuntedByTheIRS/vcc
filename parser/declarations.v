@@ -209,6 +209,13 @@ mut:
 	is_extern  bool
 	has_type   bool
 	tag_decl   bool
+	// anonymous_aggregate says the specifiers named a struct or union written
+	// with no tag and a body. As a member of an aggregate with no declarator,
+	// 6.7.2.1p13 makes the members of that type members of the aggregate the
+	// declaration is written in. A name that stands for a struct is not this,
+	// because the specifier was a name and not a structure specifier, and a
+	// specifier that named a tag is an ordinary member reached through it.
+	anonymous_aggregate bool
 	// clause is the type the specifiers name, resolved as they are read: the
 	// builtin words added up, a name followed to what it was declared as, or a
 	// tag. The declarator that follows is built from it, and it is unresolved
@@ -3918,6 +3925,7 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			spec.type_words << tag.spelling
 			spec.has_type = true
 			spec.tag_decl = true
+			spec.anonymous_aggregate = tag.anonymous
 			tag_clause = tag.clause
 			continue
 		}
@@ -4037,6 +4045,12 @@ fn (mut p Parser) parse_typeof_specifier(at tokenize.Token, depth int, unqual bo
 struct TagType {
 	spelling string
 	clause   types.Type
+	// anonymous says the specifier wrote a struct or union body with no tag,
+	// which 6.7.2.1p13 calls an anonymous structure or union. A specifier that
+	// named a tag is an ordinary reference to that tag's type, even when it has
+	// a body, and one written with no body declares the tag rather than
+	// defining an anonymous type.
+	anonymous bool
 }
 
 // parse_tag_specifier reads a struct, union or enum specifier. Its tag lives in
@@ -4095,8 +4109,9 @@ fn (mut p Parser) parse_tag_specifier(keyword tokenize.Token, depth int) !TagTyp
 	}
 	p.scopes.declare_tag(spelling, clause)
 	return TagType{
-		spelling: spelling
-		clause:   clause
+		spelling:  spelling
+		clause:    clause
+		anonymous: tag == ''
 	}
 }
 
@@ -4266,6 +4281,7 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 		}
 		if t.kind == .punct && t.text == '}' {
 			p.next()
+			p.check_member_names(members, keyword)
 			return members
 		}
 		if t.kind == .punct && t.text == ';' {
@@ -4301,11 +4317,13 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 		for {
 			if p.at_punct(';') {
 				p.next()
+				p.record_anonymous_member(spec, mut members)
 				break
 			}
 			if p.at_punct('}') {
 				// A member whose semicolon is missing, which the closing brace
 				// ends anyway.
+				p.record_anonymous_member(spec, mut members)
 				break
 			}
 			d := p.parse_declarator(depth + 1)!
@@ -4359,7 +4377,70 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 			return error('member list')
 		}
 	}
+	p.check_member_names(members, keyword)
 	return members
+}
+
+// record_anonymous_member writes the member an anonymous struct or union
+// specifier contributes to the aggregate being read when no declarator follows
+// it. 6.7.2.1p13 calls that specifier an anonymous structure or union and makes
+// its members members of the aggregate the declaration is written in, so the
+// type has to reach the member table before the aggregate's type is built; the
+// promotion in types/ reads this unnamed member and copies the members inside it
+// into the enclosing table with their offsets.
+//
+// The member carries no name and the type the specifier named. A specifier that
+// is not an anonymous aggregate writes nothing, so `int;`, a tag declared with
+// no body among the members, and a name that stands for an aggregate stay
+// declarations that declare no member.
+fn (p Parser) record_anonymous_member(spec DeclSpec, mut members []types.Member) {
+	if !spec.anonymous_aggregate {
+		return
+	}
+	members << types.Member{
+		typ:  spec.clause
+		line: spec.start.line
+		col:  spec.start.col
+	}
+}
+
+// check_member_names applies the distinctness 6.7.2.1p13 states beside the
+// promotion. Because the members of an anonymous struct or union are members of
+// the aggregate that contains it, their names have to be distinct from the names
+// of the aggregate's own members; two members behind one name could not be told
+// apart, and the type layer would have to answer a lookup with one of them.
+//
+// gcc 16.2.1 refuses `struct D { int x; union { int x; }; };` and
+// `struct E { int x; int x; };` alike as `duplicate member 'x'`, so both are
+// refused here, at the second declaration, rather than left for a lookup to
+// discover. The names an anonymous member contributes are the names in its own
+// member table, which already holds the members a nested anonymous member
+// contributed, so this sees the same names the promotion copies.
+fn (mut p Parser) check_member_names(members []types.Member, keyword tokenize.Token) {
+	mut seen := map[string]bool{}
+	for member in members {
+		if member.name != '' {
+			if seen[member.name] {
+				p.error_span(member.line, member.col, 'a constraint violation: duplicate member ${member.name} in ${keyword.text}')
+				return
+			}
+			seen[member.name] = true
+			continue
+		}
+		if member.typ.kind !in [types.Kind.struct_, .union_] || !member.typ.is_complete() {
+			continue
+		}
+		for inner in member.typ.members {
+			if inner.name == '' {
+				continue
+			}
+			if seen[inner.name] {
+				p.error_span(inner.line, inner.col, 'a constraint violation: duplicate member ${inner.name} in ${keyword.text}')
+				return
+			}
+			seen[inner.name] = true
+		}
+	}
 }
 
 // parse_bitint_width reads the width of a _BitInt specifier, which is written in
