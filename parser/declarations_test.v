@@ -542,6 +542,30 @@ fn test_a_body_list_writes_a_bitfield_member_into_its_own_bits() {
 	assert field.unit_width == 4
 }
 
+// 6.7.2.1 makes a bitfield's width an integer constant expression, so a width
+// written as an enum name or a sum is the number it folds to. A width that is
+// not positive, one wider than its type, and one the folder cannot compute are
+// each refused by name, because a width read as the wrong number lays the object
+// out at the wrong size. Measured on gcc 16.2.1: `unsigned int a : 0;` is `zero
+// width for bit-field 'a'`, `a : -1` is `negative width in bit-field 'a'`, and
+// `unsigned int a : 33;` is `width of 'a' exceeds its type`.
+fn test_a_bitfield_width_is_folded_and_a_bad_one_is_refused() {
+	folded := declarations_of('enum { W = 2 }; struct S { unsigned int a : W + 1; }; struct S s = {3};')
+	assert folded.diagnostics.len == 0
+	zero := declarations_of('struct S { unsigned int a : 0; };')
+	assert zero.diagnostics.len >= 1
+	assert zero.diagnostics.any(it.msg.contains('width of 0'))
+	negative := declarations_of('struct S { unsigned int a : -1; };')
+	assert negative.diagnostics.len >= 1
+	assert negative.diagnostics.any(it.msg.contains('width of -1'))
+	wide := declarations_of('struct S { unsigned int a : 33; };')
+	assert wide.diagnostics.len >= 1
+	assert wide.diagnostics.any(it.msg.contains('exceeds its type'))
+	anonymous := declarations_of('struct S { unsigned int : -1; };')
+	assert anonymous.diagnostics.len >= 1
+	assert anonymous.diagnostics.any(it.msg.contains('unnamed'))
+}
+
 // A character constant is a written constant too: 6.4.4.4 gives it the value of
 // the character it names and the type int, so `{ 'A' }` is the element `{ 65 }`
 // is. Measured on gcc 16.2.1, a program reading the first element of

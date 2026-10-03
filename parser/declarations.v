@@ -3625,9 +3625,22 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 			continue
 		}
 		spec := p.parse_decl_specifiers(depth + 1)!
-		// An unnamed bitfield, `int : 3;`, has a width and no declarator.
+		// An unnamed bitfield, `int : 3;`, has a width and no declarator. A width
+		// of zero is allowed and only asks the next member of the unit's type to
+		// start where this one is; a negative width is not a number of bits, and
+		// gcc refuses it as `negative width in bit-field '<anonymous>'`.
 		if p.at_punct(':') {
-			bits := p.parse_bitfield_width()!
+			bits := p.parse_bitfield_width(spec.start)!
+			if bits < 0 {
+				p.error_at(spec.start, 'unsupported: an unnamed bitfield is declared with a negative width ${bits}')
+				return error('bitfield width')
+			}
+			if unit := p.representation.size_of(spec.clause) {
+				if bits > unit * 8 {
+					p.error_at(spec.start, 'unsupported: the width of an unnamed bitfield exceeds the width of its type')
+					return error('bitfield width')
+				}
+			}
 			members << types.Member{
 				typ:      spec.clause
 				bitfield: true
@@ -3649,12 +3662,35 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 			}
 			d := p.parse_declarator(depth + 1)!
 			p.skip_gnu_postfix()!
-			bits := if p.at_punct(':') { p.parse_bitfield_width()! } else { 0 }
+			mut width := 0
+			mut written := false
+			if p.at_punct(':') {
+				written = true
+				width = p.parse_bitfield_width(spec.start)!
+			}
+			typ := p.declared_type(spec.clause, d)
+			if written {
+				// A named bitfield's width is a positive number of bits: gcc
+				// refuses `int a : 0;` as `zero width for bit-field 'a'` and a
+				// negative one as `negative width in bit-field 'a'`. The width
+				// may not exceed the width of the type it is declared with,
+				// which gcc refuses as `width of 'a' exceeds its type`.
+				if width <= 0 {
+					p.error_at(spec.start, "unsupported: the bitfield member ${d.name} is declared with a width of ${width}, and a named bitfield's width is a positive number of bits")
+					return error('bitfield width')
+				}
+				if unit := p.representation.size_of(typ) {
+					if width > unit * 8 {
+						p.error_at(spec.start, 'unsupported: the width ${width} of the bitfield member ${d.name} exceeds its type')
+						return error('bitfield width')
+					}
+				}
+			}
 			members << types.Member{
 				name:     d.name
-				typ:      p.declared_type(spec.clause, d)
-				bitfield: bits > 0
-				bits:     bits
+				typ:      typ
+				bitfield: written
+				bits:     width
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
@@ -3705,19 +3741,20 @@ fn (mut p Parser) parse_bitint_width(at tokenize.Token) !int {
 	return int(value)
 }
 
-// parse_bitfield_width reads `: N`, the width of a bitfield. A width this reader
-// can read is a number, which is what a source file writes; anything else - an
-// expression a header computed - is scanned to its separator and the member is
-// recorded without a width, which is what the reader that asked decides about.
-fn (mut p Parser) parse_bitfield_width() !int {
+// parse_bitfield_width reads `: N`, the width of a bitfield. 6.7.2.1 makes the
+// width an integer constant expression, so it is read as one and folded: a width
+// written as a macro or an enum name is the number it names. An expression the
+// folder cannot compute is refused by name rather than read as a zero, because a
+// width read as zero would move the member to a unit boundary the program did
+// not ask for and the object would be laid out at the wrong size.
+fn (mut p Parser) parse_bitfield_width(at tokenize.Token) !int {
 	p.next() // :
-	if p.peek().kind == .number {
-		t := p.next()
-		value := parse_integer_literal(t.text) or { return 0 }
-		return int(value)
+	expression := p.parse_expression()!
+	value := p.constant_value(expression) or {
+		p.error_at(at, 'unsupported: the width of a bitfield is not an integer constant expression this compiler can compute')
+		return error('bitfield width')
 	}
-	p.skip_to_separator()!
-	return 0
+	return int(value)
 }
 
 // parse_declarator reads one declarator: pointer stars, a name, and the array
