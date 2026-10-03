@@ -1430,3 +1430,68 @@ fn test_a_static_assertion_message_that_is_not_a_string_is_refused() {
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('expected the message of a static assertion')
 }
+
+// C23's auto takes the type of its initializer, after the lvalue conversion an
+// assignment makes. Measured on gcc 16.2.1, `auto x = 1;` is an int, `auto d =
+// 2.5;` a double, `auto u = 1u;` an unsigned int and `auto s = "hi";` a char *,
+// and the declaration's own spelling is the deduced type because there is no
+// other answer to write down.
+fn test_a_local_auto_takes_the_type_of_its_initializer() {
+	result := declarations_of('int main(void) { auto x = 1; auto d = 2.5; auto u = 1u; auto s = "hi"; auto l = 2L; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body.len == 6
+	assert body[0].decl_type == 'int'
+	assert body[1].decl_type == 'double'
+	assert body[2].decl_type == 'unsigned int'
+	assert body[3].decl_type == 'char *'
+	assert body[4].decl_type == 'long'
+}
+
+// C23 requires the initializer: there is nothing to take the type from, and the
+// error names that rather than leaving the object with the word auto for a type.
+fn test_an_auto_declaration_without_an_initializer_is_refused_by_name() {
+	result := declarations_of('int main(void) { auto x; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('auto needs an initializer')
+}
+
+// C23 asks for one declarator and a plain identifier, and neither is assumed:
+// each is refused by name at the declaration that wrote it.
+fn test_auto_needs_a_plain_identifier_and_one_declarator() {
+	pointer := declarations_of('int main(void) { auto *p = 0; return 0; }')
+	assert pointer.diagnostics.len == 1
+	assert pointer.diagnostics[0].msg.contains('needs a plain identifier')
+	two := declarations_of('int main(void) { auto x = 1, y = 2; return 0; }')
+	assert two.diagnostics.len == 1
+	assert two.diagnostics[0].msg.contains('only one declarator')
+}
+
+// The word is also the C89 storage class, and a declaration with a type between
+// the word and the name is still that storage class: `auto int x;` declares an
+// int, and the name after it is deduced only from what it is given.
+fn test_auto_with_a_type_after_it_is_still_the_storage_class() {
+	result := declarations_of('int main(void) { auto int x = 1; auto y = x; return y; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].body[0].decl_type == 'int'
+	assert result.unit.decls[0].body[1].decl_type == 'int'
+}
+
+// Measured on gcc 16.2.1, C23's auto is taken at file scope too and the object is
+// a definition: `auto x = 2.5;` defines a double, and `auto u = 1u;` an unsigned
+// int, which is why the type cannot be read off the folded number alone.
+fn test_a_file_scope_auto_defines_an_object_of_the_initializer_type() {
+	result := declarations_of('auto x = 2.5;\nauto u = 1u;\nint main(void) { return 0; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 2
+	assert result.unit.globals[0].typ == 'double'
+	assert result.unit.globals[1].typ == 'unsigned int'
+}
+
+// A file-scope auto is storage the image lays out, so the same constraint holds:
+// there is no object without an initializer.
+fn test_a_file_scope_auto_without_an_initializer_is_refused_by_name() {
+	result := declarations_of('auto x;\nint main(void) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('auto needs an initializer')
+}

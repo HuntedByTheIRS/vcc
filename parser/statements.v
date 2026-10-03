@@ -1185,7 +1185,10 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 	// an error depends on the declarator, and that question is asked below once
 	// the declarator has been read and its stars are a fact.
 	incomplete := p.incomplete_aggregate(spec)
-	if !incomplete {
+	// A deduced type has no spelling to judge before the declarator is read: the
+	// word auto is not a type this model cannot size, it is a type the
+	// initializer has not been read for yet.
+	if !incomplete && !spec.auto_deduced {
 		if offender := p.unsupported_type_word(spec, 0) {
 			p.error_at(spec.start, 'unsupported type ${offender}')
 			// The declaration is refused for its type, and the name it declares is
@@ -1229,7 +1232,16 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			p.skip_declaration()
 			return stmts
 		}
-		declared := p.declared_type(spec.clause, d)
+		if spec.auto_deduced && (d.pointer_count() > 0 || d.is_array()) {
+			// C23 asks auto for a plain identifier: the type is the
+			// initializer's, and a declarator that builds another type from
+			// it has nowhere to put it. Measured on gcc 16.2.1, `auto *p = 0;`
+			// is `'auto' requires a plain identifier`.
+			p.error_at(d.name_at, 'unsupported: the C23 auto type specifier needs a plain identifier, and ${d.name} is written with a pointer or an array')
+			p.skip_declaration()
+			return stmts
+		}
+		mut declared := p.declared_type(spec.clause, d)
 		mut init := ?ast.Expr(none)
 		// brace says the initializer was written as a list, elements are its
 		// values as expressions, and list_ok says the list was read. A list that
@@ -1337,6 +1349,25 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 					return stmts
 				}
 			}
+			if spec.auto_deduced {
+				// C23's auto takes its type from the initializer, so the
+				// declaration has none until the initializer has been read.
+				// The type is completed into the scope here, which is where
+				// the declaration recorded the name, so a later use of it is
+				// typed by the initializer rather than by the word auto.
+				if initializer := init {
+					declared = auto_deduced_type(initializer)
+					if declared.kind == .unknown {
+						p.error_at(d.name_at, 'unsupported: auto takes the type of ${d.name} from its initializer, and this compiler did not resolve it')
+					} else {
+						p.scopes.complete_type(d.name, declared)
+					}
+				} else {
+					p.error_at(d.name_at, 'unsupported: auto needs an initializer to take a type from, and ${d.name} has none')
+					p.skip_declaration()
+					return stmts
+				}
+			}
 			if initializer := init {
 				// 6.7.8 lets an array of characters be initialized by a string
 				// literal, which is not an assignment and not this constraint's
@@ -1349,6 +1380,13 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 					p.check_initializer(declared, initializer)
 				}
 			}
+		} else if spec.auto_deduced {
+			// C23 requires the initializer: there is nothing to take a type
+			// from, and the error names that rather than leaving the object
+			// with the word auto for a type.
+			p.error_at(d.name_at, 'unsupported: auto needs an initializer to take a type from, and ${d.name} has none')
+			p.skip_declaration()
+			return stmts
 		}
 		// The elements a string literal writes into an array: one per character
 		// and the terminator the literal does not write. They are the same
@@ -1424,7 +1462,11 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			kind:        .var_decl
 			init:        decl_init
 			decl_name:   d.name
-			decl_type:   p.spelling_of(spec, d.pointer_count())
+			decl_type:   if spec.auto_deduced {
+				declared.describe()
+			} else {
+				p.spelling_of(spec, d.pointer_count())
+			}
 			decl_count:  count
 			decl_stride: declaration_stride(declared, p.representation)
 			// The declarator decides whether the object is the aggregate or
@@ -1619,6 +1661,15 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			}
 		}
 		if p.at_punct(',') {
+			if spec.auto_deduced {
+				// C23 gives the deduced type to one declarator; a second has
+				// its own initializer and its own type, which is not what the
+				// declaration says. Measured on gcc 16.2.1, `auto x = 1, y = 2;`
+				// is `'auto' may only be used with a single declarator`.
+				p.error_at(p.peek(), 'a constraint violation: auto may be used with only one declarator')
+				p.skip_declaration()
+				return stmts
+			}
 			p.next()
 			continue
 		}

@@ -460,3 +460,47 @@ fn test_a_static_assertion_is_read_and_is_therefore_checked() {
 	question.extensions = ['static-assert']
 	assert pedantic_messages([token('_Static_assert')], question).len == 0
 }
+
+// The auto row's construct is a word that is also the C89 storage class, so the
+// check asks what follows the word and counts only the deduced form. `auto x = 1`
+// is C23's type specifier; `auto int x` has a type between the word and the name
+// and is the storage class, which the row must not report.
+fn test_the_auto_row_marks_the_type_specifier_and_not_the_storage_class() {
+	rows := features.filter(it.extension == 'auto')
+	assert rows.len == 1
+	assert rows[0].status == .implemented
+	assert rows[0].since == .c23
+	assert !rows[0].gnu
+	assert rows[0].invalid
+	deduced := [
+		token('auto'),
+		token('x'),
+		punct('='),
+		token('1'),
+		punct(';'),
+	]
+	storage := [token('auto'), token('int'), token('x'), punct(';')]
+	// c99 does not have the construct, and the row refuses it there; gnu99 is
+	// the same standard and does not add it, because gnu23 is what includes C23.
+	assert uses(deduced, features, asking(.c99)).len == 1
+	assert uses(deduced, features, asking(.gnu99)).len == 1
+	// The storage class is none of the check's business in any mode.
+	assert uses(storage, features, asking(.c99)).len == 0
+	assert uses(storage, features, asking(.c23)).len == 0
+	// c23 made it standard, and the extension brings it down to c99.
+	assert uses(deduced, features, asking(.c23)).len == 0
+	mut question := asking(.c99)
+	question.extensions = ['auto']
+	assert uses(deduced, features, question).len == 0
+	assert uses(storage, features, question).len == 0
+}
+
+fn punct(text string) tokenize.Token {
+	return tokenize.Token{
+		kind: .punct
+		text: text
+		line: 1
+		col:  1
+		file: 'f.c'
+	}
+}

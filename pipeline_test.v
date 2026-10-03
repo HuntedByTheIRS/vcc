@@ -3205,3 +3205,35 @@ fn test_the_generic_extension_brings_the_selection_down_to_c99() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// C23's auto takes the type of its initializer, and the value the program returns
+// says which type it took: each arm is worth a different number and the last term
+// is the value itself. Measured on gcc 16.2.1 the same program with the deduced
+// types written in returns 18, so 18 is the answer a deduction that picked int,
+// unsigned int, double and long has to give. It is compiled in the mode that made
+// the construct standard and in c99 with the extension that brings it down, which
+// is what naming the name on the command line is for.
+fn test_auto_is_the_initializer_type_in_both_modes_that_have_it() {
+	source := scratch('auto_local.c')
+	binary := scratch('auto_local')
+	program := 'int main(void) {\n    auto x = 1;\n    auto u = 2u;\n    auto d = 3.5;\n    auto l = 4L;\n    return _Generic(x, int: 1, default: 0) + _Generic(u, unsigned int: 2, default: 0) + _Generic(d, double: 4, default: 0) + _Generic(l, long: 8, default: 0) + (int)d;\n}\n'
+	assert compile_and_run(['-std=c23', source, '-o', binary], program) == 18
+	assert compile_and_run(['-std=c99', '-fvcc-exts=auto', source, '-o', binary], program) == 18
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A file-scope auto is a definition of the initializer's type, and the type is
+// read from the expression rather than from the folded number, which is why a
+// suffix that decides the type decides the object: measured on gcc 16.2.1,
+// `auto g = 2.5;` defines a double and the two reads below are 42 and 10.
+fn test_a_file_scope_auto_defines_an_object_of_the_initializer_type() {
+	source := scratch('auto_file.c')
+	binary := scratch('auto_file')
+	whole := 'auto g = 42;\nint main(void) { return g; }\n'
+	floating := 'auto h = 2.5;\nint main(void) { return (int)(h * 4); }\n'
+	assert compile_and_run(['-std=c23', source, '-o', binary], whole) == 42
+	assert compile_and_run(['-std=c99', '-fvcc-exts=auto', source, '-o', binary], floating) == 10
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

@@ -188,13 +188,34 @@ pub const features = [
 		pedantic:  ''
 		status:    .implemented
 	},
+	// The C23 auto type specifier takes a type from its initializer: `auto x = 1;`
+	// is an int. It is read by `parse_local_declaration` in `parser/statements.v`,
+	// which completes the declaration with the initializer's type after the lvalue
+	// conversion once the initializer has been read, and refuses a declaration
+	// with no initializer by name because C23 requires one. The word is also the
+	// C89 storage class, so the spelling alone does not mark the construct and
+	// this row brings its own detection: only `auto x` (which the token after the
+	// name ends) is the type specifier, while `auto int x` and `auto T x` have a
+	// type between the word and the name and are the storage class; see
+	// `auto_is_a_type_specifier` below. Measured on gcc 16.2.1, the flags are the
+	// C23 ones and the refusal is one the command line does not take back:
+	// `auto x = 1;` is refused under -std=c99 and -std=gnu99 even with -w written
+	// on the command line (`type defaults to 'int' ... [-Wimplicit-int]`), and
+	// taken under -std=c23, under -std=gnu23 because gnu23 includes C23, and with
+	// no -std at all. `-Wno-implicit-int` is the one flag that takes the refusal
+	// back, and it is a flag this compiler does not have, so within its surface
+	// the row refuses like the typeof row above it and is `invalid` rather than a
+	// pedantic message. The qualified form `auto const x = 1;` is not read: the
+	// reader meets the qualifier between the word and the name and reads the
+	// storage class, so the declaration is refused rather than deduced.
 	Feature{
-		spellings: []
+		spellings: ['auto']
 		since:     .c23
 		gnu:       false
 		extension: 'auto'
+		invalid:   true
 		pedantic:  'the auto type specifier'
-		status:    .unimplemented
+		status:    .implemented
 	},
 	// _Generic is read by `parse_generic_selection` in `parser/parser.v`: the
 	// controlling expression's type, after the lvalue conversion 6.5.17 asks for,
@@ -485,17 +506,52 @@ pub fn pedantic_messages(tokens []tokenize.Token, question Question) []tokenize.
 	return uses(tokens, features, question)
 }
 
+// auto_is_a_type_specifier says whether the `auto` token at `at` is C23's type
+// specifier rather than the C89 storage class of the same spelling, which is
+// what decides whether the auto row's construct is written. The declaration says
+// which and the tokens after the word are what say it: the deduced form is
+// written with the name right after the word, so the token after the name ends
+// the declaration (`=`, `;` or `,`), while the storage-class form has a type
+// between the word and the name (`auto int x`, `auto T x`). The question is
+// asked of two following tokens rather than of a table of type words because a
+// name the file typedef'd is a type and this check knows no scopes. The reader
+// in `parser/declarations.v` asks the same question of the same two tokens.
+fn auto_is_a_type_specifier(tokens []tokenize.Token, at int) bool {
+	if at + 1 >= tokens.len {
+		return false
+	}
+	after := tokens[at + 1]
+	if after.kind == .punct {
+		// The storage class cannot stand without a type in front of the
+		// declarator, so a declarator starting right after the word is the
+		// deduced form written with a declarator the standard does not allow.
+		return after.text in ['*', '(', '[']
+	}
+	if after.kind != .identifier || at + 2 >= tokens.len {
+		return false
+	}
+	ended := tokens[at + 2]
+	return ended.kind == .punct && ended.text in ['=', ';', ',', '[']
+}
+
 // uses is the walk itself, over a table the caller hands in rather than over the
 // table above, which is how the rule an extension follows is checked before
 // there is an extension to check it with: the tests bring a table of their own.
 fn uses(tokens []tokenize.Token, table []Feature, question Question) []tokenize.Diagnostic {
 	mut out := []tokenize.Diagnostic{}
-	for token in tokens {
+	// A construct no single spelling marks brings its own detection, because the
+	// spelling is shared with something else: `auto` is C23's type specifier and
+	// the C89 storage class, and only the tokens after the word say which. See
+	// auto_is_a_type_specifier.
+	for i, token in tokens {
 		for feature in table {
 			if feature.status == .unimplemented {
 				continue
 			}
 			if !feature.spellings.contains(token.text) {
+				continue
+			}
+			if feature.extension == 'auto' && !auto_is_a_type_specifier(tokens, i) {
 				continue
 			}
 			if allowed(feature, question) {
