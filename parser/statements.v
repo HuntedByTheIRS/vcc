@@ -66,6 +66,9 @@ fn (mut p Parser) parse_statement_inner() ![]ast.Stmt {
 		}]
 	}
 	if t.kind == .identifier {
+		if t.text == '__asm__' || t.text == '__asm' {
+			return p.parse_asm_statement()
+		}
 		if t.text == 'return' {
 			return p.parse_return_statement()
 		}
@@ -145,6 +148,184 @@ fn (mut p Parser) parse_simple_statement() []ast.Stmt {
 		return []ast.Stmt{}
 	}
 	return [stmt]
+}
+
+// parse_asm_statement reads a statement-level GNU asm:
+//
+//	__asm__ [ volatile | __volatile__ ] ( string-literal+ [ : output-list
+//	         [ : input-list [ : clobber-list ] ] ] ) ;
+//
+// An operand is `[ name ] "constraint" ( expression )`; the lists are
+// comma-separated and any of them may be empty, which is what
+// `("" ::: "memory")` writes. Adjacent string literals concatenate, and
+// `%[name]` and `%%` are text inside the literals and not tokens.
+//
+// The whole grammar is read rather than skipped to the `)`, because the text
+// and the operand lists are what tell a barrier that does nothing from a
+// statement that writes an instruction, and the two are not the same: the
+// statement is carried to the emitter as a node of its own, which accepts the
+// first and refuses the second by name. The expression inside an operand is
+// consumed without being kept, because a statement this reader may refuse is
+// not a place to resolve names for.
+fn (mut p Parser) parse_asm_statement() []ast.Stmt {
+	start := p.next() // __asm__ or __asm
+	// The qualifier says the statement may not be deleted when its outputs are
+	// unused. It changes nothing this reader does, and it is read so that the
+	// parenthesis after it is where the reader looks for it.
+	if p.peek().kind == .identifier
+		&& (p.peek().text == 'volatile' || p.peek().text == '__volatile__') {
+		p.next()
+	}
+	if !p.at_punct('(') {
+		p.error_at(p.peek(), 'unsupported: expected ( after ${start.text}, found ${describe(p.peek())}')
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	p.next()
+	mut text := ''
+	mut spelling := ''
+	for p.peek().kind == .string {
+		t := p.next()
+		literal := parse_string_literal(t.text) or {
+			p.error_at(t, err.msg())
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		if literal.unit != 1 {
+			p.error_at(t, 'unsupported: a wide string literal is not instruction text this compiler reads')
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		text += literal.value
+		if spelling.len > 0 {
+			spelling += ' '
+		}
+		spelling += t.text
+	}
+	mut outputs := 0
+	mut inputs := 0
+	mut clobbers := []string{}
+	if p.at_punct(':') {
+		p.next()
+		outputs = p.parse_asm_operands() or {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		if p.at_punct(':') {
+			p.next()
+			inputs = p.parse_asm_operands() or {
+				p.skip_statement()
+				return []ast.Stmt{}
+			}
+			if p.at_punct(':') {
+				p.next()
+				clobbers = p.parse_asm_clobbers() or {
+					p.skip_statement()
+					return []ast.Stmt{}
+				}
+			}
+		}
+	}
+	if !p.expect_punct(')') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	return [ast.Stmt{
+		kind:         .asm_stmt
+		asm_text:     text
+		asm_spelling: spelling
+		asm_outputs:  outputs
+		asm_inputs:   inputs
+		asm_clobbers: clobbers
+		line:         start.line
+		col:          start.col
+	}]
+}
+
+// parse_asm_operands reads one of the comma-separated operand lists of an asm
+// statement and answers how many operands it held. The cursor is just past the
+// `:` that opens the list, and the list ends at the next `:`, at the `)` that
+// closes the statement, or at the end of the file, which the callers report.
+// An operand the reader cannot follow is refused where it stands.
+fn (mut p Parser) parse_asm_operands() !int {
+	mut count := 0
+	for {
+		if p.at_punct(':') || p.at_punct(')') {
+			return count
+		}
+		// An operand may carry a name, `[name]`, which the text refers to as
+		// `%[name]`. It is read and dropped: the text is kept as written and
+		// the name is one of the things that makes the statement an
+		// instruction body rather than a barrier.
+		if p.at_punct('[') {
+			open := p.next()
+			name := p.peek()
+			if name.kind != .identifier {
+				p.error_at(name, 'unsupported: expected a name in an asm operand ${open.text}...], found ${describe(name)}')
+				return error('asm operand name')
+			}
+			p.next()
+			if !p.expect_punct(']') {
+				return error('asm operand name')
+			}
+		}
+		if p.peek().kind != .string {
+			p.error_at(p.peek(), 'unsupported: expected a constraint string in an asm operand list, found ${describe(p.peek())}')
+			return error('asm constraint')
+		}
+		p.next()
+		if !p.at_punct('(') {
+			p.error_at(p.peek(), 'unsupported: expected ( after the constraint of an asm operand, found ${describe(p.peek())}')
+			return error('asm operand value')
+		}
+		open := p.next()
+		p.skip_balanced(open) or { return error('asm operand value') }
+		count++
+		if p.at_punct(',') {
+			p.next()
+			continue
+		}
+		if p.at_punct(':') || p.at_punct(')') {
+			return count
+		}
+		p.error_at(p.peek(), 'unsupported: expected , : or ) in an asm operand list, found ${describe(p.peek())}')
+		return error('asm operand list')
+	}
+}
+
+// parse_asm_clobbers reads the clobber list of an asm statement, each entry a
+// string literal naming a register or a machine state, and answers with them as
+// the file wrote them. The cursor is just past the `:` that opens the list.
+fn (mut p Parser) parse_asm_clobbers() ![]string {
+	mut clobbers := []string{}
+	for {
+		if p.at_punct(')') {
+			return clobbers
+		}
+		if p.peek().kind != .string {
+			p.error_at(p.peek(), 'unsupported: expected a clobber string in an asm clobber list, found ${describe(p.peek())}')
+			return error('asm clobber')
+		}
+		t := p.next()
+		literal := parse_string_literal(t.text) or {
+			p.error_at(t, err.msg())
+			return error('asm clobber')
+		}
+		clobbers << literal.value
+		if p.at_punct(',') {
+			p.next()
+			continue
+		}
+		if p.at_punct(')') {
+			return clobbers
+		}
+		p.error_at(p.peek(), 'unsupported: expected , or ) in an asm clobber list, found ${describe(p.peek())}')
+		return error('asm clobber list')
+	}
 }
 
 // parse_expression_statement reads an assignment or an expression and stops

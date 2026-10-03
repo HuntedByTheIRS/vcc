@@ -1192,9 +1192,41 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 			.goto_stmt {
 				e.emit_goto(stmt)!
 			}
+			.asm_stmt {
+				e.emit_asm(stmt)!
+			}
 		}
 	}
 	return returned
+}
+
+// emit_asm writes the machine code of a statement-level GNU asm.
+//
+// A statement with no instruction text and no operands does nothing a compiler
+// can see. Its whole content is the constraint on what may be moved across it,
+// and this compiler moves nothing across it: the one optimizer pass,
+// `fold-builtins` in `optimizer/`, folds a call to a constant and touches
+// neither the order of a statement nor a memory access, so the `"memory"`
+// clobber that `__asm__ __volatile__("" ::: "memory")` writes has no work to do
+// and the statement is emitted as nothing. That is exactly what the source
+// asked the compiler to assume, and it is the whole of what this accepts. A
+// pass that reordered or elided a memory access across the statement would have
+// to honour that clobber before it could run under this tree.
+//
+// A statement that writes an instruction is refused by name, with its text and
+// its location. Emitting nothing for one would be a value the program asked for
+// and did not get, which is the wrong answer this compiler does not write: the
+// emitter has no way to place an instruction's registers from a constraint
+// string, so the honest half step is to refuse rather than to guess. The refusal
+// is placed here, at the statement, and not where the statement was read, so a
+// body the program never reaches is not a refusal: `parser/declarations.v`
+// skips a `static` definition nothing in the file names before its body is
+// read, and a statement in one of those is never seen at all.
+fn (mut e Emitter) emit_asm(stmt ast.Stmt) !void {
+	if stmt.asm_text.len > 0 || stmt.asm_outputs > 0 || stmt.asm_inputs > 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm statement ${stmt.asm_spelling} is not emitted by this compiler')
+		return error('asm statement')
+	}
 }
 
 // emit_return writes the value into the register a function's results arrive in

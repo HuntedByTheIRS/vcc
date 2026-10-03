@@ -252,6 +252,12 @@ pub enum StmtKind {
 	// goto_stmt is `goto name;`, a jump to the label of that name anywhere in
 	// the same function, forward or backward.
 	goto_stmt
+	// asm_stmt is a statement-level GNU asm, `__asm__ [volatile] ("..." :
+	// outputs : inputs : clobbers)`. It is a statement of its own because it
+	// is written where a statement goes and has no value. What it does is the
+	// emitter's answer: a statement with empty text and no operands is the
+	// barrier, and one that writes an instruction is refused by name.
+	asm_stmt
 }
 
 pub struct Stmt {
@@ -348,8 +354,28 @@ pub:
 	// converts it to the type of the controlling expression, and that
 	// conversion is made where the label is placed.
 	case_value i64
-	line       int
-	col        int
+	// asm_text is the instruction text of a statement-level GNU asm, with the
+	// escapes of its adjacent string literals resolved and the literals joined.
+	// It is empty both for the barrier and for a statement whose only string
+	// literal was `""`; empty with no operands below is the barrier shape.
+	asm_text string
+	// asm_spelling is that same text as the file wrote it, quotes and escapes
+	// included, which is what a diagnostic names: the resolved text can hold
+	// the newline and tab an instruction is written with, and a message with a
+	// newline in it is two lines.
+	asm_spelling string
+	// asm_outputs and asm_inputs are how many operands each of the statement's
+	// output and input lists wrote. Zero for both, with empty text, is the
+	// barrier: a constraint and nothing to constrain.
+	asm_outputs int
+	asm_inputs  int
+	// asm_clobbers is the clobber list, each entry as the file wrote it with
+	// its escapes resolved: `memory`, `cc`, or a register name. It says what a
+	// later pass may not keep across the statement, which is the whole of what
+	// an accepted barrier tells the optimizer.
+	asm_clobbers []string
+	line         int
+	col          int
 }
 
 // Expr is one of the expression shapes the stub understands. A call is parsed

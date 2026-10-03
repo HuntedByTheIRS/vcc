@@ -133,6 +133,9 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			.goto_stmt {
 				out << '${indent}goto ${stmt.label} at ${stmt.line}:${stmt.col}'
 			}
+			.asm_stmt {
+				out << '${indent}asm statement ${stmt.asm_spelling} at ${stmt.line}:${stmt.col}'
+			}
 		}
 		if expr := stmt.expr {
 			dump_expression(expr, depth + 1, mut out)
