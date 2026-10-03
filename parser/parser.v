@@ -1659,16 +1659,32 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 	mut size := 0
 	if p.at_punct('(') && p.starts_declaration(p.peek_at(1)) {
 		// The operand is written as a type, which is the one operand that says
-		// nothing about a value.
+		// nothing about a value. A brace list after the closing parenthesis
+		// makes it a compound literal, and its size is the size of the object
+		// it names: `sizeof (int[]){1, 2, 3}` is the size of an int[3], and the
+		// list is read for the size an unsized array takes from it and not
+		// evaluated.
 		p.next() // (
-		name := p.parse_type_name(0)!
+		spec, d, _ := p.parse_type_name_parts(0)!
 		if !p.expect_punct(')') {
 			return error('unclosed sizeof')
 		}
-		spelling = name.spelling
-		size = p.representation.size_of(name.typ) or {
-			p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler has no size for it')
-			return error('no size for the type')
+		if p.at_punct('{') {
+			list := p.parse_brace_initializer(true) or {
+				return error('sizeof compound literal')
+			}
+			spelling = p.spelling_of(spec, d.pointer_count())
+			size = p.compound_literal_size(spec, d, list) or {
+				p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler has no size for it')
+				return error('no size for the type')
+			}
+		} else {
+			declared := p.declared_type(spec.clause, d)
+			spelling = p.spelling_of(spec, d.pointer_count())
+			size = p.representation.size_of(declared) or {
+				p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler has no size for it')
+				return error('no size for the type')
+			}
 		}
 	} else {
 		// The operand is a unary expression and not a full one: `sizeof x + 1`

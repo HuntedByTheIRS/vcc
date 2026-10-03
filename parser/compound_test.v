@@ -60,3 +60,15 @@ fn test_a_compound_literal_is_an_lvalue() {
 	assert body[5].kind == .assign
 	assert body[5].subscript != none
 }
+
+fn test_sizeof_a_compound_literal_is_a_constant() {
+	decl := compound_first('int main(void) { return sizeof (int[]){1, 2, 3}; }')
+	body := decl.body
+	assert body.len == 1
+	value := body[0].expr or {
+		assert false
+		return
+	}
+	assert value is ast.IntLit
+	assert (value as ast.IntLit).value == 12
+}

@@ -117,3 +117,20 @@ fn (mut p Parser) compound_literal_object(name string, spec DeclSpec, d Declarat
 	}
 	return target, stmts
 }
+
+// compound_literal_size answers the size of the object a compound literal names
+// without building it, which is what `sizeof (int[]){1, 2, 3}` asks: 6.5.3.4
+// makes a `sizeof` operand's value a constant and its operand unevaluated, so
+// the brace list is read only for the size an unsized array's brackets take
+// from it, and nothing is stored.
+fn (mut p Parser) compound_literal_size(spec DeclSpec, d Declarator, list BraceList) ?int {
+	declared := p.declared_type(spec.clause, d)
+	mut target := declared
+	if declared.is_array() && d.array_count() <= 0 {
+		named := brace_array_count(list.elements)
+		if named > 0 {
+			target = types.array_of(declared.element() or { declared }, named)
+		}
+	}
+	return p.representation.size_of(target)
+}
