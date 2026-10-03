@@ -2308,7 +2308,7 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 	mut elements := []BraceElement{}
 	list_body := p.pos
 	for {
-		t := p.peek()
+		mut t := p.peek()
 		if t.kind == .eof {
 			p.error_at(open, 'unsupported: unterminated { opened at ${open.line}:${open.col}')
 			return error('unterminated brace initializer')
@@ -2321,6 +2321,12 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 			p.recover_brace_list(open, list_body)
 			return error('brace designator')
 		}
+		// The arms below read the token the element begins with, which is the
+		// one after a run of designators: the token peeked before them is a `.`
+		// or a `[` and names the subobject rather than the element, so a
+		// designated element whose value is an address was read as an element
+		// with no arm and refused at the designator.
+		t = p.peek()
 		if p.at_punct('{') {
 			list := p.parse_brace_initializer(body) or {
 				p.recover_brace_list(open, list_body)
@@ -2336,20 +2342,33 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 				p.recover_brace_list(open, list_body)
 				return error('brace element')
 			}
-			if body && !p.at_punct(',') && !p.at_punct('}') {
+			if !p.at_punct(',') && !p.at_punct('}') {
 				// The constant is the first operand of an expression rather than
 				// the whole element: `{1 + 1}` is one element whose value is two,
 				// which gcc 16.2.1 accepts. What ends an element is the comma or
 				// the closing brace, so any other token after the constant means
 				// the element is longer than it and is read as an expression.
 				p.pos = before
-				expr := p.parse_expression() or {
+				if body {
+					expr := p.parse_expression() or {
+						p.recover_brace_list(open, list_body)
+						return error('brace element')
+					}
+					elements << BraceElement{
+						expr:        expr
+						designators: designators
+					}
+				} else if folded := p.file_scope_element_constant() {
+					// A file-scope list holds the value the expression folds
+					// to, and not the expression that computes it: the image
+					// is written before the program runs.
+					elements << BraceElement{
+						number:      folded
+						designators: designators
+					}
+				} else {
 					p.recover_brace_list(open, list_body)
 					return error('brace element')
-				}
-				elements << BraceElement{
-					expr:        expr
-					designators: designators
 				}
 			} else {
 				elements << BraceElement{
@@ -2357,9 +2376,53 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 					designators: designators
 				}
 			}
-		} else if !body && (t.kind == .identifier || t.kind == .string || (t.kind == .punct && t.text == '&')) {
+		} else if !body && t.kind == .identifier {
+			// A name here is an enumeration constant or an address. An
+			// enumerator is an integer constant expression (6.6p4) and the
+			// value it names is what the element holds, so it is asked for
+			// first: the address reader answers an unprefixed name for both,
+			// and an enumeration constant is not an object with an address.
+			//
+			// An enumerator that is the first term of a longer expression,
+			// `{ E + F }`, is folded like a written constant that is: the
+			// element is the assignment-expression 6.7.8p1 makes it and not
+			// the name it begins with.
+			if constant := p.scopes.lookup_constant(t.text) {
+				after := p.peek_at(1)
+				if !(after.kind == .punct && (after.text == ',' || after.text == '}')) {
+					if folded := p.file_scope_element_constant() {
+						elements << BraceElement{
+							number:      folded
+							designators: designators
+						}
+					} else {
+						p.recover_brace_list(open, list_body)
+						return error('brace element')
+					}
+				} else {
+					p.next()
+					elements << BraceElement{
+						number:      NumberConstant{
+							number: FileConstant{
+								integer: constant.value
+							}
+							at:     t
+						}
+						designators: designators
+					}
+				}
+			} else if address := p.file_scope_address() {
+				elements << BraceElement{
+					address:     address
+					designators: designators
+				}
+			} else {
+				p.recover_brace_list(open, list_body)
+				return error('brace element')
+			}
+		} else if !body && (t.kind == .string || (t.kind == .punct && t.text == '&')) {
 			// Only a token that can start an address takes the address path: a
-			// name, a string literal, or the ampersand in front of one.
+			// string literal, or the ampersand in front of one.
 			if address := p.file_scope_address() {
 				elements << BraceElement{
 					address:     address
@@ -2375,13 +2438,24 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 			// inside parentheses, `(32)`, with a sign in front of them, `-(32)`.
 			// A cast of a written constant is itself a written constant, and the
 			// value is the one the conversion makes, so the element reaches the
-			// image as a number like the ones beside it. A cast of anything else
-			// - a call, a name, an expression - is refused by name, because the
-			// image holds constants and a value written into it that the cast did
-			// not make is worse than the refusal.
+			// image as a number like the ones beside it.
+			//
+			// A shape that is not that one is read as a constant expression: an
+			// element is an assignment-expression (6.7.8p1) and a file-scope one
+			// a constant expression (6.6p4), so `{(1 + 2)}`, `{-1 << 3}` and the
+			// null pointer constant `((void *)0)` are elements whose value the
+			// fold gives. A cast of a call or of a name folds to nothing and is
+			// refused by name, because the image holds constants and a value
+			// written into it that the fold did not make is worse than a
+			// refusal.
 			if constant := p.file_scope_brace_constant() {
 				elements << BraceElement{
 					number:      constant
+					designators: designators
+				}
+			} else if folded := p.file_scope_element_constant() {
+				elements << BraceElement{
+					number:      folded
 					designators: designators
 				}
 			} else {
@@ -2473,6 +2547,64 @@ fn (mut p Parser) file_scope_brace_constant() ?NumberConstant {
 	if constant := p.file_scope_signed_parenthesized_constant() {
 		return constant
 	}
+	return none
+}
+
+// file_scope_element_constant reads one element of a file-scope brace list as a
+// constant expression and answers the value. 6.7.8p1 makes an element an
+// assignment-expression and 6.6p4 lets a file-scope one be a constant
+// expression, so `{1 + 1}`, `{(1 + 1)}` and `{-(1 + 1)}` are elements whose
+// value is two and the fold is what the image holds. A null pointer constant
+// written as a cast of a zero, `(void *)0`, is an address constant (6.3.2.3p3)
+// and is answered as the zero it is, which is what the member it initializes
+// holds.
+//
+// Nothing is read when the shape is not a constant expression: the cursor and
+// every diagnostic are given back, so the caller refuses the element at its own
+// location rather than at the first term of an expression it did not finish.
+// The element has to end at the comma or the closing brace; a longer expression
+// is not one element and answers none.
+fn (mut p Parser) file_scope_element_constant() ?NumberConstant {
+	saved_pos := p.pos
+	saved_diagnostics := p.diagnostics.len
+	saved_depth := p.depth
+	saved_base := p.pending_base
+	saved_storage := p.pending_storage
+	at := p.peek()
+	expr := p.parse_expression() or {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		p.depth = saved_depth
+		p.pending_base = saved_base
+		p.pending_storage = saved_storage
+		return none
+	}
+	p.depth = saved_depth
+	p.pending_base = saved_base
+	p.pending_storage = saved_storage
+	if !p.at_punct(',') && !p.at_punct('}') {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if value := p.constant_value(expr) {
+		return NumberConstant{
+			number: FileConstant{
+				integer: value
+			}
+			at:     at
+		}
+	}
+	if p.is_null_pointer_constant(expr) {
+		return NumberConstant{
+			number: FileConstant{
+				integer: 0
+			}
+			at:     at
+		}
+	}
+	p.pos = saved_pos
+	p.diagnostics = p.diagnostics[..saved_diagnostics]
 	return none
 }
 

@@ -350,11 +350,11 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	addressed := declarations_of('int a[2] = {name};')
 	assert addressed.diagnostics.len == 1
 	assert addressed.diagnostics[0].msg.contains('does not hold addresses')
-	// A parenthesized expression that is not a written constant is refused by
-	// name: gcc 16.2.1 folds `(1 + 2)` to 3 and accepts it, and a file-scope
-	// list holds a constant the image writes, which this reader reads only when
-	// the element is a written constant rather than an expression.
-	element := declarations_of('int a[2] = {(1 + 2)};')
+	// A parenthesized expression that is not a constant is still refused by
+	// name. A constant one is read now, which is the sibling test's subject:
+	// 6.7.8p1 makes an element an assignment-expression and 6.6p4 lets a
+	// file-scope one be a constant expression.
+	element := declarations_of('int y = 1; int a[2] = {(1 + y)};')
 	assert element.diagnostics.len == 1
 	assert element.diagnostics[0].msg.contains('written constant')
 	// An empty list writes no value, so it gives an array with empty brackets
@@ -455,16 +455,23 @@ static const u8 t[4] = {((u8)(0x08)), 0x01, 0x02, 0x03};')
 	assert parenthesized.diagnostics.len == 0
 	assert parenthesized.unit.globals[0].inits[0] == 7
 	assert parenthesized.unit.globals[0].inits[1] == -32
-	// A cast of a call, a name or an expression is refused by name rather than
-	// converted: gcc 16.2.1 folds `(int)(1 + 2)` to 3 and `(int)(sizeof(int))`
-	// to 4 and accepts both, and this reader refuses them because neither is a
-	// written constant the image may hold.
+	// A cast of an expression the folder evaluates is a written constant too:
+	// 6.7.8p1 makes an element an assignment-expression and 6.6p4 lets a
+	// file-scope one be a constant expression, so `((int)(1 + 2))` is 3 and
+	// `((int)(sizeof(int)))` is 4. Measured on gcc 16.2.1, both are accepted
+	// and answer those values, where this reader refused both.
 	expression := declarations_of('static const int r[] = {((int)(1 + 2))};')
-	assert expression.diagnostics.len == 1
-	assert expression.diagnostics[0].msg.contains('written constant')
+	assert expression.diagnostics.len == 0
+	assert expression.unit.globals[0].inits[0] == 3
 	sized := declarations_of('static const int u[] = {((int)(sizeof(int)))};')
-	assert sized.diagnostics.len == 1
-	assert sized.diagnostics[0].msg.contains('written constant')
+	assert sized.diagnostics.len == 0
+	assert sized.unit.globals[0].inits[0] == 4
+	// A cast of a call is not a constant: the value is one the program computes
+	// at run time and the image holds constants, so the element is refused by
+	// name rather than written.
+	call := declarations_of('int f(void); static const int c[] = {((int)(f()))};')
+	assert call.diagnostics.len == 1
+	assert call.diagnostics[0].msg.contains('written constant')
 }
 
 // A file-scope list with a nested list or a designator initializes the
@@ -494,6 +501,32 @@ fn test_a_file_scope_nested_or_designated_list_writes_the_subobject_it_names() {
 	assert (entries[0].init or { -1 }) == 3
 	assert entries[1].offset == 0
 	assert (entries[1].init or { -1 }) == 1
+}
+
+// 6.7.8p1 makes each element of an aggregate initializer an
+// assignment-expression and 6.6p4 lets a file-scope one be a constant
+// expression, so an element may be arithmetic over constants rather than a
+// single written number. Measured on gcc 16.2.1, `int a[] = {1 + 2, (3 * 4),
+// 5, 2 * sizeof(int)};` writes 3, 12, 5 and 8, and an enumeration constant is
+// an integer constant expression whether it stands alone or begins a longer
+// element.
+fn test_a_file_scope_constant_expression_element_is_folded() {
+	folded := declarations_of('static const int a[] = {1 + 2, (3 * 4), 5, 2 * sizeof(int)};')
+	assert folded.diagnostics.len == 0
+	assert folded.unit.globals[0].count == 4
+	assert folded.unit.globals[0].inits[0] == 3
+	assert folded.unit.globals[0].inits[1] == 12
+	assert folded.unit.globals[0].inits[2] == 5
+	assert folded.unit.globals[0].inits[3] == 8
+	enumerated := declarations_of('enum { E = 7, F = 8 };\nstatic const int b[] = {E, E + F};')
+	assert enumerated.diagnostics.len == 0
+	assert enumerated.unit.globals[0].inits[0] == 7
+	assert enumerated.unit.globals[0].inits[1] == 15
+	// A parenthesized expression that is not constant is refused by name: the
+	// element is an expression the image cannot hold.
+	refused := declarations_of('int y = 1; static const int c[] = {(1 + y)};')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('written constant')
 }
 
 // A struct's brace initializer at file scope gives each value to a member in the
