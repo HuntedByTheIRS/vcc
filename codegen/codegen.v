@@ -84,6 +84,15 @@ struct Slot {
 	// it has no value of that width to be read as. A narrower value is stored in
 	// one by widening it into the two words of the object.
 	wide bool
+	// complex is set for a slot holding an object of a complex type: two
+	// components of the same real type, stored one after the other, which is the
+	// layout the model measured and the one gcc hands over. Such a slot is an
+	// object and not a value, so the bytes are what travel and what are copied;
+	// the width says which complex type it is, sixteen bytes for a
+	// `double _Complex` and eight for a `float _Complex`. It is a flag of its
+	// own because a struct can be eight bytes and a pair of ints sixteen, and a
+	// conversion to or from a complex type is not a conversion a struct has.
+	complex bool
 }
 
 // LoopLabels are the two places a loop's body can leave by: where the loop ends,
@@ -1101,7 +1110,7 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 			// kept in the frame, and the call answers with that address in the
 			// accumulator: both addresses are parked, because a copy needs two
 			// registers and neither of them can hold an address.
-			e.address_of_object(expr, 0)!
+			e.object_hand_over_address(expr, e.return_class, 0)!
 			source := e.value_slot(0)
 			e.store_accumulator(source, stmt.line, stmt.col)!
 			register := e.accumulator(stmt.line, stmt.col)!
@@ -1125,13 +1134,13 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 			// The second eightbyte is read first and eight bytes further in, and the
 			// object's address is taken again for the first one, because the address
 			// travels in the register the first general eightbyte goes back in.
-			e.address_of_object(expr, 0)!
+			e.object_hand_over_address(expr, e.return_class, 0)!
 			base := e.accumulator(stmt.line, stmt.col)!
 			e.append(e.target.add_immediate(base, e.target.word_size))
 			e.load_return_eightbyte(base, 1, e.return_class.bytes - e.target.word_size,
 				e.return_class.second_floating, stmt.line, stmt.col)!
 		}
-		e.address_of_object(expr, 0)!
+		e.object_hand_over_address(expr, e.return_class, 0)!
 		base := e.accumulator(stmt.line, stmt.col)!
 		e.load_return_eightbyte(base, 0, e.target.word_size, e.return_class.first_floating,
 			stmt.line, stmt.col)!
@@ -1272,6 +1281,12 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		e.argument_lists << stmt.decl_name
 	}
 	init := stmt.init or { return }
+	if slot.complex {
+		// A complex object is written by the conversion its type names rather
+		// than by a copy: a real initializer is a complex value with a zero
+		// imaginary part, which is 6.3.2.2 and not a byte copy.
+		return e.store_complex_local(slot, stmt.decl_type, init, stmt.line, stmt.col, 0)
+	}
 	if slot.wide {
 		// A 128-bit object declared with a value takes one of three things: a copy
 		// of another object of the type, the pair a computation left in the
@@ -1353,6 +1368,9 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		}
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
+	}
+	if target.complex {
+		return e.assign_complex_local(stmt, target, depth)
 	}
 	if target.wide {
 		// A wide target is sixteen bytes of storage, and what is written into it is
@@ -1663,6 +1681,17 @@ fn (mut e Emitter) address_of_object(expr ast.Expr, depth int) !void {
 			e.emit_expr_at(expr.expr, depth)!
 			return
 		}
+	}
+	if expr.typ.kind.is_complex() {
+		// A complex value that is not a name, a member or an element has no
+		// storage of its own: it is computed into a temporary and the address of
+		// that is what the object is worth, which is what a call hands over and
+		// what a return reads.
+		object := e.complex_object(expr, depth + 1)!
+		frame := e.frame_pointer(expr_line(expr), expr_col(expr))!
+		register := e.accumulator(expr_line(expr), expr_col(expr))!
+		e.append(e.target.address_of_slot(frame, i32(object.offset), register))
+		return
 	}
 	e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: an object handed over by value has to be a name, an element or a member, and this expression is not one')
 	return error('not an object')
@@ -2356,8 +2385,7 @@ fn (mut e Emitter) emit_if(stmt ast.Stmt) !bool {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an if without a condition')
 		return error('if without a condition')
 	}
-	e.emit_expr(cond)!
-	e.emit_test(cond, stmt.line, stmt.col)!
+	e.emit_condition(cond, 0, stmt.line, stmt.col)!
 	else_label := e.label()
 	e.branch(.branch_zero, else_label, stmt.line, stmt.col)!
 	then_returned := e.emit_branch_body(stmt.then_body)!
@@ -2395,8 +2423,7 @@ fn (mut e Emitter) emit_while(stmt ast.Stmt) !void {
 	step := e.label()
 	continue_to := if stmt.step.len > 0 { step } else { top }
 	e.place(top)
-	e.emit_expr(cond)!
-	e.emit_test(cond, stmt.line, stmt.col)!
+	e.emit_condition(cond, 0, stmt.line, stmt.col)!
 	e.branch(.branch_zero, end, stmt.line, stmt.col)!
 	// The body can leave by jumping to either end of the loop, so both labels
 	// are known while it is emitted.
@@ -2438,8 +2465,7 @@ fn (mut e Emitter) emit_do_while(stmt ast.Stmt) !void {
 	e.emit_branch_body(stmt.body)!
 	e.loops.pop()
 	e.place(test)
-	e.emit_expr(cond)!
-	e.emit_test(cond, stmt.line, stmt.col)!
+	e.emit_condition(cond, 0, stmt.line, stmt.col)!
 	// Round again while the condition holds, which is the branch opposite the one a
 	// while takes to leave: a while leaves when the test is zero, and this one goes
 	// back when the test is not.
@@ -2803,9 +2829,20 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 		boolean:  written == '_Bool'
 		bytes:    if wide { wide_bytes } else { bytes }
 		wide:     wide
+		complex:  e.writes_a_complex(written)
 	}
 	e.scopes[e.scopes.len - 1][name] = block
 	return block
+}
+
+// writes_a_complex says whether a spelling names an object of a complex type.
+// The spelling is what a declaration carries and not the resolved type, so the
+// words are read the same way the reader read them: `double _Complex` and
+// `_Complex` are both a `double _Complex`, and `float _Complex` is the other.
+// A `long double _Complex` is refused where it is read and never reaches here.
+fn (e Emitter) writes_a_complex(written string) bool {
+	typ := types.from_words(written.split(' ')) or { return false }
+	return typ.kind in [types.Kind.complex_float, types.Kind.complex_double]
 }
 
 // type_width is the width of a value of a type as the source wrote it. An int is
@@ -3840,6 +3877,15 @@ fn (mut e Emitter) emit_expr(expr ast.Expr) !void {
 }
 
 fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
+	if expr.typ.kind.is_complex() {
+		// A complex value is two components and the accumulator is one register.
+		// Every context that wants one has a complex path that answers for it —
+		// an object it is written into, a call it is handed to, a comparison it
+		// is part of — so an expression reaching here is one no complex path
+		// took, and it is refused by name rather than read as its real part.
+		e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: a value of type ${expr.typ.describe()} is two components, and a complex value used as a single one is not computed here')
+		return error('complex value as a value')
+	}
 	if depth > max_emit_depth {
 		e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: the expression is nested more than ${max_emit_depth} levels deep')
 		return error('expression nested too deeply')
@@ -3908,6 +3954,15 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.reference(e.target.load_double_constant(register, 0)!, .float_constant, float_key(expr.value),
 					e.target.name_of(register))
 			}
+		}
+		ast.ComplexLit {
+			// An imaginary constant is a complex value, and a complex value is
+			// two components rather than the one a register here holds. Where
+			// one is wanted the complex paths answer for it; a context that
+			// asks for a scalar at this point has nowhere to put it, so it is
+			// refused by name rather than read as its imaginary part alone.
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: the imaginary constant ${expr.text} is a complex value used where a scalar is wanted')
+			return error('complex constant as a scalar')
 		}
 		ast.Ident {
 			slot := e.lookup(expr.name) or {
@@ -5848,6 +5903,13 @@ fn (mut e Emitter) emit_pointer_step(step ast.Binary, depth int) !void {
 }
 
 fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
+	// A step with a complex operand is a comparison: the arithmetic is written by
+	// the complex paths into an object, and a step that reaches here is one whose
+	// value is wanted in the accumulator, which is a comparison and nothing else,
+	// because C99 defines no ordering on the complex types.
+	if binary.left.typ.kind.is_complex() || binary.right.typ.kind.is_complex() {
+		return e.emit_complex_comparison(binary, depth)
+	}
 	if binary.op == '&&' || binary.op == '||' {
 		return e.emit_short_circuit(binary, depth)
 	}
@@ -6374,16 +6436,14 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 	is_and := binary.op == '&&'
 	// The jump the left side takes when it has already settled the answer: out
 	// of an and when it is false, out of an or when it is true.
-	e.emit_expr_at(binary.left, depth + 1)!
-	e.emit_test(binary.left, binary.line, binary.col)!
+	e.emit_condition(binary.left, depth + 1, binary.line, binary.col)!
 	if is_and {
 		e.branch(.branch_zero, settles, binary.line, binary.col)!
 	} else {
 		e.branch(.branch_nonzero, settles, binary.line, binary.col)!
 	}
 	// The left side did not settle it, so the right side is the answer.
-	e.emit_expr_at(binary.right, depth + 1)!
-	e.emit_test(binary.right, binary.line, binary.col)!
+	e.emit_condition(binary.right, depth + 1, binary.line, binary.col)!
 	if is_and {
 		e.branch(.branch_zero, settles, binary.line, binary.col)!
 	} else {
@@ -6416,8 +6476,7 @@ fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !voi
 		e.diagnostics << problem(conditional.line, conditional.col, 'unsupported: a conditional whose arms have a 128-bit type is not implemented')
 		return error('128-bit conditional')
 	}
-	e.emit_expr_at(conditional.cond, depth + 1)!
-	e.emit_test(conditional.cond, conditional.line, conditional.col)!
+	e.emit_condition(conditional.cond, depth + 1, conditional.line, conditional.col)!
 	else_label := e.label()
 	end_label := e.label()
 	e.branch(.branch_zero, else_label, conditional.line, conditional.col)!
@@ -6511,6 +6570,12 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 			// a float, and eight for a double, whose bytes live in the image and
 			// are read into a floating-point register.
 			if expr.typ.kind == .float { 4 } else { 8 }
+		}
+		ast.ComplexLit {
+			// An imaginary constant is a complex value, so the width a value
+			// of it is sized at is the size the model laid out for its type.
+			// A type the description does not carry has no answer here.
+			e.storage_width(expr.typ)
 		}
 		ast.StrLit {
 			// The value of a string is the address of its bytes.
@@ -7321,7 +7386,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// is taken and the one eightbyte the convention puts in a register
 			// is read from it. A struct of one double is bits moved through the
 			// floating file, which is the same eight bytes.
-			e.address_of_object(arg, depth + i + 1)!
+			e.object_hand_over_address(arg, class, depth + i + 1)!
 			base := e.accumulator(line, col)!
 			if class.first_floating {
 				double_register := e.float_accumulator(line, col)!
@@ -7412,7 +7477,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 					} else {
 						width
 					}
-					e.address_of_object(arg, depth + i + 1)!
+					e.object_hand_over_address(arg, class, depth + i + 1)!
 					base := e.accumulator(line, col)!
 					if offset > 0 {
 						e.append(e.target.add_immediate(base, offset))
@@ -7462,12 +7527,12 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// object whose two eightbytes did not both fit is on the stack and
 			// was pushed already, and reading a register for it would hand the
 			// object over twice and clobber the arguments beside it.
-			e.address_of_object(arg, depth + i + 1)!
-			base := e.accumulator(line, col)!
 			class := e.aggregate_argument(call, i) or {
 				e.diagnostics << problem(call.line, call.col, 'internal: an object handed over in two registers has no class in the signature of ${call.name}')
 				return error('no class')
 			}
+			e.object_hand_over_address(arg, class, depth + i + 1)!
+			base := e.accumulator(line, col)!
 			e.load_argument_eightbyte(base, 0, e.target.word_size, place.floating,
 				place.position, line, col)!
 			e.load_argument_eightbyte(base, e.target.word_size, class.bytes - e.target.word_size,
@@ -8569,6 +8634,7 @@ fn expr_line(expr ast.Expr) int {
 	return match expr {
 		ast.IntLit { expr.line }
 		ast.FloatLit { expr.line }
+		ast.ComplexLit { expr.line }
 		ast.StrLit { expr.line }
 		ast.Ident { expr.line }
 		ast.Unary { expr.line }
@@ -8589,6 +8655,7 @@ fn expr_col(expr ast.Expr) int {
 	return match expr {
 		ast.IntLit { expr.col }
 		ast.FloatLit { expr.col }
+		ast.ComplexLit { expr.col }
 		ast.StrLit { expr.col }
 		ast.Ident { expr.col }
 		ast.Unary { expr.col }
@@ -8611,4 +8678,676 @@ fn problem(line int, col int, msg string) tokenize.Diagnostic {
 		col:  col
 		msg:  msg
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Complex values.
+//
+// A complex value is two components of the same real type, stored one after the
+// other. That is what gcc 16.2.1 lays out and what it hands over: a
+// `double _Complex` is sixteen bytes with the real part first, a `float _Complex`
+// is eight, and a parameter of one travels in two floating-point registers, one
+// eightbyte each, or one when the whole object is eight bytes. The model in
+// types/ carries the widths and the alignments, and backend/abi classifies every
+// eightbyte of one as floating, so a complex object travels the path a struct of
+// its two components travels.
+//
+// What is left is the arithmetic and the conversions, and their shape here is
+// forced by the machine: a value lives in one register and a complex value is
+// two, so a complex value is never in the accumulator. It lives in the frame,
+// and an operation writes its result into an object. The accumulator holds an
+// address when an address is what is wanted.
+// ---------------------------------------------------------------------------
+
+// complex_bytes is the size of an object of a complex type, read from the model
+// rather than computed here, because the model is where the measured layout is.
+fn (e Emitter) complex_bytes(t types.Type) ?int {
+	if !t.kind.is_complex() {
+		return none
+	}
+	return e.representation.size_of(t)
+}
+
+// complex_component_width is the width of one component: eight bytes for a
+// `double _Complex` and four for a `float _Complex`.
+fn complex_component_width(t types.Type) int {
+	return if t.kind == .complex_float { 4 } else { 8 }
+}
+
+// complex_component_offset is where a component starts inside the object. 6.2.5
+// leaves the layout to the implementation, and gcc 16.2.1 measured: the real part
+// is first and the imaginary part immediately after it.
+fn complex_component_offset(t types.Type, which int) int {
+	return which * complex_component_width(t)
+}
+
+// complex_component_single says whether the components are four bytes each, which
+// is the `float _Complex` whose components round at every step the way a float
+// does.
+fn complex_component_single(t types.Type) bool {
+	return t.kind == .complex_float
+}
+
+// complex_type_of is the type of a complex kind, for the places that reach a kind
+// and need the type to ask the model for a size.
+fn complex_type_of(kind types.Kind) types.Type {
+	if kind == .complex_float {
+		return types.complex_float_type()
+	}
+	return types.complex_double_type()
+}
+
+// load_complex_component reads one component of a complex object into a
+// floating-point register, at the width the object's type says.
+fn (mut e Emitter) load_complex_component(frame backend.Register, register backend.Register, offset int, single bool) !void {
+	if single {
+		e.append(e.target.load_float_slot(frame, i32(offset), register)!)
+	} else {
+		e.append(e.target.load_double_slot(frame, i32(offset), register)!)
+	}
+}
+
+// store_complex_component writes one component back, at the same width.
+fn (mut e Emitter) store_complex_component(frame backend.Register, register backend.Register, offset int, single bool) !void {
+	if single {
+		e.append(e.target.store_float_slot(frame, i32(offset), register)!)
+	} else {
+		e.append(e.target.store_double_slot(frame, i32(offset), register)!)
+	}
+}
+
+// complex_step applies one arithmetic operator to two component registers. The
+// operator names are the language's, and the width picks the machine's file:
+// `mulsd` for a double and `mulss` for a float, which is the difference between
+// rounding once at the end and rounding at every step.
+fn (mut e Emitter) complex_step(value backend.Register, other backend.Register, op string, single bool) !void {
+	if single {
+		e.append(e.target.float_arithmetic(op, value, other)!)
+		return
+	}
+	e.append(e.target.double_arithmetic(op, value, other)!)
+}
+
+// complex_object evaluates a complex expression into storage and answers the
+// frame slot that holds the object. A name whose storage is the frame answers
+// with that storage and nothing is copied; everything else is computed into a
+// temporary of this level, because there is no register that holds both
+// components.
+fn (mut e Emitter) complex_object(expr ast.Expr, depth int) !Slot {
+	return e.complex_object_as(expr, expr.typ, depth)
+}
+
+// complex_object_as is complex_object with the type the object is to have, which
+// is the expression's own except where 6.3.2.2 converts a real value, or a
+// complex value of the other width, into that type.
+fn (mut e Emitter) complex_object_as(expr ast.Expr, destination types.Type, depth int) !Slot {
+	if expr is ast.Ident {
+		if source := e.lookup(expr.name) {
+			if source.complex && source.width == (e.complex_bytes(destination) or { 0 }) {
+				return source
+			}
+		}
+	}
+	width := e.complex_bytes(destination) or {
+		e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: ${destination.describe()} is not a complex type this back end moves')
+		return error('not a complex type')
+	}
+	object := e.reserve(width)
+	e.emit_complex_into_type(object, destination, expr, depth + 1)!
+	return object
+}
+
+// emit_complex_into_type writes the value of an expression into an object of a
+// complex type. The destination's type is what the value is converted to, which
+// is the one thing this function knows that the expression does not: 6.3.2.2
+// makes a real value a complex one with a zero imaginary part, and makes a
+// complex value of the other width the same shape at the wider component type.
+fn (mut e Emitter) emit_complex_into_type(dest Slot, destination types.Type, expr ast.Expr, depth int) !void {
+	line := expr_line(expr)
+	col := expr_col(expr)
+	// A real value is the case a hand-over needs, and the imaginary part is
+	// written as zero rather than left: the object may be storage that held
+	// something else, and a program reading the imaginary part would read it.
+	if expr.typ.is_arithmetic() && !expr.typ.kind.is_complex() {
+		return e.emit_real_into_complex(dest, destination, expr, depth)
+	}
+	if !expr.typ.kind.is_complex() {
+		e.diagnostics << problem(line, col, 'unsupported: a value of type ${expr.typ.describe()} is not converted to ${destination.describe()}, and this back end converts a real value and a complex value to a complex type')
+		return error('not a complex conversion')
+	}
+	if expr.typ.kind != destination.kind {
+		// The value is materialised at its own width first and then converted,
+		// because the two are different questions: what the expression is worth,
+		// and what the destination holds.
+		source := e.complex_object_as(expr, expr.typ, depth + 1)!
+		return e.convert_complex(dest, destination, source, expr.typ, line, col)
+	}
+	if expr is ast.Ident {
+		if local := e.lookup(expr.name) {
+			if local.complex {
+				return e.copy_complex_frame(local, dest, dest.width, line, col)
+			}
+		}
+	}
+	if expr is ast.ComplexLit {
+		return e.store_imaginary_constant(dest, destination, expr)
+	}
+	if expr is ast.Binary {
+		return e.emit_complex_arithmetic(dest, expr, depth)
+	}
+	if expr is ast.Call {
+		return e.emit_complex_call(dest, expr, depth)
+	}
+	if expr is ast.Cast {
+		// A cast to a complex type converts what it wraps, which is this same
+		// conversion at the same destination type.
+		return e.emit_complex_into_type(dest, destination, expr.expr, depth)
+	}
+	if expr is ast.Unary {
+		if expr.op == '-' {
+			source := e.complex_object(expr.expr, depth + 1)!
+			return e.negate_complex(dest, destination, source, line, col)
+		}
+		if expr.op == '+' {
+			source := e.complex_object(expr.expr, depth + 1)!
+			return e.copy_complex_frame(source, dest, dest.width, line, col)
+		}
+	}
+	if expr is ast.Ident || expr is ast.Field || expr is ast.Index {
+		// Storage that is not the frame: a member, an element, or a name whose
+		// storage is in the image. Its address is taken and the bytes copied,
+		// the same copy an object hand-over makes.
+		e.address_of_object(expr, depth + 1)!
+		source_address := e.value_slot(depth + 1)
+		e.store_accumulator(source_address, line, col)!
+		frame := e.frame_pointer(line, col)!
+		register := e.accumulator(line, col)!
+		e.append(e.target.address_of_slot(frame, i32(dest.offset), register))
+		destination_address := e.value_slot(depth)
+		e.store_accumulator(destination_address, line, col)!
+		return e.copy_address_object(source_address, destination_address, dest.width, line, col)
+	}
+	e.diagnostics << problem(line, col, 'unsupported: a value of type ${destination.describe()} written as this expression is not one this back end computes')
+	return error('unsupported complex value')
+}
+
+// emit_real_into_complex writes a real value into a complex object: the real part
+// is the value converted to the component's type and the imaginary part is zero.
+// 6.3.2.2 is the rule, and the zero is written rather than left alone, because
+// the object is storage that may have held something else.
+fn (mut e Emitter) emit_real_into_complex(dest Slot, destination types.Type, expr ast.Expr, depth int) !void {
+	line := expr_line(expr)
+	col := expr_col(expr)
+	if e.is_a_pointer(expr) {
+		e.diagnostics << problem(line, col, 'unsupported: a pointer is not converted to ${destination.describe()}')
+		return error('pointer to complex')
+	}
+	single := complex_component_single(destination)
+	e.emit_expr(expr)!
+	if single {
+		e.convert_to_single(expr, line, col)!
+	} else {
+		e.convert_to_double(expr, line, col)!
+	}
+	frame := e.frame_pointer(line, col)!
+	value := e.float_accumulator(line, col)!
+	zero := e.float_scratch(line, col)!
+	e.append(e.target.zero_double(zero)!)
+	e.store_complex_component(frame, value, dest.offset, single)!
+	e.store_complex_component(frame, zero, dest.offset + complex_component_width(destination), single)!
+}
+
+// copy_complex_frame copies one complex object in the frame to another. Both are
+// frame slots, so the copy is a load and a store per eightbyte through the
+// scratch register: sixteen bytes is two moves and eight is one, and neither
+// address is held in a register because the frame pointer names both.
+fn (mut e Emitter) copy_complex_frame(source Slot, destination Slot, width int, line int, col int) !void {
+	if source.offset == destination.offset {
+		return
+	}
+	base := e.frame_pointer(line, col)!
+	register := e.scratch(line, col)!
+	mut done := 0
+	for done < width {
+		e.append(e.target.load_slot(base, i32(source.offset + done), register, 8)!)
+		e.append(e.target.store_slot(base, i32(destination.offset + done), register, 8)!)
+		done += 8
+	}
+}
+
+// convert_complex converts a complex value of one width to the other, one
+// component at a time: each component is the conversion 6.3.1.5 and 6.3.1.6
+// define between a float and a double, and each is rounded on its own.
+fn (mut e Emitter) convert_complex(dest Slot, destination types.Type, source Slot, source_type types.Type, line int, col int) !void {
+	frame := e.frame_pointer(line, col)!
+	value := e.float_accumulator(line, col)!
+	from_single := complex_component_single(source_type)
+	to_single := complex_component_single(destination)
+	mut which := 0
+	for which < 2 {
+		from_offset := source.offset + complex_component_offset(source_type, which)
+		to_offset := dest.offset + complex_component_offset(destination, which)
+		e.load_complex_component(frame, value, from_offset, from_single)!
+		if from_single && !to_single {
+			e.append(e.target.float_to_double(value, value)!)
+		} else if !from_single && to_single {
+			e.append(e.target.double_to_float(value, value)!)
+		}
+		e.store_complex_component(frame, value, to_offset, to_single)!
+		which++
+	}
+}
+
+// negate_complex flips the sign of both components, which is what the unary minus
+// of a complex value is: 6.5.3.3 negates the real and imaginary parts separately
+// and there is no instruction that negates both at once.
+fn (mut e Emitter) negate_complex(dest Slot, destination types.Type, source Slot, line int, col int) !void {
+	e.copy_complex_frame(source, dest, dest.width, line, col)!
+	frame := e.frame_pointer(line, col)!
+	value := e.float_accumulator(line, col)!
+	bits := e.scratch(line, col)!
+	single := complex_component_single(destination)
+	mut which := 0
+	for which < 2 {
+		offset := dest.offset + complex_component_offset(destination, which)
+		e.load_complex_component(frame, value, offset, single)!
+		if single {
+			e.append(e.target.negate_single(value, bits)!)
+		} else {
+			e.append(e.target.negate_double(value, bits)!)
+		}
+		e.store_complex_component(frame, value, offset, single)!
+		which++
+	}
+}
+
+// store_imaginary_constant writes an imaginary constant: the real part is zero
+// and the imaginary part is the coefficient the file wrote. 6.4.4.2 is why the
+// real part is zero rather than absent: the constant is a complex value and not
+// the real one it looks like.
+fn (mut e Emitter) store_imaginary_constant(dest Slot, destination types.Type, expr ast.ComplexLit) !void {
+	frame := e.frame_pointer(expr.line, expr.col)!
+	value := e.float_accumulator(expr.line, expr.col)!
+	zero := e.float_scratch(expr.line, expr.col)!
+	single := complex_component_single(destination)
+	e.append(e.target.zero_double(zero)!)
+	e.store_complex_component(frame, zero, dest.offset, single)!
+	if single {
+		e.intern_single(expr.value)
+		e.reference(e.target.load_float_constant(value, 0)!, .single_constant, single_key(expr.value),
+			e.target.name_of(value))
+	} else {
+		e.intern_double(expr.value)
+		e.reference(e.target.load_double_constant(value, 0)!, .float_constant, float_key(expr.value),
+			e.target.name_of(value))
+	}
+	e.store_complex_component(frame, value, dest.offset + complex_component_width(destination), single)!
+}
+
+// emit_imaginary_constant_from_value is store_imaginary_constant for the places
+// that have a value and a type rather than a node.
+fn (mut e Emitter) emit_imaginary_constant_value(dest Slot, destination types.Type, value f64, line int,
+	col int) !void {
+	frame := e.frame_pointer(line, col)!
+	register := e.float_accumulator(line, col)!
+	zero := e.float_scratch(line, col)!
+	single := complex_component_single(destination)
+	e.append(e.target.zero_double(zero)!)
+	e.store_complex_component(frame, zero, dest.offset, single)!
+	if single {
+		e.intern_single(value)
+		e.reference(e.target.load_float_constant(register, 0)!, .single_constant, single_key(value),
+			e.target.name_of(register))
+	} else {
+		e.intern_double(value)
+		e.reference(e.target.load_double_constant(register, 0)!, .float_constant, float_key(value),
+			e.target.name_of(register))
+	}
+	e.store_complex_component(frame, register, dest.offset + complex_component_width(destination), single)!
+}
+
+// emit_complex_arithmetic writes a complex arithmetic step into an object. Both
+// operands are materialised at the step's own type, which is the wider of the two
+// when they differ, so a component read is always at one width. The four
+// operators are the language's: two of them are one machine instruction per
+// component and the other two are a formula each, and the formula is the one
+// design decision here. It is written out where it is used.
+fn (mut e Emitter) emit_complex_arithmetic(dest Slot, binary ast.Binary, depth int) !void {
+	left := e.complex_object_as(binary.left, binary.typ, depth + 1)!
+	right := e.complex_object_as(binary.right, binary.typ, depth + 1)!
+	match binary.op {
+		'+', '-' {
+			return e.emit_complex_sum(dest, binary, left, right, depth)
+		}
+		'*' {
+			return e.emit_complex_product(dest, binary, left, right, depth)
+		}
+		'/' {
+			return e.emit_complex_quotient(dest, binary, left, right, depth)
+		}
+		else {
+			e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} is not an operator this back end computes a complex value with')
+			return error('unsupported complex operator')
+		}
+	}
+}
+
+// emit_complex_sum writes the sum or the difference of two complex values: one
+// instruction per component, the real part from the real parts and the imaginary
+// part from the imaginary ones. Measured on gcc 16.2.1, which compiles `z + w` to
+// one addsd per component and `z - w` to one subsd per component.
+fn (mut e Emitter) emit_complex_sum(dest Slot, binary ast.Binary, left Slot, right Slot, depth int) !void {
+	frame := e.frame_pointer(binary.line, binary.col)!
+	value := e.float_accumulator(binary.line, binary.col)!
+	other := e.float_scratch(binary.line, binary.col)!
+	single := complex_component_single(binary.typ)
+	width := complex_component_width(binary.typ)
+	mut which := 0
+	for which < 2 {
+		e.load_complex_component(frame, value, left.offset + which * width, single)!
+		e.load_complex_component(frame, other, right.offset + which * width, single)!
+		e.complex_step(value, other, binary.op, single)!
+		e.store_complex_component(frame, value, dest.offset + which * width, single)!
+		which++
+	}
+}
+
+// emit_complex_product writes the product of two complex values, and this is the
+// one design decision this work took deliberately.
+//
+// gcc 16.2.1 compiles a complex multiply to a call to libgcc's `__muldc3` -- the
+// helper that also gets the answer right when a partial product overflows or
+// underflows even though the true product does not, which is the boundary the
+// standard's Annex G describes. This compiler has no such helper to call: the
+// only library a program's image names is one the command line named with `-l`,
+// so an image that called `__muldc3` would be an undefined symbol at load under
+// the very command line this work is measured with. That trades a wrong answer in
+// one corner for a program that does not start at all.
+//
+// The formula below is therefore the arithmetic itself: `ac - bd` for the real
+// part and `ad + bc` for the imaginary one. It is exact for every product whose
+// partial products are representable, which is every product of well-behaved
+// values and includes the corpus's own `(3+4i)(1-2i) = 11-2i`; it differs from
+// gcc only where a partial product overflows to an infinity or underflows to
+// zero and the true product does not, which is exactly the set of inputs gcc
+// sends to its helper. The four partial products are written to the frame before
+// they are combined, so an operand that is also the destination is read before it
+// is written.
+fn (mut e Emitter) emit_complex_product(dest Slot, binary ast.Binary, left Slot, right Slot, depth int) !void {
+	line := binary.line
+	col := binary.col
+	frame := e.frame_pointer(line, col)!
+	value := e.float_accumulator(line, col)!
+	other := e.float_scratch(line, col)!
+	single := complex_component_single(binary.typ)
+	width := complex_component_width(binary.typ)
+	work := e.reserve(4 * width)
+	// ac and bd.
+	e.load_complex_component(frame, value, left.offset, single)!
+	e.load_complex_component(frame, other, right.offset, single)!
+	e.complex_step(value, other, '*', single)!
+	e.store_complex_component(frame, value, work.offset, single)!
+	e.load_complex_component(frame, value, left.offset + width, single)!
+	e.load_complex_component(frame, other, right.offset + width, single)!
+	e.complex_step(value, other, '*', single)!
+	e.store_complex_component(frame, value, work.offset + width, single)!
+	// The real part is ac - bd.
+	e.load_complex_component(frame, value, work.offset, single)!
+	e.load_complex_component(frame, other, work.offset + width, single)!
+	e.complex_step(value, other, '-', single)!
+	e.store_complex_component(frame, value, dest.offset, single)!
+	// ad and bc.
+	e.load_complex_component(frame, value, left.offset, single)!
+	e.load_complex_component(frame, other, right.offset + width, single)!
+	e.complex_step(value, other, '*', single)!
+	e.store_complex_component(frame, value, work.offset + 2 * width, single)!
+	e.load_complex_component(frame, value, left.offset + width, single)!
+	e.load_complex_component(frame, other, right.offset, single)!
+	e.complex_step(value, other, '*', single)!
+	e.store_complex_component(frame, value, work.offset + 3 * width, single)!
+	// The imaginary part is ad + bc.
+	e.load_complex_component(frame, value, work.offset + 2 * width, single)!
+	e.load_complex_component(frame, other, work.offset + 3 * width, single)!
+	e.complex_step(value, other, '+', single)!
+	e.store_complex_component(frame, value, dest.offset + width, single)!
+}
+
+// emit_complex_quotient writes the quotient of two complex values, by the same
+// decision and for the same reason as the product: gcc sends a complex division
+// to libgcc's `__divdc3`, and there is no such symbol an image this compiler
+// builds can name. The formula is the naive one -- `(ac + bd) / (c*c + d*d)` for
+// the real part and `(bc - ad) / (c*c + d*d)` for the imaginary one -- and it is
+// exact for every quotient whose partial products and whose denominator are
+// representable, which includes the corpus's `z / (1+0i)`.
+fn (mut e Emitter) emit_complex_quotient(dest Slot, binary ast.Binary, left Slot, right Slot, depth int) !void {
+	line := binary.line
+	col := binary.col
+	frame := e.frame_pointer(line, col)!
+	value := e.float_accumulator(line, col)!
+	other := e.float_scratch(line, col)!
+	single := complex_component_single(binary.typ)
+	width := complex_component_width(binary.typ)
+	work := e.reserve(6 * width)
+	// c*c and d*d, and their sum at work[2].
+	e.load_complex_component(frame, value, right.offset, single)!
+	e.complex_step(value, value, '*', single)!
+	e.store_complex_component(frame, value, work.offset, single)!
+	e.load_complex_component(frame, value, right.offset + width, single)!
+	e.complex_step(value, value, '*', single)!
+	e.store_complex_component(frame, value, work.offset + width, single)!
+	e.load_complex_component(frame, value, work.offset, single)!
+	e.load_complex_component(frame, other, work.offset + width, single)!
+	e.complex_step(value, other, '+', single)!
+	e.store_complex_component(frame, value, work.offset + 2 * width, single)!
+	// The real part is (a*c + b*d) / (c*c + d*d).
+	e.load_complex_component(frame, value, left.offset, single)!
+	e.load_complex_component(frame, other, right.offset, single)!
+	e.complex_step(value, other, '*', single)!
+	e.store_complex_component(frame, value, work.offset + 3 * width, single)!
+	e.load_complex_component(frame, value, left.offset + width, single)!
+	e.load_complex_component(frame, other, right.offset + width, single)!
+	e.complex_step(value, other, '*', single)!
+	e.load_complex_component(frame, other, work.offset + 3 * width, single)!
+	e.complex_step(other, value, '+', single)!
+	e.load_complex_component(frame, value, work.offset + 2 * width, single)!
+	e.complex_step(other, value, '/', single)!
+	e.store_complex_component(frame, other, dest.offset, single)!
+	// The imaginary part is (b*c - a*d) / (c*c + d*d).
+	e.load_complex_component(frame, value, left.offset + width, single)!
+	e.load_complex_component(frame, other, right.offset, single)!
+	e.complex_step(value, other, '*', single)!
+	e.store_complex_component(frame, value, work.offset + 4 * width, single)!
+	e.load_complex_component(frame, value, left.offset, single)!
+	e.load_complex_component(frame, other, right.offset + width, single)!
+	e.complex_step(value, other, '*', single)!
+	e.load_complex_component(frame, other, work.offset + 4 * width, single)!
+	e.complex_step(other, value, '-', single)!
+	e.load_complex_component(frame, value, work.offset + 2 * width, single)!
+	e.complex_step(other, value, '/', single)!
+	e.store_complex_component(frame, other, dest.offset + width, single)!
+}
+
+// emit_complex_comparison leaves 0 or 1 in the accumulator for `z == w` and
+// `z != w`. 6.5.9 makes two complex values equal when the real parts are equal
+// and the imaginary parts are, which is two comparisons combined: equal when both
+// are equal and unequal when either is. Measured on gcc 16.2.1, `z == w` compares
+// the real parts and then the imaginary ones. The remaining orders are refused by
+// name, because C99 defines no ordering on the complex types.
+fn (mut e Emitter) emit_complex_comparison(binary ast.Binary, depth int) !void {
+	if binary.op !in ['==', '!='] {
+		e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} is not an operator this back end computes on complex values, and C99 defines no order on the complex types')
+		return error('unsupported complex comparison')
+	}
+	// The operands are materialised at the complex type the comparison is made
+	// at, which is the complex one when the other side is real: 6.3.2.2 makes a
+	// real value a complex one with a zero imaginary part, and that is what the
+	// comparison reads.
+	kind := if binary.left.typ.kind.is_complex() { binary.left.typ } else { binary.right.typ }
+	left := e.complex_object_as(binary.left, kind, depth + 1)!
+	right := e.complex_object_as(binary.right, kind, depth + 1)!
+	frame := e.frame_pointer(binary.line, binary.col)!
+	value := e.float_accumulator(binary.line, binary.col)!
+	other := e.float_scratch(binary.line, binary.col)!
+	result := e.accumulator(binary.line, binary.col)!
+	bits := e.scratch(binary.line, binary.col)!
+	single := complex_component_single(kind)
+	width := complex_component_width(kind)
+	// A slot of this node's own, and not a value slot: the value slots are how
+	// the call machinery parks the arguments it has already computed, and a
+	// comparison written inside an argument would overwrite one of them.
+	keep := e.reserve(e.target.word_size)
+	// The real parts first, and the answer is kept while the imaginary parts are
+	// compared, because the second comparison needs the register the first one
+	// used as its scratch.
+	e.load_complex_component(frame, value, left.offset, single)!
+	e.load_complex_component(frame, other, right.offset, single)!
+	if single {
+		e.append(e.target.float_comparison(binary.op, value, other, result, bits)!)
+	} else {
+		e.append(e.target.double_comparison(binary.op, value, other, result, bits)!)
+	}
+	e.store_accumulator(keep, binary.line, binary.col)!
+	e.load_complex_component(frame, value, left.offset + width, single)!
+	e.load_complex_component(frame, other, right.offset + width, single)!
+	if single {
+		e.append(e.target.float_comparison(binary.op, value, other, result, bits)!)
+	} else {
+		e.append(e.target.double_comparison(binary.op, value, other, result, bits)!)
+	}
+	e.load_argument(keep, bits, e.target.word_size, binary.line, binary.col)!
+	if binary.op == '==' {
+		e.append(e.target.and_word(result, bits)!)
+	} else {
+		e.append(e.target.or_word(result, bits)!)
+	}
+}
+
+// emit_complex_condition leaves the truth of a complex value in the accumulator
+// as zero or one: 6.3.2.1 makes a complex value true when either component is not
+// zero, which is two comparisons against zero combined the way the equality is.
+fn (mut e Emitter) emit_complex_condition(cond ast.Expr, line int, col int) !void {
+	object := e.complex_object(cond, 0)!
+	frame := e.frame_pointer(line, col)!
+	value := e.float_accumulator(line, col)!
+	zero := e.float_scratch(line, col)!
+	result := e.accumulator(line, col)!
+	bits := e.scratch(line, col)!
+	single := complex_component_single(cond.typ)
+	width := complex_component_width(cond.typ)
+	keep := e.reserve(e.target.word_size)
+	e.append(e.target.zero_double(zero)!)
+	e.load_complex_component(frame, value, object.offset, single)!
+	if single {
+		e.append(e.target.float_comparison('!=', value, zero, result, bits)!)
+	} else {
+		e.append(e.target.double_comparison('!=', value, zero, result, bits)!)
+	}
+	e.store_accumulator(keep, line, col)!
+	e.load_complex_component(frame, value, object.offset + width, single)!
+	if single {
+		e.append(e.target.float_comparison('!=', value, zero, result, bits)!)
+	} else {
+		e.append(e.target.double_comparison('!=', value, zero, result, bits)!)
+	}
+	e.load_argument(keep, bits, e.target.word_size, line, col)!
+	e.append(e.target.or_word(result, bits)!)
+	e.append(e.target.test(result)!)
+}
+
+// emit_complex_call writes the complex object a call hands back into storage. The
+// value arrives the way the class says it travels: two eightbytes, each in the
+// register a value of its class comes back in, which for a complex value is the
+// two floating-point registers the convention uses for a pair of them. The
+// address of the destination is loaded after the call, into the general register,
+// because the returned value is in the floating-point ones.
+fn (mut e Emitter) emit_complex_call(dest Slot, call ast.Call, depth int) !void {
+	class := e.call_return_class(call) or {
+		e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} is used as a complex value, and its type is not one this back end hands over as an object')
+		return error('not an object return')
+	}
+	e.emit_call(call, depth + 1)!
+	frame := e.frame_pointer(call.line, call.col)!
+	base := e.accumulator(call.line, call.col)!
+	e.append(e.target.address_of_slot(frame, i32(dest.offset), base))
+	e.store_return_eightbyte(base, 0, e.target.word_size, class.first_floating, call.line, call.col)!
+	if class.count == 2 {
+		e.append(e.target.add_immediate(base, e.target.word_size))
+		e.store_return_eightbyte(base, 1, class.bytes - e.target.word_size, class.second_floating,
+			call.line, call.col)!
+	}
+}
+
+// object_hand_over_address leaves in the accumulator the address of the object an
+// expression is handed over as. An argument or a return of an object type is the
+// address of its storage; a real value handed to a complex object is the one
+// exception, because 6.3.2.2 makes it a complex value whose imaginary part is
+// zero, and that object does not exist until this builds it.
+fn (mut e Emitter) object_hand_over_address(expr ast.Expr, class abi.Class, depth int) !void {
+	// The destination is a complex object when both its eightbytes are floating
+	// and no byte of it is anything but a component, which the class says and the
+	// argument's own type does not: a real value handed to one, and a complex
+	// value of the other width, are both built here rather than found.
+	if class.first_floating && (class.count == 1 || class.second_floating) {
+		destination := if class.bytes > 8 {
+			types.complex_double_type()
+		} else {
+			types.complex_float_type()
+		}
+		if expr.typ.is_arithmetic() && !expr.typ.kind.is_complex() {
+			object := e.reserve(class.bytes)
+			e.emit_real_into_complex(object, destination, expr, depth + 1)!
+			frame := e.frame_pointer(expr_line(expr), expr_col(expr))!
+			register := e.accumulator(expr_line(expr), expr_col(expr))!
+			e.append(e.target.address_of_slot(frame, i32(object.offset), register))
+			return
+		}
+		if expr.typ.kind.is_complex() && expr.typ.kind != destination.kind {
+			object := e.reserve(class.bytes)
+			e.emit_complex_into_type(object, destination, expr, depth + 1)!
+			frame := e.frame_pointer(expr_line(expr), expr_col(expr))!
+			register := e.accumulator(expr_line(expr), expr_col(expr))!
+			e.append(e.target.address_of_slot(frame, i32(object.offset), register))
+			return
+		}
+	}
+	e.address_of_object(expr, depth + 1)!
+}
+
+// store_complex_local writes a declaration's initializer into the complex object
+// it declares. The value is converted to the object's type, which is the one
+// place a real initializer becomes a complex value with a zero imaginary part.
+fn (mut e Emitter) store_complex_local(slot Slot, written string, init ast.Expr, line int, col int,
+	depth int) !void {
+	destination := types.from_words(written.split(' ')) or {
+		e.diagnostics << problem(line, col, 'unsupported: ${written} is not a type this back end moves a complex value of')
+		return error('unknown complex type')
+	}
+	source := e.complex_object_as(init, destination, depth)!
+	return e.copy_complex_frame(source, slot, slot.width, line, col)
+}
+
+// assign_complex_local writes a value into a complex object named by a local.
+fn (mut e Emitter) assign_complex_local(stmt ast.Stmt, target Slot, depth int) !void {
+	expr := stmt.expr or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned without a value')
+		return error('assignment without a value')
+	}
+	destination := if target.width == 8 {
+		types.complex_float_type()
+	} else {
+		types.complex_double_type()
+	}
+	source := e.complex_object_as(expr, destination, depth)!
+	return e.copy_complex_frame(source, target, target.width, stmt.line, stmt.col)
+}
+
+// emit_condition leaves the truth of a condition in the accumulator as zero or
+// one. A complex condition is the one that is not a value the accumulator can
+// hold, so it is computed here rather than read out of a register.
+fn (mut e Emitter) emit_condition(cond ast.Expr, depth int, line int, col int) !void {
+	if cond.typ.kind.is_complex() {
+		return e.emit_complex_condition(cond, line, col)
+	}
+	e.emit_expr_at(cond, depth)!
+	return e.emit_test(cond, line, col)
 }
