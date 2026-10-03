@@ -62,6 +62,9 @@ fn main() {
 		}
 		return
 	}
+	if opts.verbose {
+		verbose_print(verbose_header_lines(opts))
+	}
 	// A -print- flag asks a question and stops, so it needs no input file. That
 	// is how a build system asks a compiler where its things are before it has
 	// anything to compile: it reads the answer off the standard output and does
@@ -70,6 +73,9 @@ fn main() {
 		target := backend.resolve(opts.target) or {
 			abort(err.msg())
 			return
+		}
+		if opts.verbose {
+			verbose_print(verbose_query_lines(opts, target))
 		}
 		println(query_answer(opts, target))
 		return
@@ -83,6 +89,9 @@ fn main() {
 	if opts.inputs.len > 1 {
 		abort('linking more than one input is not implemented yet')
 		return
+	}
+	if opts.verbose {
+		verbose_print(verbose_include_dir_lines(opts))
 	}
 	path := opts.inputs[0]
 	source := read_source(path) or {
@@ -108,6 +117,9 @@ fn main() {
 	phases << cli.Phase{
 		name:   'preprocess'
 		micros: time.since(started).microseconds()
+	}
+	if opts.verbose {
+		verbose_print(verbose_file_lines(processed.files))
 	}
 	// A warning is reported and the compile goes on; an error ends it, and so
 	// does a warning the command line promoted. Which is which is asked of the
@@ -229,6 +241,9 @@ fn main() {
 			abort('cannot write ${out_path}: ${err.msg()}')
 			return
 		}
+	}
+	if opts.verbose {
+		verbose_print(verbose_result_lines(opts, phases, image, out_path))
 	}
 	if opts.bench {
 		for line in cli.bench_lines(phases) {
@@ -629,4 +644,94 @@ fn query_answer(opts cli.Options, target backend.Target) string {
 // "where the compiler is" there is.
 fn install_dir() string {
 	return os.dir(os.executable())
+}
+
+// The -verbose report. gcc's -v prints the cc1, as and collect2 command lines it
+// runs; this compiler runs none of those, so what follows is what it can honestly
+// report: which compiler and target this is, where headers and libraries are
+// looked for, what was read, and what went into the file. Every line goes to
+// stderr through verbose_print and nothing here changes what is compiled, so a
+// -E stream or a -print- answer on the standard output is left alone.
+//
+// Each stage hands back its lines rather than printing them, so the stages can be
+// read in a test and there is one place that writes them.
+
+// verbose_header_lines names the compiler, the target and the dialect, the facts
+// gcc's -v opens with.
+fn verbose_header_lines(opts cli.Options) []string {
+	mut out := []string{}
+	out << 'vcc version ${cli.version} (pure V, stub)'
+	target := backend.resolve(opts.target) or {
+		out << 'target: none (${err.msg()})'
+		return out
+	}
+	out << 'target: ${target.name}'
+	out << 'standard: ${standard_line(opts)}'
+	return out
+}
+
+// verbose_query_lines shows the search a query answer came from, which is the
+// detail gcc's -v prints beside a -print- answer.
+fn verbose_query_lines(opts cli.Options, target backend.Target) []string {
+	return ['libraries: =${target.library_dirs_for(opts.library_dirs).join(':')}']
+}
+
+// verbose_include_dir_lines is where a header is looked for, in the order it is
+// searched, which is what a person reads to see why a header resolved where it
+// did.
+fn verbose_include_dir_lines(opts cli.Options) []string {
+	mut out := []string{}
+	for dir in opts.include_dirs {
+		out << 'include: ${dir}'
+	}
+	if opts.nostdinc {
+		out << 'include: (the standard directories, which -nostdinc turns off)'
+		return out
+	}
+	for dir in standard_include_dirs() {
+		out << 'include: ${dir} (standard)'
+	}
+	return out
+}
+
+// verbose_file_lines is what the read opened: the source and every header that was
+// included, which is the list -M writes as a rule.
+fn verbose_file_lines(files []preprocess.SourceFile) []string {
+	mut out := []string{}
+	for file in files {
+		kind := if file.system { ' (system)' } else { '' }
+		out << 'read: ${file.path}${kind}'
+	}
+	return out
+}
+
+// verbose_result_lines closes the report with what this compiler did instead of
+// running a linker: it wrote the container itself, so there is no command line to
+// show. What it can show is the phases and what the image will carry - the loader,
+// the C library, the libraries a -l named, and the file - which is the part of
+// gcc's -v a build reads to see what got linked.
+fn verbose_result_lines(opts cli.Options, phases []cli.Phase, image codegen.Result, out_path string) []string {
+	mut out := []string{}
+	for phase in phases {
+		out << 'phase: ${phase.name} ${phase.micros}us'
+	}
+	target := backend.resolve(opts.target) or { return out }
+	out << 'link: no linker is run; this compiler writes the container itself'
+	out << '  interpreter: ${target.interpreter}'
+	out << '  library: ${target.base_library()} (the C library every image names)'
+	for library in target.resolve_libraries(opts.libraries, opts.library_dirs) or {
+		[]backend.Library{}
+	} {
+		out << '  library: ${library.soname} (${library.path})'
+	}
+	out << '  written: ${out_path} (${image.bytes.len} bytes)'
+	return out
+}
+
+// verbose_print is the one place -verbose reaches a stream: stderr, so that the
+// standard output stays whatever the command was asked for.
+fn verbose_print(lines []string) {
+	for line in lines {
+		eprintln(line)
+	}
 }
