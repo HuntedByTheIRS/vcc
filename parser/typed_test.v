@@ -2,6 +2,7 @@ module parser
 
 import ast
 import backend.abi
+import diagnostics
 import tokenize
 import types
 import types.measured
@@ -799,6 +800,21 @@ fn test_the_null_pointer_constant_is_the_one_integer_a_pointer_takes() {
 	not_null := parsed('int wants(int *p);\nint main() { wants(1); return 0; }')
 	assert not_null.diagnostics.len == 1
 	assert not_null.diagnostics[0].msg.contains('integer')
+}
+
+fn test_a_discarded_qualifier_is_a_warning_the_flags_decide() {
+	// gcc 16.2.1 compiles this program and reports -Wdiscarded-qualifiers, so
+	// the diagnostic the parser raises carries the class and says the command
+	// line decides it. An assignment the program is wrong for does not: it
+	// stops the compile whatever the flags say.
+	dropped := parsed('int main(void) { const int *p = 0; int *q = p; return 0; }')
+	assert dropped.diagnostics.len == 1
+	assert dropped.diagnostics[0].warning
+	assert dropped.diagnostics[0].class == diagnostics.Class.discarded_qualifiers
+	assert dropped.diagnostics[0].msg.contains('drops a qualifier')
+	wrong := parsed('int main(void) { int *q = 7; return 0; }')
+	assert wrong.diagnostics.len == 1
+	assert !wrong.diagnostics[0].warning
 }
 
 fn test_a_call_reads_the_type_its_declaration_returns() {

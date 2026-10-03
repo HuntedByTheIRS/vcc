@@ -26,6 +26,18 @@ pub enum Class {
 	// `error:` with exit 1 under -std=c99 -pedantic-errors. The class is not
 	// in flag_classes for that reason: there is no spelling to name it by.
 	required
+	// discarded_qualifiers is the constraint 6.5.16.1 puts on a pointer
+	// assignment whose target points to a type missing a qualifier the source
+	// points to, which 6.8.6.2 and 6.3.2.3 repeat for a return. gcc reports
+	// it as a warning and still compiles the program: measured on gcc 16.2.1,
+	// `const int *p; int *q = p;` is `warning: initialization discards
+	// 'const' qualifier from pointer target type` and the image runs, exit 0.
+	// It is the class `required` describes and unlike that one it has a
+	// spelling, -Wdiscarded-qualifiers, so a caller can name it and -w or
+	// -Wno-discarded-qualifiers can silence it. -pedantic-errors promotes it
+	// the same way, measured: the same program is `error:` with exit 1 under
+	// -std=c99 -pedantic-errors.
+	discarded_qualifiers
 }
 
 // Severity is what to do with one class of diagnostic: print it as a warning,
@@ -44,8 +56,9 @@ pub enum Severity {
 // refusing it, because a compiler V hands flags to must not fail on one it does
 // not implement.
 const flag_classes = {
-	'cpp':      Class.cpp
-	'pedantic': Class.pedantic
+	'cpp':                  Class.cpp
+	'pedantic':             Class.pedantic
+	'discarded-qualifiers': Class.discarded_qualifiers
 }
 
 // class_of answers the class a -W name names, when it names one.
@@ -67,6 +80,10 @@ fn default_severity(class Class) Severity {
 		// having been written, so this class is reported on its own account;
 		// what -pedantic-errors decides is whether it stops the compile.
 		.required { .warning }
+		// gcc reports a discarded qualifier without being asked, the same
+		// way, and compiles the program: measured, the warning is printed
+		// under -std=c99 with no warning flag written and the image runs.
+		.discarded_qualifiers { .warning }
 		.pedantic { .silent }
 	}
 }
@@ -133,6 +150,13 @@ pub fn (mut p Policy) accept(arg string) bool {
 		}
 		p.mentions << Mention{
 			class:    .required
+			severity: .error
+		}
+		// A discarded qualifier is a constraint the standard requires a
+		// diagnostic for, and gcc promotes it the same way: measured, the
+		// warning becomes `error:` with exit 1 under -std=c99 -pedantic-errors.
+		p.mentions << Mention{
+			class:    .discarded_qualifiers
 			severity: .error
 		}
 		return true

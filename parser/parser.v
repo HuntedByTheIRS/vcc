@@ -3,6 +3,7 @@ module parser
 import ast
 import backend
 import backend.abi
+import diagnostics
 import tokenize
 import types
 
@@ -2681,7 +2682,7 @@ fn (mut p Parser) checked_arguments(signature types.Type, args []ast.Expr, at to
 		problem := types.assignment_problem(parameters[index].typ, p.value_type(argument), p.is_null_constant(argument)) or {
 			continue
 		}
-		p.error_span(argument.line, argument.col, problem)
+		p.problem_span(argument.line, argument.col, problem)
 	}
 	return signature.returns() or { types.Type{} }
 }
@@ -3167,7 +3168,7 @@ fn (mut p Parser) error_at(t tokenize.Token, msg string) {
 	// A token knows the file it came from, so a diagnostic about one names it
 	// even when the token was not read yet - the reader reports what it is
 	// looking at as often as what it just read.
-	p.report_at(t.line, t.col, if t.file != '' { t.file } else { p.file }, msg)
+	p.report_at(t.line, t.col, if t.file != '' { t.file } else { p.file }, msg, false, .cpp)
 }
 
 // error_span reports a diagnostic at a position that came from a node rather than
@@ -3175,15 +3176,36 @@ fn (mut p Parser) error_at(t tokenize.Token, msg string) {
 // is the line and column a reader of the source will look at. A node carries no
 // file, so the one the reader is in is the file the message names.
 fn (mut p Parser) error_span(line int, col int, msg string) {
-	p.report_at(line, col, p.file, msg)
+	p.report_at(line, col, p.file, msg, false, .cpp)
 }
 
-fn (mut p Parser) report_at(line int, col int, file string, msg string) {
+// problem_at reports a conversion reason at a token, which is where the
+// diagnostic's class comes from: `types.Problem` carries whether the flags
+// decide the reason and which class names it, so a reason gcc warns about is a
+// warning here and a reason the program is wrong for stays an error.
+fn (mut p Parser) problem_at(t tokenize.Token, problem types.Problem) {
+	p.report_at(t.line, t.col, if t.file != '' { t.file } else { p.file }, problem.msg, problem.warning, problem.class)
+}
+
+// problem_span is the same for a reason reported where a node started, which is
+// where gcc points a discarded qualifier: at the initializer it was written.
+fn (mut p Parser) problem_span(line int, col int, problem types.Problem) {
+	p.report_at(line, col, p.file, problem.msg, problem.warning, problem.class)
+}
+
+// report_at is the parser's one diagnostic sink. `warning` says whether the
+// command line decides the diagnostic's fate or it stops the compile on its own,
+// and `class` is what a -W flag names; a diagnostic the parser raises on its own
+// account is an error and carries the default class, which is why `warning` is
+// false on every path but a conversion reason.
+fn (mut p Parser) report_at(line int, col int, file string, msg string, warning bool, class diagnostics.Class) {
 	p.diagnostics << tokenize.Diagnostic{
-		line: line
-		col:  col
-		msg:  msg
-		file: file
+		line:    line
+		col:     col
+		msg:     msg
+		file:    file
+		warning: warning
+		class:   class
 	}
 }
 
