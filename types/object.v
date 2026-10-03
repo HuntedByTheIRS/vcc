@@ -351,6 +351,23 @@ pub fn from_target(target backend.Target) Description {
 	aligns[Kind.float] = 4
 	sizes[Kind.double] = 8
 	aligns[Kind.double] = 8
+	// A complex type is two components of its real type, one after the other:
+	// `float _Complex` is two floats and `double _Complex` is two doubles.
+	// Measured on this target with gcc 16.2.1 on a program that printed
+	// `sizeof` and `_Alignof`, `sizeof(float _Complex)` is 8 with an alignment
+	// of 4, `sizeof(double _Complex)` is 16 with an alignment of 8, and
+	// `sizeof(long double _Complex)` is 32 with an alignment of 16. The two
+	// widths the back end moves are carried; `long double _Complex` is carried
+	// for the questions about its size and layout, because a member of it
+	// decides where the member after it starts, and an object of it is refused
+	// by name where the back end is asked for a value, since it has no value of
+	// a `long double` either.
+	sizes[Kind.complex_float] = 8
+	aligns[Kind.complex_float] = 4
+	sizes[Kind.complex_double] = 16
+	aligns[Kind.complex_double] = 8
+	sizes[Kind.complex_long_double] = 32
+	aligns[Kind.complex_long_double] = 16
 	// The 128-bit integers are carried for the questions that are about the
 	// size of a type rather than about a value of one: `sizeof(__int128)` is
 	// 16, a member of that type starts on a 16-byte boundary, and a struct

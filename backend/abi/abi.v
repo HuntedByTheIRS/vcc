@@ -39,6 +39,30 @@ pub:
 // that a refusal can name how large it is, because that object is a copy in memory
 // and no register carries it.
 pub fn class_of(r types.Representation, declared types.Type) Class {
+	// A complex value is two components of its real type, one after the other,
+	// and every eightbyte of it carries only those components, so the whole
+	// object travels in the floating-point file: `double _Complex` is two
+	// eightbytes and `float _Complex` is one. Measured on gcc 16.2.1 across two
+	// translation units, a gcc-built caller and a separately gcc-built callee
+	// linked and run: a `double _Complex` parameter arrives in two floating
+	// registers, one eightbyte each, and a `float _Complex` arrives packed in
+	// one because it is eight bytes in all. The class a complex value has is
+	// therefore the same shape a struct of its two components would have, and
+	// this is where that shape is written for the types the language spells
+	// with `_Complex`.
+	if declared.kind in [types.Kind.complex_float, types.Kind.complex_double] {
+		bytes := object_bytes(r, declared)
+		if bytes == 0 {
+			return Class{}
+		}
+		count := (bytes + 7) / 8
+		return Class{
+			bytes:           bytes
+			count:           count
+			first_floating:  true
+			second_floating: count == 2
+		}
+	}
 	if declared.kind !in [types.Kind.struct_, .union_] {
 		return Class{}
 	}
@@ -121,7 +145,8 @@ pub fn pair_places(target backend.Target, first_floating bool, second_floating b
 // takes in a frame, which is asked by the parser, because a question about the
 // calling convention is only ever asked about an object that is handed over.
 fn object_bytes(r types.Representation, declared types.Type) int {
-	if declared.kind !in [types.Kind.struct_, .union_] || !declared.is_complete() {
+	if declared.kind !in [types.Kind.struct_, .union_, .complex_float, .complex_double]
+		|| !declared.is_complete() {
 		return 0
 	}
 	layout := r.layout(declared) or { return 0 }
@@ -190,6 +215,15 @@ fn note_member(r types.Representation, typ types.Type, start int, low int, high 
 			note_member(r, element, at, low, high, mut cover)
 			at += element_size
 		}
+		return
+	}
+	if typ.kind in [types.Kind.complex_float, types.Kind.complex_double] {
+		// The components of a complex value are floating-point values, so an
+		// eightbyte that carries them is carried by the floating-point file the
+		// same way an eightbyte of doubles is. `float _Complex` is two floats in
+		// one eightbyte and `double _Complex` is two doubles in two, and neither
+		// has a member that is not a floating-point value.
+		cover.covered = true
 		return
 	}
 	cover.covered = true
