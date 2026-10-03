@@ -900,11 +900,11 @@ fn (mut p Parser) parse_binary(min_precedence int) !ast.Expr {
 // carries the zero type was refused where it was written, and a second message
 // about the operator would only repeat the first.
 //
-// Pointer arithmetic is a case this model has no answer for: the type of `p + 1`
-// this model answers, and the scale factor and the emitted bytes are the back end
-// milestone's, but the type of the difference of two pointers is `ptrdiff_t`,
-// which is a type a header names and not one this compiler has, so it stays
-// unresolved and the back end refuses it.
+// Pointer arithmetic is a case this model answers in part: the type of `p + 1`
+// is the pointer's own, and 6.5.6p9 makes the difference of two pointers a
+// `ptrdiff_t`, which is a signed integer type rather than a pointer. The type
+// this target gives it is written out by `pointer_difference_type` below. A
+// sum of two pointers has no answer and stays unresolved.
 fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) types.Type {
 	a := p.value_type(left)
 	b := p.value_type(right)
@@ -942,6 +942,9 @@ fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) 
 		if op.text == '+' && b.is_pointer() && a.is_integer() {
 			return b
 		}
+		if op.text == '-' && a.is_pointer() && b.is_pointer() {
+			return p.pointer_difference_type(op, left, right, a, b)
+		}
 	}
 	if a.kind != .unknown && b.kind != .unknown {
 		// Both operands were resolved and the model still has no answer for the
@@ -950,6 +953,41 @@ fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) 
 		p.error_at(op, 'unsupported: the type of ${describe_operand(left)} ${op.text} ${describe_operand(right)} is not one this compiler resolves')
 	}
 	return types.Type{}
+}
+
+// pointer_difference_type is the type `p - q` has when both operands are
+// pointers: 6.5.6p9 makes the difference of two pointers a `ptrdiff_t`, the
+// signed integer type of a count of elements.
+//
+// The standard lets an implementation choose any signed integer type wide enough
+// to hold the difference, and this target's choice is written out here.
+// Measured with `_Generic` on gcc 16.2.1, `(q - p)` for two `int *` selects
+// `long` and selects neither `long long` nor `int`, and `sizeof(q - p)` is 8, so
+// the type is `long`. It is not derived from the width of a pointer: `long` and
+// `long long` occupy the same eight bytes and are still two types, and a
+// `_Generic` over the difference can tell which one it is.
+//
+// The two operands have to point at compatible object types, and 6.5.6p8 reads
+// a qualified and an unqualified version of one type as compatible, so the
+// qualifiers are dropped before they are compared. Two `void *` are compatible
+// the same way and the GNU dialects accept their difference, so that pair is not
+// refused here; the back end scales it by a byte. Any other pair shares no
+// element type, and its difference is refused rather than counted in an element
+// neither pointer names.
+fn (mut p Parser) pointer_difference_type(op tokenize.Token, left ast.Expr, right ast.Expr, a types.Type, b types.Type) types.Type {
+	left_element := a.pointee() or {
+		p.error_at(op, 'unsupported: the type of ${describe_operand(left)} ${op.text} ${describe_operand(right)} is not one this compiler resolves')
+		return types.Type{}
+	}
+	right_element := b.pointee() or {
+		p.error_at(op, 'unsupported: the type of ${describe_operand(left)} ${op.text} ${describe_operand(right)} is not one this compiler resolves')
+		return types.Type{}
+	}
+	if !types.unqualified(left_element).compatible(types.unqualified(right_element)) {
+		p.error_at(op, 'unsupported: ${describe_operand(left)} and ${describe_operand(right)} are ${a.describe()} and ${b.describe()}, which point at incompatible types, so their difference is not a count of an element')
+		return types.Type{}
+	}
+	return types.long_type()
 }
 
 // parse_member_path reads `.name` and the dots that follow it as one object read
