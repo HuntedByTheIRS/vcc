@@ -9210,6 +9210,26 @@ fn put_integer(mut blob []u8, at int, value i64, width int) {
 	}
 }
 
+// put_bitfield writes a constant into one bitfield inside its storage unit in a
+// blob, leaving the unit's other bits alone: the members of a struct that share
+// a unit each hold their own bits, and a whole-unit write for one would clobber
+// the rest. The unit is read, the field's bits are cleared, the low bits of the
+// value are moved up into their place and ORed in, and the unit is written
+// back. A value wider than the field is cut to the field's width, which is the
+// truncation a store into the field makes. The unit is at most eight bytes,
+// which is the widest storage unit a bitfield can be laid out in.
+fn put_bitfield(mut blob []u8, at int, value i64, bit_offset int, bit_width int, unit_width int) {
+	mut unit := u64(0)
+	for i in 0 .. unit_width {
+		unit |= u64(blob[at + i]) << (8 * i)
+	}
+	mask := if bit_width >= 64 { ~u64(0) } else { (u64(1) << bit_width) - 1 }
+	unit = (unit & ~(mask << bit_offset)) | ((u64(value) & mask) << bit_offset)
+	for i in 0 .. unit_width {
+		blob[at + i] = u8((unit >> (8 * i)) & 0xff)
+	}
+}
+
 // put_single writes a float into a blob as the four bytes of its value, which is
 // the same little-endian image the instruction that reads one expects. It is not
 // put_double at a narrower width: the low four bytes of the double of 1.5 are
@@ -9315,8 +9335,14 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 				}
 			}
 			if value := member.init {
-				put_integer(mut e.program.globals_blob, offset + member.offset,
-					e.normalize_a_bool_constant(member.spelling, value), member.width)
+				written := e.normalize_a_bool_constant(member.spelling, value)
+				if member.bitfield {
+					put_bitfield(mut e.program.globals_blob, offset + member.offset, written,
+						member.bit_offset, member.bit_width, member.unit_width)
+				} else {
+					put_integer(mut e.program.globals_blob, offset + member.offset, written,
+						member.width)
+				}
 			}
 			if address := member.address {
 				e.write_data_address(address, offset + member.offset)
