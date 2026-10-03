@@ -126,6 +126,23 @@ fn builtins(target backend.Target) []Definition {
 	definitions << Definition{'__has_attribute', ['x'], '0'}
 	definitions << Definition{'__has_builtin', ['x'], '0'}
 	definitions << Definition{'__has_feature', ['x'], '0'}
+	// The memory orders gcc names, which <stdatomic.h> builds its memory_order
+	// enum out of: `memory_order_relaxed = __ATOMIC_RELAXED`. Measured, gcc
+	// 16.2.1 predefines all six under -std=c99, -std=gnu99, -std=c11 and
+	// -std=gnu11 alike (`gcc -std=c99 -dM -E -`), so they belong to this list
+	// rather than to the GNU modes' block: a header that needs one needs it in
+	// every mode, and without them the enum has no value to fold.
+	//
+	// The two HLE names gcc also predefines on x86 (__ATOMIC_HLE_ACQUIRE and
+	// __ATOMIC_HLE_RELEASE) are left out on purpose. They are transaction hints
+	// this compiler's atomic calls do not honour, and defining one would turn a
+	// header's `#ifdef` into a promise.
+	definitions << Definition{'__ATOMIC_RELAXED', [], '0'}
+	definitions << Definition{'__ATOMIC_CONSUME', [], '1'}
+	definitions << Definition{'__ATOMIC_ACQUIRE', [], '2'}
+	definitions << Definition{'__ATOMIC_RELEASE', [], '3'}
+	definitions << Definition{'__ATOMIC_ACQ_REL', [], '4'}
+	definitions << Definition{'__ATOMIC_SEQ_CST', [], '5'}
 	return definitions
 }
 
