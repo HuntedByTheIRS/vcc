@@ -5104,6 +5104,19 @@ fn (p Parser) parameter_type_is_known(spec DeclSpec, stars int) bool {
 	if spec.clause.kind in [types.Kind.int128, .unsigned_int128] {
 		return true
 	}
+	// An alias that names an array is the same kind of question with the spelling
+	// standing in the way. `typedef int Arr[4]` resolves `Arr` to an array type and
+	// spells it as `int[4]`, so the word asked about is one no reader has, and a
+	// parameter whose type the model settled when it read the alias is refused.
+	// A pointer to that array is one address, and the direct spelling
+	// `int (*p)[4]` is already a parameter this reader takes, so the two spellings
+	// answer alike. The star is the whole condition: an alias with no star is an
+	// array parameter, which 6.7.5.3p7 adjusts to a pointer to its element, and
+	// this path does not make that adjustment yet, so it stays refused rather than
+	// being laid out as an array object and passed as one.
+	if stars > 0 && spec.clause.is_array() {
+		return true
+	}
 	return p.word_problem(p.parameter_spelling(spec)) == none
 }
 

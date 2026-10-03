@@ -1424,6 +1424,33 @@ fn test_an_object_parameter_of_a_tag_with_no_body_is_reported() {
 	assert result.diagnostics[0].msg.contains('unsupported type struct S')
 }
 
+// An alias that names an array is a type the model settled when it read the alias,
+// so a pointer to it is a parameter this reader can name. The question is about
+// that type and not about the words the file wrote, because `typedef int Arr[4]`
+// spells `Arr *` as the array's type and no word of the language is `int[4]`.
+// Measured on gcc 16.2.1, which compiles a definition taking `Arr *` and answers
+// the same value the direct spelling `int (*p)[4]` answers.
+fn test_a_pointer_parameter_to_an_array_alias_is_accepted() {
+	direct := declarations_of('int f(int (*p)[4]) { return (*p)[0]; }')
+	assert direct.diagnostics.len == 0
+
+	aliased := declarations_of('typedef int Arr[4]; int f(Arr *p) { return (*p)[0]; }')
+	assert aliased.diagnostics.len == 0
+	last := aliased.unit.decls[aliased.unit.decls.len - 1]
+	assert last.params.len == 1
+	assert last.params[0].name == 'p'
+	assert last.params[0].resolved.describe().contains('[4]')
+}
+
+// An alias with no star is an array parameter, which 6.7.5.3p7 adjusts to a
+// pointer to its element. This path does not make that adjustment, so it stays
+// refused rather than being laid out as an array object and passed as one.
+fn test_an_array_alias_parameter_with_no_star_is_still_refused() {
+	result := declarations_of('typedef int Arr[4]; int f(Arr p) { return p[0]; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('unsupported type int[4]')
+}
+
 // A definition whose return type is a pointer is a definition like any other.
 // The value goes back in the register an int comes back in, and what the pointer
 // points at is not laid out at the return, so the reader keeps the type instead
