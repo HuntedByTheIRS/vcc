@@ -259,7 +259,8 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			// The form is printed beside the operator because `x++` and `++x`
 			// are the same step and differ only in the value they are worth.
 			form := if expr.postfix { 'postfix' } else { 'prefix' }
-			out << '${indent}${form} ${expr.op} ${expr.name} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			out << '${indent}${form} ${expr.op} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			dump_expression(expr.operand, depth + 1, mut out)
 		}
 		ast.Conditional {
 			// The three operands are printed in the order they were written,

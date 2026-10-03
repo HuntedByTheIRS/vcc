@@ -1975,6 +1975,40 @@ fn test_a_pointer_step_uses_the_size_of_what_it_points_at() {
 	os.rm(binary) or {}
 }
 
+// A floating object is stepped by one of its own width, at the width it is
+// stored with: a double adds 1.0 in eight bytes and a float 1.0f in four. The
+// name, the member read through a dot and the member read through `->` are the
+// same step, and the postfix form is worth what the object held. The programs
+// are run, so what is checked is the bytes rather than the intent. Measured on
+// gcc 16.2.1, which exits 9, 5, 5, 18, 8, 14 and 6.
+fn test_a_floating_object_is_stepped_by_one_of_its_width() {
+	source := scratch('incdec_float.c')
+	binary := scratch('incdec_float')
+	double_name := compile_and_run([source, '-o', binary],
+		'int main(void) { double d = 2.5; d++; d++; return (int)(d * 2); }\n')
+	assert double_name == 9
+	double_postfix := compile_and_run([source, '-o', binary],
+		'int main(void) { double d = 2.5; double x = d++; return (int)(x * 2); }\n')
+	assert double_postfix == 5
+	float_decrement := compile_and_run([source, '-o', binary],
+		'int main(void) { float f = 3.5f; f--; return (int)(f * 2); }\n')
+	assert float_decrement == 5
+	float_member := compile_and_run([source, '-o', binary],
+		'struct S { float f; };\nint main(void) { struct S s; s.f = 1.25f; s.f++; return (int)(s.f * 8); }\n')
+	assert float_member == 18
+	double_arrow := compile_and_run([source, '-o', binary],
+		'struct S { double d; };\nint main(void) { struct S s; s.d = 1.0; struct S *p = &s; p->d++; return (int)(s.d * 4); }\n')
+	assert double_arrow == 8
+	double_element := compile_and_run([source, '-o', binary],
+		'int main(void) { double a[2] = {1.0, 2.5}; a[1]++; return (int)(a[1] * 4); }\n')
+	assert double_element == 14
+	double_element_postfix := compile_and_run([source, '-o', binary],
+		'int main(void) { double a[2] = {1.0, 2.5}; double old = a[0]++; return (int)(old * 2) + (int)(a[0] * 2); }\n')
+	assert double_element_postfix == 6
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // A pointer whose pointed-at type has no size has no step to compute: `void *`
 // is the standing case, and a pointer to a function and to an undefined struct
 // are the same shape. Refused by name where the operator is written.
@@ -1989,22 +2023,39 @@ fn test_a_step_on_a_pointer_with_no_pointed_at_size_is_refused() {
 	os.rm(source) or {}
 }
 
-// An element is not a name, and stepping one would have to reach the lvalue
-// through the subscript the tree has no node for. The program is refused where
-// the operator is written and nothing is written out: a silently wrong value is
-// the one outcome worse than a diagnostic.
-fn test_a_step_on_an_element_is_refused_and_writes_nothing() {
-	source := scratch('incdec_element.c')
-	binary := scratch('incdec_element')
-	text := 'int main(void) { int a[3]; a[0]++; return 0; }\n'
-	os.write_file(source, text) or { panic(err) }
-	lexed := tokenize.lex(text)
-	parsed := parser.parse(lexed.tokens)
-	assert parsed.diagnostics.len == 1
-	assert parsed.diagnostics[0].msg.contains('on a[...]')
-	assert parsed.diagnostics[0].msg.contains('implements ++ and -- on a plain name only')
-	assert !os.exists(binary)
+// An element is an object the operator can step in place: `a[i]++` reads the
+// element at the old index, steps it and leaves it stepped, and a postfix step
+// is worth what the element held. The programs are run, so what is checked is
+// the bytes and not the intent. Measured on gcc 16.2.1, which exits 6, 7 and 6.
+fn test_an_element_or_a_member_steps_in_place() {
+	source := scratch('incdec_object.c')
+	binary := scratch('incdec_object')
+	element := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[3] = {5, 0, 0}; a[0]++; return a[0]; }\n')
+	assert element == 6
+	member := compile_and_run([source, '-o', binary],
+		'struct S { int m; };\nint main(void) { struct S s; s.m = 6; ++s.m; return s.m; }\n')
+	assert member == 7
+	arrow := compile_and_run([source, '-o', binary],
+		'struct S { int m; };\nint main(void) { struct S s; s.m = 5; struct S *p = &s; p->m++; return s.m; }\n')
+	assert arrow == 6
 	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The index of the element a postfix step is written on is evaluated once: `a[i++]++`
+// steps the element at the old index and increments the index a single time. A
+// second evaluation of the index, or one made after the element's step, is a
+// silent wrong value with no diagnostic to show for it. Measured on gcc 16.2.1:
+// the element is 100 at the old index, 101 after the step, and the index is 1.
+fn test_the_index_of_a_stepped_element_is_read_once() {
+	source := scratch('incdec_once.c')
+	binary := scratch('incdec_once')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[3] = {100, 0, 0}; int i = 0; int old = a[i++]++; return old + a[0] + i; }\n')
+	assert exit_status == 202
+	os.rm(source) or {}
+	os.rm(binary) or {}
 }
 
 // A scalar wrapped in braces is the value in them, at either scope, and an array

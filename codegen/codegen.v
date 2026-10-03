@@ -3372,6 +3372,12 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 			// member.
 			e.writes_a_double(expr.spelling) || e.writes_a_float(expr.spelling)
 		}
+		ast.IncDec {
+			// The value is the object after the step, whose class is the
+			// object's own: a double or a float name, element or member is a
+			// floating value, and the reader resolved that type for the node.
+			expr.typ.kind != .unknown && expr.typ.is_floating()
+		}
 		ast.Call {
 			// A call that hands an object back hands its bytes over in the
 			// register its class names, so the floating class is the same answer
@@ -3449,6 +3455,11 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 		}
 		ast.Field {
 			e.writes_a_float(expr.spelling)
+		}
+		ast.IncDec {
+			// The same question at four bytes: the object is a float, so the
+			// value the operator leaves in the floating file is one.
+			expr.typ.kind == .float
 		}
 		ast.Call {
 			// The same question at four bytes, and the reader's clause is the
@@ -4604,23 +4615,27 @@ fn (mut e Emitter) inc_dec_step(expr ast.IncDec) !i32 {
 		return sign
 	}
 	pointee := expr.typ.pointee() or {
-		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, which is ${expr.typ.describe()}, and a pointer with nothing pointed at has no step')
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on this object, which is ${expr.typ.describe()}, and a pointer with nothing pointed at has no step')
 		return error('inc-dec operand points at nothing')
 	}
 	size := e.representation.size_of(pointee) or {
-		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, which is ${expr.typ.describe()}, and what it points at has no size to step by')
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on this object, which is ${expr.typ.describe()}, and what it points at has no size to step by')
 		return error('inc-dec operand points at a type with no size')
 	}
 	if size > 0x7fffffff {
-		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, which is ${expr.typ.describe()}, and a step that many bytes wide is not one this back end writes')
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on this object, which is ${expr.typ.describe()}, and a step that many bytes wide is not one this back end writes')
 		return error('inc-dec step is too wide')
 	}
 	return sign * i32(size)
 }
 
-// emit_inc_dec writes `++x`, `--x`, `x++` or `x--` for the name the node holds,
-// which is the one operand the parser builds it for: a local in the frame or a
-// top-level object in the image, of an integer or a pointer type.
+// emit_inc_dec writes `++x`, `--x`, `x++` or `x--` for the object the node
+// holds. The object is named four ways - a name in the frame or the image, an
+// element, a member, or what a pointer points at - and each is read, stepped and
+// written back in place. A name keeps the frame-and-image path it has always had;
+// the other three go through the object's own address, which is the machinery an
+// assignment already uses for an lvalue. A floating object is a step of its own
+// width rather than a count of bytes, so it is handled separately.
 //
 // The step is one for an integer, added for `++` and subtracted for `--`, and
 // the size of what is pointed at for a pointer, which is the step 6.5.2.4 gives
@@ -4628,9 +4643,7 @@ fn (mut e Emitter) inc_dec_step(expr ast.IncDec) !i32 {
 // value left in the accumulator: the prefix form leaves the object after the
 // step, the postfix form what it held before, so the postfix form is the prefix
 // form with the old value parked in a frame slot while the step runs and read
-// back at the end. The slot is the one this level of nesting already uses for a
-// half-finished value, which is free while the step runs because the step
-// evaluates nothing.
+// back at the end.
 //
 // A char is stepped and written at its own byte: the read widens it to the int
 // the language promotes it to, the step adds an int, and the store cuts the
@@ -4638,11 +4651,25 @@ fn (mut e Emitter) inc_dec_step(expr ast.IncDec) !i32 {
 // the width of the object, so an int wraps at four bytes rather than producing a
 // value no int holds.
 fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
+	if expr.typ.kind == .float || expr.typ.kind == .double {
+		return e.emit_inc_dec_floating(expr, depth)
+	}
 	step := e.inc_dec_step(expr)!
-	if slot := e.lookup(expr.name) {
-		if slot.count > 0 || slot.bytes > 0 || slot.wide || slot.floating {
-			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer or a pointer name only')
-			return error('inc-dec operand is not a name this compiler steps')
+	operand := expr.operand
+	if operand is ast.Ident {
+		return e.emit_inc_dec_name(expr, operand, step, depth)
+	}
+	return e.emit_inc_dec_object(expr, step, depth)
+}
+
+// emit_inc_dec_name steps an object named by a name, which lives either in the
+// frame or in the image. The frame case reads the slot directly; the image case
+// reads through the address the layout gives the object.
+fn (mut e Emitter) emit_inc_dec_name(expr ast.IncDec, name ast.Ident, step i32, depth int) !void {
+	if slot := e.lookup(name.name) {
+		if slot.count > 0 || slot.bytes > 0 || slot.wide || slot.floating || slot.single {
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${name.name}, and this compiler steps a scalar object only')
+			return error('inc-dec operand is not a scalar object')
 		}
 		e.load_accumulator(slot, expr.line, expr.col)!
 		old := if expr.postfix { e.value_slot(depth) } else { Slot{} }
@@ -4657,16 +4684,16 @@ fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
 		}
 		return
 	}
-	if object := e.global_of(expr.name) {
-		if object.count > 0 || object.object || object.floating || object.width == wide_bytes {
-			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer or a pointer name only')
-			return error('inc-dec operand is not a name this compiler steps')
+	if object := e.global_of(name.name) {
+		if object.count > 0 || object.object || object.floating || object.single || object.width == wide_bytes {
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${name.name}, and this compiler steps a scalar object only')
+			return error('inc-dec operand is not a scalar object')
 		}
 		// The object is storage in the image, so its address is a reference the
 		// layout fills in and is parked while the step runs: the value is read
 		// through the address, stepped, and written back through it.
 		register := e.accumulator(expr.line, expr.col)!
-		e.reference(e.target.address_of(register, 0), .global_address, expr.name, e.target.name_of(register))
+		e.reference(e.target.address_of(register, 0), .global_address, name.name, e.target.name_of(register))
 		address := e.value_slot(depth)
 		e.store_accumulator(address, expr.line, expr.col)!
 		address_register := e.scratch(expr.line, expr.col)!
@@ -4683,8 +4710,142 @@ fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
 		}
 		return
 	}
-	e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and no local or top-level object of that name is in scope')
+	e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${name.name}, and no local or top-level object of that name is in scope')
 	return error('unknown inc-dec target')
+}
+
+// emit_inc_dec_object steps an element, a member, or what a pointer points at.
+// The object's address is computed with the same machinery an assignment uses -
+// the element address, the member address, and the pointer's own value - and
+// parked while the value is read through it. The value is stepped at the width of
+// the object and written back through the same address.
+fn (mut e Emitter) emit_inc_dec_object(expr ast.IncDec, step i32, depth int) !void {
+	operand := expr.operand
+	if operand is ast.Field {
+		if operand.bitfield {
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on the bitfield ${operand.name}.${operand.member}, and this back end does not step a bitfield in place')
+			return error('bitfield increment')
+		}
+	}
+	e.inc_dec_address(operand, depth + 1)!
+	address := e.value_slot(depth)
+	e.store_accumulator(address, expr.line, expr.col)!
+	address_register := e.scratch(expr.line, expr.col)!
+	e.load_argument(address, address_register, e.target.word_size, expr.line, expr.col)!
+	width := e.storage_width(expr.typ) or {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on an object of ${expr.typ.describe()}, and this back end has no width to step it at')
+		return error('unsupported width')
+	}
+	register := e.accumulator(expr.line, expr.col)!
+	e.load_indirect_value(address_register, register, expr.typ.kind.is_unsigned(), width)!
+	old := if expr.postfix { e.value_slot(depth + 1) } else { Slot{} }
+	if expr.postfix {
+		e.store_accumulator(old, expr.line, expr.col)!
+	}
+	e.append(e.target.add_immediate(register, step))
+	e.normalize_a_bool_store(expr.typ.kind == .bool_, width == 8, expr.line, expr.col)!
+	e.append(e.target.store_indirect(address_register, register, width)!)
+	if expr.postfix {
+		e.load_accumulator(old, expr.line, expr.col)!
+	}
+}
+
+// emit_inc_dec_floating steps an object of a floating type, which is one add or
+// subtract of the right width: a float by 1.0f at four bytes and a double by 1.0
+// at eight. The step is not a byte count - there is no stride for a value that is
+// not a pointer - so the object's address is taken and the value is read into the
+// floating-point register, the constant is loaded into the scratch one, and the
+// arithmetic is the same instruction a `d + 1.0` uses. The postfix form parks the
+// old value in a slot the way the integer path does and reads it back at the end.
+fn (mut e Emitter) emit_inc_dec_floating(expr ast.IncDec, depth int) !void {
+	single := expr.typ.kind == .float
+	e.inc_dec_address(expr.operand, depth + 1)!
+	address := e.value_slot(depth)
+	e.store_accumulator(address, expr.line, expr.col)!
+	address_register := e.scratch(expr.line, expr.col)!
+	e.load_argument(address, address_register, e.target.word_size, expr.line, expr.col)!
+	value := e.float_accumulator(expr.line, expr.col)!
+	if single {
+		e.append(e.target.load_float_indirect(address_register, value)!)
+	} else {
+		e.append(e.target.load_double_indirect(address_register, value)!)
+	}
+	old := if expr.postfix { e.value_slot(depth + 1) } else { Slot{} }
+	if expr.postfix {
+		if single {
+			e.store_single_accumulator(old, expr.line, expr.col)!
+		} else {
+			e.store_double_accumulator(old, expr.line, expr.col)!
+		}
+	}
+	other := e.float_scratch(expr.line, expr.col)!
+	if single {
+		e.intern_single(1.0)
+		e.reference(e.target.load_float_constant(other, 0)!, .single_constant, single_key(1.0),
+			e.target.name_of(other))
+	} else {
+		e.intern_double(1.0)
+		e.reference(e.target.load_double_constant(other, 0)!, .float_constant, float_key(1.0),
+			e.target.name_of(other))
+	}
+	op := if expr.op == '++' { '+' } else { '-' }
+	if single {
+		e.append(e.target.float_arithmetic(op, value, other)!)
+		e.append(e.target.store_float_indirect(address_register, value)!)
+	} else {
+		e.append(e.target.double_arithmetic(op, value, other)!)
+		e.append(e.target.store_double_indirect(address_register, value)!)
+	}
+	if expr.postfix {
+		if single {
+			e.load_single_accumulator(old, expr.line, expr.col)!
+		} else {
+			e.load_double_accumulator(old, expr.line, expr.col)!
+		}
+	}
+}
+
+// inc_dec_address leaves the address of the object an increment steps in the
+// accumulator, which is the address the load and the store go through. A name
+// lives in the frame or in the image; an element is addressed from its base; a
+// member from the object that holds it, or from the pointer `->` reads; and what
+// a pointer points at is the pointer's own value.
+fn (mut e Emitter) inc_dec_address(operand ast.Expr, depth int) !void {
+	if operand is ast.Ident {
+		if slot := e.lookup(operand.name) {
+			register := e.accumulator(operand.line, operand.col)!
+			frame := e.frame_pointer(operand.line, operand.col)!
+			e.append(e.target.address_of_slot(frame, slot.offset, register))
+			return
+		}
+		if object := e.global_of(operand.name) {
+			if object.count > 0 || object.object || object.width == wide_bytes {
+				e.diagnostics << problem(operand.line, operand.col, 'unsupported: ${operand.name} is not a scalar object, and this compiler steps a scalar object only')
+				return error('not a scalar object')
+			}
+			register := e.accumulator(operand.line, operand.col)!
+			e.reference(e.target.address_of(register, 0), .global_address, operand.name, e.target.name_of(register))
+			return
+		}
+		e.diagnostics << problem(operand.line, operand.col, 'unsupported: ${operand.name} is stepped, and no declaration of that name is in scope')
+		return error('unknown inc-dec target')
+	}
+	if operand is ast.Index {
+		e.emit_element_address(operand, depth)!
+		return
+	}
+	if operand is ast.Field {
+		e.field_address(operand, depth, operand.line, operand.col)!
+		return
+	}
+	if operand is ast.Unary {
+		if operand.op == '*' {
+			e.emit_expr_at(operand.expr, depth)!
+			return
+		}
+	}
+	e.diagnostics << problem(expr_line(operand), expr_col(operand), 'unsupported: this object cannot be stepped, and this compiler steps a name, an element, a member or what a pointer points at only')
+	return error('not a step target')
 }
 
 // emit_cast writes a conversion. The operand is computed first and what the
@@ -6706,11 +6867,9 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 		}
 		ast.IncDec {
 			// The value is the one the operand holds, so it is sized the way
-			// the name is: a char is the int the load widens it to, which is
-			// the promotion the operator's value gets in an expression.
-			e.width_of_at(ast.Expr(ast.Ident{
-				name: expr.name
-			}), depth + 1) or { return none }
+			// the operand is: a char is the int the load widens it to, which
+			// is the promotion the operator's value gets in an expression.
+			e.width_of_at(expr.operand, depth + 1) or { return none }
 		}
 		ast.Conditional {
 			// Both arms are converted to the type the conditional is worth

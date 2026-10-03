@@ -578,10 +578,10 @@ pub:
 }
 
 // IncDec is `++x`, `--x`, `x++` or `x--` written where a value is expected. The
-// operand is a name and not a nested expression: the object this reads, steps
-// and writes is a plain scalar, and a subscript, a member and a literal are
-// refused where the operator is read rather than desugared into a shape the tree
-// has no node for.
+// operand is the object the operator steps, and it is an lvalue: a name, an
+// element, a member or a dereference. What the operand names is a scalar - an
+// integer, a pointer or a floating value - and the reader refuses anything else,
+// and any other expression, where the operator is written.
 //
 // C makes an assignment a statement here and gives the increment no statement of
 // its own, so this is an expression node: it is worth a value, unlike `x = 1`.
@@ -592,7 +592,7 @@ pub:
 pub struct IncDec {
 pub:
 	op      string
-	name    string
+	operand Expr
 	postfix bool
 	typ     types.Type
 	line    int
