@@ -1689,19 +1689,24 @@ fn (mut p Parser) parse_member_on(object ast.Expr, through_pointer bool, at toke
 	}
 	if object is ast.Index {
 		// A member of an element: `s[i].a` reads the member from the element
-		// the index names, so the Field carries the index and the member is
-		// read from that element. A base that is a name keeps that
-		// name-and-index shape.
+		// the index names. The name-and-index shape belongs to an array, whose
+		// place in the frame or the image the reader knows and whose stride the
+		// declaration carries. An element of a pointer is an object addressed
+		// from the pointer's value and scaled by the size of what it points at,
+		// which is what the general reader computes; `p[i].a` goes there with
+		// the element node as its base, exactly as `p[i]` alone does.
 		element := object as ast.Index
 		if element.base is ast.Ident {
 			base := element.base as ast.Ident
-			base_at := tokenize.Token{
-				kind: .identifier
-				text: base.name
-				line: base.line
-				col:  base.col
+			if base.typ.is_array() || base.typ.kind == .unknown {
+				base_at := tokenize.Token{
+					kind: .identifier
+					text: base.name
+					line: base.line
+					col:  base.col
+				}
+				return ast.Expr(p.parse_member_path(base.name, base_at, through_pointer, element.index)!)
 			}
-			return ast.Expr(p.parse_member_path(base.name, base_at, through_pointer, element.index)!)
 		}
 	}
 	return ast.Expr(p.parse_general_member_path(object, through_pointer, at)!)
