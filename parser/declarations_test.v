@@ -360,6 +360,52 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	assert empty.diagnostics[0].msg.contains('empty brace initializer')
 }
 
+// A brace list whose element read fails leaves the cursor where it was, so the
+// statements after the list are still the statements of the body that holds it.
+// The empty list below is refused by name - measured on gcc 16.2.1 it is an
+// object of zero, and this reader refuses it - and the point of this test is
+// what the refusal does to the rest of the body. Before the recovery the failed
+// read left the cursor in front of the list's own closing brace, the block
+// reader took that brace for the end of the function, and every statement after
+// it was reported as `expected a declaration` at file scope: the shape at
+// hello.c 3437 did that to eight statements of `_vinit`.
+fn test_a_failed_brace_element_leaves_the_reader_in_the_function() {
+	result := declarations_of('struct T { int a; }; struct S { int typ; struct T *obj; int boxed; }; struct S g; void *memdup(const void *p, unsigned long n); int main(void) { g = (struct S){.typ = 1, .obj = (struct T *)memdup(&(struct T){}, sizeof(struct T)), .boxed = 1}; g.typ = 6; return g.typ; }')
+	// One diagnostic, the empty list refused by name. The cascade that used to
+	// report every statement after the assignment is gone.
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('empty brace initializer')
+	mut main := result.unit.decls[0]
+	for decl in result.unit.decls {
+		if decl.name == 'main' {
+			main = decl
+		}
+	}
+	assert main.name == 'main'
+	assert main.body.len > 0
+	last := main.body[main.body.len - 1]
+	assert last.kind == .return_stmt
+}
+
+// The same recovery in an enum body. An enumerator whose value the folder cannot
+// compute is refused by name, and before the recovery the cursor was left inside
+// the braces: the typedef of the enum then reported its own name, `E`, as
+// `expected a declaration` at file scope - measured, `typedef enum { A =
+// NOTDEFINED, B } E;` gave that message at E's column, and glibc's
+// `<stdatomic.h>` reaches it through `__ATOMIC_RELAXED`, which nothing here
+// defines.
+fn test_a_failed_enumerator_leaves_the_reader_in_the_enum() {
+	result := declarations_of('typedef enum { A = NOTDEFINED, B } E; int x; int main(void) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('integer constant expression')
+	// The typedef read to its closing brace, so the program after it is the
+	// program: one global and one function, and no statement read as a
+	// declaration.
+	assert result.unit.globals.len == 1
+	assert result.unit.decls.len == 1
+	assert result.unit.decls[0].name == 'main'
+}
+
 // V writes every constant it emits as `(type)(value)`, so the C it generates has
 // file-scope const arrays whose first element is a cast of a written constant:
 // `{((u8)(0x08)), 0x00, ...}`. A cast of a written constant is itself a written

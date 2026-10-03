@@ -2249,7 +2249,18 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 	// the declaration reader expects it: a failed read that left the cursor
 	// inside the braces would report the same declaration a second time at a
 	// token of the next one.
+	//
+	// The skip starts from the list's own first token, not from wherever the
+	// failed read stopped. A read that failed inside a parenthesis leaves the
+	// parenthesis open behind it, and counted from there the `)` that closes the
+	// expression reads as a bracket this list never opened: the skip gives up
+	// before the list's own brace, the cursor is left in front of that brace,
+	// and the block reader takes it for the end of the function. Counting from
+	// the first token covers every bracket the list wrote, so the brace the skip
+	// stops at is the one that ends this list and the reader stays inside the
+	// body it is reading.
 	mut elements := []BraceElement{}
+	list_body := p.pos
 	for {
 		t := p.peek()
 		if t.kind == .eof {
@@ -2257,16 +2268,16 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 			return error('unterminated brace initializer')
 		}
 		designators := p.brace_designators() or {
-			p.skip_balanced(open) or {}
+			p.recover_brace_list(open, list_body)
 			return error('brace designator')
 		}
 		if designators.len > 0 && !p.expect_punct('=') {
-			p.skip_balanced(open) or {}
+			p.recover_brace_list(open, list_body)
 			return error('brace designator')
 		}
 		if p.at_punct('{') {
 			list := p.parse_brace_initializer(body) or {
-				p.skip_balanced(open) or {}
+				p.recover_brace_list(open, list_body)
 				return error('nested brace initializer')
 			}
 			elements << BraceElement{
@@ -2276,7 +2287,7 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 		} else if p.starts_a_written_constant() {
 			before := p.pos
 			constant := p.number_constant() or {
-				p.skip_balanced(open) or {}
+				p.recover_brace_list(open, list_body)
 				return error('brace element')
 			}
 			if body && !p.at_punct(',') && !p.at_punct('}') {
@@ -2287,7 +2298,7 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 				// the element is longer than it and is read as an expression.
 				p.pos = before
 				expr := p.parse_expression() or {
-					p.skip_balanced(open) or {}
+					p.recover_brace_list(open, list_body)
 					return error('brace element')
 				}
 				elements << BraceElement{
@@ -2309,7 +2320,7 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 					designators: designators
 				}
 			} else {
-				p.skip_balanced(open) or {}
+				p.recover_brace_list(open, list_body)
 				return error('brace element')
 			}
 		} else if !body && t.kind == .punct && (t.text == '(' || t.text == '-' || t.text == '+') {
@@ -2329,7 +2340,7 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 				}
 			} else {
 				p.error_at(t, 'unsupported: an element of a brace initializer is a written number or an address, and a parenthesized element here is a written constant or a cast of one, found ${describe(t)}')
-				p.skip_balanced(open) or {}
+				p.recover_brace_list(open, list_body)
 				return error('brace element')
 			}
 		} else if body {
@@ -2341,7 +2352,7 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 			// declaration runs, and the store places the byte the part starts
 			// at.
 			expr := p.parse_expression() or {
-				p.skip_balanced(open) or {}
+				p.recover_brace_list(open, list_body)
 				return error('brace element')
 			}
 			elements << BraceElement{
@@ -2350,7 +2361,7 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 			}
 		} else {
 			p.error_at(t, 'unsupported: an element of a brace initializer is a written number or an address, found ${describe(t)}')
-			p.skip_balanced(open) or {}
+			p.recover_brace_list(open, list_body)
 			return error('brace element')
 		}
 		if p.at_punct(',') {
@@ -2365,9 +2376,21 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 			}
 		}
 		p.error_at(p.peek(), 'unsupported: expected , or } in a brace initializer, found ${describe(p.peek())}')
-		p.skip_balanced(open) or {}
+		p.recover_brace_list(open, list_body)
 		return error('brace list')
 	}
+}
+
+// recover_brace_list moves the cursor back to the first token of a brace list
+// and skips to the brace that closes the list's opener. The cursor is moved
+// because a read that failed inside a parenthesis leaves the parenthesis open:
+// counted from the failure point the `)` that closes the expression reads as a
+// bracket the list never opened, and the skip gives up before the list's own
+// brace. From the first token every bracket the list wrote is counted, so the
+// brace the skip stops at is the one that ends the list.
+fn (mut p Parser) recover_brace_list(open tokenize.Token, start int) {
+	p.pos = start
+	p.skip_balanced(open) or {}
 }
 
 // starts_a_written_constant answers whether the next token begins a written
@@ -4049,6 +4072,14 @@ fn (mut p Parser) parse_enumerator_list(open tokenize.Token) !EnumeratorRange {
 	mut read := false
 	mut names := []string{}
 	mut values := []i64{}
+	// A shape that stops the reader is reported and the rest of the body is
+	// read past to its closing brace, the way a brace initializer's is: a
+	// failed read left the cursor inside the braces, the declaration reader
+	// then met the enum's own closing brace and the name after it as if they
+	// were the start of a new declaration, and a typedef of the enum reported
+	// its own name as `expected a declaration`. The skip starts from the body's
+	// first token so that every bracket the body wrote is counted.
+	body_start := p.pos
 	for {
 		t := p.peek()
 		if t.kind == .eof {
@@ -4065,15 +4096,20 @@ fn (mut p Parser) parse_enumerator_list(open tokenize.Token) !EnumeratorRange {
 		}
 		if t.kind != .identifier {
 			p.error_at(t, 'unsupported: an enumerator is a name, found ${describe(t)}')
+			p.recover_brace_list(open, body_start)
 			return error('an enumerator name')
 		}
 		name := p.next()
 		mut value := next
 		if p.at_punct('=') {
 			p.next()
-			expression := p.parse_expression()!
+			expression := p.parse_expression() or {
+				p.recover_brace_list(open, body_start)
+				return error('an enumerator value')
+			}
 			value = p.constant_value(expression) or {
 				p.error_at(name, 'unsupported: the value of ${name.text} is not an integer constant expression this compiler can compute')
+				p.recover_brace_list(open, body_start)
 				return error('an enumerator value')
 			}
 		}
@@ -4110,6 +4146,7 @@ fn (mut p Parser) parse_enumerator_list(open tokenize.Token) !EnumeratorRange {
 			return p.finish_enumerators(names, values, min, max)
 		}
 		p.error_at(p.peek(), 'unsupported: expected , or } in an enumerator list, found ${describe(p.peek())}')
+		p.recover_brace_list(open, body_start)
 		return error('an enumerator separator')
 	}
 }
