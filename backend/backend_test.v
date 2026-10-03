@@ -130,8 +130,8 @@ fn test_a_target_with_no_syscalls_refuses_to_exit() {
 	// A table that got emptied or renamed has to stop the emitter, not emit a
 	// trap with whatever happened to be in the register.
 	empty := Target{
-		name:         'nothing-nothing'
-		exit_syscall: 'exit'
+		name:   'nothing-nothing'
+		System: System{ exit_syscall: 'exit' }
 	}
 	code := empty.exit_sequence(1) or { []u8{} }
 	assert code.len == 0

@@ -3,38 +3,53 @@ module backend
 import backend.arch.x86_64
 import backend.os.linux
 
-// A target is two descriptions composed: a machine from `backend/arch` and a
-// system from `backend/os`. Neither of those knows the other exists, and this is
-// the only place they meet. The emitter asks a Target, so a new architecture, a
-// new system, or a new fact about either one does not reach codegen.
-//
-// The description carries what the compiler emits today. An entry no code path
-// reads is a claim nobody has tested, so the tables stay partial on purpose.
-pub struct Target {
+// Machine is the machine half of a composition. It holds the machine's own
+// data, so the register file's element type is the machine's and not this
+// module's; what the shape fixes is what a second machine has to supply: a
+// register file, the width of a register, the number a container header gives
+// the architecture, the register a result is left in, and the floating-point
+// file.
+pub struct Machine {
 pub:
-	// name spells the two descriptions the way the command line does.
-	name string
-	arch string
-	os   string
-	// From the machine: its register file, the width of a register, and the
-	// number a container header gives this architecture.
-	word_size   int
-	registers   []x86_64.Register
-	elf_machine u16
+	registers []x86_64.Register
 	// float_registers is the machine's second file, the one a double is passed
 	// and computed in. It is listed separately because it carries its own
 	// argument positions: a call numbers its integer arguments and its floating
 	// ones in two sequences, so the same position exists in both.
 	float_registers []x86_64.Register
+	// word_size is the width of a register, and elf_machine the number a
+	// container header gives this architecture.
+	word_size   int
+	elf_machine u16
 	// return_reg is the register a function leaves its result in, by the name
 	// the machine's table uses.
 	return_reg string
-	// From the system: the kernel entry points, the registers the kernel expects
-	// with them, and where the loader puts the image.
-	syscalls           []linux.Syscall
-	syscall_number_reg string
-	syscall_args_regs  []string
-	exit_syscall       string
+	// The machine's table read through the composed value: the register a
+	// syscall number goes in, the registers a floating-point result and the
+	// second operand of a floating-point operation sit in, the frame pointer,
+	// the scratch and remainder registers, the register a shift count is read
+	// from, and the numbers the machine's relocations and frame instruction
+	// carry.
+	syscall_number_reg      string
+	float_return_reg        string
+	float_scratch_reg       string
+	frame_pointer_reg       string
+	scratch_reg             string
+	remainder_reg           string
+	shift_count_code        u8
+	relocation_call         u32
+	relocation_pc_relative  u32
+	frame_reserve_immediate int
+}
+
+// System is the system half of a composition. It holds the system's own data:
+// the kernel entry points, the registers the kernel expects with them, where
+// the loader puts the image, and where a library named with -l is looked for.
+pub struct System {
+pub:
+	syscalls          []linux.Syscall
+	syscall_args_regs []string
+	exit_syscall      string
 	// interpreter is the loader the kernel starts for a dynamically linked
 	// image. A program that calls a shared library has to name it in the image.
 	interpreter string
@@ -43,6 +58,31 @@ pub:
 	library_dirs []string
 	page_size    u64
 	load_base    u64
+	// base_library_name is the C library every image this system writes runs
+	// against, named whether or not a -l asked for it.
+	base_library_name string
+}
+
+// A target is two descriptions composed: a machine from `backend/arch` and a
+// system from `backend/os`. Neither of those knows the other exists, and this is
+// the only place they meet. The emitter asks a Target, so a new architecture, a
+// new system, or a new fact about either one does not reach codegen.
+//
+// The machine and the system are held as values, and their fields are read
+// through those values: no field of Target names an architecture or an operating
+// system. What a second machine supplies is a Machine, what a second system
+// supplies is a System, and one function decides what is composed with what.
+//
+// The description carries what the compiler emits today. An entry no code path
+// reads is a claim nobody has tested, so the tables stay partial on purpose.
+pub struct Target {
+	Machine
+	System
+pub:
+	// name spells the two descriptions the way the command line does.
+	name string
+	arch string
+	os   string
 }
 
 // targets lists the descriptions the compiler can emit for. A new target is a
@@ -52,26 +92,43 @@ pub fn targets() []Target {
 }
 
 // x86_64_linux is the machine `backend/arch/x86_64/arch.v` running the system
-// `backend/os/linux/linux.v`. Every field comes from one of the two, which is what
-// makes the composition checkable: nothing here decides anything itself.
+// `backend/os/linux/linux.v`. It builds the machine value and the system value
+// once, and a Target holds those two values; every field read in this module
+// goes through them rather than through the machine's or the system's module.
 fn x86_64_linux() Target {
+	machine := Machine{
+		registers:               x86_64.registers()
+		float_registers:         x86_64.float_registers()
+		word_size:               x86_64.word_size
+		elf_machine:             x86_64.machine
+		return_reg:              x86_64.return_reg
+		syscall_number_reg:      x86_64.syscall_number_reg
+		float_return_reg:        x86_64.float_return_reg
+		float_scratch_reg:       x86_64.float_scratch_reg
+		frame_pointer_reg:       x86_64.frame_pointer
+		scratch_reg:             x86_64.scratch_reg
+		remainder_reg:           x86_64.remainder_reg
+		shift_count_code:        x86_64.shift_count_code
+		relocation_call:         x86_64.relocation_call
+		relocation_pc_relative:  x86_64.relocation_pc_relative
+		frame_reserve_immediate: x86_64.frame_reserve_immediate
+	}
+	system := System{
+		syscalls:          linux.syscalls(x86_64.name)
+		syscall_args_regs: linux.syscall_args_regs(x86_64.name)
+		exit_syscall:      linux.exit_syscall
+		interpreter:       linux.interpreter
+		library_dirs:      linux.library_dirs(x86_64.name, linux.name)
+		page_size:         linux.page_size
+		load_base:         linux.load_base
+		base_library_name: linux.base_library
+	}
 	return Target{
-		name:               '${x86_64.name}-${linux.name}'
-		arch:               x86_64.name
-		os:                 linux.name
-		word_size:          x86_64.word_size
-		registers:          x86_64.registers()
-		float_registers:    x86_64.float_registers()
-		elf_machine:        x86_64.machine
-		return_reg:         x86_64.return_reg
-		syscalls:           linux.syscalls(x86_64.name)
-		syscall_number_reg: x86_64.syscall_number_reg
-		syscall_args_regs:  linux.syscall_args_regs(x86_64.name)
-		exit_syscall:       linux.exit_syscall
-		interpreter:        linux.interpreter
-		library_dirs:       linux.library_dirs(x86_64.name, linux.name)
-		page_size:          linux.page_size
-		load_base:          linux.load_base
+		name:    '${x86_64.name}-${linux.name}'
+		arch:    x86_64.name
+		os:      linux.name
+		Machine: machine
+		System:  system
 	}
 }
 
@@ -198,11 +255,11 @@ pub fn (t Target) float_arg_reg(position int) ?Register {
 // waits while the left-hand one sits in the first. They are the same pair of
 // roles the general register file has, one file over.
 pub fn (t Target) float_return() ?Register {
-	return t.float_reg(x86_64.float_return_reg)
+	return t.float_reg(t.float_return_reg)
 }
 
 pub fn (t Target) float_scratch() ?Register {
-	return t.float_reg(x86_64.float_scratch_reg)
+	return t.float_reg(t.float_scratch_reg)
 }
 
 // syscall finds a kernel entry point by name.
@@ -280,13 +337,13 @@ pub fn (t Target) call_register(reg Register) ![]u8 {
 // linker still has to fill in: a call to a symbol this object does not define,
 // or one it leaves to the linker to route.
 pub fn (t Target) call_relocation() u32 {
-	return x86_64.relocation_call
+	return t.relocation_call
 }
 
 // address_relocation is the number an object file gives a distance the code
 // computes rather than jumps to, which is every reference to data.
 pub fn (t Target) address_relocation() u32 {
-	return x86_64.relocation_pc_relative
+	return t.relocation_pc_relative
 }
 
 // address_of computes the address of a byte string in the image and puts it in
@@ -378,7 +435,7 @@ pub fn (t Target) name_of(handle Register) string {
 // whatever that register happened to hold. The emitter needs to ask this, and asking it
 // by the register's bit pattern would be the emitter knowing an encoding.
 pub fn (t Target) carries_shift_count(handle Register) bool {
-	return t.describe(handle).code == x86_64.shift_count_code
+	return t.describe(handle).code == t.shift_count_code
 }
 
 // The instructions a body with locals, branches and arithmetic needs, in the
@@ -390,15 +447,15 @@ pub fn (t Target) carries_shift_count(handle Register) bool {
 // result register, and remainder is where a division leaves what did not divide
 // evenly.
 pub fn (t Target) frame_pointer() ?Register {
-	return t.reg(x86_64.frame_pointer)
+	return t.reg(t.frame_pointer_reg)
 }
 
 pub fn (t Target) scratch() ?Register {
-	return t.reg(x86_64.scratch_reg)
+	return t.reg(t.scratch_reg)
 }
 
 pub fn (t Target) remainder() ?Register {
-	return t.reg(x86_64.remainder_reg)
+	return t.reg(t.remainder_reg)
 }
 
 // frame_reserve opens the space a function's locals live in. The size is not
@@ -421,7 +478,7 @@ pub fn (t Target) frame_reserve(size u32) []u8 {
 }
 
 pub fn (t Target) frame_immediate_offset() int {
-	return x86_64.frame_reserve_immediate
+	return t.frame_reserve_immediate
 }
 
 // loader_arguments is what the kernel hands a process on its stack, moved into
@@ -1230,7 +1287,7 @@ pub fn (t Target) resolve_libraries(names []string, given []string) ![]Library {
 // named whether or not a -l asked for it. It is reported with the resolved
 // libraries so that a description of what the image carries is complete.
 pub fn (t Target) base_library() string {
-	return linux.base_library
+	return t.base_library_name
 }
 
 // external_link_arguments is the command line a linker named with
