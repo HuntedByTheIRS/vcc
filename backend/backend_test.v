@@ -1579,3 +1579,23 @@ fn test_a_double_reaches_an_unsigned_word_by_its_range() {
 	assert target.double_to_unsigned_word(eax, xmm0, ecx, xmm1) or { panic('the target description has no such name') } ==
 		x86_64.double_to_unsigned_word(target.describe(eax), target.describe(xmm0), target.describe(ecx), target.describe(xmm1)) or { panic('the target description has no such name') }
 }
+
+fn test_the_dynamic_frame_subtraction_is_the_bytes_that_lower_the_stack() {
+	// sub rsp, rax and sub rsp, r11: the stack pointer is the destination and the
+	// register holding the size is the source, which is the r/m form of the group
+	// opcode. Written out here so a change to the encoding has to be a change to
+	// this expectation.
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	rax := target.reg('rax') or { panic('the target description has no such name') }
+	r11 := target.reg('r11') or { panic('the target description has no such name') }
+	assert target.sub_rsp_register(rax) or { panic('the target description has no such name') } == [
+		u8(0x48),
+		0x29,
+		0xc4,
+	]
+	assert target.sub_rsp_register(r11) or { panic('the target description has no such name') } == [
+		u8(0x4c),
+		0x29,
+		0xdc,
+	]
+}

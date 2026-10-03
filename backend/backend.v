@@ -464,6 +464,21 @@ pub fn (t Target) align_stack() []u8 {
 	return x86_64.align_stack()
 }
 
+// sub_rsp_register lowers the stack pointer by an amount a register holds, which is
+// how a variable-length array claims its storage: the size is a value the program
+// computes, so the instruction that opens the space is a subtraction of one
+// register from another and not the fixed one frame_reserve writes.
+pub fn (t Target) sub_rsp_register(src Register) ![]u8 {
+	return x86_64.sub_rsp_register(t.describe(src))
+}
+
+// stack_pointer is the register the stack is at, which a variable-length array's
+// declaration reads once it has claimed its storage: the address of the array is
+// what the stack pointer became.
+pub fn (t Target) stack_pointer() ?Register {
+	return t.reg('rsp')
+}
+
 // load_slot and store_slot move a value between the frame and a register at the
 // width the value has: four bytes for an int, eight for a pointer.
 pub fn (t Target) load_slot(base Register, disp i32, dst Register, width int) ![]u8 {

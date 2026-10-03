@@ -1361,6 +1361,24 @@ pub fn align_stack() []u8 {
 	return [u8(0x48), 0x83, 0xe4, 0xf0] // and rsp, -16
 }
 
+// sub_rsp_register encodes `sub rsp, <src>`, which lowers the stack pointer by an
+// amount the program computes: a variable-length array's storage is claimed this
+// way, because how many bytes it is is a value and not a fact the image holds. The
+// stack pointer is the destination and the register the amount is the source,
+// which is the r/m direction of the group opcode with /5 in the reg field; the
+// destination's number is four, which is rsp's slot in that field.
+pub fn sub_rsp_register(src Register) ![]u8 {
+	mut out := []u8{cap: 3}
+	mut rex := u8(0x48) // REX.W: the amount is a word
+	if src.code >= 8 {
+		rex |= 0x04 // REX.R reaches the source register
+	}
+	out << rex
+	out << u8(0x29) // sub r/m64, r64
+	out << u8(0xc0 | ((src.code & 0x07) << 3) | 0x04) // mod 11, rm 100: rsp
+	return out
+}
+
 // The arithmetic this language's ints are computed with, all of it on the 32-bit
 // names: the values are four bytes wide, and an operation at eight bytes would
 // be an answer about a different value.
