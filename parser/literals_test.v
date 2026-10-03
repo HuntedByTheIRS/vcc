@@ -175,3 +175,21 @@ fn imaginary_reject(text string) string {
 	parse_imaginary_literal(text) or { return err.msg() }
 	return ''
 }
+
+// An escape gcc does not know is the character itself and not a refusal. Measured
+// on gcc 16.2.1 with -std=gnu11, which compiles and runs a program printing each
+// of these values: `\q` is 113 and `\8` is 56 under a warning, and `\e` is 27 with
+// no warning at all, so GNU's escape character is a spelling gcc knows rather than
+// one it tolerates. V's own generated C writes `'\`'` where `'`'` would do, and
+// every one of the 47 lines of it this compiler refused named the backtick.
+fn test_an_escape_gcc_does_not_know_is_the_character_itself() {
+	assert (parse_escape('`') or { i64(-1) }) == 96
+	assert (parse_escape('q') or { i64(-1) }) == 113
+	assert (parse_escape('8') or { i64(-1) }) == 56
+	assert (parse_escape('e') or { i64(-1) }) == 27
+	// What stays refused is what gcc refuses too: an escape with nothing behind the
+	// backslash, and a hex escape with no digit.
+	assert (parse_escape('') or { i64(-1) }) == -1
+	assert (parse_escape('x') or { i64(-1) }) == -1
+	assert (parse_escape('xg') or { i64(-1) }) == -1
+}

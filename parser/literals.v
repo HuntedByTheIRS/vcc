@@ -934,7 +934,20 @@ fn parse_escape(rest string) !i64 {
 		`'` { i64(39) }
 		`"` { i64(34) }
 		`?` { i64(63) }
-		else { error('unknown escape sequence \\${c.ascii_str()}') }
+		// GNU's `\e` is the escape character, and gcc 16.2.1 knows it: measured, a
+		// program printing `'\e'` prints 27 and gcc says nothing about it, in every
+		// mode it has.
+		`e` { i64(27) }
+		// An escape gcc does not know is the character itself: measured on gcc
+		// 16.2.1, `\q` is 113 and `\8` is 56 and `\`` is 96, each with a `warning:
+		// unknown escape sequence`, silent under -w and an error only under
+		// -pedantic-errors. Refusing them stops a program gcc compiles, and V's own
+		// generated C is one: it writes `'\`'` where `'`'` would do, and every one
+		// of the 47 lines of it this compiler refused named the backtick. The warning
+		// is owed rather than dropped: it is a diagnostic the standard requires,
+		// which is the class -pedantic-errors promotes, and the parser's diagnostic
+		// sink carries no class yet.
+		else { i64(c) }
 	}
 }
 
