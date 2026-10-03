@@ -2744,6 +2744,19 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 		if t.kind != .identifier {
 			break
 		}
+		// A GNU attribute or assembler name can sit anywhere among the
+		// specifiers, including between a tag's closing brace and the
+		// declarator: `struct T { int a; } __attribute__((aligned(16)));` and
+		// `} __attribute__((aligned(16))) v_int128_t;` are how V's generated C
+		// writes one. They are read past and not recorded, the same way one
+		// after a declarator is (see skip_gnu_postfix): this compiler has no
+		// attribute model, and a declaration that carries one is valid C that
+		// must not be refused for it. Reading it here is what keeps the
+		// attribute from being read as the declarator's name.
+		if t.text in gnu_postfix {
+			p.skip_gnu_postfix()!
+			continue
+		}
 		if t.text in storage_classes {
 			p.next()
 			spec.note(t)

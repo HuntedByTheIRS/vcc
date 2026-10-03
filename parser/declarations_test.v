@@ -451,6 +451,25 @@ fn test_a_typedef_of_a_pointer_to_the_tag_stays_complete() {
 	assert object.resolved.kind == .pointer
 }
 
+// A GNU attribute may follow a struct's closing brace, and 6.7 makes the
+// declaration valid with it: `struct T { int a; } __attribute__((aligned(16)));`.
+// This compiler has no attribute model, so the attribute is read past and not
+// recorded, the same as one written after a declarator. Refusing it would refuse
+// a declaration gcc 16.2.1 accepts, and V's prelude writes exactly this shape.
+fn test_an_attribute_after_a_struct_body_is_read_past() {
+	result := declarations_of('struct T { int a; } __attribute__((aligned(16)));\nstruct T t = {5};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	assert result.unit.globals[0].name == 't'
+	// The same attribute between the body and the declarator name, which is how
+	// V's prelude writes `} __attribute__((aligned(16))) v_int128_t;`.
+	named := declarations_of('struct T { int a; } __attribute__((aligned(16))) named;\nstruct T other = {6};')
+	assert named.diagnostics.len == 0
+	assert named.unit.globals.len == 2
+	assert named.unit.globals[0].name == 'named'
+	assert named.unit.globals[1].name == 'other'
+}
+
 // A struct whose member is itself an aggregate takes a list of its own, which a
 // flat list does not write, so the declaration is refused by name rather than
 // laid out with a member written at a guessed offset. Measured, gcc 16.2.1
