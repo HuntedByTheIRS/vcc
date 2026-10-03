@@ -7,6 +7,14 @@ vcc
 *.dylib
 *.dll
 
+# Executables the test suite writes beside its sources: `parser/parser_test.v`
+# builds `parser/parser_test`, `pipeline_test.v` builds `pipeline_test`, and
+# `tools/gate.vsh` builds `tools/gate`. A `git add -A` in this tree committed
+# one of them once, at 2.9 MB; the rules are here so it cannot happen again.
+# The sources are `*_test.v`, which the pattern does not match.
+*_test
+tools/gate
+
 # Ignore binary output folders
 bin/
 
