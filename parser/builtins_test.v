@@ -386,3 +386,129 @@ fn test_isinf_sign_of_a_value_is_an_expression() {
 	}
 	assert expr is ast.Conditional
 }
+
+// The nine machine builtins are read as calls in the compiler's own namespace,
+// and each node carries the type the operation is about: a load, a fetch and an
+// exchange are worth the object they name, a compare-exchange is the int the
+// standard makes a question worth, and a store and a fence have no value. The
+// type is what lets a 64-bit result be stored in a 64-bit object without being
+// read as four bytes.
+fn test_the_atomic_builtins_carry_the_type_they_operate_on() {
+	fetch := builtin_read('int main(void) { unsigned long long w = 0; unsigned long long o = __atomic_fetch_add(&w, 1, 5); return 0; }')
+	assert fetch.diagnostics.len == 0
+	fetch_value := fetch.unit.decls[0].body[1].init or {
+		assert false
+		return
+	}
+	fetch_call := fetch_value as ast.Call
+	assert fetch_call.name == '__atomic_fetch_add'
+	assert fetch_call.typ.kind == .unsigned_long_long
+	assert fetch_call.args.len == 3
+	swap := builtin_read('int main(void) { unsigned long long w = 0; unsigned long long o = __atomic_exchange_n(&w, 1, 5); return 0; }')
+	assert swap.diagnostics.len == 0
+	swap_value := swap.unit.decls[0].body[1].init or {
+		assert false
+		return
+	}
+	assert (swap_value as ast.Call).typ.kind == .unsigned_long_long
+	store := builtin_read('int main(void) { unsigned long long w = 0; __atomic_store_n(&w, 1, 5); return 0; }')
+	assert store.diagnostics.len == 0
+	store_value := store.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert (store_value as ast.Call).typ.kind == .void_
+	cas := builtin_read('int main(void) { unsigned long long w = 0; unsigned long long e = 0; int r = __atomic_compare_exchange_n(&w, &e, 1, 0, 5, 5); return 0; }')
+	assert cas.diagnostics.len == 0
+	cas_value := cas.unit.decls[0].body[2].init or {
+		assert false
+		return
+	}
+	cas_call := cas_value as ast.Call
+	assert cas_call.typ.kind == .bool_
+	assert cas_call.args.len == 6
+	fence := builtin_read('int main(void) { __atomic_thread_fence(5); return 0; }')
+	assert fence.diagnostics.len == 0
+	fence_value := fence.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (fence_value as ast.Call).typ.kind == .void_
+}
+
+// The memory order is folded into an int constant the back end chooses the
+// instruction from, because gcc takes an integer constant expression there and
+// the standard's spelling never survives the macro that writes it. The order
+// arg is read the way an array bound is, and gcc's `memory_order_seq_cst` is the
+// bare 5.
+fn test_an_atomic_memory_order_is_folded_into_the_call() {
+	result := builtin_read('int main(void) { unsigned long long w = 0; unsigned long long o = __atomic_load_n(&w, 5); return 0; }')
+	assert result.diagnostics.len == 0
+	value := result.unit.decls[0].body[1].init or {
+		assert false
+		return
+	}
+	call := value as ast.Call
+	assert call.name == '__atomic_load_n'
+	order := call.args[1] as ast.IntLit
+	assert order.value == 5
+	assert order.typ.kind == .int_
+}
+
+// The two trailing-zero counts are calls of type int, which is what gcc gives
+// both spellings, and the operand is kept as the expression it was written as:
+// the back end emits the machine's bsf rather than the reader folding a value it
+// did not compute.
+fn test_the_count_trailing_builtins_are_read_as_calls_of_type_int() {
+	wide := builtin_read('int main(void) { return __builtin_ctzll(1ULL << 40); }')
+	assert wide.diagnostics.len == 0
+	wide_value := wide.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	wide_call := wide_value as ast.Call
+	assert wide_call.name == '__builtin_ctzll'
+	assert wide_call.typ.kind == .int_
+	assert wide_call.args.len == 1
+	assert wide_call.args[0] is ast.Binary
+	narrow := builtin_read('int main(void) { int v = 40; return __builtin_ctz(v); }')
+	assert narrow.diagnostics.len == 0
+	narrow_value := narrow.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	narrow_call := narrow_value as ast.Call
+	assert narrow_call.name == '__builtin_ctz'
+	assert narrow_call.typ.kind == .int_
+	assert (narrow_call.args[0] as ast.Ident).name == 'v'
+}
+
+// A memory order outside the six the standard names is refused by name rather
+// than read as though another order had been written, and a store's order is
+// narrowed the way the standard narrows it: gcc refuses
+// `__atomic_store_n(p, v, memory_order_acquire)`.
+fn test_an_atomic_order_the_standard_does_not_allow_is_refused() {
+	wide := builtin_read('int main(void) { unsigned long long w = 0; unsigned long long o = __atomic_load_n(&w, 6); return 0; }')
+	assert wide.diagnostics.len == 1
+	assert wide.diagnostics[0].msg.contains('memory order 6')
+	store := builtin_read('int main(void) { unsigned long long w = 0; __atomic_store_n(&w, 1, 2); return 0; }')
+	assert store.diagnostics.len == 1
+	assert store.diagnostics[0].msg.contains('stores with memory order 2')
+}
+
+// An order this reader cannot evaluate is refused by name rather than guessed
+// at, which is what a run-time order would be: gcc requires an integer constant
+// expression there.
+fn test_an_atomic_order_that_is_not_a_constant_is_refused() {
+	result := builtin_read('int main(void) { unsigned long long w = 0; int n = 5; unsigned long long o = __atomic_load_n(&w, n); return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('not a constant')
+}
+
+// The counts take an integer, and gcc does not convert a float or a pointer
+// into one here, so a non-integer operand is refused by name.
+fn test_a_count_trailing_of_a_non_integer_is_refused() {
+	result := builtin_read('int main(void) { return __builtin_ctz(1.5); }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('trailing zeros of an integer')
+}

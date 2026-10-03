@@ -3982,3 +3982,154 @@ fn test_an_unimplemented_attribute_stops_the_program() {
 	assert refused.diagnostics[0].msg == "unsupported: the attribute 'packed' is not implemented"
 	assert refused.unit.globals.len == 1
 }
+
+// The two trailing-zero counts are values the machine computes, and every
+// argument of a call is parked in a slot of its own before the next one is
+// computed. A 32-bit count followed in the same argument list by a 64-bit one
+// used to read the 64-bit one's operand back as its own answer, because that
+// operand was parked in the first argument's slot. Measured on gcc 16.2.1, the
+// programs below exit 40, 160 and 3.
+fn test_the_trailing_zero_counts_are_their_own_values_in_one_argument_list() {
+	list := emit(translation_unit('int pair(int a, int b) { return a * 100 + b; } int main(void) { return pair(__builtin_ctz(1), __builtin_ctzll(1ULL << 40)); }'),
+		Options{})
+	assert list.diagnostics.len == 0
+	assert run_image(list.bytes) == 40
+	// The reversed argument list holds the same two values, so an emitter that
+	// swapped the two arguments would pass the case above and fail here.
+	reversed := emit(translation_unit('int pair(int a, int b) { return a * 100 + b; } int main(void) { return pair(__builtin_ctzll(1ULL << 40), __builtin_ctz(1)); }'),
+		Options{})
+	assert reversed.diagnostics.len == 0
+	assert run_image(reversed.bytes) == 160
+	// A count of a value the machine reads at run time rather than one folded
+	// here, which is the other side of the same builtin.
+	runtime := emit(translation_unit('int main(void) { volatile int v = 40; return __builtin_ctz(v); }'),
+		Options{})
+	assert runtime.diagnostics.len == 0
+	assert run_image(runtime.bytes) == 3
+}
+
+// A machine builtin's value is as wide as the type it operates on, and the
+// reader resolved that type onto the call. Storing the result of a 64-bit fetch
+// into a 64-bit object used to be refused as four bytes stored into an
+// eight-byte slot, because a direct call was sized only by a declaration in the
+// unit and the builtin has none. Measured on gcc 16.2.1, the two programs below
+// exit 11 and 11.
+fn test_an_atomic_result_lands_in_an_object_of_the_width_it_operates_on() {
+	wide := emit(translation_unit('int main(void) { unsigned long long w = 100; unsigned long long o = __atomic_fetch_add(&w, 100, 5); return (o == 100) + (w == 200) * 10; }'),
+		Options{})
+	assert wide.diagnostics.len == 0
+	assert run_image(wide.bytes) == 11
+	pointer := emit(translation_unit('int main(void) { void *p = 0; void *q = __atomic_exchange_n(&p, (void*)0x1000, 5); return (q == 0) + (p != 0) * 10; }'),
+		Options{})
+	assert pointer.diagnostics.len == 0
+	assert run_image(pointer.bytes) == 11
+}
+
+// The values a single-threaded program can assert about the atomic builtins. A
+// fetch answers the value the object held before the operation and an exchange
+// the value it replaced; a load answers what a store put there. Atomicity is not
+// something one thread can show, and no case here claims it. Measured on gcc
+// 16.2.1, the programs below exit 42, 11, 11, 11 and 5.
+fn test_the_atomic_builtins_answer_the_values_one_thread_can_assert() {
+	load := emit(translation_unit('int main(void) { unsigned long long w = 0; __atomic_store_n(&w, 42, 5); unsigned long long v = __atomic_load_n(&w, 5); return (int)v; }'),
+		Options{})
+	assert load.diagnostics.len == 0
+	assert run_image(load.bytes) == 42
+	add := emit(translation_unit('int main(void) { unsigned long long w = 100; unsigned long long o = __atomic_fetch_add(&w, 100, 5); return (o == 100) + (w == 200) * 10; }'),
+		Options{})
+	assert add.diagnostics.len == 0
+	assert run_image(add.bytes) == 11
+	sub := emit(translation_unit('int main(void) { unsigned long long w = 200; unsigned long long o = __atomic_fetch_sub(&w, 50, 5); return (o == 200) + (w == 150) * 10; }'),
+		Options{})
+	assert sub.diagnostics.len == 0
+	assert run_image(sub.bytes) == 11
+	swap := emit(translation_unit('int main(void) { unsigned long long w = 7; unsigned long long p = __atomic_exchange_n(&w, 9, 5); return (p == 7) + (w == 9) * 10; }'),
+		Options{})
+	assert swap.diagnostics.len == 0
+	assert run_image(swap.bytes) == 11
+	fence := emit(translation_unit('int main(void) { __atomic_thread_fence(5); return 5; }'),
+		Options{})
+	assert fence.diagnostics.len == 0
+	assert run_image(fence.bytes) == 5
+	// A sequentially consistent fence is the one order that asks this machine
+	// for an instruction, and the instruction is mfence.
+	assert holds(fence.bytes, [u8(0x0f), 0xae, 0xf0])
+}
+
+// A compare-exchange is a question, and its answer is whether it stored: it
+// writes the desired value and answers 1 when memory held what the expected
+// pointer names, and otherwise leaves memory alone and writes what it held back
+// through the expected pointer. The two programs below are the two answers;
+// measured on gcc 16.2.1 they exit 11 and 110.
+fn test_a_compare_exchange_answers_whether_it_stored() {
+	stored := emit(translation_unit('int main(void) { unsigned long long w = 5; unsigned long long e = 5; int r = __atomic_compare_exchange_n(&w, &e, 8, 0, 5, 5); return r + (w == 8) * 10; }'),
+		Options{})
+	assert stored.diagnostics.len == 0
+	assert run_image(stored.bytes) == 11
+	missed := emit(translation_unit('int main(void) { unsigned long long w = 5; unsigned long long e = 4; int r = __atomic_compare_exchange_n(&w, &e, 8, 0, 5, 5); return r + (w == 5) * 10 + (e == 5) * 100; }'),
+		Options{})
+	assert missed.diagnostics.len == 0
+	assert run_image(missed.bytes) == 110
+}
+
+// A byte and a two-byte object take the machine's narrow read-modify-write
+// instructions, and the value that comes back out is widened the way any read of
+// a narrow type is: with the sign for a signed one. Measured on gcc 16.2.1, the
+// three programs below exit 11, 11 and 11.
+fn test_a_narrow_atomic_object_takes_its_own_width() {
+	byte := emit(translation_unit('int main(void) { unsigned char c = 250; unsigned char o = __atomic_fetch_add(&c, 10, 5); return (o == 250) + (c == 4) * 10; }'),
+		Options{})
+	assert byte.diagnostics.len == 0
+	assert run_image(byte.bytes) == 11
+	half := emit(translation_unit('int main(void) { unsigned short s = 65530; unsigned short o = __atomic_fetch_add(&s, 10, 5); return (o == 65530) + (s == 4) * 10; }'),
+		Options{})
+	assert half.diagnostics.len == 0
+	assert run_image(half.bytes) == 11
+	signed_byte := emit(translation_unit('int main(void) { signed char c = -56; signed char o = __atomic_fetch_add(&c, 1, 5); return (o == -56) + (c == -55) * 10; }'),
+		Options{})
+	assert signed_byte.diagnostics.len == 0
+	assert run_image(signed_byte.bytes) == 11
+}
+
+// The value operand of an atomic operation is converted to the type the pointer
+// names before the instruction runs, and a signed value narrower than that type
+// has to keep its sign: `(unsigned long long)-1` is all ones and not the
+// 0xffffffff a zero-extended 32-bit read gives. The operand used to be written
+// into the value slot at the width it was read at, so the high half of the word
+// was zero and the addition was short by 2^32. Measured on gcc 16.2.1, the three
+// programs below exit 111, 11 and 11.
+fn test_a_signed_value_narrower_than_the_target_keeps_its_sign() {
+	add := emit(translation_unit('int main(void) { int d = -1; unsigned long long w = 5; unsigned long long o = __atomic_fetch_add(&w, d, 5); return (o == 5) + (w == 4) * 10 + ((w >> 32) == 0) * 100; }'),
+		Options{})
+	assert add.diagnostics.len == 0
+	assert run_image(add.bytes) == 111
+	swap := emit(translation_unit('int main(void) { int d = -1; unsigned long long w = 5; unsigned long long p = __atomic_exchange_n(&w, d, 5); return (p == 5) + ((w >> 63) == 1) * 10; }'),
+		Options{})
+	assert swap.diagnostics.len == 0
+	assert run_image(swap.bytes) == 11
+	short_delta := emit(translation_unit('int main(void) { short d = -2; unsigned long long w = 5; unsigned long long o = __atomic_fetch_add(&w, d, 5); return (o == 5) + (w == 3) * 10; }'),
+		Options{})
+	assert short_delta.diagnostics.len == 0
+	assert run_image(short_delta.bytes) == 11
+}
+
+// The value an atomic builtin is handed is converted to the type its pointer
+// names before the instruction runs, and a signed operand narrower than that
+// type keeps its sign in the conversion. Without it the operand was widened as an
+// unsigned read: all ones became 0xffffffff. Measured on gcc 16.2.1, the three
+// programs below exit 11, 11 and 11; a compiler that zero-extends them exits 1,
+// 10 and 10.
+fn test_a_signed_operand_widens_into_the_atomic_word_with_its_sign() {
+	add := emit(translation_unit('int main(void) { unsigned long long w = 10; unsigned long long o = __atomic_fetch_add(&w, -1, 5); return (o == 10) + (w == 9) * 10; }'),
+		Options{})
+	assert add.diagnostics.len == 0
+	assert run_image(add.bytes) == 11
+	literal := emit(translation_unit('int main(void) { unsigned long long w = 0; __atomic_store_n(&w, -1, 5); return (w >> 63) + ((w & 0xffffffff) == 0xffffffff) * 10; }'),
+		Options{})
+	assert literal.diagnostics.len == 0
+	assert run_image(literal.bytes) == 11
+	object := emit(translation_unit('int main(void) { int s = -1; unsigned long long w = 0; __atomic_store_n(&w, s, 5); return (w >> 63) + ((w & 0xffffffff) == 0xffffffff) * 10; }'),
+		Options{})
+	assert object.diagnostics.len == 0
+	assert run_image(object.bytes) == 11
+}

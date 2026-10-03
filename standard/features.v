@@ -111,6 +111,26 @@ pub const features = [
 		pedantic:  'an asm statement or an assembler name on a declarator'
 		status:    .implemented
 	},
+	// The seven atomic operations and the two trailing-zero counts are the GNU
+	// compiler's own and no standard has them: V's code generator writes them
+	// into an inline shim, and the tree reads each one here and emits the
+	// machine's instruction for it. The row is a GNU row with a phrase, the way
+	// the attribute and asm rows above are, and for the same measured reason:
+	// gcc 16.2.1 accepts `__atomic_load_n(p, 5)` and `__builtin_ctz(x)` under
+	// `-std=c99 -pedantic-errors` with empty stderr, because the double
+	// underscore is in the reserved namespace. So no ISO mode is made to refuse
+	// them and a strict mode reports the construct only when asked: -Wpedantic
+	// shows the message and -pedantic-errors makes it an error.
+	Feature{
+		spellings: ['__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n',
+			'__atomic_compare_exchange_n', '__atomic_fetch_add', '__atomic_fetch_sub',
+			'__atomic_thread_fence', '__builtin_ctz', '__builtin_ctzll']
+		since:     .none
+		gnu:       true
+		extension: ''
+		pedantic:  'the atomic builtins and the count-trailing builtins'
+		status:    .implemented
+	},
 	// A GNU statement expression, `({ ... })`, is marked by two tokens with nothing
 	// between them and not by a word, so its spelling here is the pair and the
 	// check joins two tokens to find it. The tree reads the construct, so the row

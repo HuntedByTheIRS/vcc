@@ -615,6 +615,49 @@ pub fn (t &Target) store_indirect(address Register, src Register, width int) ![]
 	return t.encoders.store_indirect(t.describe(address), t.describe(src), width)
 }
 
+// The atomic operations, named for what the language's builtins ask for rather
+// than for the instruction that carries each. The emitter decides which order
+// takes which form; these forward the operation and the width, and the machine
+// file owns the encoding.
+//
+// A load is the ordinary load and needs no method: this machine does not reorder
+// a naturally aligned load and the emitter already has load_indirect for it. A
+// store is a plain store at every order but the sequentially consistent one,
+// whose barrier is the exchange, so a store is told which by the emitter.
+
+// atomic_exchange swaps the value in memory with the register's and leaves the
+// old memory value in the register. Its encoding carries the lock itself, so it
+// serves both the exchange builtin and the sequentially consistent store.
+pub fn (t &Target) atomic_exchange(address Register, value Register, width int) ![]u8 {
+	return t.encoders.exchange_indirect(t.describe(address), t.describe(value), width)
+}
+
+// atomic_compare_exchange is the lock cmpxchg: the accumulator holds what is
+// expected and receives what memory held when they differ, and the register
+// holds the value to store when they agree.
+pub fn (t &Target) atomic_compare_exchange(address Register, value Register, width int) ![]u8 {
+	return t.encoders.compare_exchange_indirect(t.describe(address), t.describe(value), width)
+}
+
+// atomic_fetch_add adds the register's value into memory and leaves the old
+// memory value in the register, which is the value both fetch_add and, with the
+// register negated first, fetch_sub answer with.
+pub fn (t &Target) atomic_fetch_add(address Register, value Register, width int) ![]u8 {
+	return t.encoders.fetch_add_indirect(t.describe(address), t.describe(value), width)
+}
+
+// memory_fence is the barrier a sequentially consistent fence asks for. An
+// acquire or a release fence is nothing on this machine and emits no instruction.
+pub fn (t &Target) memory_fence() []u8 {
+	return t.encoders.memory_fence()
+}
+
+// bit_scan_forward is the index of the lowest set bit, which is what the two
+// count-trailing builtins are worth. `wide` asks for the eight-byte form.
+pub fn (t &Target) bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {
+	return t.encoders.bit_scan_forward(t.describe(dst), t.describe(src), wide)
+}
+
 // The two widenings a conversion between the value classes needs. A byte is
 // widened with its sign kept, which is what converting a value to a char is; a
 // word is widened into the whole register, which is what converting an int to a
