@@ -16,11 +16,13 @@ pub enum Mode {
 	c11
 	c17
 	c23
+	c29
 	gnu89
 	gnu99
 	gnu11
 	gnu17
 	gnu23
+	gnu29
 	// other: a spelling this compiler does not implement. It is recorded and
 	// nothing else. tcc accepts every spelling there is, including nonsense,
 	// and a compiler V may hand any spelling to must not fail on one, so a
@@ -48,6 +50,9 @@ pub fn from_spelling(spelling string) Mode {
 		'c23', 'iso9899:2024' {
 			.c23
 		}
+		'c29', 'c2y', 'iso9899:2029' {
+			.c29
+		}
 		'gnu89', 'gnu90' {
 			.gnu89
 		}
@@ -62,6 +67,9 @@ pub fn from_spelling(spelling string) Mode {
 		}
 		'gnu23' {
 			.gnu23
+		}
+		'gnu29', 'gnu2y' {
+			.gnu29
 		}
 		else {
 			.other
