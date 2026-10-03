@@ -51,8 +51,8 @@ pub fn targets() []Target {
 	return [x86_64_linux()]
 }
 
-// x86_64_linux is the machine `backend/arch/x86_64.v` running the system
-// `backend/os/linux.v`. Every field comes from one of the two, which is what
+// x86_64_linux is the machine `backend/arch/x86_64/arch.v` running the system
+// `backend/os/linux/linux.v`. Every field comes from one of the two, which is what
 // makes the composition checkable: nothing here decides anything itself.
 fn x86_64_linux() Target {
 	return Target{
