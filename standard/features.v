@@ -111,7 +111,7 @@ pub const features = [
 		pedantic:  'an asm statement or an assembler name on a declarator'
 		status:    .implemented
 	},
-	// The seven atomic operations and the two trailing-zero counts are the GNU
+	// The seven atomic operations and the four zero-bit counts are the GNU
 	// compiler's own and no standard has them: V's code generator writes them
 	// into an inline shim, and the tree reads each one here and emits the
 	// machine's instruction for it. The row is a GNU row with a phrase, the way
@@ -124,11 +124,12 @@ pub const features = [
 	Feature{
 		spellings: ['__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n',
 			'__atomic_compare_exchange_n', '__atomic_fetch_add', '__atomic_fetch_sub',
-			'__atomic_thread_fence', '__builtin_ctz', '__builtin_ctzll']
+			'__atomic_thread_fence', '__builtin_ctz', '__builtin_ctzll', '__builtin_clz',
+			'__builtin_clzll']
 		since:     .none
 		gnu:       true
 		extension: ''
-		pedantic:  'the atomic builtins and the count-trailing builtins'
+		pedantic:  'the atomic builtins and the count-trailing and count-leading builtins'
 		status:    .implemented
 	},
 	// A GNU statement expression, `({ ... })`, is marked by two tokens with nothing

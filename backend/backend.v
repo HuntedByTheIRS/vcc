@@ -658,6 +658,12 @@ pub fn (t &Target) bit_scan_forward(dst Register, src Register, wide bool) ![]u8
 	return t.encoders.bit_scan_forward(t.describe(dst), t.describe(src), wide)
 }
 
+// count_leading is the number of leading zero bits of a value, which is what the
+// two count-leading builtins are worth. `wide` asks for the eight-byte form.
+pub fn (t &Target) count_leading(dst Register, src Register, wide bool) ![]u8 {
+	return t.encoders.count_leading(t.describe(dst), t.describe(src), wide)
+}
+
 // The two widenings a conversion between the value classes needs. A byte is
 // widened with its sign kept, which is what converting a value to a char is; a
 // word is widened into the whole register, which is what converting an int to a

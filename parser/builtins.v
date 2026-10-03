@@ -7,17 +7,18 @@ import types
 
 // The GCC builtins this reader answers while it reads, which are the ones a
 // C library's headers reach for rather than the ones a program writes by hand.
-// The last nine are the machine's own: the atomic operations and the two
-// trailing-zero counts, which V's generated C writes into an inline shim rather
-// than into a library call. Each of those is a GNU extension this tree declares
-// in `standard/features.v`, so a strict mode reports it; the folded builtins
-// above them are in the reserved namespace and no row gates them.
+// The last eleven are the machine's own: the atomic operations and the two
+// trailing-zero and two leading-zero counts, which V's generated C writes into
+// an inline shim rather than into a library call. Each of those is a GNU
+// extension this tree declares in `standard/features.v`, so a strict mode
+// reports it; the folded builtins above them are in the reserved namespace and
+// no row gates them.
 //
 // Most of the list is folded where it is written, the way `sizeof` is: the
 // question it asks is one the reader can answer from the declaration it was
 // handed, and the value it is worth is an integer constant expression with no
 // run-time part. A builtin whose answer would be a guess is refused by name here
-// rather than filled in with a value this compiler has not computed. The nine
+// rather than filled in with a value this compiler has not computed. The
 // machine builtins are not folded: their answer is an instruction sequence, and
 // the back end emits it.
 const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr',
@@ -27,13 +28,13 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__builtin_nanl', '__builtin_nans', '__builtin_nansf', '__builtin_nansl', '__builtin_classify_type',
 	'__builtin_isinf_sign', '__builtin_signbit', '__builtin_signbitf', '__builtin_signbitl',
 	'__builtin_signbitf128', 
-	// The nine machine builtins are in this same list for the same reason, and in
+	// The eleven machine builtins are in this same list for the same reason, and in
 	// one place only: the reader routes them here, and the check for a name
 	// nothing declares consults this list, because no program can write a
 	// declaration for a spelling in the compiler's own namespace.
 	'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
-	'__builtin_ctzll']
+	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -98,8 +99,8 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence' {
 			return p.parse_atomic_builtin(at)
 		}
-		'__builtin_ctz', '__builtin_ctzll' {
-			return p.parse_count_trailing(at)
+		'__builtin_ctz', '__builtin_ctzll', '__builtin_clz', '__builtin_clzll' {
+			return p.parse_bit_count(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -566,12 +567,14 @@ fn (mut p Parser) parse_atomic_builtin(at tokenize.Token) !ast.Expr {
 	}
 }
 
-// parse_count_trailing reads `__builtin_ctz` and `__builtin_ctzll`, the index of
-// the lowest set bit of an integer. gcc gives both the type int, so the answer is
-// an int at either width. An operand that is not an integer is refused by name:
-// these count the trailing zeros of an integer, and gcc does not convert a float
-// or a pointer into one here.
-fn (mut p Parser) parse_count_trailing(at tokenize.Token) !ast.Expr {
+// parse_bit_count reads the four builtins that count the zero bits of an
+// integer, which is the count-trailing and the count-leading family:
+// `__builtin_ctz` and `__builtin_ctzll` are the index of the lowest set bit, and
+// `__builtin_clz` and `__builtin_clzll` the number of leading zero bits. gcc
+// gives all four the type int, so the answer is an int at either width. An
+// operand that is not an integer is refused by name: these count the zero bits
+// of an integer, and gcc does not convert a float or a pointer into one here.
+fn (mut p Parser) parse_bit_count(at tokenize.Token) !ast.Expr {
 	args := p.parse_arguments()!
 	if args.len != 1 {
 		p.error_at(at, 'unsupported: ${at.text} takes one value')
@@ -580,7 +583,12 @@ fn (mut p Parser) parse_count_trailing(at tokenize.Token) !ast.Expr {
 	if !p.is_unresolved(args[0]) {
 		operand := p.value_type(args[0])
 		if operand.kind != .unknown && !operand.kind.is_integer() {
-			p.error_at(at, 'unsupported: ${at.text} counts the trailing zeros of an integer, and ${describe_operand(args[0])} is ${operand.describe()}')
+			zeros := if at.text in ['__builtin_clz', '__builtin_clzll'] {
+				'leading'
+			} else {
+				'trailing'
+			}
+			p.error_at(at, 'unsupported: ${at.text} counts the ${zeros} zeros of an integer, and ${describe_operand(args[0])} is ${operand.describe()}')
 			return error('the operand of ${at.text}')
 		}
 	}

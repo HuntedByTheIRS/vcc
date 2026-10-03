@@ -4046,6 +4046,36 @@ fn test_the_trailing_zero_counts_are_their_own_values_in_one_argument_list() {
 	assert run_image(runtime.bytes) == 3
 }
 
+// The count-leading builtins are the machine's bsr and xor, and the values are
+// what gcc 16.2.1 computes on nonzero input: `__builtin_clz(8)` is 28,
+// `__builtin_clzll(8)` is 60, `__builtin_clzll(1)` is 63 and `__builtin_clz(1)`
+// is 31. A wrong answer for a nonzero argument is worse than a refusal, so the
+// operands include a value the machine reads at run time as well as folded ones.
+fn test_the_leading_zero_counts_are_the_machines_bsr_and_xor() {
+	eight32 := emit(translation_unit('int main(void) { return __builtin_clz(8); }'),
+		Options{})
+	assert eight32.diagnostics.len == 0
+	assert run_image(eight32.bytes) == 28
+	eight64 := emit(translation_unit('int main(void) { return __builtin_clzll(8); }'),
+		Options{})
+	assert eight64.diagnostics.len == 0
+	assert run_image(eight64.bytes) == 60
+	one64 := emit(translation_unit('int main(void) { return __builtin_clzll(1); }'),
+		Options{})
+	assert one64.diagnostics.len == 0
+	assert run_image(one64.bytes) == 63
+	one32 := emit(translation_unit('int main(void) { return __builtin_clz(1); }'),
+		Options{})
+	assert one32.diagnostics.len == 0
+	assert run_image(one32.bytes) == 31
+	// The same instruction on a value the machine reads at run time rather than
+	// one folded while the tree was read.
+	runtime := emit(translation_unit('int main(void) { volatile unsigned v = 8; return __builtin_clz(v); }'),
+		Options{})
+	assert runtime.diagnostics.len == 0
+	assert run_image(runtime.bytes) == 28
+}
+
 // A machine builtin's value is as wide as the type it operates on, and the
 // reader resolved that type onto the call. Storing the result of a 64-bit fetch
 // into a 64-bit object used to be refused as four bytes stored into an

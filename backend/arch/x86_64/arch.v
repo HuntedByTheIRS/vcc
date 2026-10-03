@@ -1387,6 +1387,71 @@ pub fn bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {
 	return out
 }
 
+// bit_scan_reverse encodes `bsr`: the index of the highest set bit of the source
+// into the destination. It is bit_scan_forward with the other direction, opcode
+// 0f bd, and the same operand encoding; the source and the destination may be the
+// same register, and a zero source leaves the destination undefined.
+fn bit_scan_reverse(dst Register, src Register, wide bool) ![]u8 {
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x40)
+	if wide {
+		rex |= 0x08
+	}
+	if dst.code >= 8 {
+		rex |= 0x04
+	}
+	if src.code >= 8 {
+		rex |= 0x01
+	}
+	if rex != 0x40 {
+		out << rex
+	}
+	out << u8(0x0f)
+	out << u8(0xbd)
+	out << u8(0xc0 | ((dst.code & 0x07) << 3) | (src.code & 0x07)) // mod 11: the source is a register
+	return out
+}
+
+// xor_immediate exclusive-ors a register with a constant in place, at the width
+// `wide` names: it is the same group opcode as add_immediate with /6 in the reg
+// field, and the constant is written in the four bytes that keep the
+// instruction's length from depending on its value.
+fn xor_immediate(dst Register, value i32, wide bool) ![]u8 {
+	mut out := []u8{cap: 7}
+	if wide {
+		out << if dst.code >= 8 { u8(0x49) } else { u8(0x48) } // REX.W, with B when the code needs it
+	} else if dst.code >= 8 {
+		out << u8(0x41) // REX.B, and no W: the value is four bytes
+	}
+	out << u8(0x81) // the group opcode, with /6 for the xor
+	out << u8(0xf0 | (dst.code & 0x07))
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
+// count_leading encodes the number of leading zero bits of a value, which is
+// what `__builtin_clz` and `__builtin_clzll` are worth. One bsr leaves the index
+// of the highest set bit, and the count is the register's width minus one minus
+// that index: 31 - i at four bytes and 63 - i at eight, which is i exclusive-or
+// 31 and i exclusive-or 63 because i is below the width. Measured on gcc 16.2.1
+// at -O0 with -mno-lzcnt on this machine, which is the shape this writes:
+// `unsigned clz32(unsigned x) { return __builtin_clz(x); }` is `bsrl %edi,%eax;
+// xorl $31,%eax`, and the 64-bit `__builtin_clzll` is `bsrq` and `xorq $63`.
+//
+// The machine has no single instruction for this without lzcnt, which is not
+// part of the baseline this tree targets, so the answer is the two the oracle
+// writes rather than a value that would be wrong where lzcnt is absent. A zero
+// source asks a question with no answer: bsr leaves the destination undefined,
+// which is what gcc's builtin is defined to be.
+pub fn count_leading(dst Register, src Register, wide bool) ![]u8 {
+	mut out := bit_scan_reverse(dst, src, wide)!
+	out << xor_immediate(dst, if wide { i32(63) } else { i32(31) }, wide)!
+	return out
+}
+
 // exchange_indirect encodes `xchg [address], value`, which swaps the value in
 // memory with the one in the register in a single locked step and leaves the old
 // memory value in the register. The memory form carries the lock implicitly,
@@ -2347,12 +2412,13 @@ pub:
 	call_register                   fn (Register) ![]u8                 = unsafe { nil }
 	call_rel32                      fn (i32) []u8                       = unsafe { nil }
 	call_rip_slot                   fn (i32) []u8                       = unsafe { nil }
-	cdq                             fn () []u8                                        = unsafe { nil }
-	cmp_reg32                       fn (Register, Register) ![]u8                     = unsafe { nil }
-	cmp_reg64                       fn (Register, Register) ![]u8                     = unsafe { nil }
-	compare_double                  fn (Register, Register) ![]u8                     = unsafe { nil }
-	compare_exchange_indirect       fn (Register, Register, int) ![]u8                = unsafe { nil }
-	compare_float                   fn (Register, Register) ![]u8                     = unsafe { nil }
+	cdq                             fn () []u8                          = unsafe { nil }
+	cmp_reg32                       fn (Register, Register) ![]u8       = unsafe { nil }
+	cmp_reg64                       fn (Register, Register) ![]u8       = unsafe { nil }
+	compare_double                  fn (Register, Register) ![]u8       = unsafe { nil }
+	compare_exchange_indirect       fn (Register, Register, int) ![]u8  = unsafe { nil }
+	compare_float                   fn (Register, Register) ![]u8       = unsafe { nil }
+	count_leading                   fn (Register, Register, bool) ![]u8 = unsafe { nil }
 	cqo                             fn () []u8                                        = unsafe { nil }
 	div_reg32                       fn (Register) ![]u8                               = unsafe { nil }
 	div_reg64                       fn (Register) ![]u8                               = unsafe { nil }
@@ -2488,6 +2554,7 @@ pub fn encoders() Encoders {
 		compare_double:                  &compare_double
 		compare_exchange_indirect:       &compare_exchange_indirect
 		compare_float:                   &compare_float
+		count_leading:                   &count_leading
 		cqo:                             &cqo
 		div_reg32:                       &div_reg32
 		div_reg64:                       &div_reg64
