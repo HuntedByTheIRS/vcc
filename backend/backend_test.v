@@ -1599,3 +1599,27 @@ fn test_the_dynamic_frame_subtraction_is_the_bytes_that_lower_the_stack() {
 		0xdc,
 	]
 }
+
+fn test_the_dynamic_stride_multiply_is_the_bytes_that_scale_an_index() {
+	// imul rax, rcx / imul r11, r12: the destination is in the reg field and the
+	// source in the r/m field, which is the way this two-operand form runs. The
+	// multiply a variable-length array's row stride needs is the same one a wide
+	// pair's cross products use, so it is the machine's existing encoder.
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	rax := target.reg('rax') or { panic('the target description has no such name') }
+	rcx := target.reg('rcx') or { panic('the target description has no such name') }
+	r11 := target.reg('r11') or { panic('the target description has no such name') }
+	r12 := target.reg('r12') or { panic('the target description has no such name') }
+	assert target.multiply_word(rax, rcx) or { panic('the target description has no such name') } == [
+		u8(0x48),
+		0x0f,
+		0xaf,
+		0xc1,
+	]
+	assert target.multiply_word(r11, r12) or { panic('the target description has no such name') } == [
+		u8(0x4d),
+		0x0f,
+		0xaf,
+		0xdc,
+	]
+}

@@ -98,6 +98,24 @@ struct Slot {
 	// own because a struct can be eight bytes and a pair of ints sixteen, and a
 	// conversion to or from a complex type is not a conversion a struct has.
 	complex bool
+	// vla is set for a slot holding a variable-length array. Such a slot does not
+	// hold the array: its storage was claimed on the stack when the declaration
+	// ran, and the slot holds two words, the address of the first element and how
+	// many bytes the array is. count is -1 for one, so this is the flag that says
+	// the name is an array at all; width is the size of one element.
+	vla bool
+	// vla_base and vla_size are the frame slots those two words live in. They are
+	// offsets rather than Slots because a Slot cannot contain one of itself, and
+	// they are reserved for the declaration and never given out again.
+	vla_base int
+	vla_size int
+}
+
+// is_array says the slot holds an array, whether its size was written or is
+// computed at run time. count alone answers for the first kind and vla for the
+// second, and the two differ exactly where a bound is a value.
+fn (s Slot) is_array() bool {
+	return s.count > 0 || s.vla
 }
 
 // LoopLabels are the two places a loop's body can leave by: where the loop ends,
@@ -1325,6 +1343,11 @@ fn (e Emitter) returns_eight_byte_integer() bool {
 // storage and nothing else, which is what C says it is: the slot is there for
 // whatever the function writes into it next.
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
+	if size_expr := stmt.decl_vla_size {
+		// A variable-length array is the one declaration whose storage is
+		// claimed while the program runs rather than reserved by the frame.
+		return e.emit_vla_decl(stmt, size_expr)
+	}
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.decl_stride,
 		stmt.line, stmt.col)!
 	// What makes an object an argument list is the type it was declared with,
@@ -1393,6 +1416,40 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	}
 	e.emit_expr(init)!
 	e.store_value(slot, init, stmt.line, stmt.col)!
+}
+
+// emit_vla_decl claims a variable-length array's storage where the declaration
+// runs. The size is a value the program computed, so the frame cannot reserve it:
+// the bytes are rounded up to the alignment a call needs and subtracted from the
+// stack pointer, and the address the stack pointer became is kept as the array's
+// base. The size before rounding is kept too, because that is what sizeof answers
+// with. Nothing is released at the end of a block; the epilogue's move of the
+// stack pointer back to the frame pointer gives every declaration in the function
+// back at once.
+fn (mut e Emitter) emit_vla_decl(stmt ast.Stmt, size_expr ast.Expr) !void {
+	if stmt.init != none {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is a variable-length array, and a variable-length array may not be initialized')
+		return error('VLA initializer')
+	}
+	slot := e.declare_vla(stmt.decl_name, stmt.decl_stride, stmt.line, stmt.col)!
+	// The size the object is, before the frame rounds it up: sizeof answers with
+	// this and not with the padded size, because padding is a fact about the
+	// stack and not about the object.
+	e.emit_expr_at(size_expr, 1)!
+	register := e.accumulator(stmt.line, stmt.col)!
+	base := e.frame_pointer(stmt.line, stmt.col)!
+	e.append(e.target.store_slot(base, i32(slot.vla_size), register, e.target.word_size)!)
+	// Round up to the boundary a call needs, so that a call inside the body
+	// reaches a function whose frame is aligned, and lower the stack pointer by
+	// that much. What the stack pointer becomes is where the array starts.
+	e.append(e.target.add_immediate(register, frame_alignment - 1))
+	e.append(e.target.and_immediate(register, -frame_alignment)!)
+	e.append(e.target.sub_rsp_register(register)!)
+	stack := e.target.stack_pointer() or {
+		e.diagnostics << problem(stmt.line, stmt.col, '${e.target.name}: the machine has no stack pointer to claim a variable-length array against')
+		return error('no stack pointer')
+	}
+	e.append(e.target.store_slot(base, i32(slot.vla_base), stack, e.target.word_size)!)
 }
 
 // emit_assign evaluates the value and writes it into the slot the name lives in.
@@ -2244,15 +2301,25 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
 	}
-	if slot.count == 0 {
+	if !slot.is_array() {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an element of ${stmt.target} is written, and ${stmt.target} is not an array')
 		return error('not an array')
 	}
 	e.check_subscript_index(subscript)!
 	e.emit_expr_at(subscript, depth)!
-	base := e.frame_pointer(stmt.line, stmt.col)!
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.element_address(base, register, slot.width, slot.offset, slot.wide || slot.long_double, slot.complex, stmt.target,
+	mut base := e.frame_pointer(stmt.line, stmt.col)!
+	mut offset := slot.offset
+	if slot.vla {
+		// The array is not in the frame but at an address the frame holds, so
+		// the base is that address rather than the frame pointer. The base goes
+		// in the scratch register because the index is already in the
+		// accumulator and element_address adds the two together.
+		base = e.scratch(stmt.line, stmt.col)!
+		e.load_vla_base(slot, base, stmt.line, stmt.col)!
+		offset = 0
+	}
+	e.element_address(base, register, slot.width, offset, slot.wide || slot.long_double, slot.complex, stmt.target,
 		stmt.line, stmt.col)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
@@ -2977,6 +3044,45 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 	}
 	e.scopes[e.scopes.len - 1][name] = block
 	return block
+}
+
+// declare_vla gives a variable-length array's declaration its place: two words in
+// the frame, one for the address of the first element and one for the size in
+// bytes, because the array itself is claimed on the stack when the declaration
+// runs and not reserved here. elem is the size of one element, which is what an
+// index scales by. The name is an array to every reader of the slot, and vla is
+// what says its storage is somewhere the frame's fixed size does not reach.
+fn (mut e Emitter) declare_vla(name string, elem int, line int, col int) !Slot {
+	if e.scopes.len > 0 {
+		if name in e.scopes[e.scopes.len - 1] {
+			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared twice in the same block')
+			return error('redeclared')
+		}
+	}
+	if elem <= 0 {
+		e.diagnostics << problem(line, col, 'internal: ${name} is a variable-length array of elements with no size')
+		return error('no element size')
+	}
+	base := e.reserve(e.target.word_size)
+	size := e.reserve(e.target.word_size)
+	block := Slot{
+		width:    elem
+		count:    -1
+		vla:      true
+		vla_base: base.offset
+		vla_size: size.offset
+	}
+	e.scopes[e.scopes.len - 1][name] = block
+	return block
+}
+
+// load_vla_base leaves the address a variable-length array's first element is at in
+// a register. The address was stored when the declaration ran, because the frame
+// the object lives in was not known before that: it is what the stack pointer
+// became after the declaration subtracted the object's size from it.
+fn (mut e Emitter) load_vla_base(slot Slot, register backend.Register, line int, col int) !void {
+	base := e.frame_pointer(line, col)!
+	e.append(e.target.load_slot(base, i32(slot.vla_base), register, e.target.word_size)!)
 }
 
 // writes_a_complex says whether a spelling names an object of a complex type.
@@ -3889,7 +3995,7 @@ fn (e Emitter) is_a_pointer(expr ast.Expr) bool {
 	}
 	if expr is ast.Ident {
 		if slot := e.lookup(expr.name) {
-			return slot.count > 0
+			return slot.is_array()
 		}
 		if object := e.global_shape(expr.name) {
 			return object.count > 0
@@ -4276,6 +4382,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is an object of an aggregate type, and using it as a value is not implemented; a member of it, or its address, is')
 				return error('aggregate value')
 			}
+			if slot.vla {
+				// A variable-length array's name is worth the address of its
+				// first element, which is the address the declaration stored;
+				// the frame slot holds that address and not the array.
+				register := e.accumulator(expr.line, expr.col)!
+				e.load_vla_base(slot, register, expr.line, expr.col)!
+				return
+			}
 			if slot.count > 0 {
 				// An array's name is worth the address of its first element: in
 				// an expression it is what a pointer is, which is what makes
@@ -4597,6 +4711,9 @@ fn (mut e Emitter) emit_general_index(expr ast.Index, depth int) !void {
 // element. It is the address half of the element read and of the element write,
 // which is why the two share it.
 fn (mut e Emitter) emit_element_address(expr ast.Index, depth int) !void {
+	if stride_expr := expr.vla_stride {
+		return e.emit_dynamic_element_address(expr, stride_expr, depth)
+	}
 	e.emit_base_address(expr.base, depth + 1)!
 	base := e.value_slot(depth)
 	e.store_accumulator(base, expr.line, expr.col)!
@@ -4612,6 +4729,35 @@ fn (mut e Emitter) emit_element_address(expr ast.Index, depth int) !void {
 	e.element_address(other, index, stride, 0, stride == wide_bytes, expr.typ.is_array(), 'the element', expr.line, expr.col)!
 }
 
+// emit_dynamic_element_address is emit_element_address for an element whose stride
+// is a value rather than a constant: the row of a variable-length array is as many
+// bytes as its bound says, and the bound is computed where the subscript runs. The
+// three values the address is made of need a register or a slot each, so the stride
+// and the index are parked while the base is addressed, and the machine's multiply
+// scales the index by the stride. The address is left in the accumulator the way
+// the constant-stride path leaves it, so the read and the write that follow do not
+// know which path produced it.
+fn (mut e Emitter) emit_dynamic_element_address(expr ast.Index, stride_expr ast.Expr, depth int) !void {
+	e.emit_expr_at(stride_expr, depth + 1)!
+	stride_slot := e.reserve(e.target.word_size)
+	e.store_accumulator(stride_slot, expr.line, expr.col)!
+	e.check_subscript_index(expr.index)!
+	e.emit_expr_at(expr.index, depth + 1)!
+	index_slot := e.reserve(e.target.word_size)
+	e.store_accumulator(index_slot, expr.line, expr.col)!
+	e.emit_base_address(expr.base, depth + 1)!
+	base := e.remainder(expr.line, expr.col)!
+	accumulator := e.accumulator(expr.line, expr.col)!
+	e.append(e.target.move_register64(base, accumulator)!)
+	e.load_accumulator(index_slot, expr.line, expr.col)!
+	index := e.accumulator(expr.line, expr.col)!
+	stride := e.scratch(expr.line, expr.col)!
+	frame := e.frame_pointer(expr.line, expr.col)!
+	e.append(e.target.load_slot(frame, i32(stride_slot.offset), stride, e.target.word_size)!)
+	e.append(e.target.multiply_word(index, stride)!)
+	e.append(e.target.add_reg64(index, base))
+}
+
 // emit_base_address leaves in the accumulator the address a subscript scales from.
 // For an array's name that address is what the name is worth, which is the same
 // value a read of the name produces - except for an array of 128-bit objects,
@@ -4623,6 +4769,14 @@ fn (mut e Emitter) emit_base_address(base ast.Expr, depth int) !void {
 	if base is ast.Ident {
 		name := (base as ast.Ident).name
 		if slot := e.lookup(name) {
+			if slot.vla {
+				// A variable-length array's storage is at the address its
+				// declaration stored, not at an offset from the frame: the
+				// frame held that address and nothing of the array.
+				register := e.accumulator(base.line, base.col)!
+				e.load_vla_base(slot, register, base.line, base.col)!
+				return
+			}
 			if slot.count > 0 {
 				register := e.accumulator(base.line, base.col)!
 				frame := e.frame_pointer(base.line, base.col)!
@@ -4661,6 +4815,12 @@ fn (mut e Emitter) emit_address(unary ast.Unary, depth int) !void {
 	if unary.expr is ast.Ident {
 		name := unary.expr.name
 		if slot := e.lookup(name) {
+			if slot.vla {
+				// The object is at the address the declaration stored, so its
+				// address is that value and not a place in the frame.
+				e.load_vla_base(slot, register, unary.line, unary.col)!
+				return
+			}
 			base := e.frame_pointer(unary.line, unary.col)!
 			e.append(e.target.address_of_slot(base, slot.offset, register))
 			return
@@ -5025,7 +5185,7 @@ fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
 fn (mut e Emitter) emit_inc_dec_name(expr ast.IncDec, name ast.Ident, step i32, depth int) !void {
 	if slot := e.lookup(name.name) {
 		if slot.count > 0 || slot.bytes > 0 || slot.wide || slot.floating || slot.single
-			|| slot.long_double {
+			|| slot.long_double || slot.vla {
 			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${name.name}, and this compiler steps a scalar object only')
 			return error('inc-dec operand is not a scalar object')
 		}
@@ -7210,7 +7370,7 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 			// pointer. A char in an expression is an int: the language promotes
 			// it, and the load that reads it is where that happens, so the width
 			// of the value is the width of the read rather than of the slot.
-			if slot.count > 0 {
+			if slot.is_array() {
 				e.target.word_size
 			} else if slot.width < 4 {
 				4
