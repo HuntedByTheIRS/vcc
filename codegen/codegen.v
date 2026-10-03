@@ -1130,17 +1130,26 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 		// out of those registers. The first eightbyte of a pair goes into the
 		// register a value of its class comes back in and the second into the one
 		// after it, so the two files are numbered apart and both are read here.
+		// The object is evaluated once and its address parked, rather than a
+		// second time for the first eightbyte: an expression that is not
+		// already an object, such as a complex sum, has to build one, and
+		// building it again for the second read would use the register the
+		// first read left the second eightbyte in.
+		address := e.value_slot(0)
+		e.object_hand_over_address(expr, e.return_class, 0)!
+		e.store_accumulator(address, stmt.line, stmt.col)!
 		if e.return_class.count == 2 {
-			// The second eightbyte is read first and eight bytes further in, and the
-			// object's address is taken again for the first one, because the address
-			// travels in the register the first general eightbyte goes back in.
-			e.object_hand_over_address(expr, e.return_class, 0)!
+			// The second eightbyte is read first and eight bytes further in, and
+			// the object's address is read again for the first one, because the
+			// address travels in the register the first general eightbyte goes
+			// back in.
+			e.load_accumulator(address, stmt.line, stmt.col)!
 			base := e.accumulator(stmt.line, stmt.col)!
 			e.append(e.target.add_immediate(base, e.target.word_size))
 			e.load_return_eightbyte(base, 1, e.return_class.bytes - e.target.word_size,
 				e.return_class.second_floating, stmt.line, stmt.col)!
 		}
-		e.object_hand_over_address(expr, e.return_class, 0)!
+		e.load_accumulator(address, stmt.line, stmt.col)!
 		base := e.accumulator(stmt.line, stmt.col)!
 		e.load_return_eightbyte(base, 0, e.target.word_size, e.return_class.first_floating,
 			stmt.line, stmt.col)!

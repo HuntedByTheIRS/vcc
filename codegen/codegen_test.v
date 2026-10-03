@@ -2853,6 +2853,20 @@ fn test_two_complex_arguments_are_placed_in_their_own_registers() {
 	assert run_image(emitted.bytes) == 0
 }
 
+// A function that returns a complex value built by an expression, such as a
+// difference of two complex parameters, has to build the returned object once
+// and read both of its eightbytes from that one object. Building it again for
+// the second eightbyte reads the register the first read left it in, so the
+// answer comes back with one component from each evaluation. Measured with gcc
+// 16.2.1, the program below exits 0, and a compiler that evaluates the returned
+// object twice exits 1.
+fn test_a_returned_complex_expression_is_built_once() {
+	emitted := emit(translation_unit('double _Complex sub(double _Complex a, double _Complex b) { return a - b; } int main() { double _Complex z = 1.0 + 2.0i; double _Complex w = 3.0 + 4.0i; if (sub(z, w) != -2.0 - 2.0i) { return 1; } if (sub(2.0, 3.0) != -1.0) { return 2; } return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_a_double_comparison_answers_the_int_a_branch_reads() {
 	// A comparison of two doubles reads the flags the floating compare leaves,
 	// which are not the integer ones: the sign of a double lives in the top bit of
