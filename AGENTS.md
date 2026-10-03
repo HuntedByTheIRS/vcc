@@ -16,6 +16,19 @@ Linux x86-64.
 1. **Pure V.** No C source, no `#include`, no `cc` invocation, no C library
    binding added to make something work. If V cannot express a piece yet, that
    piece stays unimplemented and the failure is reported, not worked around.
+   One exception, named and off by default. `-external-linker=NAME` hands the
+   link to a linker the system already has, for the inputs this compiler
+   cannot consume yet: a relocatable object, an archive. It exists so that
+   linking behaviour is available before an in-house linker is written, not so
+   that a missing piece can be papered over. `NAME` must not be a C compiler:
+   `cc`, `gcc`, `clang`, `c++` and `tcc` are refused by name, because a C
+   compiler finishing C compilation is the one thing this rule is for. With
+   the flag unset every refusal stands exactly as it does today, and the
+   in-house path is unchanged when it is set. A tool that is missing or exits
+   non-zero is reported rather than silently falling back to the other path.
+   The paths it needs (the system's start files, its dynamic loader, its
+   library directories) come from `backend/os/linux/`, so there stays one
+   source for where those live.
 2. **TCC-class speed, which is not open to compromise.** The workload that
    decides this is the V self-build: a few megabytes of generated C. Wall time
    and peak RSS both matter. Never claim a speed improvement from intuition;
