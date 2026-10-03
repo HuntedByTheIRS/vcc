@@ -1394,7 +1394,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						name:       d.name
 						member:     first.name
 						offset:     0
-						spelling:   first.typ.describe()
+						spelling:   first.typ.storage_spelling()
 						typ:        first.typ
 						bitfield:   first.bitfield
 						bit_offset: 0
@@ -1430,7 +1430,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						name:     d.name
 						member:   member.name
 						offset:   layout.offsets[i]
-						spelling: member.typ.describe()
+						spelling: member.typ.storage_spelling()
 						typ:      member.typ
 						line:     d.name_at.line
 						col:      d.name_at.col
@@ -1449,7 +1449,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						name:     d.name
 						member:   member.name
 						offset:   layout.offsets[i]
-						spelling: member.typ.describe()
+						spelling: member.typ.storage_spelling()
 						typ:      member.typ
 						line:     d.name_at.line
 						col:      d.name_at.col

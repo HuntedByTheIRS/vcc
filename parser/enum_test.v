@@ -2,6 +2,7 @@ module parser
 
 import ast
 import tokenize
+import types
 
 // An enumeration is a list of names the reader turns into integer constants, and
 // every number here is the one gcc 16.2.1 gives the same list: `enum { A, B, C };
@@ -124,9 +125,69 @@ fn test_an_ordinary_name_is_not_an_enumeration_constant() {
 // header whose mask is built from an expression this compiler has not learned
 // says so instead of answering a wrong mask.
 fn test_an_uncomputable_value_is_refused() {
-	result := enum_read('int s;
-enum { A = s };
-int main(void) { return A; }')
+	result := enum_read('int s;\nenum { A = s };\nint main(void) { return A; }')
 	assert result.diagnostics.len >= 1
 	assert result.diagnostics[0].msg.contains('is not an integer constant expression')
+}
+
+// enum_object_declaration is the first declaration inside main of an object whose
+// type is the enum named by `tag`, from the definitions the test writes out. It
+// is what a test reads the object's spelling and clause from.
+fn enum_object_declaration(definitions string, tag string) ast.Stmt {
+	result := enum_read('${definitions}\nint main(void) { enum ${tag} e = 0; return 0; }')
+	assert result.diagnostics.len == 0
+	return result.unit.decls[0].body[0]
+}
+
+// An object whose specifier is an enum tag names the integer type its enumerators
+// require. The clause keeps the tag, and the spelling is the integer type the
+// back end stores, sized and signed by. Every row is the type gcc 16.2.1 gives
+// the same enum.
+fn test_an_enum_typed_object_is_the_integer_type_its_enumerators_require() {
+	small := enum_object_declaration('enum c99_small { SMALL_ONE = 1, SMALL_TWO, SMALL_THREE, };',
+		'c99_small')
+	assert small.decl_name == 'e'
+	assert small.decl_type == 'unsigned int'
+	assert small.resolved.kind == types.Kind.enum_
+	assert small.resolved.tag == 'c99_small'
+	assert small.resolved.enum_underlying() == types.Kind.unsigned_int
+	neg := enum_object_declaration('enum c99_neg { NEG_MIN = -3, NEG_ZERO = 0, NEG_POS = 3 };',
+		'c99_neg')
+	assert neg.decl_type == 'int'
+	assert neg.resolved.enum_underlying() == types.Kind.int_
+	big := enum_object_declaration('enum c99_big { BIG = 65535 };', 'c99_big')
+	assert big.decl_type == 'unsigned int'
+	both := enum_object_declaration('enum c99_both { BN = -1, BP = 4000000000 };', 'c99_both')
+	assert both.decl_type == 'long'
+	assert both.resolved.enum_underlying() == types.Kind.long
+	huge := enum_object_declaration('enum c99_huge { H = 5000000000 };', 'c99_huge')
+	assert huge.decl_type == 'unsigned long'
+	assert huge.resolved.enum_underlying() == types.Kind.unsigned_long
+}
+
+// A typedef name for an enum and an anonymous enum spell the same integer type,
+// because the spelling is read off the clause and not off the name the
+// declaration was written with.
+fn test_a_typedef_for_an_enum_and_an_anonymous_enum_name_the_same_type() {
+	result := enum_read('typedef enum { A = 7, B } anon_t;
+int main(void) { anon_t x = A; enum { C = 9, D } y = C; return x + y; }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls[0].body[0].decl_type == 'unsigned int'
+	assert result.unit.decls[0].body[1].decl_type == 'unsigned int'
+}
+
+// A use of an enumerator carries the type gcc 16.2.1 gives it, which is the
+// question `sizeof` of the name answers: an enumerator of an enum whose values
+// do not fit int is as wide as the enum itself.
+fn test_a_use_of_an_enumerator_carries_the_wider_type() {
+	result := enum_read('enum c99_huge { H = 5000000000 };
+int main(void) { unsigned long n = H; return 0; }')
+	assert result.diagnostics.len == 0
+	stmt := result.unit.decls[0].body[0]
+	initializer := stmt.init or {
+		assert false
+		return
+	}
+	assert initializer is ast.IntLit
+	assert (initializer as ast.IntLit).typ.describe() == 'unsigned long'
 }
