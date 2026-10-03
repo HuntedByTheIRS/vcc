@@ -7393,9 +7393,24 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		line := expr_line(arg)
 		col := expr_col(arg)
 		if place.object {
-			// An object is not read into a slot at all: its own bytes are read
-			// after the stack this call takes has been made, either into the
-			// registers it goes in or onto the stack itself.
+			// An object is not read into a slot of its own: its own bytes are
+			// read after the stack this call takes has been made, either into
+			// the registers it goes in or onto the stack itself. The address
+			// those bytes are read through is taken here for an object the
+			// convention hands over in registers, and parked in this level's
+			// value slot, rather than where the registers are loaded: building
+			// the object a converted argument needs uses the floating-point
+			// register, and that register holds the arguments already loaded
+			// once the loading pass has started. An object on the stack is left
+			// to the stack pass, which runs before any register is loaded.
+			if !place.stack {
+				class := e.aggregate_argument(call, i) or {
+					e.diagnostics << problem(call.line, call.col, 'internal: an object handed over in two registers has no class in the signature of ${call.name}')
+					return error('no class')
+				}
+				e.object_hand_over_address(arg, class, depth + i + 1)!
+				e.store_accumulator(e.value_slot(depth + i), line, col)!
+			}
 			continue
 		}
 		if place.wide {
@@ -7559,12 +7574,15 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// general file is handed only the bytes the object has left. An
 			// object whose two eightbytes did not both fit is on the stack and
 			// was pushed already, and reading a register for it would hand the
-			// object over twice and clobber the arguments beside it.
+			// object over twice and clobber the arguments beside it. The address
+			// was taken in the value pass and waits in this argument's slot, so
+			// nothing here builds an object and no argument register is touched
+			// but the two this object is read into.
 			class := e.aggregate_argument(call, i) or {
 				e.diagnostics << problem(call.line, call.col, 'internal: an object handed over in two registers has no class in the signature of ${call.name}')
 				return error('no class')
 			}
-			e.object_hand_over_address(arg, class, depth + i + 1)!
+			e.load_accumulator(e.value_slot(depth + i), line, col)!
 			base := e.accumulator(line, col)!
 			e.load_argument_eightbyte(base, 0, e.target.word_size, place.floating,
 				place.position, line, col)!

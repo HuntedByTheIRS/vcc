@@ -2838,6 +2838,21 @@ fn test_a_float_argument_is_passed_as_a_float_to_a_declared_callee() {
 	assert run_image(in_file.bytes) == 0
 }
 
+// Two arguments of a function whose parameters are complex objects travel in
+// the two floating-point registers the convention gives a pair of eightbytes
+// each. A real argument is built into a complex object first, and that build
+// uses the floating-point register, so it has to happen before any argument is
+// loaded: an argument placed and then overwritten hands the wrong value over,
+// which is a wrong answer and not a refusal. Measured with gcc 16.2.1, the
+// program below exits 0, and a compiler that builds the second argument after
+// loading the first exits 1.
+fn test_two_complex_arguments_are_placed_in_their_own_registers() {
+	emitted := emit(translation_unit('double _Complex first(double _Complex a, double _Complex b) { return a; } int main() { if (first(2.0, 3.0) != 2.0) { return 1; } if (first(3.0, 2.0) != 3.0) { return 2; } double _Complex z = 1.0 + 2.0i; double _Complex w = 3.0 + 4.0i; if (first(z, w) != z) { return 3; } if (first(w, z) != w) { return 4; } return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_a_double_comparison_answers_the_int_a_branch_reads() {
 	// A comparison of two doubles reads the flags the floating compare leaves,
 	// which are not the integer ones: the sign of a double lives in the top bit of
