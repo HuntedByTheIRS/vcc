@@ -2867,6 +2867,19 @@ fn test_a_returned_complex_expression_is_built_once() {
 	assert run_image(emitted.bytes) == 0
 }
 
+// A quotient of two complex values has no formula this back end can write that
+// is right on the boundary, so it is refused by name rather than answered with a
+// value that is wrong where the standard's is not. Measured against gcc 16.2.1:
+// `x / y` for x = y = 1e308 + 1e308i is 1 + 0i, and the formula this back end
+// wrote answered NaN + NaNi.
+fn test_a_complex_quotient_is_refused_by_name() {
+	emitted := emit(translation_unit('int main() { double _Complex z = 1.0 + 2.0i; double _Complex w = 3.0 + 4.0i; double _Complex q = z / w; return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('quotient of two complex values')
+	assert emitted.bytes.len == 0
+}
+
 fn test_a_double_comparison_answers_the_int_a_branch_reads() {
 	// A comparison of two doubles reads the flags the floating compare leaves,
 	// which are not the integer ones: the sign of a double lives in the top bit of

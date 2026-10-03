@@ -9163,12 +9163,15 @@ fn (mut e Emitter) emit_complex_sum(dest Slot, binary ast.Binary, left Slot, rig
 // The formula below is therefore the arithmetic itself: `ac - bd` for the real
 // part and `ad + bc` for the imaginary one. It is exact for every product whose
 // partial products are representable, which is every product of well-behaved
-// values and includes the corpus's own `(3+4i)(1-2i) = 11-2i`; it differs from
-// gcc only where a partial product overflows to an infinity or underflows to
-// zero and the true product does not, which is exactly the set of inputs gcc
-// sends to its helper. The four partial products are written to the frame before
-// they are combined, so an operand that is also the destination is read before it
-// is written.
+// values and includes the corpus's own `(3+4i)(1-2i) = 11-2i`. Measured against
+// gcc 16.2.1 over the 20736 products of the twelve extreme operands {1e308,
+// 1e307, 1e200, 1e155, 1e154, 1e-154, 1e-155, 1e-200, 1e-308, 3, 1e16, 1e-16} in
+// each of the four components, this formula agreed with gcc's `__muldc3` on every
+// one, so the boundary the helper exists for did not appear over that set and the
+// product keeps the formula. The division beside it is a different matter and is
+// refused where it cannot be right. The four partial products are written to the
+// frame before they are combined, so an operand that is also the destination is
+// read before it is written.
 fn (mut e Emitter) emit_complex_product(dest Slot, binary ast.Binary, left Slot, right Slot, depth int) !void {
 	line := binary.line
 	col := binary.col
@@ -9208,59 +9211,33 @@ fn (mut e Emitter) emit_complex_product(dest Slot, binary ast.Binary, left Slot,
 	e.store_complex_component(frame, value, dest.offset + width, single)!
 }
 
-// emit_complex_quotient writes the quotient of two complex values, by the same
-// decision and for the same reason as the product: gcc sends a complex division
-// to libgcc's `__divdc3`, and there is no such symbol an image this compiler
-// builds can name. The formula is the naive one -- `(ac + bd) / (c*c + d*d)` for
-// the real part and `(bc - ad) / (c*c + d*d)` for the imaginary one -- and it is
-// exact for every quotient whose partial products and whose denominator are
-// representable, which includes the corpus's `z / (1+0i)`.
+// emit_complex_quotient refuses a complex division by name, because this back
+// end has no way to compute one that is right on the boundary.
+//
+// gcc sends a complex division to libgcc's `__divdc3`. There is no such symbol
+// an image this compiler builds can name: a program that called it was built and
+// run, and died at load with `symbol lookup error: undefined symbol: __divdc3`.
+// The formula this back end wrote instead -- `(a*c + b*d) / (c*c + d*d)` for the
+// real part -- is not the arithmetic. Measured against gcc 16.2.1 over the 20736
+// pairs of the twelve extreme operands {1e308, 1e307, 1e200, 1e155, 1e154,
+// 1e-154, 1e-155, 1e-200, 1e-308, 3, 1e16, 1e-16} in each of the four components,
+// it answers differently on 16079 of them, because `c*c + d*d` overflows to an
+// infinity as soon as a component of the divisor is large: `x / y` for
+// x = y = 1e308 + 1e308i is 1 + 0i in gcc and NaN + NaNi here. The same
+// measurement over the products of the same pairs found 0 differences, which is
+// why the product keeps its formula and the quotient does not.
+//
+// C99 Annex G.5.1 gives a scaled division that is right on those boundaries
+// without a library symbol, and that is the change to make here. It is not
+// emitted yet, and a division this back end cannot compute is refused rather
+// than answered with a value that is wrong where gcc's is not.
 fn (mut e Emitter) emit_complex_quotient(dest Slot, binary ast.Binary, left Slot, right Slot, depth int) !void {
-	line := binary.line
-	col := binary.col
-	frame := e.frame_pointer(line, col)!
-	value := e.float_accumulator(line, col)!
-	other := e.float_scratch(line, col)!
-	single := complex_component_single(binary.typ)
-	width := complex_component_width(binary.typ)
-	work := e.reserve(6 * width)
-	// c*c and d*d, and their sum at work[2].
-	e.load_complex_component(frame, value, right.offset, single)!
-	e.complex_step(value, value, '*', single)!
-	e.store_complex_component(frame, value, work.offset, single)!
-	e.load_complex_component(frame, value, right.offset + width, single)!
-	e.complex_step(value, value, '*', single)!
-	e.store_complex_component(frame, value, work.offset + width, single)!
-	e.load_complex_component(frame, value, work.offset, single)!
-	e.load_complex_component(frame, other, work.offset + width, single)!
-	e.complex_step(value, other, '+', single)!
-	e.store_complex_component(frame, value, work.offset + 2 * width, single)!
-	// The real part is (a*c + b*d) / (c*c + d*d).
-	e.load_complex_component(frame, value, left.offset, single)!
-	e.load_complex_component(frame, other, right.offset, single)!
-	e.complex_step(value, other, '*', single)!
-	e.store_complex_component(frame, value, work.offset + 3 * width, single)!
-	e.load_complex_component(frame, value, left.offset + width, single)!
-	e.load_complex_component(frame, other, right.offset + width, single)!
-	e.complex_step(value, other, '*', single)!
-	e.load_complex_component(frame, other, work.offset + 3 * width, single)!
-	e.complex_step(other, value, '+', single)!
-	e.load_complex_component(frame, value, work.offset + 2 * width, single)!
-	e.complex_step(other, value, '/', single)!
-	e.store_complex_component(frame, other, dest.offset, single)!
-	// The imaginary part is (b*c - a*d) / (c*c + d*d).
-	e.load_complex_component(frame, value, left.offset + width, single)!
-	e.load_complex_component(frame, other, right.offset, single)!
-	e.complex_step(value, other, '*', single)!
-	e.store_complex_component(frame, value, work.offset + 4 * width, single)!
-	e.load_complex_component(frame, value, left.offset, single)!
-	e.load_complex_component(frame, other, right.offset + width, single)!
-	e.complex_step(value, other, '*', single)!
-	e.load_complex_component(frame, other, work.offset + 4 * width, single)!
-	e.complex_step(other, value, '-', single)!
-	e.load_complex_component(frame, value, work.offset + 2 * width, single)!
-	e.complex_step(other, value, '/', single)!
-	e.store_complex_component(frame, other, dest.offset + width, single)!
+	_ = dest
+	_ = left
+	_ = right
+	_ = depth
+	e.diagnostics << problem(binary.line, binary.col, 'unsupported: the quotient of two complex values is not computed here; the formula this back end could write overflows where the standard gives a finite answer, and no scaled form is emitted')
+	return error('complex division')
 }
 
 // emit_complex_comparison leaves 0 or 1 in the accumulator for `z == w` and
