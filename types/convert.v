@@ -1,5 +1,7 @@
 module types
 
+import diagnostics
+
 // The conversions of clause 6.3: the integer promotions, the usual arithmetic
 // conversions, decay, the rules for `void *`, and the constraint an assignment
 // between two pointer types has to satisfy.
@@ -223,6 +225,27 @@ pub fn decay(t Type) Type {
 	return t
 }
 
+// Problem is why a conversion is not allowed, and which kind of diagnostic the
+// reason is. Most reasons here are the constraint 6.5.16.1 makes a program
+// wrong for, and they are errors; a pointer assignment that drops a qualifier is
+// the one reason the standard requires a diagnostic for and gcc still compiles,
+// so it carries `warning` and the class the command line names it by.
+//
+// The class travels with the message so that the stage which reports it does
+// not have to decide again which reason was answered: a caller matching on the
+// text to tell a warning from an error would be a second answer waiting to
+// disagree with this one.
+pub struct Problem {
+pub:
+	msg string
+	// warning says the flags decide this reason rather than stopping the
+	// compile on its own, which is what gcc does for a discarded qualifier.
+	warning bool
+	// class is the kind of diagnostic, which is what a -W flag names. An
+	// error carries the default, which the reporter does not read for it.
+	class diagnostics.Class = .cpp
+}
+
 // assignment_problem is the constraint on assignment, 6.5.16.1, and with it the
 // constraint on an argument, which 6.5.2.2 says is checked as if by assignment.
 // It answers with the reason the assignment is a constraint violation, and with
@@ -238,7 +261,7 @@ pub fn decay(t Type) Type {
 // constant_zero says the source is an integer constant expression with the value
 // zero, which is the null pointer constant: it converts to every pointer type,
 // while any other integer does not convert to one at all.
-pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
+pub fn assignment_problem(to Type, from Type, constant_zero bool) ?Problem {
 	if to.kind == .unknown || from.kind == .unknown {
 		// Nothing is claimed about a type this compiler did not resolve.
 		return none
@@ -274,15 +297,25 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 			}
 			if (target.is_void() && source.is_object()) || (source.is_void() && target.is_object()) {
 				if !target.quals.contains(source.quals) {
-					return 'a constraint violation: ${to.describe()} drops a qualifier that ${from.describe()} has on the type it points to'
+					return Problem{
+						msg:     'a constraint violation: ${to.describe()} drops a qualifier that ${from.describe()} has on the type it points to'
+						warning: true
+						class:   .discarded_qualifiers
+					}
 				}
 				return none
 			}
 			if !unqualified(target).compatible(unqualified(source)) {
-				return 'a constraint violation: ${from.describe()} does not point to a type compatible with what ${to.describe()} points to'
+				return Problem{
+					msg: 'a constraint violation: ${from.describe()} does not point to a type compatible with what ${to.describe()} points to'
+				}
 			}
 			if !target.quals.contains(source.quals) {
-				return 'a constraint violation: ${to.describe()} drops a qualifier that ${from.describe()} has on the type it points to'
+				return Problem{
+					msg:     'a constraint violation: ${to.describe()} drops a qualifier that ${from.describe()} has on the type it points to'
+					warning: true
+					class:   .discarded_qualifiers
+				}
 			}
 			return none
 		}
@@ -297,12 +330,18 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 			if constant_zero {
 				return none
 			}
-			return 'a constraint violation: ${from.describe()} is an integer and ${to.describe()} is a pointer, and only an integer constant of value zero converts to one'
+			return Problem{
+				msg: 'a constraint violation: ${from.describe()} is an integer and ${to.describe()} is a pointer, and only an integer constant of value zero converts to one'
+			}
 		}
 		if target.is_function() {
-			return 'a constraint violation: only a pointer to an object or an incomplete type converts to ${to.describe()}, and it points to a function'
+			return Problem{
+				msg: 'a constraint violation: only a pointer to an object or an incomplete type converts to ${to.describe()}, and it points to a function'
+			}
 		}
-		return 'a constraint violation: ${from.describe()} is an integer and ${to.describe()} is a pointer, and only an integer constant of value zero converts to one'
+		return Problem{
+			msg: 'a constraint violation: ${from.describe()} is an integer and ${to.describe()} is a pointer, and only an integer constant of value zero converts to one'
+		}
 	}
 	if from.is_pointer() {
 		// 6.5.16.1's last form: the target is _Bool and the source is a pointer.
@@ -312,13 +351,19 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 		if to.kind == .bool_ {
 			return none
 		}
-		return 'a constraint violation: ${from.describe()} is a pointer and ${to.describe()} is not'
+		return Problem{
+			msg: 'a constraint violation: ${from.describe()} is a pointer and ${to.describe()} is not'
+		}
 	}
 	if to.is_void() {
-		return 'a constraint violation: there is no object of type void to assign to'
+		return Problem{
+			msg: 'a constraint violation: there is no object of type void to assign to'
+		}
 	}
 	if to.is_function() {
-		return 'a constraint violation: a function type is not the type of an object, so nothing is assigned to ${to.describe()}'
+		return Problem{
+			msg: 'a constraint violation: a function type is not the type of an object, so nothing is assigned to ${to.describe()}'
+		}
 	}
 	if to.is_aggregate() || from.is_aggregate() {
 		// 6.5.16.1: an object of a struct or union type is assigned to an object
@@ -338,7 +383,9 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 		if to.is_aggregate() && from.is_aggregate() && unqualified(to).same(unqualified(from)) {
 			return none
 		}
-		return 'a constraint violation: ${from.describe()} is not assigned to ${to.describe()}, and an object of an aggregate type is assigned to an object of its own type'
+		return Problem{
+			msg: 'a constraint violation: ${from.describe()} is not assigned to ${to.describe()}, and an object of an aggregate type is assigned to an object of its own type'
+		}
 	}
 	return none
 }

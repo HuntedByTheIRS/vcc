@@ -662,7 +662,7 @@ fn (mut p Parser) check_assignment(to types.Type, value ast.Expr, at tokenize.To
 	problem := types.assignment_problem(to, p.value_type(value), p.is_null_constant(value)) or {
 		return
 	}
-	p.error_at(at, problem)
+	p.problem_at(at, problem)
 }
 
 // check_initializer is the same question for the initializer of a declaration,
@@ -674,7 +674,7 @@ fn (mut p Parser) check_initializer(to types.Type, init ast.Expr) {
 	problem := types.assignment_problem(to, p.value_type(init), p.is_null_constant(init)) or {
 		return
 	}
-	p.error_span(init.line, init.col, problem)
+	p.problem_span(init.line, init.col, problem)
 }
 
 // parse_compound_assignment reads `name += expr` and every other compound

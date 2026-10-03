@@ -57,7 +57,8 @@ fn sum(a Type, b Type) string {
 // reason is the diagnostic an assignment would produce, and empty when the
 // standard allows it.
 fn reason(to Type, from Type, constant_zero bool) string {
-	return assignment_problem(to, from, constant_zero) or { return '' }
+	problem := assignment_problem(to, from, constant_zero) or { return '' }
+	return problem.msg
 }
 
 // only_reason says whether the reason an assignment produces is the one this
@@ -222,6 +223,19 @@ fn test_the_constraint_on_assignment_between_pointer_types() {
 	}))
 	assert reason(const_char, pointer_to(char_type()), false) == ''
 	assert only_reason(pointer_to(char_type()), const_char, false, 'drops a qualifier')
+	// The reason carries the class and says the flags decide it, because gcc
+	// compiles this program: measured 16.2.1, the same assignment is a warning
+	// under -std=c99 and the image runs. A reason the program is wrong for does
+	// not carry that.
+	dropped := assignment_problem(pointer_to(char_type()), const_char, false) or {
+		panic('a dropped qualifier is a problem')
+	}
+	assert dropped.warning
+	assert dropped.class == .discarded_qualifiers
+	wrong := assignment_problem(pointer_to(char_type()), pointer_to(int_type()), false) or {
+		panic('an incompatible pointee is a problem')
+	}
+	assert !wrong.warning
 	// f_different_pointee: `initialization of 'char *' from incompatible pointer
 	// type 'int *'`.
 	assert only_reason(pointer_to(char_type()), pointer_to(int_type()), false, 'compatible')
