@@ -1,8 +1,9 @@
 module diagnostics
 
 // A diagnostic is one thing the compiler has to say about a program, and a class
-// says which kind of thing it is: whether the program is wrong, or whether it is
-// asking for something the selected dialect does not have.
+// says which kind of thing it is: whether the program is wrong, whether it is
+// asking for something the selected dialect does not have, or whether the
+// standard requires a diagnostic for it that the flags may promote.
 //
 // The class is what a -W flag names, and the severity the command line gives a
 // class is the whole of what those flags decide. Nothing else in the compiler
@@ -16,6 +17,15 @@ pub enum Class {
 	// pedantic is a construct the selected dialect does not allow. gcc's
 	// -Wpedantic asks this question under the same name, so the name matches.
 	pedantic
+	// required is a diagnostic the standard requires, which gcc reports
+	// whether or not anything was asked for and which -pedantic-errors turns
+	// into an error. gcc has no -W name for it, which is why -Wno-pedantic
+	// leaves it alone, and that is measured rather than assumed: for an
+	// unknown escape sequence gcc 16.2.1 prints `warning: unknown escape
+	// sequence` under -std=c99, the same under -std=c99 -Wno-pedantic, and
+	// `error:` with exit 1 under -std=c99 -pedantic-errors. The class is not
+	// in flag_classes for that reason: there is no spelling to name it by.
+	required
 }
 
 // Severity is what to do with one class of diagnostic: print it as a warning,
@@ -53,6 +63,10 @@ pub fn class_of(name string) ?Class {
 fn default_severity(class Class) Severity {
 	return match class {
 		.cpp { .warning }
+		// The standard requiring a diagnostic does not depend on a flag
+		// having been written, so this class is reported on its own account;
+		// what -pedantic-errors decides is whether it stops the compile.
+		.required { .warning }
 		.pedantic { .silent }
 	}
 }
@@ -107,9 +121,18 @@ pub fn (mut p Policy) accept(arg string) bool {
 	}
 	if arg == '-pedantic-errors' {
 		// gcc's -pedantic-errors is -pedantic and -Werror=pedantic in one
-		// flag: it asks for the diagnostic and makes it an error.
+		// flag: it asks for the diagnostic and makes it an error. It is also
+		// what promotes the class the standard requires a diagnostic for,
+		// which is a class of its own because gcc reports that one without
+		// being asked: measured on gcc 16.2.1, an unknown escape sequence is
+		// a warning under -std=c99 and an error under -std=c99
+		// -pedantic-errors, with -Wno-pedantic leaving it a warning.
 		p.mentions << Mention{
 			class:    .pedantic
+			severity: .error
+		}
+		p.mentions << Mention{
+			class:    .required
 			severity: .error
 		}
 		return true

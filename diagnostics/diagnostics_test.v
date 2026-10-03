@@ -118,3 +118,37 @@ fn test_a_run_that_only_reads_is_not_stopped_by_a_promotion() {
 	assert named.severity(.pedantic) == .error
 	assert named.without_promotion().severity(.pedantic) == .warning
 }
+
+fn test_the_class_the_standard_requires_is_reported_and_then_promoted() {
+	mut plain := Policy{}
+	// gcc reports this one without being asked, which is the whole of what
+	// separates it from the pedantic class.
+	assert plain.severity(.required) == .warning
+
+	// Nothing names it, so a flag naming it is left to the command line rather
+	// than taken as a mention: gcc has no -W spelling for the class either,
+	// which is why -Wno-pedantic does not silence it.
+	mut unnamed := Policy{}
+	assert !unnamed.accept('-Wrequired')
+	assert unnamed.mentions.len == 0
+	assert unnamed.severity(.required) == .warning
+
+	mut after_pedantic_off := Policy{}
+	assert after_pedantic_off.accept('-Wno-pedantic')
+	assert after_pedantic_off.severity(.required) == .warning
+
+	// -pedantic-errors is what promotes it, measured on gcc 16.2.1.
+	mut promoted := Policy{}
+	assert promoted.accept('-pedantic-errors')
+	assert promoted.severity(.required) == .error
+	assert promoted.severity(.pedantic) == .error
+
+	mut suppressed := Policy{}
+	assert suppressed.accept('-w')
+	assert suppressed.severity(.required) == .silent
+
+	// A run that only reads keeps the message and takes the verdict back.
+	mut reading := Policy{}
+	assert reading.accept('-pedantic-errors')
+	assert reading.without_promotion().severity(.required) == .warning
+}
