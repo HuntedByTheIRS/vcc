@@ -995,6 +995,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 								data_count = general.count
 								data_resolved = general.resolved
 								data_struct_brace = true
+								if general.count > 0 && !d.array_sized() && data_clause.is_array()
+									&& !data_clause.is_complete() {
+									// The walk against the list is what gave this array
+									// with empty brackets its size, and the type it
+									// walked is the array the name turned out to be.
+									// The completion below makes a later `sizeof`
+									// answer with that count.
+									data_complete = general.resolved
+								}
 							} else {
 								data_problem = true
 							}
@@ -1098,6 +1107,17 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 							}
 							if data_count == 0 {
 								data_count = list.elements.len
+							}
+							if data_count > 0 && !d.array_sized() && data_clause.is_array()
+								&& !data_clause.is_complete() {
+								// The declarator's brackets wrote no size and this flat
+								// list is what gives the array its count: `int a[] = {1, 2,
+								// 3};` is an int[3]. The name is completed with that type
+								// once it is declared, so a later `sizeof` is a question
+								// about the count the list fixed rather than about the
+								// brackets that wrote none.
+								element := data_clause.element() or { spec.clause }
+								data_complete = types.array_of(element, data_count)
 							}
 							data_inits, data_init_floats = p.initializer_list_for(data_type, list.elements,
 								data_name, list.at)
@@ -1290,6 +1310,13 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				p.scopes.complete_type(data_name, data_clause)
 			} else {
 				p.declare_name(data_name, data_clause, data_at, true)
+			}
+			if completed := data_complete {
+				// The declarator wrote empty brackets and the list gave the
+				// array its count: the symbol is completed with the array the
+				// name turned out to be, so a later `sizeof` answers with that
+				// count rather than with the brackets that wrote none.
+				p.scopes.complete_type(data_name, completed)
 			}
 			p.globals << ast.Global{
 				name:         data_name
