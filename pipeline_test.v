@@ -3472,3 +3472,19 @@ fn test_a_null_function_pointer_is_null_after_a_void_pointer_round_trip() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// 6.5.3.4p2 for a compound literal's operand, where the statements are the point:
+// a literal writes its object as statements appended to the statement it was
+// written in, and the operand of a sizeof is not a place that was taken into
+// account. Measured on gcc 16.2.1, `sizeof((S){count(), count()})` calls count no
+// times, and this compiler called it twice. The type spelling and the constant list
+// were already right, so they are here to keep them that way. The sibling test
+// above covers the call shape, which was never wrong. The exit code says which row
+// failed.
+fn test_sizeof_does_not_build_a_compound_literal_operand() {
+	source := scratch('sizeof_operand.c')
+	binary := scratch('sizeof_operand')
+	program := 'typedef struct { int x; int y; } S;\nint calls = 0;\nint count(void) { calls++; return calls; }\nint main(void) {\n    if (sizeof((S){count(), count()}) != 8) { return 1; }\n    if (calls != 0) { return 2; }\n    if (sizeof(S){count(), count()} != 8) { return 3; }\n    if (calls != 0) { return 4; }\n    if (sizeof((S){1, 2}) != 8) { return 5; }\n    return 0;\n}\n'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 0
+}

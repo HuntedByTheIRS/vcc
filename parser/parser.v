@@ -2025,6 +2025,15 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 		// operators use, so a chain of `sizeof` raises the nesting count once
 		// per link: measured on an 8 MB stack, `sizeof sizeof ... x` nested
 		// twenty thousand deep took signal 11 before this.
+		//
+		// Nothing the operand writes is run unless its size is not a constant, so
+		// where the statements it wrote are dropped is below. The list is one per
+		// statement being read, and a sizeof outside any statement has none.
+		pending := if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1].len
+		} else {
+			0
+		}
 		operand := p.parse_prefix_operand(at)!
 		spelling = describe_operand(operand)
 		if p.is_unresolved(operand) {
@@ -2039,6 +2048,15 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 		// evaluated where the sizeof is asked.
 		if vla := p.vla_size_expr(operand.typ, at) {
 			return vla
+		}
+		// The size is a constant, so 6.5.3.4p2 has the operand not evaluated and
+		// nothing it wrote may run: measured against gcc 16.2.1,
+		// `sizeof((S){count(), count()})` calls count no times, where this
+		// compiler called it twice. Dropping what the operand appended is the
+		// whole of it, and the declaration a compound literal writes goes with
+		// them, so the object is not created either.
+		if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1] = p.compound_pending[p.compound_pending.len - 1][..pending]
 		}
 		size = p.representation.size_of(operand.typ) or {
 			p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler has no size for ${operand.typ.describe()}')
