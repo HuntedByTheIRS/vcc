@@ -381,6 +381,12 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			// the integer one beside it.
 			return expr
 		}
+		ast.ComplexLit {
+			// An imaginary constant is a value too, and one no pass here folds:
+			// its two components are written at emission, so there is nothing
+			// for this file to compute.
+			return expr
+		}
 		ast.Ident {
 			return expr
 		}

@@ -311,6 +311,7 @@ pub type Expr = Binary
 	| Cast
 	| IntLit
 	| FloatLit
+	| ComplexLit
 	| Ident
 	| Call
 	| StrLit
@@ -321,6 +322,27 @@ pub type Expr = Binary
 	| Assign
 	| Comma
 	| StmtExpr
+
+// ComplexLit is one imaginary constant, `1.0i` or `1.0if`. 6.4.4.2 gives a
+// floating constant written with an `i` or `j` suffix an imaginary part of the
+// value it names and a real part of zero, so one node is worth both components
+// and neither a FloatLit nor an IntLit can hold it. `_Complex_I` in
+// <complex.h> is the spelling `1.0if` under an `__extension__`, which is why a
+// program that uses `I` needs this node.
+//
+// The suffix decides the component type the way it does for a real constant: a
+// constant with an `f` is a `float _Complex` and one without is a
+// `double _Complex`. `value` is the coefficient the file wrote, which is the
+// imaginary part; the real part is zero and is not carried, because a written
+// imaginary constant never has one.
+pub struct ComplexLit {
+pub:
+	value f64
+	text  string
+	typ   types.Type
+	line  int
+	col   int
+}
 
 // StmtExpr is a GNU statement expression, `({ ... })`: a brace-enclosed
 // compound statement written where a value is wanted, whose value is the value

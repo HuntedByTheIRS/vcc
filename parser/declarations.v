@@ -2447,15 +2447,17 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	// A return type with a star is one address wide whatever it points at, so
 	// the base type is asked the same question a local of pointer type is: the
 	// emitter sizes the value from the star and never lays out what is under it.
-	// The complex and long double clause below is about a value the emitter has
-	// to give a form to, so it is asked only of a return type that is not a
-	// pointer, and a pointer to one of those types takes the same answer a
-	// pointer object takes.
-	if d.pointer_count() == 0 && (spec.clause.is_complex() || spec.clause.kind == .long_double) {
+	// The `long double` clause below is about a value the emitter has to give a
+	// form to, so it is asked only of a return type that is not a pointer, and a
+	// pointer to one takes the same answer a pointer object takes. A complex
+	// type is a value the emitter does have a form for now: it travels as its
+	// two components through the aggregate path, so only `long double` and
+	// `long double _Complex` are refused here.
+	if d.pointer_count() == 0 && spec.clause.kind == .long_double {
 		// A type the model knows and the emitter has no form for is a different
 		// answer from a type whose first word is not one the emitter reads:
-		// `long double` and `double _Complex` are each one type, and the refusal
-		// names it rather than naming half of it.
+		// `long double` is one type, and the refusal names it rather than
+		// naming half of it.
 		p.error_at(spec.start, 'unsupported: ${spec.clause.describe()} is a type this compiler does not emit yet, so a function cannot return it')
 		return
 	}
@@ -2597,6 +2599,14 @@ fn (p Parser) unsupported_type_word(spec DeclSpec, stars int) ?string {
 		return none
 	}
 	if spec.type_words.len == 1 {
+		// A single word may still name a type rather than only be a name:
+		// `_Complex` on its own is `double _Complex`, the one specifier word
+		// that is a whole type without a second one. The kind the words name
+		// decides, and a word that names no type at all is asked about as a
+		// name, which is how a typedef resolves.
+		if kind := types.from_specifiers(spec.type_words) {
+			return if kind in emitted_kinds { none } else { spec.type_words[0] }
+		}
 		return p.word_problem(spec.type_words[0])
 	}
 	// More than one word: the type they name decides, and the answer is the first

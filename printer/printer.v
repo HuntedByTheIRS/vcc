@@ -211,6 +211,11 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 			// was written with, because what the emitter reads is the value.
 			out << '${indent}double ${expr.value} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
+		ast.ComplexLit {
+			// The imaginary constant's value is its imaginary part, and the
+			// real part is the zero 6.4.4.2 leaves it.
+			out << '${indent}imaginary ${expr.value} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+		}
 		ast.Ident {
 			out << '${indent}ident ${expr.name} at ${expr.line}:${expr.col}${typed(expr.typ)}'
 		}
