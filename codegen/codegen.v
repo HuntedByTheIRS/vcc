@@ -2001,6 +2001,14 @@ fn (e Emitter) aggregate_argument(call ast.Call, position int) ?abi.Class {
 // caller needs is where those bytes are: a local's place in the frame, a top-level
 // object's place in the image, or a member's place inside the object that holds it.
 fn (mut e Emitter) address_of_object(expr ast.Expr, depth int) !void {
+	if expr is ast.Comma {
+		// A compound literal written where its statement does not describe a
+		// single evaluation: the left operand is the stores that initialize
+		// the object and the right operand names it, so the stores run first
+		// and the object is what the right operand is.
+		e.emit_effect(expr.left, depth + 1)!
+		return e.address_of_object(expr.right, depth)
+	}
 	if expr is ast.Ident {
 		e.address_of_member(expr.name, ?ast.Expr(none), 0, false, depth, expr.line, expr.col)!
 		return
@@ -2075,6 +2083,13 @@ fn (mut e Emitter) aggregate_object(expr ast.Expr, depth int) !Slot {
 // an object with no path in this back end yet, and it is refused with the same
 // words a name, an element or a member are not needed for.
 fn (mut e Emitter) emit_aggregate_into(destination Slot, expr ast.Expr, depth int) !void {
+	if expr is ast.Comma {
+		// A compound literal written where its statement does not describe a
+		// single evaluation: the left operand is the stores that initialize
+		// the object, runs first, and the object is what the right operand is.
+		e.emit_effect(expr.left, depth + 1)!
+		return e.emit_aggregate_into(destination, expr.right, depth)
+	}
 	if expr is ast.Conditional {
 		e.emit_condition(expr.cond, depth + 1, expr.line, expr.col)!
 		else_label := e.label()
@@ -5354,6 +5369,19 @@ fn (mut e Emitter) emit_address(unary ast.Unary, depth int) !void {
 		// reads or writes through it.
 		e.emit_element_address(unary.expr, depth)!
 		return
+	}
+	if unary.expr is ast.Comma {
+		// The address of a compound literal written where its statement does
+		// not describe a single evaluation: the left operand initializes the
+		// object, runs first for that, and the address is the right operand's.
+		e.emit_effect(unary.expr.left, depth + 1)!
+		return e.emit_address(ast.Unary{
+			op:   '&'
+			expr: unary.expr.right
+			typ:  unary.typ
+			line: unary.line
+			col:  unary.col
+		}, depth)
 	}
 	e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of ${describe_target(unary.expr)} is not implemented, and only a local or a top-level object has one this back end can take')
 	return error('no address')

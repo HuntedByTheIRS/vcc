@@ -73,14 +73,59 @@ fn test_sizeof_a_compound_literal_is_a_constant() {
 	assert (value as ast.IntLit).value == 12
 }
 
-fn test_a_nonconstant_literal_in_a_reevaluated_place_is_refused() {
-	result := compound_parsed('int main(void) { int i = 0; return i ? (int[]){i}[0] : 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('may evaluate it a number of times')
+// A nonconstant literal in a place the statement may evaluate more than once is
+// initialized where the literal is evaluated, not in front of the statement. The
+// object is still declared in front of the statement, so there is one object for
+// the scope; the stores that initialize it are wrapped in a statement expression
+// the comma puts at the literal's own position, and the comma is worth the
+// object they wrote.
+fn test_a_nonconstant_literal_in_a_reevaluated_place_is_initialized_at_the_literal() {
+	decl := compound_first('int main(void) { int i = 0; while ((int[]){i}[0]) { i++; } return i; }')
+	body := decl.body
+	mut object := ''
+	mut loop := ast.Stmt{}
+	for stmt in body {
+		if stmt.kind == .var_decl && stmt.decl_name.starts_with('__vcc_compound_') {
+			object = stmt.decl_name
+		}
+		if stmt.kind == .while_stmt {
+			loop = stmt
+		}
+	}
+	assert object.len > 0
+	cond := loop.cond or {
+		assert false
+		return
+	}
+	assert cond is ast.Index
+	base := (cond as ast.Index).base
+	assert base is ast.Comma
+	comma := base as ast.Comma
+	assert comma.right is ast.Ident
+	assert (comma.right as ast.Ident).name == object
+	assert comma.left is ast.StmtExpr
+	stores := comma.left as ast.StmtExpr
+	assert stores.typ.same(types.void_type())
+	assert stores.body.len > 0
+	// Every statement the wrapper runs is a store into the object, so the
+	// declaration is not among them.
+	for stmt in stores.body {
+		assert stmt.kind == .assign
+		assert stmt.target == object
+	}
 }
 
 fn test_a_constant_literal_in_a_reevaluated_place_is_read() {
 	result := compound_parsed('int main(void) { int i = 0; while ((int[]){1}[0]) { i++; } return i; }')
+	assert result.diagnostics.len == 0
+}
+
+// A literal in a for header's condition is read by the same path. The header's
+// clauses and the literal's brace list share the parentheses that hold them,
+// which the reader used to misread as the header's end and report as
+// `unsupported: expected ;, found ')'` at the closing parenthesis.
+fn test_a_nonconstant_literal_in_a_for_header_is_read() {
+	result := compound_parsed('int main(void) { int i = 0, n = 0; for (; (int[]){i}[0] < 3; i++) n += 1; return n; }')
 	assert result.diagnostics.len == 0
 }
 

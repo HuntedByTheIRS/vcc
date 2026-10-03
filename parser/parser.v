@@ -128,9 +128,11 @@ mut:
 	// compound_unstable counts the places being read whose expression may be
 	// evaluated a number of times the enclosing statement does not describe: a
 	// condition, a loop's third part, the right operand of `&&` or `||`, and an
-	// arm of `?:`. A compound literal is built where its statement begins,
-	// which is the same object only when everything in its list is a constant,
-	// so a list with an expression in it is refused where this is not zero.
+	// arm of `?:`. A compound literal is built where its statement begins, which
+	// is one evaluation; where this is not zero and the literal's list is not
+	// constant, 6.5.2.5p7 re-initializes the object at the literal's own
+	// position instead, so the value a later read sees is the one that
+	// evaluation wrote.
 	compound_unstable int
 	// generic_controls is the controlling expression of every generic selection
 	// read, kept because 6.5.17 says it is not evaluated: no code is emitted for
