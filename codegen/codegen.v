@@ -725,11 +725,12 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// answer in. Measured on gcc 16.2.1, which returns one in rax and the
 		// word above it in rdx, and which clears rdx when the returned
 		// expression is narrower than the type.
-	} else if decl.ret_type.kind != .pointer && decl.ret != 'int' && decl.ret != 'void'
+	} else if decl.ret_type.kind != .pointer && decl.ret != 'int' && decl.ret != 'unsigned int'
+		&& decl.ret != 'void'
 		&& decl.ret != 'double' && decl.ret != 'float'
 		&& !e.eight_byte_integer(types.from_words(decl.ret.split(' ')) or { types.Type{} })
 		&& !e.narrow_integer_spelling(decl.ret) {
-		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, the four 64-bit integers, the narrow integer types, float, double, a pointer and void are implemented')
+		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, unsigned int, the four 64-bit integers, the narrow integer types, float, double, a pointer and void are implemented')
 		return error('unsupported return type')
 	}
 	e.returning = decl.ret
