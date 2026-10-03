@@ -384,20 +384,23 @@ pub const features = [
 		pedantic:  'the _Imaginary type'
 		status:    .unimplemented
 	},
-	// sizeof is an operator, and the tree does not read it: the spelling in a
-	// program was read as a call to a function of that name, so
-	// `int main(void) { int a[4]; return sizeof(a); }` compiled into a binary
-	// that died at load with `undefined symbol: sizeof`. The parser refuses the
-	// spelling by name and location now, which is the refusal the unimplemented
-	// rule asks for, and the row records that the operator is C89 and is not
-	// read yet. Implementing it is the milestone that owns the operator.
+	// sizeof is C89's operator and the tree reads it: `parser/parser.v` answers it
+	// where it is written, its operand is not evaluated, and `pipeline_test.v`
+	// asserts both (`sizeof(double) + sizeof(char)` is 9, and `sizeof(bump())`
+	// calls bump no times). Measured on gcc 16.2.1, the operator is C89's, so every
+	// mode has it and none reports it. The comment on this row used to say the
+	// tree did not read the spelling and refused it by name, which was true before
+	// the reader landed and stopped being true after; the reader is what the row
+	// now records. A sizeof whose operand is an array with no size this compiler
+	// knows, which is a variable-length array, is refused by name at its own
+	// location, and that is the shape's answer rather than this operator's.
 	Feature{
 		spellings: ['sizeof']
 		since:     .c89
 		gnu:       false
 		extension: ''
 		pedantic:  'the sizeof operator'
-		status:    .unimplemented
+		status:    .implemented
 	},
 ]
 

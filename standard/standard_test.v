@@ -540,3 +540,17 @@ fn test_the_braced_group_row_finds_the_pair_and_a_gnu_dialect_takes_it() {
 	assert report.msg == 'ISO C99 forbids braced-groups within expressions'
 	assert report.warning
 }
+
+// sizeof is C89's operator and the tree reads it, so the row is implemented: its
+// comment had said the parser refused the spelling, which outlived the reader
+// that landed. Every mode has the operator, so no mode reports it and the row's
+// answer is silent everywhere.
+fn test_the_sizeof_row_is_read_and_no_mode_reports_it() {
+	rows := features.filter(it.spellings.contains('sizeof'))
+	assert rows.len == 1
+	assert rows[0].status == .implemented
+	assert rows[0].since == .c89
+	for mode in [Mode.c89, Mode.c99, Mode.c11, Mode.c23, Mode.gnu89, Mode.gnu99, Mode.gnu23] {
+		assert uses([token('sizeof'), punct('('), token('x'), punct(')')], features, asking(mode)).len == 0
+	}
+}
