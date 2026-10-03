@@ -1027,17 +1027,18 @@ fn test_a_gnu_dialect_claims_a_gnu_compiler() {
 	// not just the first. <tgmath.h> and the 132 other headers under /usr/include
 	// that ask about __GNUC__ read them; without them <tgmath.h> is an #error, and
 	// with a claim below 4.3 it is a different #error.
-	gnu := standard_defines(.gnu99)
+	gnu := standard_defines(.gnu99, .none)
 	assert '__GNUC__=4' in gnu
 	assert '__GNUC_MINOR__=3' in gnu
 	assert '__GNUC_PATCHLEVEL__=1' in gnu
 	// The claim belongs to the spelling, so every GNU spelling has it and the ISO
-	// ones and the unrecognized ones do not.
-	assert standard_defines(.gnu11).len == 3
-	assert standard_defines(.gnu23).len == 3
-	assert standard_defines(.c89) == []
-	assert standard_defines(.c11) == []
-	assert standard_defines(.other) == []
+	// ones and the unrecognized ones do not. The second argument is the emulation,
+	// and what naming one does to this claim is the next test's subject.
+	assert standard_defines(.gnu11, .none).len == 3
+	assert standard_defines(.gnu23, .none).len == 3
+	assert standard_defines(.c89, .none) == []
+	assert standard_defines(.c11, .none) == []
+	assert standard_defines(.other, .none) == []
 	// c99 is the mode that also hides what the standard does not have.
-	assert standard_defines(.c99) == ['__STRICT_ANSI__=1']
+	assert standard_defines(.c99, .none) == ['__STRICT_ANSI__=1']
 }

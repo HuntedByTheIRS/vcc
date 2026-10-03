@@ -129,3 +129,60 @@ fn test_a_use_of_a_predefine_is_its_value() {
 	}
 	assert texts == ['int', 'x', '=', '2', ';', 'int', 'y', '=', '21', ';']
 }
+
+// emulation_from_spelling is the flag's whole vocabulary: the three compilers
+// this one can present itself as, and none for the compiler's own identity.
+fn test_an_emulation_spelling_names_a_compiler_or_is_refused() {
+	assert emulation_from_spelling('gcc')! == .gcc
+	assert emulation_from_spelling('clang')! == .clang
+	assert emulation_from_spelling('tcc')! == .tcc
+	assert emulation_from_spelling('none')! == .none
+	if _ := emulation_from_spelling('msvc') {
+		assert false, 'a compiler this one cannot present itself as should be refused'
+	} else {
+		assert err.msg().contains('gcc, clang and tcc')
+	}
+}
+
+// The gcc set is what `gcc -std=gnu99 -dM -E -x c /dev/null` prints for its own
+// names on this machine, and it replaces the GNU spelling's invented 4.3.1 rather
+// than sitting beside it.
+fn test_the_gcc_emulation_defines_gccs_identity() {
+	defines := standard_defines(.gnu99, .gcc)
+	assert '__GNUC__=16' in defines
+	assert '__GNUC_MINOR__=2' in defines
+	assert '__GNUC_PATCHLEVEL__=1' in defines
+	assert '__GNUC_STDC_INLINE__=1' in defines
+	assert '__VERSION__="16.2.1 20260810"' in defines
+	assert !('__GNUC__=4' in defines)
+}
+
+// clang claims to be gcc 4.2.1 as well as itself, and the set carries both.
+fn test_the_clang_emulation_defines_clangs_identity() {
+	defines := standard_defines(.c99, .clang)
+	assert '__clang__=1' in defines
+	assert '__clang_major__=22' in defines
+	assert '__clang_minor__=1' in defines
+	assert '__clang_patchlevel__=8' in defines
+	assert '__GNUC__=4' in defines
+	assert '__GNUC_MINOR__=2' in defines
+	assert '__VERSION__="Clang 22.1.8"' in defines
+}
+
+// tcc defines no __GNUC__ at all, so emulating it drops the GNU spelling's
+// invented claim instead of leaving it standing beside __TINYC__.
+fn test_the_tcc_emulation_defines_tccs_identity_and_no_gnu_claim() {
+	defines := standard_defines(.gnu99, .tcc)
+	assert '__TINYC__=928' in defines
+	assert '__TCC_PP__=1' in defines
+	assert !defines.any(it.starts_with('__GNUC__'))
+	assert !defines.any(it.starts_with('__VERSION__'))
+}
+
+// No emulation is the compiler's own identity, and the mode's own macros do not
+// depend on the emulation argument.
+fn test_no_emulation_adds_nothing_and_keeps_the_mode_macros() {
+	assert emulation_defines(.none) == []
+	assert '__STRICT_ANSI__=1' in standard_defines(.c99, .none)
+	assert !('__STRICT_ANSI__=1' in standard_defines(.gnu99, .gcc))
+}

@@ -166,6 +166,86 @@ pub fn identity_defines(version string) []string {
 // is "this build does not know", which defines no macro.
 const vcc_commit = $env('VCC_COMMIT')
 
+// Emulation is the other compiler whose predefined macros -femulation names.
+// The zero value is no emulation, which is this compiler's own identity.
+pub enum Emulation {
+	none
+	gcc
+	clang
+	tcc
+}
+
+// emulation_from_spelling answers the emulation a -femulation value names. Only
+// a name this compiler can present itself as is accepted: unlike a -std spelling,
+// which every C compiler must tolerate because it comes from a build vcc does not
+// control, -femulation is this compiler's own flag and it asks for one compiler.
+// A name it cannot honor is refused and named, not recorded.
+pub fn emulation_from_spelling(spelling string) !Emulation {
+	match spelling {
+		'none' { return .none }
+		'gcc' { return .gcc }
+		'clang' { return .clang }
+		'tcc' { return .tcc }
+		else {}
+	}
+	return error('unknown -femulation value ${spelling}: the compilers this compiler can present itself as are gcc, clang and tcc')
+}
+
+// spelling is the name an emulation was asked for, so a verbose mode can say what
+// -femulation selected.
+pub fn (e Emulation) spelling() string {
+	return match e {
+		.none { 'none' }
+		.gcc { 'gcc' }
+		.clang { 'clang' }
+		.tcc { 'tcc' }
+	}
+}
+
+// emulation_defines are the macros the named compiler's own preprocessor defines
+// to identify itself. Each set is read from that compiler's `-dM -E` output on
+// this machine, from the mode a program is normally built in, -std=gnu99:
+//
+//	gcc 16.2.1     gcc -std=gnu99 -dM -E -x c /dev/null
+//	clang 22.1.8   clang -std=gnu99 -dM -E -x c /dev/null
+//	tcc 0.9.28rc   tcc -dM -E -x c /dev/null
+//
+// The set is the oracle's own-name macros: every name carrying the compiler's
+// name, __GNUC, __clang, __TINYC and __TCC, plus __VERSION__. The 411 macros gcc
+// prints for this target are mostly not identity but target description, and this
+// compiler already predefines those from the same oracle for the target it
+// compiles for; copying gcc's copy would be a second answer to a question that
+// has one, and it would claim machine features, SSE, atomics and position
+// independence among them, that this compiler does not implement. What is left is
+// the set a program branches on when it asks which compiler it is under, which is
+// what the flag is for.
+//
+// What this does not do is make the compiler gcc. A program that branches on
+// __GNUC__ >= 16 takes gcc's path and then hands this compiler constructs it
+// refuses, because the numbers say gcc 16 and the language does not. That is the
+// fiction the flag offers, and it is stated rather than hidden. The values
+// describe the compilers measured above and go stale when the machine's compilers
+// change.
+fn emulation_defines(e Emulation) []string {
+	return match e {
+		.gcc {
+			['__GNUC__=16', '__GNUC_MINOR__=2', '__GNUC_PATCHLEVEL__=1', '__GNUC_STDC_INLINE__=1',
+				'__GNUC_EXECUTION_CHARSET_NAME="UTF-8"', '__GNUC_WIDE_EXECUTION_CHARSET_NAME="UTF-32LE"',
+				'__VERSION__="16.2.1 20260810"']
+		}
+		.clang {
+			['__GNUC__=4', '__GNUC_MINOR__=2', '__GNUC_PATCHLEVEL__=1', '__GNUC_STDC_INLINE__=1',
+				'__VERSION__="Clang 22.1.8"', '__clang__=1', '__clang_major__=22', '__clang_minor__=1',
+				'__clang_patchlevel__=8', '__clang_version__="22.1.8 "',
+				'__clang_literal_encoding__="UTF-8"', '__clang_wide_literal_encoding__="UTF-32"']
+		}
+		.tcc {
+			['__TINYC__=928', '__TCC_PP__=1']
+		}
+		.none { []string{} }
+	}
+}
+
 // standard_defines are the macros the selected mode adds to the ones this
 // compiler already predefines, in the shape a -D argument has: main() hands them
 // to the preprocessor ahead of the command line's own -D arguments, which is the
@@ -185,12 +265,19 @@ const vcc_commit = $env('VCC_COMMIT')
 // be a promise about a language this compiler does not have, and the headers
 // would read it.
 //
-// The GNU spellings add the three names a header asks a GNU compiler for. gcc
-// defines those in every mode, because gcc is gcc; this compiler is not one, so the
-// claim is tied to the spelling that asks for a GNU dialect, and the ISO spellings
-// and the ones nobody here recognizes make no such claim. That keeps the dialect a
-// build asked for the thing that decides whether a GNU system's headers see a GNU
-// compiler.
+// The GNU spellings add the three names a header asks a GNU compiler for, unless
+// an emulation was named. gcc defines those in every mode, because gcc is gcc;
+// this compiler is not one, so the claim is tied to the spelling that asks for a
+// GNU dialect, and the ISO spellings and the ones nobody here recognizes make no
+// such claim. That keeps the dialect a build asked for the thing that decides
+// whether a GNU system's headers see a GNU compiler.
+//
+// The identity claim is the GNU claim's, and -femulation= takes it over instead
+// of adding to it: a program built with -femulation=tcc must not still see the
+// __GNUC__ this compiler invented for a GNU spelling, since tcc defines no such
+// name. So when an emulation is named the GNU claim is not added and the
+// emulation's own names are, from emulation_defines above. The dialect still
+// decides the mode's own macros, __STRICT_ANSI__ among them.
 //
 // __STRICT_ANSI__ is the other macro a mode adds, and it is the one that makes a C
 // library's headers hide everything that is not the standard's: a program compiled
@@ -202,12 +289,19 @@ const vcc_commit = $env('VCC_COMMIT')
 // gcc does with it: `gcc -std=c99 -undef -dM -E -x c /dev/null` prints no
 // __STRICT_ANSI__, and the caller here asks for these defines only when the compiler
 // is meant to predefine things at all.
-pub fn standard_defines(mode standard.Mode) []string {
-	return match mode {
-		.c99 { ['__STRICT_ANSI__=1'] }
-		.gnu89, .gnu99, .gnu11, .gnu17, .gnu23 { gnu_claim() }
-		else { []string{} }
+pub fn standard_defines(mode standard.Mode, emulation Emulation) []string {
+	mut out := []string{}
+	match mode {
+		.c99 { out << '__STRICT_ANSI__=1' }
+		.gnu89, .gnu99, .gnu11, .gnu17, .gnu23 {
+			if emulation == .none {
+				out << gnu_claim()
+			}
+		}
+		else {}
 	}
+	out << emulation_defines(emulation)
+	return out
 }
 
 // gnu_claim is the answer a GNU dialect gives a header that asks whether a GNU
@@ -228,6 +322,9 @@ pub fn standard_defines(mode standard.Mode) []string {
 // 1355, 1355, 1354, 1353 diagnostics. The spread is two in 1355 and it runs the other
 // way from what reaching further into glibc would predict: two fewer, not more. What
 // those two are was not chased down, so the claim stays at the floor.
+//
+// -femulation replaces this claim rather than adding to it, so these numbers are
+// the answer only when no emulation was named.
 fn gnu_claim() []string {
 	return ['__GNUC__=4', '__GNUC_MINOR__=3', '__GNUC_PATCHLEVEL__=1']
 }

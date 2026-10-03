@@ -45,6 +45,7 @@ fn main() {
 		println('target: ${target.name}')
 		println('optimize: ${opts.optimization.summary()}')
 		println('standard: ${standard_line(opts)}')
+		println('emulation: ${emulation_line(opts)}')
 		println('extensions: ${extensions_line(opts.vcc_extensions)}')
 		println('recorded: ${recorded_line(opts.ignored)}')
 		if opts.include_dirs.len == 0 {
@@ -240,7 +241,7 @@ fn language_defines(opts cli.Options) []string {
 	}
 	mut out := []string{}
 	out << preprocess.identity_defines(cli.version)
-	out << preprocess.standard_defines(opts.dialect)
+	out << preprocess.standard_defines(opts.dialect, opts.emulation)
 	out << opts.defines
 	return out
 }
@@ -284,6 +285,16 @@ fn standard_line(opts cli.Options) string {
 fn parser_target(name string) ?backend.Target {
 	target := backend.resolve(name) or { return backend.host() }
 	return target
+}
+
+// emulation_line is what -vv says about -femulation: the compiler whose identity
+// macros the build asked for, or that it asked for none and this compiler's own
+// are the answer.
+fn emulation_line(opts cli.Options) string {
+	if opts.emulation == .none {
+		return '(none; this compiler reports its own identity)'
+	}
+	return '${opts.emulation.spelling()} (the identity macros of that compiler are defined)'
 }
 
 // extensions_line is what -vv says about the vendor extensions: which are on,
