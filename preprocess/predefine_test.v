@@ -67,9 +67,9 @@ fn test_the_standard_limits_and_float_predefines_carry_gccs_values() {
 		'__LDBL_MAX_EXP__':    '16384'
 		'__LDBL_MAX_10_EXP__': '4932'
 		// The long double values carry gcc's own spelling with the `L`
-		// suffix. The reader has no long double arithmetic yet, so a use of
-		// one is refused where it is written rather than answered with a
-		// value this compiler did not compute.
+		// suffix. The reader computes the value of one exactly now, so the
+		// constant is the extended number rather than a double rounded to
+		// eight bytes; arithmetic on it is still refused where it is written.
 		'__LDBL_MAX__':        '1.18973149535723176502126385303097021e+4932L'
 		'__LDBL_EPSILON__':    '1.08420217248550443400745280086994171e-19L'
 		'__LDBL_MIN__':        '3.36210314311209350626267781732175260e-4932L'

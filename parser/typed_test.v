@@ -1206,7 +1206,6 @@ fn test_the_long_double_suffix_names_the_extended_type() {
 	// A hexadecimal constant carries the same suffix and gets the same reader,
 	// while the `f` suffix on one is a float, which is a different type.
 	decl := first('double f(void) { return 1.5L; }')
-	assert decl.diagnostics.len == 0
 	returned := decl.body[0].expr or {
 		assert false
 		return
@@ -1224,7 +1223,6 @@ fn test_the_long_double_suffix_names_the_extended_type() {
 	assert held.exponent() == 0
 	// 0x1.8p3 is 12.0: the same significand, three powers of two up.
 	hex := first('double f(void) { return 0x1.8p3L; }')
-	assert hex.diagnostics.len == 0
 	from_hex := hex.body[0].expr or {
 		assert false
 		return

@@ -2419,12 +2419,10 @@ fn test_a_float_asked_as_a_question_is_compared_at_four_bytes() {
 }
 
 // A suffix the compiler does not implement is refused by name where it is written
-// rather than dropped: `L` names a long double, which is its own machine class on
-// this target, and a letter that names nothing is not a suffix at all.
+// rather than dropped: a letter that names nothing is not a suffix at all, and
+// the constant it trails is refused at the reader.
 fn test_a_floating_suffix_that_is_not_read_is_refused_by_name() {
 	refusals := [
-		['int main(void) { return 1.5L; }', 'long double literal'],
-		['int main(void) { return 1.5l; }', 'long double literal'],
 		['int main(void) { return 1.5q; }', 'not part of a floating constant'],
 		['int main(void) { return 1.5fq; }', 'not part of a floating constant'],
 	]
@@ -2435,6 +2433,10 @@ fn test_a_floating_suffix_that_is_not_read_is_refused_by_name() {
 		assert parsed.diagnostics[0].msg.contains(pair[1])
 		assert parsed.diagnostics[0].line == 1
 	}
+	// `L` is a suffix this compiler reads now: it names the extended type, so
+	// the constant is a long double and the program is accepted.
+	accepted := parser.parse(tokenize.lex('int main(void) { return 1.5L; }').tokens)
+	assert accepted.diagnostics.len == 0
 }
 
 // A top-level object that holds a float is read and written at four bytes: the
