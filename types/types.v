@@ -453,6 +453,11 @@ pub fn (t Type) returns() ?Type {
 // one: the kind, the qualifiers, the shape each is derived from, the members of
 // an aggregate and the parameters of a function.
 //
+// A function's parameter types are compared with their own qualifiers taken
+// off, which 6.7.6.3p15 asks for; what each parameter points at keeps its
+// qualifiers. That is the whole of the exception, so a qualified object type is
+// still a different type from the unqualified one.
+//
 // A struct or a union written with a tag is identified by that tag. Its members
 // are a property of the tagged type, not a second half of its identity, so two
 // readings of one tag are one type even when the first was taken before the body
@@ -485,7 +490,15 @@ pub fn (t Type) same(other Type) bool {
 		return false
 	}
 	for i, param in t.params {
-		if !param.typ.same(other.params[i].typ) {
+		// 6.7.6.3p15: a parameter declared with a qualified type is taken as
+		// having the unqualified version of its declared type, so qualifiers
+		// on the parameter itself do not tell two parameter types apart. Only
+		// the parameter's own qualifiers are dropped - `void *restrict` is the
+		// same parameter type as `void *` - while the qualifiers of what it
+		// points at stay: `const void *` is still a different parameter type
+		// from `void *`, and `void f(void *); void f(const void *);` is still a
+		// constraint violation.
+		if !unqualified(param.typ).same(unqualified(other.params[i].typ)) {
 			return false
 		}
 	}

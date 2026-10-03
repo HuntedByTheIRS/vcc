@@ -387,3 +387,70 @@ fn test_an_enum_answers_with_its_underlying_type() {
 	assert int_type().storage_spelling() == 'int'
 	assert !int_type().is_unsigned_type()
 }
+
+// 6.7.6.3p15: in the determination of type compatibility each parameter
+// declared with a qualified type is taken as having the unqualified version of
+// its declared type. The qualifier belongs to the parameter, so `void *restrict`
+// and `void *` are one parameter type and two function types that differ only
+// there are one type. The qualifier of what the parameter points at is not the
+// parameter's own and stays, so `const void *` and `void *` are two parameter
+// types. Measured, gcc 16.2.1 under `-std=c99` accepts
+// `void *memcpy(void *restrict, const void *restrict, unsigned long);` against
+// `void *memcpy(void *, const void *, unsigned long);` and refuses
+// `void f(void *); void f(const void *);` with `conflicting types for f`.
+fn test_a_parameters_own_qualifiers_do_not_tell_two_function_types_apart() {
+	plain := function_type(void_type(), [
+		Param{
+			name: 'd'
+			typ:  pointer_to(void_type())
+		},
+	], false, true)
+	restricted := function_type(void_type(), [
+		Param{
+			name: 'd'
+			typ:  qualified(pointer_to(void_type()), Qualifiers{
+				restrict_: true
+			})
+		},
+	], false, true)
+	const_param := function_type(void_type(), [
+		Param{
+			name: 'd'
+			typ:  qualified(pointer_to(void_type()), Qualifiers{
+				const_: true
+			})
+		},
+	], false, true)
+	volatile_param := function_type(void_type(), [
+		Param{
+			name: 'd'
+			typ:  qualified(pointer_to(void_type()), Qualifiers{
+				volatile_: true
+			})
+		},
+	], false, true)
+	// Each of the three qualified spellings names the same parameter type as
+	// the plain one, so neither declaration is a conflict with the other.
+	assert plain.compatible(restricted)
+	assert restricted.compatible(plain)
+	assert plain.same(restricted)
+	assert plain.compatible(const_param)
+	assert const_param.compatible(plain)
+	assert plain.compatible(volatile_param)
+	assert volatile_param.compatible(plain)
+	// The qualifier of the pointee is the pointee's own, so a pointer to a const
+	// void is a different parameter type from a pointer to void, and the two
+	// function types are not compatible. This is the assertion that fails if the
+	// unqualification is applied one level too deep.
+	to_const := function_type(void_type(), [
+		Param{
+			name: 'd'
+			typ:  pointer_to(qualified(void_type(), Qualifiers{
+				const_: true
+			}))
+		},
+	], false, true)
+	assert !plain.compatible(to_const)
+	assert !to_const.compatible(plain)
+	assert !plain.same(to_const)
+}
