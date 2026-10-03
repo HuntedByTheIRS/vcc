@@ -252,11 +252,26 @@ fn (mut p Parser) parse_deref_assignment(start tokenize.Token, target ast.Expr, 
 				p.error_at(op, 'unsupported: the target of an assignment is ${describe_operand(target)}, and this compiler writes to a name, an element, a member or a dereference')
 				return error('assignment target is not a dereference')
 			}
-			if op.text != '=' {
-				p.error_at(op, 'unsupported: the compound assignment ${op.text} through a dereference is not implemented')
-				return error('compound assignment through a dereference')
-			}
 			value := p.parse_assignment_expression()!
+			if op.text != '=' {
+				// `*p op= v` is the compound assignment through a dereference.
+				// The pointer's value is the address, and the statement carries
+				// the operator in `compound` so the back end computes that
+				// address once and both reads and writes through it. Written
+				// as `*p = *p + v` the pointer expression would be evaluated
+				// twice, which is a different program whenever it has a side
+				// effect.
+				arithmetic := p.compound_operator(op)!
+				deref := ast.Expr(target)
+				return ast.Stmt{
+					kind:     .assign
+					deref:    deref
+					expr:     p.compound_expansion(op, arithmetic, deref, value)
+					compound: arithmetic
+					line:     start.line
+					col:      start.col
+				}
+			}
 			// The object written to is the one the pointer points at, so the
 			// value converts to the pointed-at type the same way it does into
 			// a name.
@@ -477,10 +492,67 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 		}
 	}
 	if member := field {
-		p.error_at(op, 'unsupported: a compound assignment to the member ${member.name}.${member.member} is not implemented')
-		return error('compound assignment to a member')
+		return p.parse_member_compound_assignment(op, member)
 	}
 	return p.parse_compound_assignment(t, op, index)
+}
+
+// parse_member_compound_assignment reads `E.m op= value` where the object of the
+// member is a name, which is what `s.m += 1` and `p->m |= 1` are. It is the same
+// expansion the name reader writes: the target is the member the reader already
+// resolved, the value is the binary operator the spelling names, and the
+// statement carries that operator in `compound` so the back end can compute the
+// member's address once and read it through that address rather than once per
+// use. The member is one selector deeper than an element and the logic is the
+// same, which is why it goes through the compound assignment the element reader
+// already builds rather than a second path.
+fn (mut p Parser) parse_member_compound_assignment(op tokenize.Token, member ast.Field) !ast.Stmt {
+	arithmetic := p.compound_operator(op)!
+	right := p.parse_assignment_expression()!
+	left := ast.Expr(member)
+	return ast.Stmt{
+		kind:     .assign
+		field:    member
+		expr:     p.compound_expansion(op, arithmetic, left, right)
+		compound: arithmetic
+		line:     member.line
+		col:      member.col
+	}
+}
+
+// compound_operator is the arithmetic operator a compound spelling names: `+`
+// for `+=`, `<<` for `<<=`. A spelling no operator here carries is refused by
+// name, which is the guard for one a later change might add to the lexer.
+fn (mut p Parser) compound_operator(op tokenize.Token) !string {
+	arithmetic := op.text[..op.text.len - 1]
+	if arithmetic !in ['+', '-', '*', '/', '%', '<<', '>>', '&', '|', '^'] {
+		p.error_at(op, 'unsupported: the compound assignment ${op.text} is not implemented')
+		return error('compound assignment')
+	}
+	return arithmetic
+}
+
+// compound_expansion is the value a compound assignment writes: the binary
+// operator the spelling names, with the target read on its left and the written
+// expression on its right, so the tree is the assignment the source means. The
+// operator is the one the spelling names and not the spelling itself, because
+// every stage after the reader reads the node's operator and its type, and a
+// binary whose type is the zero type is a value the emitter cannot size. The
+// spelling governs the whole expression on its right, so `x &= 1 | 2` groups the
+// `|` under the `&`.
+fn (mut p Parser) compound_expansion(op tokenize.Token, arithmetic string, left ast.Expr, right ast.Expr) ast.Expr {
+	operator := tokenize.Token{
+		...op
+		text: arithmetic
+	}
+	return ast.Expr(ast.Binary{
+		op:    arithmetic
+		left:  left
+		right: right
+		typ:   p.binary_type(operator, left, right)
+		line:  op.line
+		col:   op.col
+	})
 }
 
 // parse_subscript_assignment reads `E1[E2] = value` where the target's base is
@@ -506,15 +578,27 @@ fn (mut p Parser) parse_subscript_assignment(index ast.Index) !ast.Stmt {
 }
 
 // parse_member_assignment reads `E.m = value` where the object of the member is
-// an expression rather than a name, which is what `s[i].m = v` and
-// `p->m->n = v` are. The member node is carried whole so the back end can
-// compute the address the value is stored through. A compound spelling is
-// refused by name: this tree has no shape that reads a member twice.
+// an expression rather than a name, which is what `s[i].m = v`, `p->m->n = v` and
+// `(*pp)->m |= v` are. The member node is carried whole so the back end can
+// compute the address the value is stored through. A compound spelling is the
+// same assignment with the operator the spelling names, and the statement carries
+// that operator so the back end computes the member's address once and reads and
+// writes through it, rather than reading the object - which may be a call or a
+// dereference - twice.
 fn (mut p Parser) parse_member_assignment(member ast.Field) !ast.Stmt {
 	op := p.next()
 	if op.text != '=' {
-		p.error_at(op, 'unsupported: the compound assignment ${op.text} to the member ${member.name}.${member.member} is not implemented')
-		return error('compound assignment to a member')
+		arithmetic := p.compound_operator(op)!
+		right := p.parse_assignment_expression()!
+		left := ast.Expr(member)
+		return ast.Stmt{
+			kind:     .assign
+			field:    member
+			expr:     p.compound_expansion(op, arithmetic, left, right)
+			compound: arithmetic
+			line:     member.line
+			col:      member.col
+		}
 	}
 	value := p.parse_assignment_expression()!
 	p.check_assignment(member.typ, value, op)
@@ -606,11 +690,7 @@ fn (mut p Parser) check_initializer(to types.Type, init ast.Expr) {
 // moved the refusal from the first stage that can describe the construct to one
 // that can only complain about it.
 fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.Token, index ?ast.Expr) !ast.Stmt {
-	arithmetic := op.text[..op.text.len - 1]
-	if arithmetic !in ['+', '-', '*', '/', '%', '<<', '>>', '&', '|', '^'] {
-		p.error_at(op, 'unsupported: the compound assignment ${op.text} is not implemented')
-		return error('compound assignment')
-	}
+	arithmetic := p.compound_operator(op)!
 	right := p.parse_assignment_expression()!
 	// What the assignment reads is the target itself, and for an element that is
 	// the element rather than the array: the subscript is written into the tree
@@ -624,10 +704,6 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 	// not true of the value. The operator the type is worked out from is the one the
 	// spelling names, not the spelling itself, and it is the same token with that
 	// text.
-	operator := tokenize.Token{
-		...op
-		text: arithmetic
-	}
 	target_type := p.assignment_target_type(target.text, index, none)
 	mut left := ast.Expr(ast.Ident{
 		name: target.text
@@ -644,21 +720,15 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 			col:   target.col
 		})
 	}
-	value := ast.Expr(ast.Binary{
-		op:    arithmetic
-		left:  left
-		right: right
-		typ:   p.binary_type(operator, left, right)
-		line:  op.line
-		col:   op.col
-	})
+	value := p.compound_expansion(op, arithmetic, left, right)
 	return ast.Stmt{
-		kind:   .assign
-		target: target.text
-		index:  index
-		expr:   value
-		line:   target.line
-		col:    target.col
+		kind:     .assign
+		target:   target.text
+		index:    index
+		expr:     value
+		compound: arithmetic
+		line:     target.line
+		col:      target.col
 	}
 }
 
