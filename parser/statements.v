@@ -996,7 +996,7 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 		col:   t.col
 	})
 	if !p.at_punct(';') {
-		cond = p.parse_expression() or {
+		cond = p.parse_comma_expression() or {
 			p.skip_statement()
 			return []ast.Stmt{}
 		}

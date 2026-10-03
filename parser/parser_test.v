@@ -797,6 +797,24 @@ fn test_a_for_init_and_update_read_a_comma() {
 	assert loop.step[1].kind == .expr_stmt
 }
 
+// A for's condition is an expression, so a comma there is the comma operator:
+// gcc 16.2.1 runs `for (i = 0; i < 5, i < 3; i++) ;` three times, because the
+// condition is worth its right operand. The reader keeps the comma as one
+// condition rather than stopping at it, which is what the corpus's line needs
+// for the init and update and what a bare comma condition needs of its own.
+fn test_a_for_condition_reads_a_comma_expression() {
+	result := parsed('int main() { int i; for (i = 0; i < 5, i < 3; i++) ; return i; }')
+	assert result.diagnostics.len == 0
+	loop := result.unit.decls[0].body[1].body[1]
+	assert loop.kind == .while_stmt
+	cond := loop.cond or {
+		assert false
+		return
+	}
+	assert cond is ast.Comma
+	assert (cond as ast.Comma).typ.kind == .int_
+}
+
 // A GNU statement expression is `({ ... })`: a brace-enclosed compound statement
 // in parentheses, read as a primary expression. Its value is the value of its
 // last statement when that statement is an expression, and the statements before
