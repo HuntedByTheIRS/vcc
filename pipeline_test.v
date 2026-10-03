@@ -139,19 +139,19 @@ fn test_a_pointer_return_is_usable_where_the_call_is_written() {
 	os.rm(binary) or {}
 }
 
-// A call to a pointer-returning function the file only declares is not refused
-// by the compiler, because a declaration is a promise and nothing is emitted for
-// it. The name stays a symbol the image imports, so the loader refuses it by
-// name rather than the program reading an address from nothing: measured, the
-// image exits 127 with "symbol lookup error: ... undefined symbol: missing",
-// which is what the same shape returns when the function returns an int.
-fn test_a_pointer_return_declared_and_never_defined_stays_a_named_symbol() {
+// A call to a pointer-returning function the file only declares is refused by
+// name: the declaration is a promise nothing keeps, so the name is a symbol no
+// library the image names provides. It used to compile and die at load with
+// "symbol lookup error: ... undefined symbol: missing", the same shape an int
+// return took, and the compile said nothing either way.
+fn test_a_pointer_return_declared_and_never_defined_is_refused_by_name() {
 	source := scratch('pointer_return_undefined.c')
-	binary := scratch('pointer_return_undefined')
-	exit_status := compile_and_run([source, '-o', binary], 'char *missing(void);\nint main(void) { char *p = missing(); return p == 0; }\n')
-	assert exit_status == 127
+	image := compile([source, '-o', scratch('pointer_return_undefined')],
+		'char *missing(void);\nint main(void) { char *p = missing(); return p == 0; }\n')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('missing')
+	assert image.bytes.len == 0
 	os.rm(source) or {}
-	os.rm(binary) or {}
 }
 
 // `*p` where p points at an array is the array, and an array's value is the
@@ -1078,25 +1078,37 @@ fn test_a_library_named_with_l_is_the_one_a_symbol_resolves_from() {
 	os.rm(binary) or {}
 }
 
-// The other half of that: with the library not named, the program compiles and
-// then dies at load, saying which symbol it could not find. That is the shape
-// the flag used to leave behind, and it is worth a test of its own because it is
-// silent at compile time.
-fn test_without_the_library_the_symbol_does_not_resolve() {
+// The other half of that: with the library not named, the compile is refused and
+// the symbol is named. It used to compile and die at load saying which symbol it
+// could not find, which was silent at compile time, and a build that trusts the
+// exit status took the image for a success.
+fn test_without_the_library_the_symbol_is_refused_by_name() {
 	source := scratch('nolibm.c')
-	binary := scratch('nolibm')
 	program := 'int fetestexcept(int);\nint main() { return fetestexcept(0); }\n'
-	opts := cli.parse([source, '-o', binary])!
-	image := compile([source, '-o', binary], program)
-	assert image.diagnostics.len == 0
-	os.write_file_array(binary, image.bytes) or { panic(err) }
-	os.chmod(binary, 0o755) or { panic(err) }
-	result := os.execute(os.quoted_path(binary))
+	opts := cli.parse([source, '-o', scratch('nolibm')])!
+	image := compile([source, '-o', scratch('nolibm')], program)
 	assert opts.libraries.len == 0
-	assert result.exit_code != 0
-	assert result.output.contains('fetestexcept')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('fetestexcept')
+	assert image.diagnostics[0].msg.contains('no library the image names defines it')
+	// No bytes means main() writes no file and leaves with a non-zero status.
+	assert image.bytes.len == 0
 	os.rm(source) or {}
-	os.rm(binary) or {}
+}
+
+// An external the file declares and never defines, with no library named to
+// supply it, is refused at compile time and leaves no image. This program used
+// to compile with exit status 0 and nothing on stderr, and the binary died at
+// load: the shape the check exists to keep out.
+fn test_an_external_nothing_defines_is_refused_by_name() {
+	source := scratch('undefined_external.c')
+	program := 'extern int nowhere(void);\nint main(void) { return nowhere(); }\n'
+	image := compile([source, '-o', scratch('undefined_external')], program)
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('nowhere')
+	assert image.diagnostics[0].msg.contains('no library the image names defines it')
+	assert image.bytes.len == 0
+	os.rm(source) or {}
 }
 
 // Naming one library twice names it once, and the image is the one the flag

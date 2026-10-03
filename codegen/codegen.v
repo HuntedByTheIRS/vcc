@@ -577,6 +577,24 @@ fn (mut e Emitter) build() ![]u8 {
 		}
 		e.emit_function(decl)!
 	}
+	// Every import this image made has to have something to bind to. The loader
+	// resolves each name out of a library the image names, and a name none of
+	// them defines is a program that cannot start. It is the question a link
+	// answers by refusing an undefined reference, and this compiler knows the
+	// imports because it wrote them: leaving the question to the loader is what
+	// turned an unresolved symbol into a compile that succeeded and a binary
+	// that died at load with nothing on the compiler's stderr. An object is not
+	// a program and is left out, because a linker resolves its symbols later.
+	if !e.compile_only {
+		dirs := linux.search_dirs(e.library_dirs, e.target.library_dirs)
+		unresolved := linux.unresolved_imports(e.program.imports, e.libraries, dirs)
+		if unresolved.len > 0 {
+			for name in unresolved {
+				e.diagnostics << problem(1, 1, 'undefined reference to `${name}`: no library the image names defines it')
+			}
+			return error('unresolved imports')
+		}
+	}
 	// The same program, wrapped as one of two things: an object a linker takes as
 	// input, or a program a kernel starts. This is the last decision the emitter
 	// makes and the only one that depends on the mode.
