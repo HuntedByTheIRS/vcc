@@ -75,6 +75,25 @@ pub fn integer_constant_type(text string, value i64, rep Representation) !Type {
 	if missing {
 		return error('the type of the integer constant ${text} needs the widths of the types it could be, which ${missing_note(rep, candidates)} does not carry')
 	}
+	// A decimal constant with no unsigned suffix that fits no signed type is a
+	// value 6.4.4.1's list leaves untyped. gcc accepts it as an extension and
+	// warns `integer constant is so large that it is unsigned`: the value is
+	// the 64-bit pattern the literal reader built, which has its top bit set
+	// and so is not a value any signed 64-bit type holds, and the only type
+	// that holds the pattern is a 64-bit unsigned one. Measured on gcc 16.2.1,
+	// `18446744073709551615`, `9223372036854775808`, `9999999999999999999`
+	// and `14695981039346656037` are each accepted with that warning and
+	// without it when a `u` suffix is written or the constant is hexadecimal or
+	// octal, where 6.4.4.1's list already reaches the unsigned types. gcc's own
+	// type for the decimal spellings in C99 and later is signed `__int128`,
+	// which this back end carries no value of: it materializes an integer
+	// constant in eight bytes, so a 128-bit type would be accepted and the
+	// value silently cut down to its low bytes. `unsigned long long` is what
+	// this back end can represent, and the eight constants V's own C writes are
+	// used as `(u64)(...)`, so the low 64 bits are the value they name.
+	if decimal && !has_unsigned && value < 0 {
+		return scalar(.unsigned_long_long) or { return error('${text} has no type') }
+	}
 	return error('the integer constant ${text} is too large for every type it could be')
 }
 

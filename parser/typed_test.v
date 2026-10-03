@@ -172,20 +172,19 @@ fn test_a_constant_is_typed_by_the_widths_the_description_carries() {
 		return
 	}
 	assert (suffixed_lit as ast.IntLit).typ.same(types.long_long_type())
-	// A constant too large for every type it could be is still refused, and the
-	// node keeps the zero type so nothing is compiled at a width nothing
-	// decided. 18446744073709551615 is 2^64 - 1, and a decimal constant with no
-	// suffix may not take an unsigned type.
-	refused := parsed('int main() { return 18446744073709551615; }')
-	assert refused.diagnostics.len == 1
-	assert refused.diagnostics[0].msg.contains('18446744073709551615')
-	assert refused.diagnostics[0].line == 1
-	assert refused.diagnostics[0].col == 21
-	refused_lit := refused.unit.decls[0].body[0].expr or {
+	// A decimal constant with no unsigned suffix that fits no signed type is
+	// accepted as `unsigned long long`, the extension gcc performs with the
+	// warning `integer constant is so large that it is unsigned`. The node keeps
+	// the 64-bit pattern the literal reader built, which read as a signed value
+	// is -1, and that is the value the back end writes at the width the type
+	// names.
+	past := checked('int main() { return 18446744073709551615; }')
+	past_lit := past.unit.decls[0].body[0].expr or {
 		assert false
 		return
 	}
-	assert (refused_lit as ast.IntLit).typ.kind == .unknown
+	assert (past_lit as ast.IntLit).typ.same(types.unsigned_long_long_type())
+	assert (past_lit as ast.IntLit).value == -1
 }
 
 fn test_sizeof_answers_a_value_and_a_type_where_it_was_refused_by_name() {
