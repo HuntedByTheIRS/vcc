@@ -242,6 +242,14 @@ pub:
 	decl_name  string
 	decl_type  string
 	decl_count int
+	// decl_vla_size is the number of bytes a variable-length array declaration
+	// claims, as an expression evaluated where the declaration runs: for
+	// `int a[n]` it is `n * sizeof(int)`, and for `int m[r][c]` it is
+	// `r * c * sizeof(int)`. It is none for a declaration whose size is a
+	// constant, which is what the frame reserves for every other object. The
+	// type's vla flag says which declaration this is; a vla declaration without
+	// this expression is not emitted.
+	decl_vla_size ?Expr
 	// decl_stride is the size of one element of an array declaration: what an
 	// index scales by and what the frame reserves a count of. For an array of
 	// arrays it is the whole row, which is the size of the element's own type
@@ -460,8 +468,19 @@ pub:
 	base  Expr
 	index Expr
 	typ   types.Type
-	line  int
-	col   int
+	// vla_stride is the run-time stride of this subscript when the element type
+	// has no size this compiler can fold: for `int m[r][c]`, the stride of
+	// `m[i]` is `c * sizeof(int)`, which is a value and not a constant. It is
+	// none where the stride is a constant, and the emitter then sizes the
+	// element from its type as it always did.
+	vla_stride ?Expr
+	// vla_bounds are the run-time bounds remaining in this element's type,
+	// innermost dimension first, so that a further subscript of this element can
+	// compute its own stride. Empty for an element that is not a
+	// variable-length array.
+	vla_bounds []Expr
+	line       int
+	col        int
 }
 
 // Field is one member of an aggregate object, written `x.a`. The object is a name
@@ -571,8 +590,15 @@ pub struct Ident {
 pub:
 	name string
 	typ  types.Type
-	line int
-	col  int
+	// vla_bounds are the run-time bounds of the array dimensions this name's
+	// type has, innermost dimension first, and empty for a name whose type is
+	// not a variable-length array. A name whose type is one carries them because
+	// the model cannot: the bound is an expression, and the model is imported by
+	// this file. `sizeof a`, a subscript of a, and the declaration that claims a
+	// all reach the bound here.
+	vla_bounds []Expr
+	line       int
+	col        int
 }
 
 pub struct Unary {
