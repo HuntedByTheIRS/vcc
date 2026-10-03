@@ -1520,6 +1520,13 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned without a value')
 		return error('assignment without a value')
 	}
+	// A compound assignment whose target is reached through an address is
+	// written by the path that computes that address once and reads and writes
+	// through it. A name target is not one of those: reading a name has no side
+	// effect to repeat, and the expansion in expr is emitted directly below.
+	if stmt.compound != '' && (stmt.field != none || stmt.deref != none || stmt.subscript != none || stmt.index != none) {
+		return e.assign_compound(stmt, depth)
+	}
 	if deref := stmt.deref {
 		return e.assign_deref(stmt, deref, expr, depth)
 	}
@@ -1656,6 +1663,138 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 	value := e.accumulator(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 	e.append(e.target.store_indirect(address_register, value, width)!)
+}
+
+// assign_compound writes `E1 op= E2` where E1 is reached through an address: a
+// member (`s.m` or `p->m`), an element of an array, or what a pointer points at
+// (`*p`). The operator exists as a construct of its own in C because E1 is
+// evaluated once. Written as `E1 = E1 op E2` an index like `a[i++]` would be
+// stepped twice, once for the read and once for the write, which is a different
+// program, so the address is computed once, parked, and both the read and the
+// write go through it.
+//
+// The address is the one the increment machinery computes for the same shapes,
+// and the operator is applied by the apply_binary and apply_float the expression
+// reader uses, so this is a shared path rather than a second idea about
+// arithmetic. A name target does not come here: reading a name has no side
+// effect to repeat and the expansion in expr is emitted directly. What cannot be
+// written through a parked address here is refused by name rather than
+// half-emitted: a bitfield, a pointer (whose `+=` scales by the pointee size),
+// and the 128-bit, complex and long double objects this back end has no value
+// for.
+fn (mut e Emitter) assign_compound(stmt ast.Stmt, depth int) !void {
+	value := stmt.expr or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= has no value')
+		return error('compound assignment without a value')
+	}
+	binary := value as ast.Binary
+	destination := binary.left
+	written := destination.typ.describe()
+	if destination.typ.kind == .unknown {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= writes an object whose type this compiler cannot resolve')
+		return error('unknown compound target type')
+	}
+	if destination is ast.Field {
+		if destination.bitfield {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= to the bitfield ${destination.name}.${destination.member} is not implemented, and this back end does not step a bitfield in place')
+			return error('bitfield compound assignment')
+		}
+	}
+	if destination.typ.kind.is_complex() {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= to an object of ${written} is not implemented, and this back end keeps one value of a complex type in a register')
+		return error('complex compound assignment')
+	}
+	if destination.typ.kind == .long_double {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= to an object of ${written} is not one this back end makes at the width of the type')
+		return error('long double compound assignment')
+	}
+	if destination.typ.kind in [.int128, .unsigned_int128] {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= to an object of ${written} is not implemented')
+		return error('wide compound assignment')
+	}
+	if destination.typ.is_pointer() {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= to an object of ${written} is not implemented, and an integer added to a pointer is scaled by the size of what it points at')
+		return error('pointer compound assignment')
+	}
+	// The address of the target, computed once and parked while the value is
+	// read. The increment path computes the same address for the same shapes, so
+	// it is the one used here rather than a fourth copy of that computation.
+	e.inc_dec_address(destination, depth + 1)!
+	address := e.value_slot(depth)
+	e.store_accumulator(address, stmt.line, stmt.col)!
+	mut single := destination.typ.kind == .float
+	mut double := destination.typ.kind == .double
+	if destination is ast.Field {
+		single = single || e.writes_a_float(destination.spelling)
+		double = double || e.writes_a_double(destination.spelling)
+	}
+	if single || double {
+		return e.assign_compound_float(stmt, binary, address, single, depth)
+	}
+	width := e.storage_width(destination.typ) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= writes an object of ${written}, and this back end stores ints, chars, floats, doubles and pointers only')
+		return error('unsupported compound width')
+	}
+	// The old value is read through the parked address, at the width and
+	// signedness of the object. A step at the width of a word widens an operand
+	// narrower than one before the operation reads it, because the load that
+	// produced it left four bytes with the rest of the register cleared.
+	wide := e.step_is_wide(binary)
+	load_register := e.scratch(stmt.line, stmt.col)!
+	e.load_argument(address, load_register, e.target.word_size, stmt.line, stmt.col)!
+	register := e.accumulator(stmt.line, stmt.col)!
+	e.load_indirect_value(load_register, register, destination.typ.is_unsigned_type(), width)!
+	if wide {
+		e.extend_operand_to_word(destination, stmt.line, stmt.col)!
+	}
+	left := e.value_slot(depth + 1)
+	e.store_accumulator(left, stmt.line, stmt.col)!
+	e.emit_expr_at(binary.right, depth + 2)!
+	if wide && binary.op !in ['<<', '>>'] {
+		e.extend_operand_to_word(binary.right, stmt.line, stmt.col)!
+	}
+	e.move_operand_to_scratch(binary, wide)!
+	e.load_accumulator(left, stmt.line, stmt.col)!
+	e.apply_binary(binary, wide)!
+	e.normalize_a_bool_store(destination.typ.kind == .bool_, wide, stmt.line, stmt.col)!
+	// The scratch register may have been used by the value's own expression, so
+	// the address is read back into it here rather than kept across that
+	// emission. The result that is written is the accumulator's, which the load
+	// of the address does not touch.
+	store_register := e.scratch(stmt.line, stmt.col)!
+	e.load_argument(address, store_register, e.target.word_size, stmt.line, stmt.col)!
+	result := e.accumulator(stmt.line, stmt.col)!
+	e.append(e.target.store_indirect(store_register, result, width)!)
+}
+
+// assign_compound_float is assign_compound for an object in the floating-point
+// file: the old value is read at the object's width, the written expression is
+// converted to the same class, and the arithmetic is the instruction that class
+// takes. It is the floating form of the step the expression reader makes, with
+// the left operand read through the parked address instead of emitted.
+fn (mut e Emitter) assign_compound_float(stmt ast.Stmt, binary ast.Binary, address Slot, single bool, depth int) !void {
+	value := e.float_accumulator(stmt.line, stmt.col)!
+	load_register := e.scratch(stmt.line, stmt.col)!
+	e.load_argument(address, load_register, e.target.word_size, stmt.line, stmt.col)!
+	if single {
+		e.append(e.target.load_float_indirect(load_register, value)!)
+	} else {
+		e.append(e.target.load_double_indirect(load_register, value)!)
+	}
+	left := e.value_slot(depth + 1)
+	e.store_float_accumulator(left, single, stmt.line, stmt.col)!
+	e.emit_expr_at(binary.right, depth + 2)!
+	e.convert_to_float_class(binary.right, single, stmt.line, stmt.col)!
+	e.move_float_to_scratch(single, stmt.line, stmt.col)!
+	e.load_float_accumulator(left, single, stmt.line, stmt.col)!
+	e.apply_float(binary, single)!
+	store_register := e.scratch(stmt.line, stmt.col)!
+	e.load_argument(address, store_register, e.target.word_size, stmt.line, stmt.col)!
+	if single {
+		e.append(e.target.store_float_indirect(store_register, value)!)
+	} else {
+		e.append(e.target.store_double_indirect(store_register, value)!)
+	}
 }
 
 // assign_double_at writes a double through an address, which is the floating

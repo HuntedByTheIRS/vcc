@@ -2680,6 +2680,58 @@ fn test_a_compound_assignment_on_a_pair_runs() {
 	}
 }
 
+// A compound assignment whose target is a member or a dereference runs the
+// assignment it means: `E1 op= E2` is `E1 = E1 op E2` with E1 evaluated once,
+// and the result converts back to E1's type, so a narrowing member narrows. Each
+// case returns 1 when the object holds what the source says; every operator the
+// spelling can name is here, each measured against gcc 16.2.1, which accepts it
+// and answers the same.
+fn test_a_compound_assignment_to_a_member_or_a_dereference_runs() {
+	cases := [
+		'struct S { unsigned f; };\nint main(void) { struct S s; s.f = 0xF0; s.f |= 0x0F; return s.f == 0xFF; }',
+		'struct S { unsigned f; };\nint main(void) { struct S s; s.f = 0xFF; s.f &= ~0x10; return s.f == 239; }',
+		'struct S { int n; };\nint main(void) { struct S s; struct S *p = &s; p->n = 10; p->n += 5; return p->n == 15; }',
+		'struct S { int n; };\nint main(void) { struct S s; s.n = 10; s.n -= 4; return s.n == 6; }',
+		'struct S { int n; };\nint main(void) { struct S s; s.n = 6; s.n *= 3; return s.n == 18; }',
+		'struct S { int n; };\nint main(void) { struct S s; s.n = 18; s.n /= 3; return s.n == 6; }',
+		'struct S { int n; };\nint main(void) { struct S s; s.n = 17; s.n %= 5; return s.n == 2; }',
+		'struct S { unsigned n; };\nint main(void) { struct S s; s.n = 0xF0; s.n ^= 0xFF; return s.n == 0x0F; }',
+		'struct S { unsigned n; };\nint main(void) { struct S s; s.n = 1; s.n <<= 4; return s.n == 16; }',
+		'struct S { int n; };\nint main(void) { struct S s; s.n = -16; s.n >>= 2; return s.n == -4; }',
+		'struct S { unsigned char c; };\nint main(void) { struct S s; s.c = 250; s.c += 10; return s.c == 4; }',
+		'struct S { long long n; };\nint main(void) { struct S s; s.n = 1; s.n <<= 40; return s.n == 1099511627776LL; }',
+		'struct S { _Bool b; };\nint main(void) { struct S s; s.b = 0; s.b |= 2; return s.b == 1; }',
+		'int main(void) { int x = 10; int *p = &x; *p += 5; return x == 15; }',
+		'int main(void) { unsigned char c = 250; unsigned char *p = &c; *p += 10; return c == 4; }',
+		'int main(void) { long long l = 1; long long *p = &l; *p <<= 40; return l == 1099511627776LL; }',
+	]
+	for source in cases {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
+// A compound assignment evaluates its target once. This is the case a fix
+// written as `E1 = E1 op E2` gets wrong: the index `i++` would be stepped once
+// for the read and once for the write, so `a[0]` would be read back as 5 but
+// written at a different element and i would be 2. The standard makes `op=` a
+// construct of its own for exactly this reason. Each case is the program the
+// equivalent gcc 16.2.1 program is, which returns 1 as well.
+fn test_a_compound_assignment_evaluates_its_target_once() {
+	cases := [
+		'int main(void) { int i = 0; int a[2]; a[0] = 0; a[1] = 0; a[i++] += 5; return a[0] == 5 && a[1] == 0 && i == 1; }',
+		'int main(void) { int i = 0; int a[2]; a[0] = 0; a[1] = 0; a[i++] |= 5; return a[0] == 5 && a[1] == 0 && i == 1; }',
+		'struct S { int n; };\nint main(void) { int i = 0; struct S a[2]; a[0].n = 0; a[1].n = 0; a[i++].n += 5; return a[0].n == 5 && a[1].n == 0 && i == 1; }',
+		'int main(void) { int i = 0; int a[2]; a[0] = 0; a[1] = 0; a[i++] += 5; return i == 1 && a[1] == 0; }',
+	]
+	for source in cases {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
 // An assignment and a comma are expressions of the ordinary grammar, worth the
 // value 6.5.16 and 6.5.17 give them, so they run inside a larger expression the
 // way gcc runs them. Each case returns 1 when the value is what the source

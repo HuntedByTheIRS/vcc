@@ -1055,14 +1055,53 @@ fn test_an_assignment_through_an_undeclared_pointer_is_reported() {
 	assert result.diagnostics[0].msg.contains('missing')
 }
 
-// A compound assignment through a dereference is refused by name: writing
-// `*p += 1` as `*p = *p + 1` would read the pointer twice, where C reads the
-// lvalue once, and this tree has no shape that reads it once.
-fn test_a_compound_assignment_through_a_dereference_is_refused_by_name() {
+// A compound assignment through a dereference is read as the assignment it
+// means, and the statement carries the operator so the back end computes the
+// pointer once and reads and writes through that one address. Writing
+// `*p += 1` as `*p = *p + 1` would read the pointer twice, which is a different
+// program whenever the pointer expression has a side effect, so the compound
+// field is what keeps the target a single evaluation.
+fn test_a_compound_assignment_through_a_dereference_is_the_assignment_it_means() {
 	result := parsed('int main() { int x = 1; int *p = &x; *p += 1; return x; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('through a dereference')
-	assert result.diagnostics[0].msg.contains('not implemented')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	statement := body[2]
+	assert statement.kind == .assign
+	assert statement.compound == '+'
+	assert statement.deref != none
+	value := statement.expr or {
+		assert false
+		return
+	}
+	assert value is ast.Binary
+	binary := value as ast.Binary
+	assert binary.op == '+'
+	assert binary.left is ast.Unary
+	assert (binary.left as ast.Unary).op == '*'
+}
+
+// A compound assignment to a member is the same assignment with the operator
+// the spelling names, and it carries that operator so the back end reads the
+// member through one address. `s.a += 2` and `p->a |= 1` are both writes to the
+// member the reader already resolved.
+fn test_a_compound_assignment_to_a_member_is_the_assignment_it_means() {
+	direct := parsed('struct S { int a; };\nint main(void) { struct S s; s.a += 2; return s.a; }')
+	assert direct.diagnostics.len == 0
+	statement := direct.unit.decls[0].body[1]
+	assert statement.kind == .assign
+	assert statement.compound == '+'
+	assert statement.field != none
+	value := statement.expr or {
+		assert false
+		return
+	}
+	assert value is ast.Binary
+	assert (value as ast.Binary).left is ast.Field
+	arrow := parsed('struct S { int a; };\nint main(void) { struct S s; struct S *p = &s; p->a |= 1; return 0; }')
+	assert arrow.diagnostics.len == 0
+	through := arrow.unit.decls[0].body[2]
+	assert through.compound == '|'
+	assert through.field != none
 }
 
 // An assignment after an expression that is not a place is refused by name

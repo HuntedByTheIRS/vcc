@@ -307,6 +307,17 @@ pub:
 	// none for an assignment to a name, and target is empty for one written
 	// through a dereference.
 	deref ?Expr
+	// compound is the arithmetic operator of a compound assignment: `+` for
+	// `+=`, `-` for `-=`, and the empty string for a plain `=`. The reader
+	// expands the spelling into the assignment it means in `expr` as well, and
+	// a name target is emitted from that expansion because reading a name has
+	// no side effect to repeat. A target reached through an address is
+	// emitted from this operator and the value instead: the address is
+	// computed once and used for both the read and the write, so that an
+	// index like `a[i++]` is stepped once rather than once per use. The empty
+	// string means the value in `expr` is written as it stands, which is what
+	// every plain assignment does.
+	compound string
 	// subscript is the element an assignment writes to when its base is not a
 	// name the target fields can address, which is what `3[p] = 9` and
 	// `p[3] = 9` for a pointer p are. The element node is carried whole because
