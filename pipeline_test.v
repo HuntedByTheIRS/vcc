@@ -107,6 +107,38 @@ fn test_a_source_file_becomes_a_runnable_binary() {
 	os.rm(binary) or {}
 }
 
+// A variable-length array declared in a loop body claims its storage on the
+// stack when the declaration runs, and the storage is given back where the block
+// ends. Before that release, each time round subtracted again and the stack grew
+// until the program died; four million iterations of an eight-byte array is
+// sixty-odd megabytes of stack, far past the eight a thread gets. The program
+// answers 1 when it finishes and the same program exits 1 under gcc 16.2.1 with
+// -std=gnu99, measured.
+fn test_a_loop_body_gives_a_variable_length_array_back_every_time_round() {
+	source := scratch('vla_loop.c')
+	binary := scratch('vla_loop')
+	program := 'int main(void) {\n    int c = 0;\n    for (int i = 0; i < 4000000; i++) {\n        int n = 8;\n        int a[n];\n        a[0] = i;\n        if (a[0] == 3999999) { c = 1; }\n    }\n    return c;\n}\n'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A goto that leaves a block which claimed a variable-length array's storage
+// gives it back before it jumps, because the block's own exit is not reached.
+// The loop here is a block and a backward goto out of it, so each time round
+// leaves the block early; without the release on that edge the stack grows once
+// per iteration and the program dies, where gcc 16.2.1 with -std=gnu99 exits 1.
+fn test_a_goto_out_of_a_block_gives_a_variable_length_array_back() {
+	source := scratch('vla_goto.c')
+	binary := scratch('vla_goto')
+	program := 'int main(void) {\n    int c = 0;\n    int i = 0;\ntop:\n    if (i >= 4000000) { goto done; }\n    {\n        int n = 8;\n        int a[n];\n        a[0] = i;\n        if (a[0] == 3999999) { c = 1; }\n        i++;\n        goto top;\n    }\ndone:\n    return c;\n}\n'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 1
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 fn test_a_call_through_a_function_pointer_is_the_address_it_holds() {
 	// A call written to an expression calls the address the expression is worth,
 	// and the answer says which function that was: add and mul disagree on
