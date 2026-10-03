@@ -1,7 +1,9 @@
 module parser
 
 import math
+import math.big
 import strconv
+import types
 
 // Literal conversion. Both of these report instead of guessing: a constant that
 // does not fit, or a digit that is not valid for the base it was written in, is
@@ -86,6 +88,379 @@ fn is_floating_constant(text string) bool {
 		return text.contains('.') || text.contains('p') || text.contains('P')
 	}
 	return text.contains('.') || text.contains('e') || text.contains('E')
+}
+
+// is_long_double_constant says whether a floating constant is written with the
+// `l` suffix, which names a long double. 6.4.4.2 makes the suffix the whole
+// question of the constant's type, and this is asked only of a token the
+// floating reader would take: `10L` is a long integer, not a floating constant.
+fn is_long_double_constant(text string) bool {
+	if text.len == 0 {
+		return false
+	}
+	last := text[text.len - 1]
+	return last == `l` || last == `L`
+}
+
+// parse_long_double_literal reads a long double constant into the value it
+// names, in the extended format the target gives `long double`.
+//
+// The value is computed here rather than handed to the host's double reader
+// because a long double holds more precision than a double does, and a value
+// rounded through a double first would be a different number: measured on gcc
+// 16.2.1, `0.6L` is 0x3ffe9999999999999a and the double 0.6 rounded up to a
+// long double is 0x3ffe99999999999a00. Both decimal and hexadecimal constants
+// are read exactly and rounded once, to nearest with ties to even, which is the
+// rule the hardware uses and the rule gcc's own reader uses.
+fn parse_long_double_literal(text string) !types.LongDouble {
+	if text.len < 2 {
+		return error('${text}: not a floating constant')
+	}
+	body := text[..text.len - 1]
+	if body.len > 1 && body[0] == `0` && (body[1] == `x` || body[1] == `X`) {
+		return parse_hex_long_double(text, body)
+	}
+	return parse_decimal_long_double(text, body)
+}
+
+// parse_decimal_long_double reads the decimal form of a long double constant.
+// The digits are an integer D, the constant is D * 10^exp, and the value is
+// rounded to sixty-four bits of significand once.
+fn parse_decimal_long_double(text string, body string) !types.LongDouble {
+	mut int_digits := []u8{}
+	mut frac_digits := []u8{}
+	mut exp_sign := 1
+	mut exp_value := 0
+	mut seen_point := false
+	mut seen_exp := false
+	mut seen_exp_digit := false
+	mut i := 0
+	for i < body.len {
+		c := body[i]
+		if c >= `0` && c <= `9` {
+			if seen_exp {
+				if exp_value < 1000000 {
+					exp_value = exp_value * 10 + int(c - `0`)
+				}
+				seen_exp_digit = true
+			} else if seen_point {
+				frac_digits << c
+			} else {
+				int_digits << c
+			}
+			i++
+			continue
+		}
+		if c == `.` {
+			if seen_point || seen_exp {
+				return error('${text}: not a floating constant')
+			}
+			seen_point = true
+			i++
+			continue
+		}
+		if c == `e` || c == `E` {
+			if seen_exp {
+				return error('${text}: not a floating constant')
+			}
+			seen_exp = true
+			i++
+			if i < body.len && (body[i] == `+` || body[i] == `-`) {
+				if body[i] == `-` {
+					exp_sign = -1
+				}
+				i++
+			}
+			continue
+		}
+		return error('${text}: ${c.ascii_str()} is not part of a floating constant')
+	}
+	if int_digits.len + frac_digits.len == 0 {
+		return error('${text}: not a floating constant')
+	}
+	if seen_exp && !seen_exp_digit {
+		return error('${text}: an exponent with no digits')
+	}
+	// D is the digits with the point removed, and the value is
+	// D * 10^(written exponent - how many digits followed the point).
+	mut all := int_digits
+	all << frac_digits
+	exp := exp_sign * exp_value - frac_digits.len
+	mut start := 0
+	for start < all.len && all[start] == `0` {
+		start++
+	}
+	if start == all.len {
+		return types.LongDouble{}
+	}
+	significant := all[start..].clone()
+	value := decimal_to_long_double(significant.bytestr(), exp) or {
+		return error('${text}: the constant is outside the range this reader converts')
+	}
+	return value
+}
+
+// parse_hex_long_double reads the hexadecimal form, `0x` significand `p`
+// exponent, into a long double. The significand D is a power-of-two multiple of
+// an integer, D * 2^bin_exp, and it is rounded to sixty-four bits of significand
+// once.
+fn parse_hex_long_double(text string, body string) !types.LongDouble {
+	after := body[2..]
+	mut exponent_at := -1
+	for i, ch in after {
+		if ch == `p` || ch == `P` {
+			exponent_at = i
+			break
+		}
+	}
+	if exponent_at < 0 {
+		return error('${text}: hexadecimal floating constants require an exponent')
+	}
+	mantissa := after[..exponent_at]
+	exponent := after[exponent_at + 1..]
+	mut digits := []u8{}
+	mut fractional := 0
+	mut point_seen := false
+	for ch in mantissa {
+		if ch == `.` {
+			if point_seen {
+				return error('${text}: not a floating constant')
+			}
+			point_seen = true
+			continue
+		}
+		if digit_value(ch, 16) == none {
+			return error('${text}: ${ch.ascii_str()} is not part of a hexadecimal floating constant')
+		}
+		digits << ch
+		if point_seen {
+			fractional++
+		}
+	}
+	if digits.len == 0 {
+		return error('${text}: a hexadecimal floating constant has no digits')
+	}
+	mut i := 0
+	mut negative := false
+	if i < exponent.len && (exponent[i] == `+` || exponent[i] == `-`) {
+		negative = exponent[i] == `-`
+		i++
+	}
+	mut magnitude := 0
+	mut exponent_digits := 0
+	for i < exponent.len {
+		ch := exponent[i]
+		if ch < `0` || ch > `9` {
+			break
+		}
+		if magnitude < 1000000 {
+			magnitude = magnitude * 10 + int(ch - `0`)
+		}
+		exponent_digits++
+		i++
+	}
+	if exponent_digits == 0 {
+		return error('${text}: an exponent with no digits')
+	}
+	if negative {
+		magnitude = -magnitude
+	}
+	// The digits name the integer D and the value is D * 2^(exp - 4*fractional).
+	mut start := 0
+	for start < digits.len && digits[start] == `0` {
+		start++
+	}
+	if start == digits.len {
+		return types.LongDouble{}
+	}
+	significant := digits[start..].clone()
+	if significant.len > 32 {
+		return error('${text}: the constant has more significant digits than this reader carries')
+	}
+	mut d := u128(0)
+	for ch in significant {
+		got := digit_value(ch, 16) or { return error('${text}: not a floating constant') }
+		d = d * 16 + u128(got)
+	}
+	value := long_double_from_scaled(d, magnitude - 4 * fractional, false) or {
+		return error('${text}: the constant is outside the range this reader converts')
+	}
+	return value
+}
+
+// decimal_to_long_double rounds D * 10^exp to the extended format. Positive
+// exponents multiply out exactly into an integer; a negative exponent is a
+// division, and the quotient is scaled by a power of two so that at least
+// sixty-five bits of it survive, which is what holds the rounding bit and the
+// sticky bit the nearest-even rule needs. It answers none when the arithmetic
+// would need more bits than a 128-bit integer holds, which is a constant this
+// reader does not carry rather than one it rounds wrongly.
+fn decimal_to_long_double(significant string, exp int) ?types.LongDouble {
+	// A power of ten this far from the digits cannot leave a value the extended
+	// exponent field holds, whatever the digits are, so the arithmetic below is
+	// kept to a size a string can carry.
+	if exp > 5000 || exp < -5000 {
+		return none
+	}
+	// The arithmetic is arbitrary precision because a constant may name more
+	// digits, and a smaller power of ten, than any fixed-width integer holds:
+	// `1.08420217248550443400745280086994171e-19L` is thirty-six digits over a
+	// fifty-fourth power of ten, and rounding it through a fixed width first
+	// would answer with a different number.
+	mut numerator := big.integer_from_string(significant) or { return none }
+	mut denominator := big.integer_from_string('1') or { return none }
+	if exp >= 0 {
+		power := big.integer_from_string(power_of_ten(exp)) or { return none }
+		numerator = numerator * power
+	} else {
+		denominator = big.integer_from_string(power_of_ten(-exp)) or { return none }
+	}
+	if numerator.bit_len() == 0 {
+		return types.LongDouble{}
+	}
+	// The value's leading bit sits at the difference of the two bit lengths, one
+	// place lower when the numerator is the smaller of the two at that width.
+	// Aligning to that place is what makes one division enough: the quotient of
+	// the numerator scaled to the sixty-fourth place by the denominator is
+	// sixty-four bits wide with its leading bit on top, and the remainder is
+	// what the rounding reads.
+	mut exponent := numerator.bit_len() - denominator.bit_len()
+	if exponent >= 0 {
+		if numerator < denominator.left_shift(u32(exponent)) {
+			exponent--
+		}
+	} else {
+		if numerator.left_shift(u32(-exponent)) < denominator {
+			exponent--
+		}
+	}
+	mut scaled := numerator
+	mut divisor := denominator
+	if exponent <= 63 {
+		scaled = numerator.left_shift(u32(63 - exponent))
+	} else {
+		divisor = denominator.left_shift(u32(exponent - 63))
+	}
+	quotient, remainder := scaled.div_mod(divisor)
+	mantissa := strconv.parse_uint(quotient.str(), 10, 64) or { return none }
+	mut result := mantissa
+	// Rounding to nearest with ties to even is twice the remainder against the
+	// divisor, which is the same question as the first dropped bit and whether
+	// anything followed it.
+	if remainder.bit_len() > 0 {
+		twice := remainder * big.integer_from_int(2)
+		if twice > divisor || (twice == divisor && (mantissa & 1) == 1) {
+			result++
+			if result == 0 {
+				// The significand rounded up out of sixty-four bits, so the
+				// leading bit moved one place.
+				return long_double_from_parts(u64(0x8000000000000000), exponent + 1)
+			}
+		}
+	}
+	return long_double_from_parts(result, exponent)
+}
+
+// power_of_ten is the decimal text of ten raised to a non-negative power, which
+// is what the arbitrary-precision reader reads its power of ten from.
+fn power_of_ten(k int) string {
+	return '1' + '0'.repeat(k)
+}
+
+// long_double_from_parts builds the value from a sixty-four-bit significand,
+// whose leading bit is the top bit of the word, and an unbiased power of two. A
+// value whose exponent is outside the field is refused rather than answered
+// with a wrong exponent.
+fn long_double_from_parts(mantissa u64, exponent int) ?types.LongDouble {
+	if mantissa == 0 {
+		return types.LongDouble{}
+	}
+	field := exponent + 16383
+	if field >= 0x7fff {
+		return none
+	}
+	if field <= 0 {
+		// A subnormal or underflowing constant is outside what this reader
+		// computes exactly, so it is refused rather than answered wrongly.
+		return none
+	}
+	return types.LongDouble{
+		mantissa: mantissa
+		sign_exp: u16(field)
+	}
+}
+
+// long_double_from_scaled rounds q * 2^bin_exp, where q is a non-negative
+// integer and `sticky` says bits below q were dropped, to the extended format.
+// The significand is the top sixty-four bits of q, rounded to nearest with ties
+// to even, and the exponent is the position of q's leading bit plus bin_exp.
+fn long_double_from_scaled(q u128, bin_exp int, sticky bool) ?types.LongDouble {
+	if q == 0 {
+		return types.LongDouble{}
+	}
+	bits := bit_len_u128(q)
+	mut mantissa := u64(0)
+	mut round_sticky := sticky
+	if bits <= 64 {
+		mantissa = u64(q) << (64 - bits)
+	} else {
+		shift := bits - 64
+		mantissa = u64(q >> shift)
+		guard := (q >> (shift - 1)) & 1 == 1
+		if shift >= 2 && (q & ((u128(1) << (shift - 1)) - 1)) != 0 {
+			round_sticky = true
+		}
+		if guard && (round_sticky || (mantissa & 1) == 1) {
+			mantissa++
+		}
+	}
+	mut exponent := (bits - 1) + bin_exp
+	if mantissa == 0 {
+		// The significand rounded up out of sixty-four bits: the leading bit
+		// moved one place, and the mantissa is that bit alone.
+		mantissa = u64(0x8000000000000000)
+		exponent++
+	}
+	field := exponent + 16383
+	if field >= 0x7fff {
+		return types.LongDouble{
+			mantissa: u64(0x8000000000000000)
+			sign_exp: u16(0x7fff)
+		}
+	}
+	if field <= 0 {
+		// A subnormal or underflowing constant is outside what this reader
+		// computes exactly, so it is refused rather than answered wrongly.
+		return none
+	}
+	return types.LongDouble{
+		mantissa: mantissa
+		sign_exp: u16(field)
+	}
+}
+
+// pow10_u128 is ten to the k as a 128-bit integer, and none past the largest
+// power that fits, which is 10^38.
+fn pow10_u128(k int) ?u128 {
+	if k < 0 || k > 38 {
+		return none
+	}
+	mut value := u128(1)
+	for _ in 0 .. k {
+		value *= 10
+	}
+	return value
+}
+
+// bit_len_u128 is how many bits the value needs, and zero for a zero.
+fn bit_len_u128(x u128) int {
+	mut count := 0
+	mut value := x
+	for value != 0 {
+		count++
+		value >>= 1
+	}
+	return count
 }
 
 // parse_floating_literal reads a floating constant into the value it names. A

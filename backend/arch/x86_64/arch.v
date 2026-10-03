@@ -690,6 +690,70 @@ pub fn store_float_indirect(address Register, src Register) ![]u8 {
 	return scalar_indirect_move(prefix_float, address, src, true)
 }
 
+// The x87 moves are how a long double is loaded from and stored to memory. The
+// machine has no register file for extended precision: the value lives in
+// memory and the conversions load it onto the x87 stack, which is where the
+// machine keeps eighty bits, and store it back. Each is two bytes with a mod-00
+// memory operand named by the address register, the way the scalar indirect
+// moves name one; unlike those, the second byte is the whole instruction, since
+// the x87 opcode extension carries the operation and there is no register field
+// holding a value. The address is named with mod 00, the way the scalar indirect
+// moves name one: mod 11 would make the byte a register operand of the x87
+// stack, which is a different instruction and, for most of these fields, one
+// the machine does not have.
+//
+// The pairs are the conversions the long double type needs and nothing more:
+// `fldt`/`fstpt` move the extended format itself, `fldl`/`fstpl` move a double
+// through the extended stack so the conversion is done by the machine, and
+// `fildl`/`fildll`/`fistpl`/`fistpll` do the same for a signed integer four and
+// eight bytes wide.
+fn x87_indirect_move(prefix u8, field u8, address Register) ![]u8 {
+	low := address.code & 0x07
+	if low == 4 || low == 5 {
+		return error('${name}: an address in ${address.name} cannot be named without a displacement')
+	}
+	return [prefix, u8((field << 3) | low)]
+}
+
+// load_extended and store_extended are the extended format itself: `fldt` reads
+// the ten bytes of a long double out of memory and `fstpt` writes them back.
+pub fn load_extended(address Register) ![]u8 {
+	return x87_indirect_move(0xdb, 5, address)
+}
+
+pub fn store_extended(address Register) ![]u8 {
+	return x87_indirect_move(0xdb, 7, address)
+}
+
+// load_double_extended and store_double_extended do a double through the same
+// stack, which is what makes a double convertible to and from the extended
+// format without a routine of its own.
+pub fn load_double_extended(address Register) ![]u8 {
+	return x87_indirect_move(0xdd, 0, address)
+}
+
+pub fn store_double_extended(address Register) ![]u8 {
+	return x87_indirect_move(0xdd, 3, address)
+}
+
+// The integer conversions: `fildl` and `fildll` read a four- and an eight-byte
+// integer onto the stack, and `fistpl` and `fistpll` write one back.
+pub fn load_int_extended(address Register) ![]u8 {
+	return x87_indirect_move(0xdb, 0, address)
+}
+
+pub fn load_word_extended(address Register) ![]u8 {
+	return x87_indirect_move(0xdf, 5, address)
+}
+
+pub fn store_int_extended(address Register) ![]u8 {
+	return x87_indirect_move(0xdb, 3, address)
+}
+
+pub fn store_word_extended(address Register) ![]u8 {
+	return x87_indirect_move(0xdf, 7, address)
+}
+
 fn scalar_indirect_move(prefix u8, address Register, operand Register, store bool) ![]u8 {
 	if operand.width != 16 {
 		return error('${name}: a floating value is moved through a sixteen-byte register, and ${operand.name} is not one')

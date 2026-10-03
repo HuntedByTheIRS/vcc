@@ -351,6 +351,15 @@ pub fn from_target(target backend.Target) Description {
 	aligns[Kind.float] = 4
 	sizes[Kind.double] = 8
 	aligns[Kind.double] = 8
+	// A long double is the x87 extended format: sixteen bytes of storage with an
+	// alignment of sixteen, holding one 80-bit value in the low ten bytes.
+	// Measured on this target with gcc 16.2.1: `sizeof(long double)` is 16 and
+	// `_Alignof(long double)` is 16. The width is carried because the back end
+	// moves those sixteen bytes: an object of the type is reserved, stored and
+	// copied as an object, and the value's own read and write go through the
+	// x87 stack, which is what the conversions at the end of this file describe.
+	sizes[Kind.long_double] = 16
+	aligns[Kind.long_double] = 16
 	// The 128-bit integers are carried for the questions that are about the
 	// size of a type rather than about a value of one: `sizeof(__int128)` is
 	// 16, a member of that type starts on a 16-byte boundary, and a struct

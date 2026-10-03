@@ -813,6 +813,66 @@ pub fn enum_type(tag string) Type {
 	}
 }
 
+// LongDouble is the value of an extended-precision floating constant: the
+// significand and the sign-and-exponent word of the 80-bit x87 format this
+// target gives `long double`, as its own two fields rather than as a host
+// number, because no host type here holds one. Measured on gcc 16.2.1 on this
+// machine: `sizeof(long double)` is 16 and `_Alignof(long double)` is 16, and a
+// long double holds one 80-bit value in the low ten bytes of that storage with
+// six bytes of padding above it.
+//
+// mantissa is the 64-bit significand with its explicit integer bit at bit 63,
+// which is the shape the x87 format stores: `1.5L` is mantissa
+// 0xc000000000000000. sign_exp holds the sign in bit 15 and the biased exponent
+// in bits 14..0, so `1.5L` is 0x3fff. A zero is both fields zero; an infinity
+// is the exponent field all ones with the integer bit set.
+pub struct LongDouble {
+pub:
+	mantissa  u64
+	sign_exp  u16
+}
+
+// is_zero says whether the value is a zero of either sign.
+pub fn (v LongDouble) is_zero() bool {
+	return (v.sign_exp & 0x7fff) == 0 && v.mantissa == 0
+}
+
+// exponent is the unbiased power of two the significand is scaled by: the value
+// is mantissa * 2^(exponent - 63), with the integer bit counted in. It is the
+// field minus the bias, and it says nothing for a zero or a subnormal, whose
+// field is zero.
+pub fn (v LongDouble) exponent() int {
+	return int(v.sign_exp & 0x7fff) - 16383
+}
+
+// bytes is the object representation the target gives a long double: the ten
+// significant bytes of the 80-bit value, least significant first, with the six
+// padding bytes above them zero. That is the ten bytes gcc 16.2.1 writes and
+// the bytes this compiler writes into a long double it stores.
+pub fn (v LongDouble) bytes() [16]u8 {
+	mut out := [16]u8{}
+	for i in 0 .. 8 {
+		out[i] = u8((v.mantissa >> (8 * i)) & 0xff)
+	}
+	out[8] = u8(v.sign_exp & 0xff)
+	out[9] = u8(v.sign_exp >> 8)
+	return out
+}
+
+// long_double_from_bytes reads a long double back from the object
+// representation a store wrote, which is what a copy of one and a conversion
+// out of one start from.
+pub fn long_double_from_bytes(object [16]u8) LongDouble {
+	mut mantissa := u64(0)
+	for i in 0 .. 8 {
+		mantissa |= u64(object[i]) << (8 * i)
+	}
+	return LongDouble{
+		mantissa: mantissa
+		sign_exp: u16(object[8]) | (u16(object[9]) << 8)
+	}
+}
+
 // qualified is t with the qualifiers of other added, which is how `const int` is
 // built from the words of a declaration.
 pub fn qualified(t Type, other Qualifiers) Type {

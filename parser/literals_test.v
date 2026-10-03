@@ -69,8 +69,16 @@ fn test_a_malformed_hexadecimal_float_is_refused_by_name() {
 	assert reject_message('0x1p3g').contains('is not part of a floating constant')
 	assert reject_message('0x1.8p1u').contains('is not part of a floating constant')
 	// The `l` suffix is not a mistake in the constant: it names a long double,
-	// which is a type this compiler has no value for, so that is what is said.
-	assert reject_message('0x1.8p3L').contains('a long double literal')
+	// which this compiler reads and stores now, so the reader takes it. The
+	// value 0x1.8p3 is 12.0, and the significand and power of two are the ones
+	// gcc 16.2.1 produces for the same spelling, read as extended bits rather
+	// than as a decimal that would round and hide a value one bit off.
+	wide := parse_long_double_literal('0x1.8p3L') or {
+		assert false
+		return
+	}
+	assert wide.mantissa == 0xc000000000000000
+	assert wide.exponent() == 3
 }
 
 // The reader reports through the parser, which puts the token's location on the

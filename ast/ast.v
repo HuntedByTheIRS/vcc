@@ -126,6 +126,10 @@ pub:
 	bytes      int
 	init       ?i64
 	init_float ?f64
+	// init_long is the constant of an object of a long double type, in the
+	// extended format. A long double value does not fit in a host double, so it
+	// has its own field the way a double has `init_float`.
+	init_long ?types.LongDouble
 	// address is the object's initializer when it is an address rather than a
 	// number, which is what a pointer defined at the top level has: a function
 	// designator, the address of an object, or a string literal.
@@ -507,10 +511,15 @@ pub:
 pub struct FloatLit {
 pub:
 	value f64
-	text  string
-	typ   types.Type
-	line  int
-	col   int
+	// long_value is the value of a constant written with the `l` suffix, in the
+	// extended format this target gives `long double`. It is set only for one of
+	// those, and `value` is zero for it: the two are alternative representations
+	// of one constant at two widths, and a constant is one of them.
+	long_value ?types.LongDouble
+	text       string
+	typ        types.Type
+	line       int
+	col        int
 }
 
 // StrLit is one string literal. value is the bytes it names with the escapes

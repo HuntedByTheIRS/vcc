@@ -149,7 +149,7 @@ const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long
 // name one of these.
 const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .bool_, .char_, .signed_char,
 	.unsigned_char, .short, .unsigned_short, .double, .float, .long, .unsigned_long, .long_long,
-	.unsigned_long_long]
+	.unsigned_long_long, .long_double]
 
 // max_expression_depth bounds how deep one expression nests: a parenthesis, a
 // prefix operator, a cast, a `?:`, a `[` index, a call's argument list and a
@@ -1771,6 +1771,19 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		// integer one, so the two readers are reached from here rather than
 		// one of them guessing at the other's input.
 		if is_floating_constant(t.text) {
+			if is_long_double_constant(t.text) {
+				value := parse_long_double_literal(t.text) or {
+					p.error_at(t, err.msg())
+					return error('bad long double literal')
+				}
+				return ast.Expr(ast.FloatLit{
+					long_value: value
+					text:       t.text
+					typ:        p.floating_type(t, 0.0)
+					line:       t.line
+					col:        t.col
+				})
+			}
 			value := parse_floating_literal(t.text) or {
 				p.error_at(t, err.msg())
 				return error('bad floating literal')
@@ -2082,12 +2095,12 @@ fn (mut p Parser) constant_type(at tokenize.Token, value i64) types.Type {
 
 // floating_type is the type a floating constant has. 6.4.4.2 makes that a
 // question about the suffix: a constant with no suffix is a double, one written
-// with an `f` is a float, and `l` names a long double this compiler has no value
-// for, which the literal reader refuses where the constant is written.
+// with an `f` is a float, and one written with an `l` is a long double.
 //
 // The value arrives already rounded to the width the suffix named, so nothing
-// here changes it; this only says which of the two floating types the constant
-// is.
+// here changes it; this only says which of the three floating types the
+// constant is. The host double is not consulted for a long double constant
+// because it cannot hold one; the suffix is the whole answer.
 fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 	if value != value {
 		// A NaN is what a conversion that ran out of range produces, and the
@@ -2095,6 +2108,9 @@ fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 		// the constant is better than emitting a NaN where a number was.
 		p.error_at(at, '${at.text}: the constant is out of range for a double')
 		return types.Type{}
+	}
+	if is_long_double_constant(at.text) && is_floating_constant(at.text) {
+		return types.long_double_type()
 	}
 	if at.text.len > 0 && (at.text[at.text.len - 1] == `f` || at.text[at.text.len - 1] == `F`) {
 		return types.float_type()

@@ -84,6 +84,11 @@ struct Slot {
 	// it has no value of that width to be read as. A narrower value is stored in
 	// one by widening it into the two words of the object.
 	wide bool
+	// long_double is set for a slot holding a long double, which is the same
+	// sixteen bytes of storage for a different reason: the extended format has
+	// no register this back end computes in, so the value lives in memory and
+	// the name of such a slot is the address of it.
+	long_double bool
 }
 
 // LoopLabels are the two places a loop's body can leave by: where the loop ends,
@@ -1272,6 +1277,12 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		e.argument_lists << stmt.decl_name
 	}
 	init := stmt.init or { return }
+	if slot.long_double && slot.count == 0 {
+		// An object of the extended type declared with a value: the value is
+		// copied if it is a long double, and converted by the machine's x87 moves
+		// if it is a double, a float or an integer.
+		return e.store_long_double(slot, init, stmt.line, stmt.col, 0)
+	}
 	if slot.wide {
 		// A 128-bit object declared with a value takes one of three things: a copy
 		// of another object of the type, the pair a computation left in the
@@ -1354,6 +1365,12 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
 	}
+	if target.long_double && target.count == 0 {
+		// The same store a declaration of the type makes: the target's address
+		// is worked out, the value is converted or copied, and the sixteen bytes
+		// are written.
+		return e.store_long_double(target, expr, stmt.line, stmt.col, depth)
+	}
 	if target.wide {
 		// A wide target is sixteen bytes of storage, and what is written into it is
 		// one of three things: a copy of another object of the type, a pair a
@@ -1408,6 +1425,12 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 	e.emit_expr_at(unary.expr, depth + 1)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
+	if unary.typ.kind == .long_double {
+		// A write through an address of the extended type is the store an
+		// object of the type makes, at the address the pointer holds: sixteen
+		// bytes are not a width the machine moves in one instruction.
+		return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
+	}
 	if unary.typ.kind == .double {
 		return e.assign_double_at(stmt, address, expr, depth)
 	}
@@ -1840,6 +1863,16 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 		e.store_accumulator(address, stmt.line, stmt.col)!
 		return e.store_wide_at(address, expr, stmt.line, stmt.col, depth)
 	}
+	if e.writes_a_long_double(member.spelling) {
+		// A member of the extended type takes a value the way an object of the
+		// type does, through the member's own address: the object the member
+		// lies in may be a pointer's target or a top-level object, so the store
+		// cannot be an offset from the frame.
+		e.field_address(member, depth + 1, stmt.line, stmt.col)!
+		address := e.value_slot(depth)
+		e.store_accumulator(address, stmt.line, stmt.col)!
+		return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
+	}
 	width := e.type_width(member.spelling) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, floats, doubles and pointers only')
 		return error('unsupported member type')
@@ -2034,11 +2067,18 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			base := e.scratch(stmt.line, stmt.col)!
 			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, e.target.name_of(base))
 			is_wide := !object.object && object.width == wide_bytes
-			e.element_address(base, register, object.width, 0, is_wide, false, stmt.target,
+			long_double := e.global_array_is_long_double(stmt.target)
+			e.element_address(base, register, object.width, 0, is_wide || long_double, false, stmt.target,
 				stmt.line,
 				stmt.col)!
 			address := e.value_slot(depth)
 			e.store_accumulator(address, stmt.line, stmt.col)!
+			if long_double {
+				// An element of the extended type, at an address the image
+				// holds: the value goes in through the path an object of the
+				// type uses.
+				return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
+			}
 			if is_wide {
 				// An element of that width takes the two words an object of the type
 				// takes, through the element's own address.
@@ -2118,10 +2158,17 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	e.emit_expr_at(subscript, depth)!
 	base := e.frame_pointer(stmt.line, stmt.col)!
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.element_address(base, register, slot.width, slot.offset, slot.wide, false, stmt.target,
+	e.element_address(base, register, slot.width, slot.offset, slot.wide || slot.long_double, false, stmt.target,
 		stmt.line, stmt.col)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
+	if slot.long_double {
+		// An element of the extended type is sixteen bytes at an address this
+		// back end can compute; the value goes in through the path an object of
+		// the type uses, because sixteen bytes is not a width the machine moves
+		// in one instruction.
+		return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
+	}
 	if slot.wide {
 		// An element of that width takes the two words an object of the type takes,
 		// through the element's own address.
@@ -2207,6 +2254,13 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	address_register := e.scratch(stmt.line, stmt.col)!
+	if index.typ.kind == .long_double {
+		// An element of the extended type, at an address computed from a
+		// pointer: the value goes in through the path an object of the type
+		// uses, and the expression has not been emitted yet because that path
+		// emits it.
+		return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
+	}
 	e.emit_expr_at(expr, depth + 1)!
 	if index.typ.kind == .double {
 		if !e.floating_of(expr) && e.is_a_pointer(expr) {
@@ -2773,6 +2827,10 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 	// something other than the width of a value: an object of one is sixteen
 	// bytes, which is the whole object and not a value it is read at.
 	wide := bytes == 0 && e.writes_a_128(written)
+	// A long double is the other object sized by a width rather than by a value:
+	// sixteen bytes, the format's own size, and a slot whose name is the address
+	// of the object for the same reason a 128-bit one is.
+	long_double := bytes == 0 && e.writes_a_long_double(written)
 	// An object of an aggregate type is sized by the layout the reader worked
 	// out rather than by its spelling: `struct S` is a name the back end has no
 	// width for, and the members are what say how many bytes the object is.
@@ -2786,6 +2844,8 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 		bytes
 	} else if wide {
 		wide_bytes
+	} else if long_double {
+		long_double_bytes
 	} else {
 		e.type_width(written) or {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints, chars, floats, doubles and pointers only')
@@ -2794,15 +2854,16 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 	}
 	slot := if count > 0 { e.reserve(count * width) } else { e.reserve(width) }
 	block := Slot{
-		offset:   slot.offset
-		width:    width
-		count:    count
-		floating: bytes == 0 && e.writes_a_double(written)
-		single:   bytes == 0 && e.writes_a_float(written)
-		unsigned: e.written_is_unsigned(written)
-		boolean:  written == '_Bool'
-		bytes:    if wide { wide_bytes } else { bytes }
-		wide:     wide
+		offset:      slot.offset
+		width:       width
+		count:       count
+		floating:    bytes == 0 && e.writes_a_double(written)
+		single:      bytes == 0 && e.writes_a_float(written)
+		unsigned:    e.written_is_unsigned(written)
+		boolean:     written == '_Bool'
+		bytes:       if wide { wide_bytes } else { bytes }
+		wide:        wide
+		long_double: long_double
 	}
 	e.scopes[e.scopes.len - 1][name] = block
 	return block
@@ -2841,6 +2902,14 @@ fn (e Emitter) type_width(written string) ?int {
 	}
 	if written == 'double' {
 		return 8
+	}
+	// A long double is the extended format: sixteen bytes of storage. Measured
+	// on gcc 16.2.1 on this target, `sizeof(long double)` is 16 and so is
+	// `_Alignof(long double)`, which is the size the model lays an object of the
+	// type out with; the back end needs the same number here for the storage of
+	// a top-level object and for the width of the sixteen bytes a copy moves.
+	if written == 'long double' {
+		return long_double_bytes
 	}
 	if written == 'float' {
 		return 4
@@ -3047,6 +3116,13 @@ fn (mut e Emitter) branch(kind image.FixupKind, name string, line int, col int) 
 // cleared by exclusive-or with itself rather than read from memory, so this costs
 // no constant.
 fn (mut e Emitter) emit_test(value ast.Expr, line int, col int) !void {
+	if e.long_double_of(value) {
+		// The truth value of a long double is the comparison of it with zero,
+		// which the x87 stack makes with an instruction this back end does not
+		// write: testing the address the value is at would ask whether the
+		// object exists, which is a different question entirely.
+		return e.refuse_a_long_double_operation('a truth test', line, col)
+	}
 	register := e.accumulator(line, col)!
 	if e.floating_of(value) {
 		// Zero is the other operand, in the scratch register of the same file,
@@ -3291,6 +3367,13 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 	if depth > max_emit_depth {
 		return false
 	}
+	// A long double is a floating type in the language and not a value of the
+	// register file this walk is about: it lives in memory, so no path that asks
+	// this question computes with it. The guard is here rather than in each arm
+	// because a long double reaches them all as `is_floating`.
+	if expr.typ.kind == .long_double {
+		return false
+	}
 	return match expr {
 		ast.FloatLit {
 			true
@@ -3406,6 +3489,11 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 	if depth > max_emit_depth {
 		return false
 	}
+	// The same guard floating_at carries: the extended type is not a value of
+	// this register file at either width.
+	if expr.typ.kind == .long_double {
+		return false
+	}
 	return match expr {
 		ast.FloatLit {
 			// The reader gives a constant with an `f` suffix the float type and
@@ -3496,6 +3584,11 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 // into a slot that holds one, an argument a parameter is one for, and the value a
 // function returning a double returns.
 fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
+	if e.long_double_of(expr) {
+		// The value is in memory at the address the expression left in the
+		// accumulator, and the machine converts it on its x87 stack.
+		return e.extended_to_double(expr, line, col)
+	}
 	if e.double_of(expr) {
 		return
 	}
@@ -3555,6 +3648,13 @@ fn (mut e Emitter) convert_to_single(expr ast.Expr, line int, col int) !void {
 	if e.single_of(expr) {
 		return
 	}
+	if e.long_double_of(expr) {
+		// The conversion to a float narrows twice and truncates nowhere, but the
+		// nine-byte store that would make it is not the instruction this back
+		// end writes, so the destination is refused by name like every other
+		// destination but a double.
+		return e.refuse_a_long_double_conversion('float', line, col)
+	}
 	if e.double_of(expr) {
 		register := e.float_accumulator(line, col)!
 		e.append(e.target.double_to_float(register, register)!)
@@ -3586,6 +3686,12 @@ fn (mut e Emitter) convert_to_single(expr ast.Expr, line int, col int) !void {
 // one and 2^63 for an eight-byte one, while a signed destination has no such
 // values and its conversion is the one the machine has.
 fn (mut e Emitter) convert_to_int(expr ast.Expr, unsigned_target bool, target_width int, line int, col int) !void {
+	if e.long_double_of(expr) {
+		// The destination truncates toward zero and the machine's instruction
+		// rounds to nearest even, so the two answers differ for a fractional
+		// value and the destination is refused by name.
+		return e.refuse_a_long_double_conversion('an integer of ${target_width} bytes', line, col)
+	}
 	if !e.floating_of(expr) {
 		return
 	}
@@ -3763,6 +3869,13 @@ fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int,
 // of the two conversions that does not exist, and it is refused by name.
 fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !void {
 	floating := e.floating_of(expr)
+	if e.long_double_of(expr) && !slot.single && !slot.floating {
+		// A value of the extended type stored in a slot of another type is a
+		// conversion out of it, and the only one this back end writes is the
+		// conversion to a double. An integer slot is refused by name rather
+		// than written with the bits of the address the value is at.
+		return e.refuse_a_long_double_conversion('an integer of ${slot.width} bytes', line, col)
+	}
 	if slot.single {
 		// A slot holding a float takes the value converted to one, which rounds
 		// a double to four bytes and converts an integer, and then stores it
@@ -3887,6 +4000,13 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.append(e.target.move_immediate32(register, u32(expr.value))!)
 		}
 		ast.FloatLit {
+			if expr.typ.kind == .long_double {
+				// A long double constant is materialized into a frame
+				// temporary. Its value is sixteen bytes and not a register
+				// width, so what the expression is worth is the address of them.
+				e.emit_extended_literal(expr, expr.line, expr.col)!
+				return
+			}
 			// A floating constant of either width is read-only data and an
 			// instruction that says where they are. The machine has no form of
 			// a floating move that takes the value in the instruction, so the
@@ -3921,6 +4041,12 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 					if object.count > 0 {
 						// The name of an array is the address of its first
 						// element.
+						return
+					}
+					if object.count == 0 && e.global_is_long_double(expr.name) {
+						// An object of the extended type read as a value is
+						// its address: sixteen bytes are in memory and there is
+						// no register of that width to read them into.
 						return
 					}
 					if object.count == 0 && object.width == wide_bytes {
@@ -3964,6 +4090,12 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is not a constant and is not a local of this function')
 				return error('unknown name')
 			}
+			if slot.long_double && slot.count == 0 {
+				// The name of an object of the extended type is the address of
+				// its sixteen bytes, which is what a value of the type is worth
+				// everywhere in this back end.
+				return e.leave_address(slot, expr.line, expr.col)
+			}
 			if slot.wide {
 				// A 128-bit object is stored, copied and addressed, and it is
 				// not a value this back end has: reading the name would have to
@@ -4001,6 +4133,13 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.load_accumulator(slot, expr.line, expr.col)!
 		}
 		ast.Field {
+			if e.writes_a_long_double(expr.spelling) {
+				// A member of the extended type is sixteen bytes at an offset
+				// into the object that holds it, and the value of the member is
+				// the address of those bytes.
+				e.field_address(expr, depth, expr.line, expr.col)!
+				return
+			}
 			// A member is the value at an offset into an object: the address of
 			// the object plus the offset the model's layout put the member at,
 			// read at the width of the member's type. A double member is read
@@ -4147,7 +4286,7 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 		e.emit_expr_at(expr.index, depth + 1)!
 		base := e.frame_pointer(expr.line, expr.col)!
 		register := e.accumulator(expr.line, expr.col)!
-		e.element_address(base, register, slot.width, slot.offset, slot.wide,
+		e.element_address(base, register, slot.width, slot.offset, slot.wide || slot.long_double,
 			expr.typ.is_array(), name, expr.line, expr.col)!
 		if expr.typ.is_array() {
 			// The element is itself an array, so reading it is not a load: its
@@ -4161,6 +4300,12 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 		if slot.wide {
 			e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 			return error('128-bit element')
+		}
+		if slot.long_double {
+			// An element of an array of long doubles: what the element is worth
+			// is the address element_address left, the way a scalar name of the
+			// type is.
+			return
 		}
 		if slot.single {
 			// An element of an array of floats: the address is in a general
@@ -4192,7 +4337,9 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 	base := e.scratch(expr.line, expr.col)!
 	e.reference(e.target.address_of(base, 0), .global_address, name, e.target.name_of(base))
 	wide := !object.object && object.width == wide_bytes
-	e.element_address(base, register, object.width, 0, wide, expr.typ.is_array(), name, expr.line,
+	long_double := e.global_array_is_long_double(name)
+	e.element_address(base, register, object.width, 0, wide || long_double, expr.typ.is_array(), name,
+		expr.line,
 		expr.col)!
 	if expr.typ.is_array() {
 		// The element is an array, so its value is the address of its first
@@ -4202,6 +4349,11 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 	if wide {
 		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 		return error('128-bit element')
+	}
+	if !object.floating && !object.single && e.global_is_long_double(name) {
+		// An element of a top-level array of long doubles: its value is the
+		// address element_address left, exactly as a local element of the type.
+		return
 	}
 	if object.single {
 		float_register := e.float_accumulator(expr.line, expr.col)!
@@ -4227,6 +4379,11 @@ fn (mut e Emitter) emit_general_index(expr ast.Index, depth int) !void {
 		return
 	}
 	address := e.accumulator(expr.line, expr.col)!
+	if expr.typ.kind == .long_double {
+		// An element of the extended type is the address emit_element_address
+		// left, which is what a value of the type is worth.
+		return
+	}
 	if expr.typ.kind == .float {
 		float_register := e.float_accumulator(expr.line, expr.col)!
 		e.append(e.target.load_float_indirect(address, float_register)!)
@@ -4381,6 +4538,13 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// Reading through an address is not a computation either: the operand is
 		// the address and the value is at it.
 		return e.emit_deref(unary, depth)
+	}
+	if e.long_double_of(unary.expr) {
+		// A sign change or a logical not on a value of the extended type would
+		// have to be computed in a double, and the guard has already answered so
+		// for every other operator: this is the one place the operand is known
+		// to be a long double rather than a register value.
+		return e.refuse_a_long_double_operation(unary.op, unary.line, unary.col)
 	}
 	if e.wide_value(unary.expr) {
 		// A 128-bit operand is a pair rather than a value in the accumulator, so
@@ -4640,7 +4804,7 @@ fn (mut e Emitter) inc_dec_step(expr ast.IncDec) !i32 {
 fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
 	step := e.inc_dec_step(expr)!
 	if slot := e.lookup(expr.name) {
-		if slot.count > 0 || slot.bytes > 0 || slot.wide || slot.floating {
+		if slot.count > 0 || slot.bytes > 0 || slot.wide || slot.floating || slot.long_double {
 			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer or a pointer name only')
 			return error('inc-dec operand is not a name this compiler steps')
 		}
@@ -4658,7 +4822,8 @@ fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
 		return
 	}
 	if object := e.global_of(expr.name) {
-		if object.count > 0 || object.object || object.floating || object.width == wide_bytes {
+		if object.count > 0 || object.object || object.floating || object.width == wide_bytes
+			|| e.global_is_long_double(expr.name) {
 			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer or a pointer name only')
 			return error('inc-dec operand is not a name this compiler steps')
 		}
@@ -4752,6 +4917,20 @@ fn (mut e Emitter) low_word_of_object(expr ast.Expr, width int, line int, col in
 
 fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 	target := cast.typ
+	if target.kind == .long_double {
+		// A conversion to the extended type: a source of the same type is the
+		// same value, and anything else is converted into a temporary whose
+		// address the conversion is worth.
+		return e.emit_extended_cast(cast, depth)
+	}
+	if e.long_double_of(cast.expr) && target.kind != .double {
+		// A conversion out of the extended type and into anything but a double:
+		// the machine's truncating store rounds to nearest even rather than
+		// toward zero, and the language's conversion truncates, so the plain
+		// instruction would be a wrong value for a fractional long double.
+		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from long double to ${cast.spelling} is not one this back end makes, and the machine instruction that takes a value out of the extended format is not the truncation the language asks for; only a conversion to double is implemented')
+		return error('long double conversion')
+	}
 	if target.kind in [.int128, .unsigned_int128] {
 		// A conversion *to* a 128-bit type is the value widened into the pair, the
 		// same widening a 128-bit operation does to a narrower operand: the word
@@ -5059,6 +5238,11 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 	if unary.typ.kind == .double {
 		double_register := e.float_accumulator(unary.line, unary.col)!
 		e.append(e.target.load_double_indirect(address, double_register)!)
+		return
+	}
+	if unary.typ.kind == .long_double {
+		// The object at the address is a long double, whose value is the address
+		// of its sixteen bytes: there is no register to read them into.
 		return
 	}
 	width := e.storage_width(unary.typ) or {
@@ -5902,6 +6086,15 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		return error('operator chain too long')
 	}
 	for step in spine {
+		if e.long_double_of(step.left) || e.long_double_of(step.right) {
+			// An operation on a long double is refused where it is written. The
+			// machine's SSE register file is as wide as a double, so computing
+			// it here would store a value narrower than the type says it is,
+			// with no diagnostic, which is the outcome this tree treats as a bug.
+			return e.refuse_a_long_double_operation(step.op, step.line, step.col)
+		}
+	}
+	for step in spine {
 		if !e.is_pointer_step(step) {
 			e.check_int_operands(step)!
 		}
@@ -6439,6 +6632,13 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 // be read by whatever the conditional is an operand of, so both are converted
 // to the type the conditional is worth before they meet.
 fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !void {
+	if conditional.typ.kind == .long_double {
+		// The two arms would each have to leave a sixteen-byte value, and there
+		// is no register for one to arrive in. Computing the arms as doubles
+		// would narrow whichever one ran.
+		return e.refuse_a_long_double_operation('a conditional expression', conditional.line,
+			conditional.col)
+	}
 	if e.wide_value(ast.Expr(conditional)) {
 		// Two arms of a 128-bit type would each have to leave a pair of
 		// registers, and the branch machinery carries one value. Saying so
@@ -7181,6 +7381,18 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			return e.emit_va_end(call)
 		}
 		else {}
+	}
+	if e.returns_a_long_double(call) {
+		// A function that hands a long double back returns it on the x87 stack,
+		// which is a convention this back end does not write.
+		e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} hands back a long double, and the x87 return convention a long double comes back in is not one this compiler emits')
+		return error('long double return')
+	}
+	if argument := e.long_double_argument(call) {
+		// A long double argument travels by the x87 convention too, so the
+		// address of the value is not what the callee expects to read.
+		e.diagnostics << problem(expr_line(argument), expr_col(argument), 'unsupported: the argument passed to ${call.name} is a long double, and the x87 calling convention one is passed by is not one this compiler emits')
+		return error('long double argument')
 	}
 	mut places := []ArgPlace{cap: call.args.len}
 	// A call written to an expression calls the address that expression is
@@ -8303,6 +8515,12 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		put_integer(mut e.program.globals_blob, offset, e.normalize_a_bool_constant(object.typ,
 			value), element)
 	}
+	if value := object.init_long {
+		// A long double object at the top level starts as the sixteen bytes of
+		// the constant the reader computed, which is the value gcc's assembler
+		// would name for the same initializer.
+		put_extended_value(mut e.program.globals_blob, offset, value)
+	}
 	// A brace list writes one element at a time, at the width of one element, in
 	// the order the list wrote them. The elements the list did not reach stay
 	// zero, which is what the storage started as and what C says the rest of a
@@ -8408,6 +8626,12 @@ fn (mut e Emitter) assign_global(stmt ast.Stmt, object image.GlobalSlot, expr as
 	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, e.target.name_of(register))
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
+	if e.global_is_long_double(stmt.target) {
+		// A top-level object of the extended type takes a value the way a local
+		// of it does, through the address the image holds: sixteen bytes are
+		// not a width the machine moves in one instruction.
+		return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
+	}
 	if object.width == wide_bytes {
 		// A top-level object of a 128-bit type takes the two words a local of it
 		// takes, through the address the image holds: the same widening store, and
