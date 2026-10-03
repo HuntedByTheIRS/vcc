@@ -1726,7 +1726,9 @@ fn test_the_increment_and_decrement_are_read_as_prefix_and_postfix_values() {
 		return
 	}
 	assert post_increment is ast.IncDec
-	assert (post_increment as ast.IncDec).name == 'i'
+	post_operand := (post_increment as ast.IncDec).operand
+	assert post_operand is ast.Ident
+	assert (post_operand as ast.Ident).name == 'i'
 	assert (post_increment as ast.IncDec).op == '++'
 	assert (post_increment as ast.IncDec).postfix
 	pre_increment := body[2].expr or {
@@ -1776,20 +1778,31 @@ fn test_an_increment_is_read_as_the_step_of_a_for() {
 	assert (expr as ast.IncDec).postfix
 }
 
-// Every operand that is not a name is refused where the operator is written,
-// and the message names the construct it refused: a silently wrong value from an
-// element or a member read as the name beside it is the worst outcome here.
-fn test_an_increment_refuses_every_operand_that_is_not_a_name() {
-	element := parsed('int main(void) { int a[3]; a[0]++; return 0; }')
-	assert element.diagnostics.len == 1
-	assert element.diagnostics[0].msg.contains('on a[...]')
-	assert element.diagnostics[0].msg.contains('implements ++ and -- on a plain name only')
+// Every operand that is not an object is refused where the operator is written,
+// and the message names the construct it refused: a literal has no place to
+// store and a computed value has no identity to step, so neither may be read as
+// something else.
+fn test_an_increment_refuses_every_operand_that_is_not_an_object() {
 	literal := parsed('int main(void) { ++5; return 0; }')
 	assert literal.diagnostics.len == 1
 	assert literal.diagnostics[0].msg.contains('on 5')
+	assert literal.diagnostics[0].msg.contains('steps an object')
+	computed := parsed('int main(void) { int i = 0; (i + 1)++; return 0; }')
+	assert computed.diagnostics.len == 1
+	assert computed.diagnostics[0].msg.contains('a value of +')
+}
+
+// An element, a member and what a pointer points at are objects, and the
+// operator steps each of them in place: the target need not be a plain name.
+fn test_an_increment_steps_an_element_or_a_member() {
+	element := parsed('int main(void) { int a[3]; a[0]++; return 0; }')
+	assert element.diagnostics.len == 0
 	member := parsed('struct S { int a; };\nint main(void) { struct S s; --s.a; return 0; }')
-	assert member.diagnostics.len == 1
-	assert member.diagnostics[0].msg.contains('on s.a')
+	assert member.diagnostics.len == 0
+	arrow := parsed('struct S { int a; };\nint main(void) { struct S s; struct S *p = &s; p->a++; return 0; }')
+	assert arrow.diagnostics.len == 0
+	deref := parsed('int main(void) { int i = 0; int *p = &i; (*p)++; return 0; }')
+	assert deref.diagnostics.len == 0
 }
 
 // The step is one, which is the increment of an integer of any width the back
@@ -1830,7 +1843,7 @@ fn test_an_increment_refuses_a_name_this_compiler_does_not_step() {
 	floating := parsed('int main(void) { double d = 0.0; d--; return 0; }')
 	assert floating.diagnostics.len == 1
 	assert floating.diagnostics[0].msg.contains('which is double')
-	assert floating.diagnostics[0].msg.contains('steps an integer or a pointer name only')
+	assert floating.diagnostics[0].msg.contains('steps an object of an integer or a pointer type only')
 	wide := parsed('int main(void) { __int128 x = 5; x++; return 0; }')
 	assert wide.diagnostics.len == 1
 	assert wide.diagnostics[0].msg.contains('which is __int128')

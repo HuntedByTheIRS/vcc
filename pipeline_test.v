@@ -1989,22 +1989,39 @@ fn test_a_step_on_a_pointer_with_no_pointed_at_size_is_refused() {
 	os.rm(source) or {}
 }
 
-// An element is not a name, and stepping one would have to reach the lvalue
-// through the subscript the tree has no node for. The program is refused where
-// the operator is written and nothing is written out: a silently wrong value is
-// the one outcome worse than a diagnostic.
-fn test_a_step_on_an_element_is_refused_and_writes_nothing() {
-	source := scratch('incdec_element.c')
-	binary := scratch('incdec_element')
-	text := 'int main(void) { int a[3]; a[0]++; return 0; }\n'
-	os.write_file(source, text) or { panic(err) }
-	lexed := tokenize.lex(text)
-	parsed := parser.parse(lexed.tokens)
-	assert parsed.diagnostics.len == 1
-	assert parsed.diagnostics[0].msg.contains('on a[...]')
-	assert parsed.diagnostics[0].msg.contains('implements ++ and -- on a plain name only')
-	assert !os.exists(binary)
+// An element is an object the operator can step in place: `a[i]++` reads the
+// element at the old index, steps it and leaves it stepped, and a postfix step
+// is worth what the element held. The programs are run, so what is checked is
+// the bytes and not the intent. Measured on gcc 16.2.1, which exits 6, 7 and 6.
+fn test_an_element_or_a_member_steps_in_place() {
+	source := scratch('incdec_object.c')
+	binary := scratch('incdec_object')
+	element := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[3] = {5, 0, 0}; a[0]++; return a[0]; }\n')
+	assert element == 6
+	member := compile_and_run([source, '-o', binary],
+		'struct S { int m; };\nint main(void) { struct S s; s.m = 6; ++s.m; return s.m; }\n')
+	assert member == 7
+	arrow := compile_and_run([source, '-o', binary],
+		'struct S { int m; };\nint main(void) { struct S s; s.m = 5; struct S *p = &s; p->m++; return s.m; }\n')
+	assert arrow == 6
 	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The index of the element a postfix step is written on is evaluated once: `a[i++]++`
+// steps the element at the old index and increments the index a single time. A
+// second evaluation of the index, or one made after the element's step, is a
+// silent wrong value with no diagnostic to show for it. Measured on gcc 16.2.1:
+// the element is 100 at the old index, 101 after the step, and the index is 1.
+fn test_the_index_of_a_stepped_element_is_read_once() {
+	source := scratch('incdec_once.c')
+	binary := scratch('incdec_once')
+	exit_status := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[3] = {100, 0, 0}; int i = 0; int old = a[i++]++; return old + a[0] + i; }\n')
+	assert exit_status == 202
+	os.rm(source) or {}
+	os.rm(binary) or {}
 }
 
 // A scalar wrapped in braces is the value in them, at either scope, and an array

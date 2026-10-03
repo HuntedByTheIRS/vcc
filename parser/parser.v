@@ -496,9 +496,9 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			}
 		}
 		ast.IncDec {
-			// The name the operator steps is a use of it: `++missing;` names
-			// a missing declaration just as reading the name does.
-			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			// The object the operator steps is a use of it: `++missing;`
+			// names a missing declaration just as reading the name does.
+			p.check_undeclared_expression(expr.operand, mut reported)
 		}
 		ast.Conditional {
 			// All three operands are read, because all three can name
@@ -1145,7 +1145,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Unary { 'a value with ${expr.op} applied to it' }
 		ast.Cast { 'a value converted to ${expr.spelling}' }
 		ast.Binary { 'a value of ${expr.op}' }
-		ast.IncDec { 'a value with ${expr.op} applied to ${expr.name}' }
+		ast.IncDec { 'a value with ${expr.op} applied to ${describe_operand(expr.operand)}' }
 		ast.Conditional { 'a conditional value' }
 		ast.Assign { 'a value assigned to ${describe_operand(expr.target)} with ${expr.op}' }
 		ast.Comma { 'a value of ,' }
@@ -1587,9 +1587,10 @@ fn (mut p Parser) element_type(t types.Type, operand ast.Expr, at tokenize.Token
 	return none
 }
 
-// inc_dec builds the node for `++` or `--` on a name, and refuses every other
-// operand where the operator is written: the lvalue this compiler steps is a
-// plain object, so an element, a member and a literal are named in a diagnostic
+// inc_dec builds the node for `++` or `--` on an object, and refuses every other
+// operand where the operator is written: the lvalue this compiler steps is an
+// object - a name, an element, a member or what a pointer points at - so a
+// literal, a call's result and an arithmetic value are named in a diagnostic
 // rather than read as something else.
 //
 // The type has to be an integer the back end moves as a value, whose step is
@@ -1600,38 +1601,47 @@ fn (mut p Parser) element_type(t types.Type, operand ast.Expr, at tokenize.Token
 // names nothing declares, so an undeclared name gets that message and not this
 // one.
 fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !ast.Expr {
-	match operand {
-		ast.Ident {
-			kind := operand.typ.kind
-			if kind != .unknown && !steps_a_value(kind) {
-				reason := if kind in [.int128, .unsigned_int128] {
-					'and this back end has no ${operand.typ.describe()} value to step'
-				} else {
-					'and this compiler steps an integer or a pointer name only'
-				}
-				p.error_at(op, 'unsupported: ${op.text} on ${operand.name}, which is ${operand.typ.describe()}, ${reason}')
-				return error('operand is not a name this compiler steps')
-			}
-			return ast.Expr(ast.IncDec{
-				op:      op.text
-				name:    operand.name
-				postfix: postfix
-				typ:     operand.typ
-				line:    op.line
-				col:     op.col
-			})
+	if !steps_an_object(operand) {
+		p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, and this compiler steps an object - a name, an element, a member or what a pointer points at - only')
+		return error('operand is not an object')
+	}
+	kind := operand.typ.kind
+	if kind != .unknown && !steps_a_value(kind) {
+		reason := if kind in [.int128, .unsigned_int128] {
+			'and this back end has no ${operand.typ.describe()} value to step'
+		} else {
+			'and this compiler steps an object of an integer or a pointer type only'
 		}
-		else {
-			p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, and this compiler implements ++ and -- on a plain name only')
-			return error('operand is not a name')
-		}
+		p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, which is ${operand.typ.describe()}, ${reason}')
+		return error('operand is not a value this compiler steps')
+	}
+	return ast.Expr(ast.IncDec{
+		op:      op.text
+		operand: operand
+		postfix: postfix
+		typ:     operand.typ
+		line:    op.line
+		col:     op.col
+	})
+}
+
+// steps_an_object says whether an expression names an object the operator can
+// step in place: a name, an element, a member, or what a pointer points at. A
+// literal and a computed value are not objects, so they are refused by name
+// rather than read as a place to store.
+fn steps_an_object(operand ast.Expr) bool {
+	return match operand {
+		ast.Ident, ast.Index, ast.Field { true }
+		ast.Unary { operand.op == '*' }
+		else { false }
 	}
 }
 
-// steps_a_value says whether the back end steps a name of this kind as a value
-// of its own width. A pointer is stepped by the size of what it points at, and
-// every integer kind it stores is a candidate; the two 128-bit kinds are not,
-// because the back end has no value that wide and refuses a name of one by name.
+// steps_a_value says whether the back end steps an object of this kind as a
+// value of its own width. A pointer is stepped by the size of what it points
+// at, and every integer kind it stores is a candidate; the two 128-bit kinds are
+// not, because the back end has no value that wide and refuses an object of one
+// by name.
 fn steps_a_value(kind types.Kind) bool {
 	if kind == .pointer {
 		return true
