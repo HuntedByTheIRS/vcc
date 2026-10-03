@@ -62,6 +62,18 @@ fn main() {
 		}
 		return
 	}
+	// A -print- flag asks a question and stops, so it needs no input file. That
+	// is how a build system asks a compiler where its things are before it has
+	// anything to compile: it reads the answer off the standard output and does
+	// not want a file, an object or a diagnostic beside it.
+	if opts.asks_query() {
+		target := backend.resolve(opts.target) or {
+			abort(err.msg())
+			return
+		}
+		println(query_answer(opts, target))
+		return
+	}
 	if opts.inputs.len == 0 {
 		eprintln('vcc: no input files')
 		eprintln('')
@@ -538,4 +550,83 @@ fn standard_include_dirs() []string {
 	}
 	dirs << '/usr/include'
 	return dirs
+}
+
+// query_answer answers the -print- question the command line asked. The answers
+// are this compiler's own and come from the same description the compile uses: a
+// file resolves through the linker's search, and the target's multiarch spelling
+// is the one its own search lists are built from.
+//
+// gcc answers questions about its private tree - its install directory, its cc1
+// and its as - which this compiler does not have, because it is one binary that
+// runs no program and writes the container itself. Where that is the reason, the
+// answer is the one gcc gives for a thing it cannot find, and the comment says so.
+//
+// When more than one query is written, the first of these in this order is the
+// one answered, which is the order gcc's own answers come out in: a file query
+// first, then the variant queries, then the sysroot.
+fn query_answer(opts cli.Options, target backend.Target) string {
+	if opts.print_file_name_given {
+		// The file the linker's search finds, or the name back unchanged when it
+		// finds none. An empty name is not a file and comes back empty, which is
+		// the same rule and not gcc's special answer of its install directory.
+		return target.library_file(opts.print_file_name, opts.library_dirs) or {
+			opts.print_file_name
+		}
+	}
+	if opts.print_prog_name_given {
+		// This compiler runs no external program: it emits the container
+		// itself, so there is no name it could resolve to a path. gcc prints a
+		// program name unchanged for one it cannot find, and every name is one
+		// this compiler cannot find.
+		return opts.print_prog_name
+	}
+	if opts.print_libgcc_file_name {
+		// No libgcc is linked, so this answers what a search of the libraries
+		// finds for libgcc.a: on a machine that keeps it beside gcc the search
+		// has none and the name comes back, which is gcc's answer for a libgcc
+		// it does not have.
+		return target.library_file('libgcc.a', opts.library_dirs) or { 'libgcc.a' }
+	}
+	if opts.print_multi_directory {
+		// One compilation variant exists, and its directory is the default one.
+		return '.'
+	}
+	if opts.print_multi_lib {
+		// That one variant, named by the directory it lives in and no options.
+		return '.;'
+	}
+	if opts.print_multi_os_directory {
+		// There is no multilib tree to move through: the system's own library
+		// directories are what the search looks in, so the relative directory
+		// is the one this compiler is already in.
+		return '.'
+	}
+	if opts.print_multiarch {
+		// The target's multiarch spelling, which is the name this compiler
+		// builds both of its search lists from. gcc here prints an empty line
+		// because it is configured without multiarch.
+		return '${target.arch}-${target.os}-gnu'
+	}
+	if opts.print_sysroot {
+		// A sysroot is a tree to compile against instead of the running system,
+		// and this compiler has none: its headers and libraries are the host's,
+		// so the answer is empty and not a directory.
+		return ''
+	}
+	if opts.print_sysroot_headers_suffix {
+		// The suffix goes with the sysroot, and there is no sysroot. gcc makes
+		// this a fatal error because it has no suffix to give; an empty answer
+		// is the same fact in a form a build can use, so the run still exits 0.
+		return ''
+	}
+	return cli.search_dirs_text(install_dir(), []string{}, target.library_dirs_for(opts.library_dirs))
+}
+
+// install_dir is the directory the running compiler is in. gcc names its private
+// install tree here because that is where its own files are; this compiler is one
+// binary with no tree beside it, so the directory holding the binary is the only
+// "where the compiler is" there is.
+fn install_dir() string {
+	return os.dir(os.executable())
 }
