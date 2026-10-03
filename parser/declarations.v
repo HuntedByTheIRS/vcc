@@ -2274,6 +2274,26 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 				p.skip_balanced(open) or {}
 				return error('brace element')
 			}
+		} else if !body && t.kind == .punct && (t.text == '(' || t.text == '-' || t.text == '+') {
+			// A written constant may be written with a cast around it, which is
+			// the shape V emits for every constant it writes: `((u8)(0x08))`, or
+			// inside parentheses, `(32)`, with a sign in front of them, `-(32)`.
+			// A cast of a written constant is itself a written constant, and the
+			// value is the one the conversion makes, so the element reaches the
+			// image as a number like the ones beside it. A cast of anything else
+			// - a call, a name, an expression - is refused by name, because the
+			// image holds constants and a value written into it that the cast did
+			// not make is worse than the refusal.
+			if constant := p.file_scope_brace_constant() {
+				elements << BraceElement{
+					number:      constant
+					designators: designators
+				}
+			} else {
+				p.error_at(t, 'unsupported: an element of a brace initializer is a written number or an address, and a parenthesized element here is a written constant or a cast of one, found ${describe(t)}')
+				p.skip_balanced(open) or {}
+				return error('brace element')
+			}
 		} else if body {
 			// The element a store takes: a name, a call, `&x`, a string
 			// literal, or a parenthesized constant this reader has no arm for.
@@ -2325,6 +2345,189 @@ fn (p Parser) starts_a_written_constant() bool {
 		return after.kind == .number || after.kind == .character
 	}
 	return false
+}
+
+// file_scope_brace_constant reads one element of a file-scope brace list that is
+// a written constant written with something around it rather than a bare number:
+// a cast of a written constant, `((u8)(0))`, which is the shape V emits for every
+// constant it writes, or a written constant inside parentheses, `(32)`, with a
+// sign allowed in front of the parentheses, `-(32)`, or inside them, `(-32)`.
+// Each is the value the conversion or the sign makes, so the element reaches the
+// image as a number like the ones beside it.
+//
+// A shape that is neither answers none and gives back every token and diagnostic
+// it read, so the caller names the element at its own location: a cast of a call,
+// a name or an expression is not a written constant and is refused rather than
+// converted, and so is a parenthesized expression like `(1 + 2)`.
+fn (mut p Parser) file_scope_brace_constant() ?NumberConstant {
+	if constant := p.file_scope_cast_constant() {
+		return constant
+	}
+	if constant := p.file_scope_signed_parenthesized_constant() {
+		return constant
+	}
+	return none
+}
+
+// file_scope_signed_parenthesized_constant reads a written constant inside one
+// pair of parentheses, `(32)`, with a sign allowed in front of the parentheses,
+// `-(32)`, or inside them, `(-32)`. The value is the constant the sign makes, and
+// a shape that is not a parenthesized written constant - `(1 + 2)`, `(sizeof(int))`
+// - answers none with every token and diagnostic given back, because a
+// parenthesized expression is not a written constant the image may hold.
+fn (mut p Parser) file_scope_signed_parenthesized_constant() ?NumberConstant {
+	saved := p.pos
+	saved_diagnostics := p.diagnostics.len
+	mut sign := 1
+	if p.at_punct('-') {
+		p.next()
+		sign = -1
+	} else if p.at_punct('+') {
+		p.next()
+	}
+	if !p.at_punct('(') {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	p.next() // the (
+	constant := p.number_constant() or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if !p.at_punct(')') {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	p.next() // the )
+	// The parenthesized constant is the whole element: a comma or the closing
+	// brace follows it.
+	if !p.at_punct(',') && !p.at_punct('}') {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if sign < 0 {
+		negated := negate_file_constant(constant.number) or {
+			p.pos = saved
+			p.diagnostics = p.diagnostics[..saved_diagnostics]
+			return none
+		}
+		return NumberConstant{
+			number: negated
+			at:     constant.at
+		}
+	}
+	return constant
+}
+
+// negate_file_constant answers the constant a minus sign in front of it makes,
+// for the classes a sign folds into. A long double travels in its own field and
+// has no negation here, so a constant with neither an integer nor a floating
+// value answers none rather than a value the sign did not make.
+fn negate_file_constant(constant FileConstant) ?FileConstant {
+	if value := constant.integer {
+		return FileConstant{
+			integer: -value
+		}
+	}
+	if value := constant.floating {
+		return FileConstant{
+			floating: -value
+		}
+	}
+	return none
+}
+
+// file_scope_cast_constant reads one element of a file-scope brace list that is a
+// cast of a written constant, the shape V emits for every constant: `((u8)(0))`,
+// which is a written constant with a conversion written around it. The value the
+// element is worth is the one the conversion makes - the constant narrowed to
+// the named type's width and sign, a floating constant truncated towards zero
+// for an integer target, an integer widened to a floating one - so the element
+// reaches the image as a number, converted the way the language converts it.
+//
+// The whole element may be written inside one pair of parentheses, `((u8)(0))`,
+// or only the cast's own type may be, `(u8)(0)`, and the constant may itself be
+// parenthesized, `(u8)(0)`. It reads no token when the shape is not this one:
+// every token it read and every diagnostic it raised is given back, so the caller
+// can refuse the element by name at its own location rather than report a cast
+// the source did not write or a literal the source wrote somewhere else.
+//
+// Only a written constant is converted: a cast of a call, of a name, or of an
+// expression answers none, because the image holds constants and a value the cast
+// did not make would be a wrong table entry with no diagnostic. The target type
+// has to be one this reader has a conversion for - an integer or a real floating
+// type - and a cast to anything else answers none for the same reason.
+fn (mut p Parser) file_scope_cast_constant() ?NumberConstant {
+	saved := p.pos
+	saved_diagnostics := p.diagnostics.len
+	// One pair of parentheses around the whole cast, which is the shape V
+	// emits: after it comes the cast's own `(type)`.
+	mut wrapped := false
+	if p.peek_at(1).kind == .punct && p.peek_at(1).text == '(' {
+		wrapped = true
+		p.next()
+	}
+	p.next() // the ( of the cast
+	spec, d, _ := p.parse_type_name_parts(1) or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if !p.at_punct(')') {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	p.next() // the ) of the cast
+	// The value, which may be written inside its own parentheses.
+	mut operand_wrapped := false
+	if p.at_punct('(') {
+		operand_wrapped = true
+		p.next()
+	}
+	constant := p.number_constant() or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if operand_wrapped {
+		if !p.at_punct(')') {
+			p.pos = saved
+			p.diagnostics = p.diagnostics[..saved_diagnostics]
+			return none
+		}
+		p.next()
+	}
+	if wrapped {
+		if !p.at_punct(')') {
+			p.pos = saved
+			p.diagnostics = p.diagnostics[..saved_diagnostics]
+			return none
+		}
+		p.next()
+	}
+	// The cast is the whole element: a comma or the closing brace follows it.
+	// Anything else means the element is a longer expression, which is not a
+	// written constant with a cast around it.
+	if !p.at_punct(',') && !p.at_punct('}') {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	typ := p.declared_type(spec.clause, d)
+	converted := p.cast_file_constant(typ, constant.number) or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	return NumberConstant{
+		number: converted
+		at:     constant.at
+	}
 }
 
 // brace_designators reads the run of designators in front of an element and
@@ -2996,6 +3199,56 @@ fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
 		return i64(fraction_value), none
 	}
 	return value, none
+}
+
+// cast_file_constant converts a written constant to the type of a cast written
+// in front of it, which is what the cast means: the constant narrowed to the
+// target's width and sign, a floating one truncated towards zero for an integer
+// target, an integer widened to a floating one. The class the answer has is the
+// target type's, because that is what the object's own conversion then places,
+// so a double target holds a floating constant and an integer target an integer
+// one.
+//
+// An integer target converts through `converted_constant`, which is the same
+// conversion the constant folder makes for `(char) 300` in an expression, so a
+// value keeps what the target can hold and never what the source wrote. A
+// floating target keeps the value as a double, which the emitter rounds to the
+// target's width when it writes it, the same rounding `(float) x` makes.
+//
+// A target this reader has no conversion for - a pointer, an aggregate, a long
+// double - and an operand whose class it cannot convert from answer none, so the
+// element is refused by name rather than written as a value the cast did not
+// make.
+fn (p Parser) cast_file_constant(typ types.Type, operand FileConstant) ?FileConstant {
+	if typ.kind.is_integer() {
+		if value := operand.integer {
+			converted := p.converted_constant(typ, value) or { return none }
+			return FileConstant{
+				integer: converted
+			}
+		}
+		if value := operand.floating {
+			converted := p.converted_float_constant(typ, value) or { return none }
+			return FileConstant{
+				integer: converted
+			}
+		}
+		return none
+	}
+	if typ.kind in [types.Kind.float, .double] {
+		if value := operand.integer {
+			return FileConstant{
+				floating: f64(value)
+			}
+		}
+		if value := operand.floating {
+			return FileConstant{
+				floating: value
+			}
+		}
+		return none
+	}
+	return none
 }
 
 // initializer_list_for makes each element of an array's brace list the class the
