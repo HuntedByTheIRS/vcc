@@ -456,6 +456,29 @@ fn test_an_address_table_inside_a_body_becomes_the_stores_of_the_elements() {
 	assert run_image(emitted.bytes) == 195
 }
 
+// A compound literal written in a condition is initialized where the condition
+// is evaluated rather than in front of the statement, because 6.5.2.5p7 makes
+// the object's value the one the evaluation wrote. The loop counts 0, 1 and 2
+// and stops at 3. Measured on gcc 16.2.1, this program exits 33 (3 * 10 + 3).
+fn test_a_compound_literal_in_a_condition_is_initialized_each_evaluation() {
+	emitted := emit(translation_unit('int main(void) { int i = 0; int sum = 0; while ((int[]){i}[0] < 3) { sum += (int[]){i}[0]; i++; } return i * 10 + sum; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 33
+}
+
+// 6.5.2.5p7: each compound literal creates only a single object in a given
+// scope, so a literal in a condition names one object across the loop even
+// though its value is re-stored on every evaluation. The helper hands back the
+// address it was given both times and this program answers 1. Measured on gcc
+// 16.2.1.
+fn test_a_compound_literal_in_a_condition_is_one_object_for_the_scope() {
+	emitted := emit(translation_unit('int *g[2]; int gi = 0; int keep(int *a) { g[gi++] = a; return 1; } int main(void) { for (int i = 0; i < 2; i++) { if (keep((int[]){i})) {} } return g[0] == g[1]; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 1
+}
+
 // A member of a table's element type that does not hold an address is refused by
 // name rather than converted, because the address of the storage is a value the
 // declaration did not write.

@@ -19,10 +19,21 @@ import types
 // `arr[1] = 21` writes through the name, `&(P){3, 4}` takes its address, and
 // passing one to a function reads it the way passing a named object does.
 //
-// The statements are put in front of the statement the literal was written in,
-// which is where the object has to be created before the expression that reads
-// it runs. `parse_statement` opens one list per statement for this to be
-// appended to.
+// The declaration of the object is put in front of the statement the literal
+// was written in, which is where the object has to be created before the
+// expression that reads it runs. `parse_statement` opens one list per statement
+// for this to be appended to.
+//
+// 6.5.2.5p7 makes that one object for a whole scope and re-initializes it every
+// time the literal is evaluated. For a literal written somewhere the statement
+// describes a single evaluation of, the stores go in front of the statement with
+// the declaration and that is the one evaluation. For a literal written inside a
+// condition, a loop step, a short-circuited operand or an arm of `?:`, the
+// statement may evaluate it a number of times, so the stores are wrapped in a
+// statement expression at the literal's own position: they run each time the
+// literal is evaluated, and the comma makes the expression worth the object they
+// wrote. The declaration still goes in front of the statement, so the object is
+// one for the scope rather than one per evaluation.
 
 // brace_list_is_constant says whether a brace list initializes its object
 // without running anything: every element is a written constant - a number, a
@@ -48,10 +59,6 @@ fn (mut p Parser) parse_compound_literal(spec DeclSpec, d Declarator, at tokeniz
 	list := p.parse_brace_initializer(true) or {
 		return error('compound literal initializer')
 	}
-	if p.compound_unstable > 0 && !brace_list_is_constant(list.elements) {
-		p.error_at(at, 'unsupported: a compound literal whose initializer is not constant is built where its statement begins, and this one is written inside a condition, a loop step or a short-circuited operand, where the standard may evaluate it a number of times the statement does not describe')
-		return error('compound literal in a re-evaluated place')
-	}
 	if p.compound_pending.len == 0 {
 		// A compound literal outside a statement is one whose object lives in
 		// the image rather than in a frame. The one shape this reader builds
@@ -62,6 +69,33 @@ fn (mut p Parser) parse_compound_literal(spec DeclSpec, d Declarator, at tokeniz
 	}
 	name := p.compound_name()
 	target, stmts := p.compound_literal_object(name, spec, d, at, list)
+	if p.compound_unstable > 0 && !brace_list_is_constant(list.elements) {
+		// The literal is written where the statement may evaluate it more than
+		// once and the initializer is not constant, so 6.5.2.5p7's "the object
+		// is initialized each time the literal is evaluated" is observable: the
+		// stores have to run at the evaluation and not once in front of the
+		// statement. Only the declaration stays in front, so the object is one
+		// for the scope; the stores are wrapped in a statement expression at the
+		// literal's position and the comma is worth the object they wrote.
+		p.compound_pending[p.compound_pending.len - 1] << stmts[0..1]
+		return ast.Expr(ast.Comma{
+			left:  ast.Expr(ast.StmtExpr{
+				body: stmts[1..].clone()
+				typ:  types.void_type()
+				line: at.line
+				col:  at.col
+			})
+			right: ast.Expr(ast.Ident{
+				name: name
+				typ:  target
+				line: at.line
+				col:  at.col
+			})
+			typ:   target
+			line:  at.line
+			col:   at.col
+		})
+	}
 	p.compound_pending[p.compound_pending.len - 1] << stmts
 	return ast.Expr(ast.Ident{
 		name: name
