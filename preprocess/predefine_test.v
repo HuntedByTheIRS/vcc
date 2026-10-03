@@ -86,6 +86,38 @@ fn test_a_name_that_is_not_predefined_has_no_body() {
 	assert predefine('__NOT_A_MACRO_THIS_COMPILER_DEFINES__') == none
 }
 
+// The compiler's own identity macros are what a program reads when it reports
+// which compiler built it. The version is the command line's, passed the way
+// main.v passes it, and __VCC__ is the presence flag.
+fn test_the_compiler_identifies_itself() {
+	defines := identity_defines('0.0.1')
+	assert '__VCC__=1' in defines
+	assert '__VCC_VERSION__="0.0.1"' in defines
+	// The commit is this build's own answer, so the assertion is about the
+	// mechanism and not about a value a test can carry: a build that knew a
+	// commit defines the macro with that value, and one that did not defines no
+	// such macro rather than an empty one.
+	if vcc_commit == '' {
+		assert !defines.any(it.starts_with('__VCC_COMMIT__'))
+	} else {
+		assert '__VCC_COMMIT__="${vcc_commit}"' in defines
+	}
+}
+
+// A use of one of these is its value, which is what a program that prints its
+// compiler expands.
+fn test_a_use_of_the_identity_macros_is_their_value() {
+	result := preprocess('int a = __VCC__; char *s = __VCC_VERSION__;', 'test.c', Options{
+		defines: identity_defines('0.0.1')
+	})
+	assert result.diagnostics.len == 0
+	mut texts := []string{}
+	for tok in result.tokens {
+		texts << tok.text
+	}
+	assert texts == ['int', 'a', '=', '1', ';', 'char', '*', 's', '=', '"0.0.1"', ';']
+}
+
 // A use of one of these is the number, which is what a header that branches on it
 // reads.
 fn test_a_use_of_a_predefine_is_its_value() {

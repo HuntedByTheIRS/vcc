@@ -229,17 +229,17 @@ fn main() {
 }
 
 // language_defines are the -D arguments the compiler hands the preprocessor: the
-// macros the selected mode adds, and then the ones the command line wrote. That
-// order is what makes a -D win over the mode, the way it wins over a built-in in
-// gcc. -undef takes the mode's macros away with every other macro that describes
-// the target.
+// macros that identify this compiler, the ones the selected mode adds, and then
+// the ones the command line wrote. That order is what makes a -D win over the
+// mode and over the identity, the way it wins over a built-in in gcc. -undef
+// takes all of the compiler's own macros away with every other macro that
+// describes the target.
 fn language_defines(opts cli.Options) []string {
 	if opts.undef_builtins {
 		return opts.defines
 	}
-	// The mode's macros come first, so a -D on the command line still wins over
-	// them: a mode is a built-in, and the command line is not.
 	mut out := []string{}
+	out << preprocess.identity_defines(cli.version)
 	out << preprocess.standard_defines(opts.dialect)
 	out << opts.defines
 	return out

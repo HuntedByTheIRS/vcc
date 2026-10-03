@@ -129,6 +129,43 @@ fn builtins(target backend.Target) []Definition {
 	return definitions
 }
 
+// identity_defines are the macros that say which compiler is reading the
+// program: its name, the version it reports, and, when the build knew it, the
+// commit it was built from.
+//
+// `__VCC__` is a presence flag, spelled the way __GNUC__, __clang__ and
+// __TINYC__ are, so a program asks with `#ifdef __VCC__`. `__VCC_VERSION__` is a
+// string rather than a number: what it names is a release and not a language
+// level, this compiler has no feature history a `>=` on it could compare, and a
+// string is what a program prints. The version is the command line's own
+// (`cli.version`) and arrives as a parameter, so there is one version number in
+// the tree and not a second copy here.
+//
+// `__VCC_COMMIT__` is defined only when the build that made the binary knew its
+// commit, which is what vcc_commit below is: the VCC_COMMIT environment variable
+// read when this compiler was compiled. That mechanism is the reproducible one.
+// A commit is an input the builder states and not something the tree guesses:
+// `VCC_COMMIT=$(git rev-parse HEAD) v -nocache -o vcc .` bakes one in, the same
+// source and the same VCC_COMMIT give the same bytes, and a build that was not
+// told a commit (the gate, CI, a plain `v -o vcc .`) defines no such macro
+// instead of naming the checkout it happened to sit beside. The cost is that an
+// ordinary build has no __VCC_COMMIT__ at all, so a program that wants it has to
+// be built through the documented command.
+pub fn identity_defines(version string) []string {
+	mut out := ['__VCC__=1', '__VCC_VERSION__="${version}"']
+	if vcc_commit != '' {
+		out << '__VCC_COMMIT__="${vcc_commit}"'
+	}
+	return out
+}
+
+// vcc_commit is the commit a build was made from, asked for when this compiler
+// is compiled rather than when it runs: a binary that read a .git directory at
+// run time would report the checkout it is sitting next to, which is not the one
+// it was built from. An unset variable is the empty string, and an empty string
+// is "this build does not know", which defines no macro.
+const vcc_commit = $env('VCC_COMMIT')
+
 // standard_defines are the macros the selected mode adds to the ones this
 // compiler already predefines, in the shape a -D argument has: main() hands them
 // to the preprocessor ahead of the command line's own -D arguments, which is the
