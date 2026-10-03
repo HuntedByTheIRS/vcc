@@ -196,6 +196,32 @@ fn test_a_header_name_with_a_slash_is_read_as_one_name() {
 	assert result.tokens.map(it.text) == ['int', 'typed', ';']
 }
 
+fn test_an_absolute_include_is_opened_where_it_points() {
+	// An absolute name is the file, so there is nothing to search: both
+	// spellings open it, and it is not in any directory the search would
+	// reach.
+	dir := fixture_directory()
+	header := os.join_path(os.abs_path(dir), 'absolute.h')
+	os.write_file(header, 'int from_absolute;\n') or {}
+	assert os.is_abs_path(header)
+	for name in ['"${header}"', '<${header}>'] {
+		result := preprocess(include_line(name), os.join_path(dir, 'main.c'), Options{})
+		assert result.diagnostics.len == 0
+		assert result.tokens.map(it.text) == ['int', 'from_absolute', ';']
+		assert result.tokens[0].file == header
+	}
+}
+
+fn test_an_absolute_include_that_is_not_there_is_refused_by_name() {
+	// Nothing was searched for, so the message must not claim directories
+	// were looked in.
+	missing := os.join_path(os.abs_path(fixture_directory()), 'no-such-absolute.h')
+	messages := diagnostics_of(include_line('"${missing}"'))
+	assert messages.len == 1
+	assert messages[0].contains(missing)
+	assert !messages[0].contains('looked in')
+}
+
 fn test_an_include_guard_keeps_the_second_read_out() {
 	dir := fixture_directory()
 	os.write_file(os.join_path(dir, 'guarded.h'), '#ifndef GUARDED_H\n#define GUARDED_H\nint once;\n#endif\n') or {}
@@ -1027,17 +1053,18 @@ fn test_a_gnu_dialect_claims_a_gnu_compiler() {
 	// not just the first. <tgmath.h> and the 132 other headers under /usr/include
 	// that ask about __GNUC__ read them; without them <tgmath.h> is an #error, and
 	// with a claim below 4.3 it is a different #error.
-	gnu := standard_defines(.gnu99)
+	gnu := standard_defines(.gnu99, .none)
 	assert '__GNUC__=4' in gnu
 	assert '__GNUC_MINOR__=3' in gnu
 	assert '__GNUC_PATCHLEVEL__=1' in gnu
 	// The claim belongs to the spelling, so every GNU spelling has it and the ISO
-	// ones and the unrecognized ones do not.
-	assert standard_defines(.gnu11).len == 3
-	assert standard_defines(.gnu23).len == 3
-	assert standard_defines(.c89) == []
-	assert standard_defines(.c11) == []
-	assert standard_defines(.other) == []
+	// ones and the unrecognized ones do not. The second argument is the emulation,
+	// and what naming one does to this claim is the next test's subject.
+	assert standard_defines(.gnu11, .none).len == 3
+	assert standard_defines(.gnu23, .none).len == 3
+	assert standard_defines(.c89, .none) == []
+	assert standard_defines(.c11, .none) == []
+	assert standard_defines(.other, .none) == []
 	// c99 is the mode that also hides what the standard does not have.
-	assert standard_defines(.c99) == ['__STRICT_ANSI__=1']
+	assert standard_defines(.c99, .none) == ['__STRICT_ANSI__=1']
 }

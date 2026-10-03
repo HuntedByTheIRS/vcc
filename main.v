@@ -45,6 +45,7 @@ fn main() {
 		println('target: ${target.name}')
 		println('optimize: ${opts.optimization.summary()}')
 		println('standard: ${standard_line(opts)}')
+		println('emulation: ${emulation_line(opts)}')
 		println('extensions: ${extensions_line(opts.vcc_extensions)}')
 		println('recorded: ${recorded_line(opts.ignored)}')
 		if opts.include_dirs.len == 0 {
@@ -75,6 +76,17 @@ fn main() {
 	path := opts.inputs[0]
 	source := read_source(path) or {
 		abort('cannot read ${path}: ${err.msg()}')
+		return
+	}
+	// What the input is decides whether it is read as source at all. An object
+	// or an archive is an input to a link, which this compiler does not have
+	// yet, and reading one as source answers a wrong input kind with a parse
+	// error raised from inside a binary file. The bytes are classified rather
+	// than the path so that standard input, which cannot be read twice, is
+	// decided by the same rule.
+	kind := cli.classify_input(source, path, opts.input_type)
+	if kind != .source {
+		abort(cli.input_refusal(path, kind))
 		return
 	}
 	mut phases := []cli.Phase{}
@@ -229,18 +241,18 @@ fn main() {
 }
 
 // language_defines are the -D arguments the compiler hands the preprocessor: the
-// macros the selected mode adds, and then the ones the command line wrote. That
-// order is what makes a -D win over the mode, the way it wins over a built-in in
-// gcc. -undef takes the mode's macros away with every other macro that describes
-// the target.
+// macros that identify this compiler, the ones the selected mode adds, and then
+// the ones the command line wrote. That order is what makes a -D win over the
+// mode and over the identity, the way it wins over a built-in in gcc. -undef
+// takes all of the compiler's own macros away with every other macro that
+// describes the target.
 fn language_defines(opts cli.Options) []string {
 	if opts.undef_builtins {
 		return opts.defines
 	}
-	// The mode's macros come first, so a -D on the command line still wins over
-	// them: a mode is a built-in, and the command line is not.
 	mut out := []string{}
-	out << preprocess.standard_defines(opts.dialect)
+	out << preprocess.identity_defines(cli.version)
+	out << preprocess.standard_defines(opts.dialect, opts.emulation)
 	out << opts.defines
 	return out
 }
@@ -284,6 +296,16 @@ fn standard_line(opts cli.Options) string {
 fn parser_target(name string) ?backend.Target {
 	target := backend.resolve(name) or { return backend.host() }
 	return target
+}
+
+// emulation_line is what -vv says about -femulation: the compiler whose identity
+// macros the build asked for, or that it asked for none and this compiler's own
+// are the answer.
+fn emulation_line(opts cli.Options) string {
+	if opts.emulation == .none {
+		return '(none; this compiler reports its own identity)'
+	}
+	return '${opts.emulation.spelling()} (the identity macros of that compiler are defined)'
 }
 
 // extensions_line is what -vv says about the vendor extensions: which are on,

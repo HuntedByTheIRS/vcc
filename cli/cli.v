@@ -45,8 +45,12 @@ pub mut:
 	// of. Every spelling has a mode, including the ones this compiler does not
 	// implement, because a spelling that stops a build is worse than a flag
 	// that does nothing.
-	standard     string
-	dialect      standard.Mode
+	standard string
+	dialect  standard.Mode
+	// emulation is -femulation: the compiler whose own identity macros this
+	// compiler defines in place of its own, so that a program branching on
+	// __GNUC__, __clang__ or __TINYC__ sees the compiler the flag names.
+	emulation    preprocess.Emulation
 	input_type   string
 	compile_only bool
 	preprocess   bool
@@ -283,6 +287,10 @@ pub fn parse(args []string) !Options {
 		} else if arg.starts_with('-std=') {
 			opts.standard = arg[5..]
 			opts.dialect = standard.from_spelling(opts.standard)
+		} else if arg == '-femulation' {
+			opts.emulation = preprocess.emulation_from_spelling(cursor.value_of('')!)!
+		} else if arg.starts_with('-femulation=') {
+			opts.emulation = preprocess.emulation_from_spelling(arg[12..])!
 		} else if arg == '-x' {
 			opts.input_type = cursor.value_of('')!
 		} else if arg == '-B' {
@@ -385,6 +393,8 @@ pub fn usage(all bool) string {
 	out << '  -fvcc-exts=all            or every name the compiler has'
 	out << '  -fno-vcc-exts=NAME        turn one off again'
 	out << '  -fno-vcc-exts=all         or all of them'
+	out << '  -femulation=NAME  define the identity macros of NAME (gcc, clang or'
+	out << '                    tcc) in place of the ones this compiler invented'
 	if all {
 		out << ''
 		out << 'What a replacement for the bundled tcc is asked to accept, and what'
@@ -419,8 +429,9 @@ pub fn usage(all bool) string {
 		out << '  @listfile             expanded before anything else'
 		out << '  -                     read the source from standard input'
 		out << 'The V toolchain also hands the compiler its own GC library,'
-		out << 'thirdparty/tcc/lib/libgc.a, as an ordinary input. It is accepted and'
-		out << 'not linked yet, like any other archive.'
+		out << 'thirdparty/tcc/lib/libgc.a, as an ordinary input. An object or an'
+		out << 'archive is named as such and refused; linking one is not implemented'
+		out << 'yet, and neither is reading one as source.'
 	}
 	return out.join('\n')
 }
