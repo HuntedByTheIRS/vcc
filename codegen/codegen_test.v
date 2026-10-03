@@ -2969,6 +2969,34 @@ fn test_the_part_of_a_complex_value_is_the_component_it_names() {
 	assert run_image(emitted.bytes) == 0
 }
 
+// The component of a complex value a call hands back is the value the call wrote
+// into storage, not a stale slot: the operand is materialised before the
+// component is loaded, so the address the returned object was stored at is the
+// address the load reads. The program below reads a component off a call result,
+// compares it with `==`, stores it to a plain double and compares that, and reads
+// a component straight off a call; a load at the wrong offset or out of the wrong
+// slot answers a different number here. The callee is compiled by this compiler,
+// so the value is exact and the comparison is about the read rather than about a
+// library's rounding; a call into libm whose result is not exact is the subject
+// of the pipeline test beside it. Measured on gcc 16.2.1, this program exits 0.
+fn test_a_component_read_from_a_call_result_is_the_value_the_call_wrote() {
+	source := 'double _Complex make(void) { return 8.0 + 0.0i; }' +
+		' int main(void) {' +
+		' double _Complex c = make();' +
+		' if (__real__ c != 8.0) { return 1; }' +
+		' if (__imag__ c != 0.0) { return 2; }' +
+		' double r = __real__ c;' +
+		' if (r != 8.0) { return 3; }' +
+		' double i = __imag__ c;' +
+		' if (i != 0.0) { return 4; }' +
+		' if (__real__ make() != 8.0) { return 5; }' +
+		' if (__real__ c + 1.0 != 9.0) { return 6; }' +
+		' return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_a_double_comparison_answers_the_int_a_branch_reads() {
 	// A comparison of two doubles reads the flags the floating compare leaves,
 	// which are not the integer ones: the sign of a double lives in the top bit of
