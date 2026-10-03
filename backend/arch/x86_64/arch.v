@@ -1351,6 +1351,13 @@ fn indirect_move(address Register, operand Register, width int, store bool, sign
 	return out
 }
 
+// The atomic read-modify-write instructions, and the one barrier. A program
+// that reaches for one of these is asking for an operation no other thread may
+// interleave with, and on this machine that is a lock prefix on the instruction
+// that touches memory, or, for xchg, the instruction itself. Which instruction
+// an operation is is the emitter's decision, taken from the memory order it
+// folded; here each one is a single encoding.
+
 // bit_scan_forward encodes `bsf`: the index of the lowest set bit of the source
 // into the destination. Measured on gcc 16.2.1 at -O2 on this machine,
 // `unsigned ctz32(unsigned x) { return __builtin_ctz(x); }` is
@@ -1378,6 +1385,110 @@ pub fn bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {
 	out << u8(0xbc)
 	out << u8(0xc0 | ((dst.code & 0x07) << 3) | (src.code & 0x07)) // mod 11: the source is a register
 	return out
+}
+
+// exchange_indirect encodes `xchg [address], value`, which swaps the value in
+// memory with the one in the register in a single locked step and leaves the old
+// memory value in the register. The memory form carries the lock implicitly,
+// which is why no f0 byte is written: measured on gcc 16.2.1 at -O2,
+// `__atomic_store_n(p, v, 5)` on an int is `xchgl (%rdi),%esi` and on a byte is
+// `xchgb (%rdi),%sil`, with no prefix either time.
+pub fn exchange_indirect(address Register, value Register, width int) ![]u8 {
+	if width != 1 && width != 2 && width != 4 && width != 8 {
+		return error('${name}: a value of ${width} bytes is not one this machine exchanges')
+	}
+	low := address.code & 0x07
+	if low == 4 || low == 5 {
+		return error('${name}: an address in ${address.name} cannot be named without a displacement')
+	}
+	mut out := []u8{cap: 6}
+	mut rex := u8(0x40)
+	if width == 8 {
+		rex |= 0x08
+	}
+	if value.code >= 8 {
+		rex |= 0x04
+	}
+	if address.code >= 8 {
+		rex |= 0x01
+	}
+	if width == 2 {
+		out << u8(0x66)
+	}
+	if width == 1 || rex != 0x40 {
+		out << rex
+	}
+	out << u8(if width == 1 { 0x86 } else { 0x87 })
+	out << u8(((value.code & 0x07) << 3) | low) // mod 00: [address]
+	return out
+}
+
+// compare_exchange_indirect encodes `lock cmpxchg [address], value`. The
+// instruction compares the memory word with the accumulator and, when the two
+// are equal, writes the register's value there and sets the zero flag; when they
+// differ it leaves the accumulator holding what memory held. The accumulator is
+// implicit, so this names only the address and the value. Measured on gcc 16.2.1
+// at -O2, `__atomic_compare_exchange_n(p, &e, d, 0, 5, 5)` is
+// `movl %esi,%eax; lock cmpxchgl %edx,(%rdi); sete %al; movzbl %al,%eax`, and the
+// byte form is `lock cmpxchgb %cl,(%rdx)`.
+pub fn compare_exchange_indirect(address Register, value Register, width int) ![]u8 {
+	return locked_indirect(0xb0, 0xb1, address, value, width)
+}
+
+// fetch_add_indirect encodes `lock xadd [address], value`: the register's value
+// is added to memory and the old memory value left in the register. Measured on
+// gcc 16.2.1 at -O2, `__atomic_fetch_add(p, d, 5)` is
+// `movl %esi,%eax; lock xaddl %eax,(%rdi)`, and a subtraction negates the
+// register first and takes the same instruction, so there is one encoding for
+// both.
+pub fn fetch_add_indirect(address Register, value Register, width int) ![]u8 {
+	return locked_indirect(0xc0, 0xc1, address, value, width)
+}
+
+// locked_indirect is the shared shape of the two locked read-modify-write
+// instructions: a lock prefix, the operand-size prefix for a two-byte value, the
+// REX byte a wide or high register needs, the two-byte opcode the width selects,
+// and the modrm that names the register and the address.
+fn locked_indirect(byte_opcode u8, wide_opcode u8, address Register, value Register, width int) ![]u8 {
+	if width != 1 && width != 2 && width != 4 && width != 8 {
+		return error('${name}: a value of ${width} bytes is not one this machine read-modify-writes')
+	}
+	low := address.code & 0x07
+	if low == 4 || low == 5 {
+		return error('${name}: an address in ${address.name} cannot be named without a displacement')
+	}
+	mut out := []u8{cap: 7}
+	out << u8(0xf0) // lock
+	if width == 2 {
+		out << u8(0x66)
+	}
+	mut rex := u8(0x40)
+	if width == 8 {
+		rex |= 0x08
+	}
+	if value.code >= 8 {
+		rex |= 0x04
+	}
+	if address.code >= 8 {
+		rex |= 0x01
+	}
+	if width == 1 || rex != 0x40 {
+		out << rex
+	}
+	out << u8(0x0f)
+	out << u8(if width == 1 { byte_opcode } else { wide_opcode })
+	out << u8(((value.code & 0x07) << 3) | low) // mod 00: [address]
+	return out
+}
+
+// memory_fence encodes `mfence`, the machine's full memory barrier, which is what
+// a sequentially consistent fence asks for. Measured on gcc 16.2.1 at -O2,
+// `__atomic_thread_fence(5)` emits `lock orq $0, (%rsp)`, a full barrier written
+// another way, while an acquire or a release fence emits nothing at all because
+// this machine already orders those in the instruction stream. mfence names the
+// same barrier directly and takes no stack address it would have to find.
+pub fn memory_fence() []u8 {
+	return [u8(0x0f), 0xae, 0xf0]
 }
 
 // frame_reserve opens the space a function's locals live in. The size is an
@@ -2240,6 +2351,7 @@ pub:
 	cmp_reg32                       fn (Register, Register) ![]u8                     = unsafe { nil }
 	cmp_reg64                       fn (Register, Register) ![]u8                     = unsafe { nil }
 	compare_double                  fn (Register, Register) ![]u8                     = unsafe { nil }
+	compare_exchange_indirect       fn (Register, Register, int) ![]u8                = unsafe { nil }
 	compare_float                   fn (Register, Register) ![]u8                     = unsafe { nil }
 	cqo                             fn () []u8                                        = unsafe { nil }
 	div_reg32                       fn (Register) ![]u8                               = unsafe { nil }
@@ -2250,6 +2362,8 @@ pub:
 	double_to_signed_word           fn (Register, Register) ![]u8                     = unsafe { nil }
 	double_to_unsigned_int          fn (Register, Register) ![]u8                     = unsafe { nil }
 	double_to_unsigned_word         fn (Register, Register, Register, Register) ![]u8 = unsafe { nil }
+	exchange_indirect               fn (Register, Register, int) ![]u8                = unsafe { nil }
+	fetch_add_indirect              fn (Register, Register, int) ![]u8                = unsafe { nil }
 	float_arithmetic                fn (string, Register, Register) ![]u8             = unsafe { nil }
 	float_to_double                 fn (Register, Register) ![]u8                     = unsafe { nil }
 	float_to_int                    fn (Register, Register) ![]u8                     = unsafe { nil }
@@ -2284,6 +2398,7 @@ pub:
 	load_slot                       fn (Register, i32, Register, int) ![]u8 = unsafe { nil }
 	load_slot_unsigned              fn (Register, i32, Register, int) ![]u8 = unsafe { nil }
 	load_word_extended              fn (Register) ![]u8                     = unsafe { nil }
+	memory_fence                    fn () []u8                              = unsafe { nil }
 	mov_imm32                       fn (Register, u32) ![]u8                = unsafe { nil }
 	mov_imm64                       fn (Register, u64) ![]u8                = unsafe { nil }
 	mov_reg32                       fn (Register, Register) ![]u8           = unsafe { nil }
@@ -2371,6 +2486,7 @@ pub fn encoders() Encoders {
 		cmp_reg32:                       &cmp_reg32
 		cmp_reg64:                       &cmp_reg64
 		compare_double:                  &compare_double
+		compare_exchange_indirect:       &compare_exchange_indirect
 		compare_float:                   &compare_float
 		cqo:                             &cqo
 		div_reg32:                       &div_reg32
@@ -2381,6 +2497,8 @@ pub fn encoders() Encoders {
 		double_to_signed_word:           &double_to_signed_word
 		double_to_unsigned_int:          &double_to_unsigned_int
 		double_to_unsigned_word:         &double_to_unsigned_word
+		exchange_indirect:               &exchange_indirect
+		fetch_add_indirect:              &fetch_add_indirect
 		float_arithmetic:                &float_operator
 		float_to_double:                 &float_to_double
 		float_to_int:                    &float_to_int
@@ -2415,6 +2533,7 @@ pub fn encoders() Encoders {
 		load_slot:                       &load_slot
 		load_slot_unsigned:              &load_slot_unsigned
 		load_word_extended:              &load_word_extended
+		memory_fence:                    &memory_fence
 		mov_imm32:                       &mov_imm32
 		mov_imm64:                       &mov_imm64
 		mov_reg32:                       &mov_reg32

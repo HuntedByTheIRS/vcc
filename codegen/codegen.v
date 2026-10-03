@@ -8477,6 +8477,221 @@ fn (mut e Emitter) emit_va_end(call ast.Call) !void {
 	}
 }
 
+// The machine builtins: the atomic operations and the two trailing-zero counts.
+// The reader built them from reserved spellings, and each is answered with the
+// machine's own instruction rather than with a call to a name no image holds, so
+// they are answered here, before the call path, for the same reason the
+// argument-list operations are.
+//
+// The memory order decides the form, and the reader folded it to a number before
+// this stage saw anything. Measured on gcc 16.2.1 at -O2 on this machine: a load
+// is the ordinary load at every order; a store is a plain store at relaxed and
+// release and an xchg at sequential consistency; an exchange, a fetch and a
+// compare-exchange each take their locked instruction at every order; and a
+// sequentially consistent fence is a full barrier while an acquire or a release
+// fence emits nothing. This reads that number and does not guess at it.
+
+// atomic_target_width is the width of the object an atomic builtin operates on,
+// which is what its pointer argument names. A width this back end has no atomic
+// instruction for is refused by name rather than read at the width of something
+// smaller.
+fn (mut e Emitter) atomic_target_width(call ast.Call, spelling string) ?int {
+	pointer := types.decay(call.args[0].typ)
+	pointee := pointer.pointee() or {
+		e.diagnostics << problem(call.line, call.col, 'unsupported: ${spelling} operates through ${pointer.describe()}, and this back end reads and writes what a pointer names')
+		return none
+	}
+	width := e.storage_width(pointee) or {
+		e.diagnostics << problem(call.line, call.col, 'unsupported: ${spelling} operates on ${pointee.describe()}, and this back end reads and writes ints, chars and pointers')
+		return none
+	}
+	if width != 1 && width != 2 && width != 4 && width != 8 {
+		e.diagnostics << problem(call.line, call.col, 'unsupported: ${spelling} operates on an object of ${width} bytes, and this back end has an atomic instruction at one, two, four or eight')
+		return none
+	}
+	return width
+}
+
+// atomic_order_value is the memory order the reader folded into the call.
+fn atomic_order_value(expr ast.Expr) int {
+	if expr is ast.IntLit {
+		return int(expr.value)
+	}
+	return -1
+}
+
+// widen_machine_value brings a value a narrow atomic operation left in the
+// register up to the width of the type it is worth, the way any other read of
+// that type would: a char with its sign when the type is signed and with zeros
+// when it is not, and a short the same way. A four- or eight-byte operation
+// writes the whole register.
+fn (mut e Emitter) widen_machine_value(typ types.Type, destination backend.Register, width int) !void {
+	if width >= 4 {
+		return
+	}
+	unsigned := typ.is_unsigned_type()
+	if width == 1 {
+		if unsigned {
+			e.append(e.target.widen_byte(destination)!)
+		} else {
+			e.append(e.target.sign_extend_byte(destination)!)
+		}
+		return
+	}
+	if unsigned {
+		e.append(e.target.zero_extend_half(destination)!)
+	} else {
+		e.append(e.target.sign_extend_half(destination)!)
+	}
+}
+
+// emit_atomic_load reads the value a pointer names. The read is the ordinary read
+// at every order -- this machine does not reorder a load of an aligned object --
+// and it widens a char or a short the way a plain read of that type does.
+fn (mut e Emitter) emit_atomic_load(call ast.Call) !void {
+	width := e.atomic_target_width(call, '__atomic_load_n') or {
+		return error('the width of __atomic_load_n')
+	}
+	unsigned := call.typ.is_unsigned_type()
+	e.emit_expr_at(call.args[0], 1)!
+	address := e.scratch(call.line, call.col)!
+	accumulator := e.accumulator(call.line, call.col)!
+	e.append(e.target.move_register64(address, accumulator)!)
+	e.load_indirect_value(address, accumulator, unsigned, width)!
+}
+
+// emit_atomic_store writes a value through a pointer. At sequential consistency
+// the store is an xchg, whose implicit lock is the barrier the order asks for; at
+// relaxed and release it is the plain store, which this machine does not reorder
+// past the instructions around it.
+fn (mut e Emitter) emit_atomic_store(call ast.Call) !void {
+	width := e.atomic_target_width(call, '__atomic_store_n') or {
+		return error('the width of __atomic_store_n')
+	}
+	order := atomic_order_value(call.args[2])
+	base := e.frame_pointer(call.line, call.col)!
+	address_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[0], 1)!
+	e.store_accumulator(address_slot, call.line, call.col)!
+	value_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[1], 1)!
+	e.store_accumulator(value_slot, call.line, call.col)!
+	address := e.scratch(call.line, call.col)!
+	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
+	accumulator := e.accumulator(call.line, call.col)!
+	e.append(e.target.load_slot_unsigned(base, value_slot.offset, accumulator, width)!)
+	if order == 5 {
+		e.append(e.target.atomic_exchange(address, accumulator, width)!)
+		return
+	}
+	e.append(e.target.store_indirect(address, accumulator, width)!)
+}
+
+// emit_atomic_exchange swaps a value with the one a pointer names and answers the
+// value memory held before: gcc's `exchange` returns the previous value, and the
+// machine's xchg leaves exactly that in the register.
+fn (mut e Emitter) emit_atomic_exchange(call ast.Call) !void {
+	width := e.atomic_target_width(call, '__atomic_exchange_n') or {
+		return error('the width of __atomic_exchange_n')
+	}
+	base := e.frame_pointer(call.line, call.col)!
+	address_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[0], 1)!
+	e.store_accumulator(address_slot, call.line, call.col)!
+	value_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[1], 1)!
+	e.store_accumulator(value_slot, call.line, call.col)!
+	address := e.scratch(call.line, call.col)!
+	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
+	accumulator := e.accumulator(call.line, call.col)!
+	e.append(e.target.load_slot_unsigned(base, value_slot.offset, accumulator, width)!)
+	e.append(e.target.atomic_exchange(address, accumulator, width)!)
+	e.widen_machine_value(call.typ, accumulator, width)!
+}
+
+// emit_atomic_fetch adds a value into the object a pointer names and answers the
+// value that was there before, which is what the machine's xadd leaves in the
+// register. A subtraction is the same instruction over a negated register, since
+// the reader has already told the two apart by name.
+fn (mut e Emitter) emit_atomic_fetch(call ast.Call, subtract bool) !void {
+	spelling := if subtract { '__atomic_fetch_sub' } else { '__atomic_fetch_add' }
+	width := e.atomic_target_width(call, spelling) or {
+		return error('the width of ${spelling}')
+	}
+	base := e.frame_pointer(call.line, call.col)!
+	address_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[0], 1)!
+	e.store_accumulator(address_slot, call.line, call.col)!
+	value_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[1], 1)!
+	e.store_accumulator(value_slot, call.line, call.col)!
+	address := e.scratch(call.line, call.col)!
+	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
+	accumulator := e.accumulator(call.line, call.col)!
+	e.append(e.target.load_slot_unsigned(base, value_slot.offset, accumulator, width)!)
+	if subtract {
+		if width == 8 {
+			e.append(e.target.negate_word(accumulator)!)
+		} else {
+			e.append(e.target.negate(accumulator)!)
+		}
+	}
+	e.append(e.target.atomic_fetch_add(address, accumulator, width)!)
+	e.widen_machine_value(call.typ, accumulator, width)!
+}
+
+// emit_atomic_compare_exchange compares what the expected pointer names with the
+// object and, when they agree, stores the desired value and answers 1; when they
+// differ it writes back what memory held through the expected pointer and answers
+// 0. The value to compare against travels in the accumulator because the machine's
+// cmpxchg compares the accumulator implicitly, and the zero flag carries the
+// answer until it is turned into the int the standard gives the question.
+fn (mut e Emitter) emit_atomic_compare_exchange(call ast.Call) !void {
+	width := e.atomic_target_width(call, '__atomic_compare_exchange_n') or {
+		return error('the width of __atomic_compare_exchange_n')
+	}
+	base := e.frame_pointer(call.line, call.col)!
+	address_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[0], 1)!
+	e.store_accumulator(address_slot, call.line, call.col)!
+	expected_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[1], 1)!
+	e.store_accumulator(expected_slot, call.line, call.col)!
+	desired_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[2], 1)!
+	e.store_accumulator(desired_slot, call.line, call.col)!
+	address := e.scratch(call.line, call.col)!
+	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
+	accumulator := e.accumulator(call.line, call.col)!
+	e.append(e.target.load_slot(base, expected_slot.offset, accumulator, e.target.word_size)!)
+	e.append(e.target.load_indirect(accumulator, accumulator, width)!)
+	desired := e.remainder(call.line, call.col)!
+	e.append(e.target.load_slot_unsigned(base, desired_slot.offset, desired, width)!)
+	e.append(e.target.atomic_compare_exchange(address, desired, width)!)
+	// The zero flag says whether it stored. On success the jump skips the
+	// write-back; on failure the machine has left the value memory held in the
+	// accumulator and the standard asks for it to be written back through the
+	// expected pointer before the answer is read. Neither move below disturbs the
+	// flags the compare-exchange set, so the jump and the answer read the same one.
+	stored := e.label()
+	e.branch(.branch_zero, stored, call.line, call.col)!
+	e.append(e.target.load_slot(base, expected_slot.offset, desired, e.target.word_size)!)
+	e.append(e.target.store_indirect(desired, accumulator, width)!)
+	e.place(stored)
+	e.append(e.target.set_condition(backend.Condition.equal, accumulator)!)
+	e.append(e.target.widen_byte(accumulator)!)
+}
+
+// emit_atomic_thread_fence is the barrier between the operations before it and
+// the ones after. Only the sequentially consistent order asks for an instruction
+// on this machine; an acquire or a release fence orders nothing the instruction
+// stream does not already, so nothing is emitted for one, which is what gcc does.
+fn (mut e Emitter) emit_atomic_thread_fence(call ast.Call) !void {
+	if atomic_order_value(call.args[0]) == 5 {
+		e.append(e.target.memory_fence())
+	}
+}
+
 // emit_count_trailing answers `__builtin_ctz` and `__builtin_ctzll` with the
 // index of the lowest set bit, which is one bsf at either width. gcc answers an
 // int for both, and a program that asks this of zero has asked a question with no
@@ -8520,6 +8735,27 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		'__builtin_va_end' {
 			return e.emit_va_end(call)
+		}
+		'__atomic_load_n' {
+			return e.emit_atomic_load(call)
+		}
+		'__atomic_store_n' {
+			return e.emit_atomic_store(call)
+		}
+		'__atomic_exchange_n' {
+			return e.emit_atomic_exchange(call)
+		}
+		'__atomic_compare_exchange_n' {
+			return e.emit_atomic_compare_exchange(call)
+		}
+		'__atomic_fetch_add' {
+			return e.emit_atomic_fetch(call, false)
+		}
+		'__atomic_fetch_sub' {
+			return e.emit_atomic_fetch(call, true)
+		}
+		'__atomic_thread_fence' {
+			return e.emit_atomic_thread_fence(call)
 		}
 		'__builtin_ctz', '__builtin_ctzll' {
 			return e.emit_count_trailing(call)

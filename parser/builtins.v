@@ -7,17 +7,17 @@ import types
 
 // The GCC builtins this reader answers while it reads, which are the ones a
 // C library's headers reach for rather than the ones a program writes by hand.
-// The last two are the machine's own: the trailing-zero counts, which V's
-// generated C writes into an inline shim rather than into a library call. They
-// are a GNU extension this tree declares in `standard/features.v`, so a strict
-// mode reports them; the folded builtins above them are in the reserved
-// namespace and no row gates them.
+// The last nine are the machine's own: the atomic operations and the two
+// trailing-zero counts, which V's generated C writes into an inline shim rather
+// than into a library call. Each of those is a GNU extension this tree declares
+// in `standard/features.v`, so a strict mode reports it; the folded builtins
+// above them are in the reserved namespace and no row gates them.
 //
 // Most of the list is folded where it is written, the way `sizeof` is: the
 // question it asks is one the reader can answer from the declaration it was
 // handed, and the value it is worth is an integer constant expression with no
 // run-time part. A builtin whose answer would be a guess is refused by name here
-// rather than filled in with a value this compiler has not computed. The two
+// rather than filled in with a value this compiler has not computed. The nine
 // machine builtins are not folded: their answer is an instruction sequence, and
 // the back end emits it.
 const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr',
@@ -26,7 +26,14 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__builtin_inf', '__builtin_inff', '__builtin_infl', '__builtin_nan', '__builtin_nanf',
 	'__builtin_nanl', '__builtin_nans', '__builtin_nansf', '__builtin_nansl', '__builtin_classify_type',
 	'__builtin_isinf_sign', '__builtin_signbit', '__builtin_signbitf', '__builtin_signbitl',
-	'__builtin_signbitf128', '__builtin_ctz', '__builtin_ctzll']
+	'__builtin_signbitf128',
+	// The nine machine builtins are in this same list for the same reason, and in
+	// one place only: the reader routes them here, and the check for a name
+	// nothing declares consults this list, because no program can write a
+	// declaration for a spelling in the compiler's own namespace.
+	'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
+	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
+	'__builtin_ctzll']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -86,6 +93,10 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_classify_type' {
 			return p.parse_classify_type(at)
+		}
+		'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
+		'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence' {
+			return p.parse_atomic_builtin(at)
 		}
 		'__builtin_ctz', '__builtin_ctzll' {
 			return p.parse_count_trailing(at)
@@ -384,6 +395,175 @@ fn (mut p Parser) parse_va_copy(at tokenize.Token) !ast.Expr {
 		line: at.line
 		col:  at.col
 	})
+}
+
+// The machine builtins: the atomic operations and the two trailing-zero counts.
+// They arrive from V's own generated C, which writes them into an inline shim
+// rather than into a library call, so there is no header function under them and
+// no declaration a program could write. The reader builds the call and the back
+// end answers it with the machine's own instruction.
+//
+// The memory order is the whole of the shape here. gcc takes an integer constant
+// expression for it, so a `memory_order_seq_cst` argument arrives as the bare 5
+// and the standard's spelling never appears: measured on gcc 16.2.1 at -O2, it
+// emits `lock xaddl` for `__atomic_fetch_add(p, 1, 5)` and a plain `addl` for the
+// same call with 0. The order is folded here the way an array bound is, and one
+// that is not a constant, or is outside the six the standard names, is refused
+// by name rather than read as though another order had been written.
+
+// atomic_target is the type an atomic builtin reads through its pointer
+// argument. The machine has an atomic instruction at the widths a char, a short,
+// an int, a pointer and the eight-byte integers have, so a pointer to anything
+// else is refused by name rather than read at the width of something smaller.
+fn (mut p Parser) atomic_target(at tokenize.Token, spelling string, expr ast.Expr) ?types.Type {
+	if p.is_unresolved(expr) {
+		p.error_at(at, 'unsupported: ${spelling} reads through ${describe_operand(expr)}, and this compiler did not resolve the type it points at')
+		return none
+	}
+	pointer := p.value_type(expr)
+	pointee := pointer.pointee() or {
+		p.error_at(at, 'unsupported: ${spelling} operates through a pointer, and ${describe_operand(expr)} is ${pointer.describe()}')
+		return none
+	}
+	kind := pointee.enum_underlying()
+	if kind !in [types.Kind.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short,
+		.int_, .unsigned_int, .long, .unsigned_long, .long_long, .unsigned_long_long, .pointer] {
+		p.error_at(at, 'unsupported: ${spelling} operates on ${pointee.describe()}, and this back end reads and writes ints, chars and pointers with the machine\'s atomic instructions')
+		return none
+	}
+	return pointee
+}
+
+// atomic_order folds a memory order argument to the integer the back end chooses
+// the instruction from. `storing` is set for a store, whose order the standard
+// narrows: gcc refuses `__atomic_store_n(p, v, memory_order_acquire)` and takes
+// relaxed, release and sequentially consistent.
+fn (mut p Parser) atomic_order(at tokenize.Token, spelling string, expr ast.Expr, storing bool) ?ast.Expr {
+	value := p.constant_value(expr) or {
+		p.error_at(at, 'unsupported: ${spelling} asks for a memory order, and ${describe_operand(expr)} is not a constant this compiler can read')
+		return none
+	}
+	if value < 0 || value > 5 {
+		p.error_at(at, 'unsupported: ${spelling} asks for memory order ${value}, and the standard names six, 0 through 5')
+		return none
+	}
+	if storing && value != 0 && value != 3 && value != 5 {
+		p.error_at(at, 'unsupported: ${spelling} stores with memory order ${value}, and a store is relaxed, release or sequentially consistent')
+		return none
+	}
+	return integer_constant(value, '${value}', at, types.Kind.int_)
+}
+
+// parse_atomic_builtin reads the seven atomic operations the back end emits an
+// instruction for. Each call keeps the type the operation is about as its own
+// type, so a load of a `u64` is a `u64` and a compare-exchange, which is a
+// question rather than a value read, is an int like the standard says.
+fn (mut p Parser) parse_atomic_builtin(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	match at.text {
+		'__atomic_load_n' {
+			if args.len != 2 {
+				p.error_at(at, 'unsupported: __atomic_load_n takes a pointer and a memory order')
+				return error('the arguments of __atomic_load_n')
+			}
+			target := p.atomic_target(at, at.text, args[0]) or {
+				return error('the target of __atomic_load_n')
+			}
+			order := p.atomic_order(at, at.text, args[1], false) or {
+				return error('the memory order of __atomic_load_n')
+			}
+			return ast.Expr(ast.Call{
+				name: at.text
+				args: [args[0], order]
+				typ:  target
+				line: at.line
+				col:  at.col
+			})
+		}
+		'__atomic_store_n' {
+			if args.len != 3 {
+				p.error_at(at, 'unsupported: __atomic_store_n takes a pointer, a value and a memory order')
+				return error('the arguments of __atomic_store_n')
+			}
+			_ := p.atomic_target(at, at.text, args[0]) or {
+				return error('the target of __atomic_store_n')
+			}
+			order := p.atomic_order(at, at.text, args[2], true) or {
+				return error('the memory order of __atomic_store_n')
+			}
+			return ast.Expr(ast.Call{
+				name: at.text
+				args: [args[0], args[1], order]
+				typ:  types.void_type()
+				line: at.line
+				col:  at.col
+			})
+		}
+		'__atomic_exchange_n', '__atomic_fetch_add', '__atomic_fetch_sub' {
+			if args.len != 3 {
+				p.error_at(at, 'unsupported: ${at.text} takes a pointer, a value and a memory order')
+				return error('the arguments of ${at.text}')
+			}
+			target := p.atomic_target(at, at.text, args[0]) or {
+				return error('the target of ${at.text}')
+			}
+			order := p.atomic_order(at, at.text, args[2], false) or {
+				return error('the memory order of ${at.text}')
+			}
+			return ast.Expr(ast.Call{
+				name: at.text
+				args: [args[0], args[1], order]
+				typ:  target
+				line: at.line
+				col:  at.col
+			})
+		}
+		'__atomic_compare_exchange_n' {
+			if args.len != 6 {
+				p.error_at(at, 'unsupported: __atomic_compare_exchange_n takes a pointer, the expected pointer, the value to store, the weak flag and two memory orders')
+				return error('the arguments of __atomic_compare_exchange_n')
+			}
+			_ := p.atomic_target(at, at.text, args[0]) or {
+				return error('the target of __atomic_compare_exchange_n')
+			}
+			_ := p.atomic_target(at, at.text, args[1]) or {
+				return error('the expected pointer of __atomic_compare_exchange_n')
+			}
+			_ = p.atomic_order(at, at.text, args[4], false) or {
+				return error('the success memory order of __atomic_compare_exchange_n')
+			}
+			_ = p.atomic_order(at, at.text, args[5], false) or {
+				return error('the failure memory order of __atomic_compare_exchange_n')
+			}
+			return ast.Expr(ast.Call{
+				name: at.text
+				args: args
+				typ:  types.bool_type()
+				line: at.line
+				col:  at.col
+			})
+		}
+		'__atomic_thread_fence' {
+			if args.len != 1 {
+				p.error_at(at, 'unsupported: __atomic_thread_fence takes one memory order')
+				return error('the argument of __atomic_thread_fence')
+			}
+			order := p.atomic_order(at, at.text, args[0], false) or {
+				return error('the memory order of __atomic_thread_fence')
+			}
+			return ast.Expr(ast.Call{
+				name: at.text
+				args: [order]
+				typ:  types.void_type()
+				line: at.line
+				col:  at.col
+			})
+		}
+		else {
+			p.error_at(at, 'unsupported: ${at.text} is not one of the atomic builtins this compiler answers')
+			return error('an atomic builtin')
+		}
+	}
 }
 
 // parse_count_trailing reads `__builtin_ctz` and `__builtin_ctzll`, the index of
