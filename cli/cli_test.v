@@ -376,3 +376,68 @@ fn test_x_naming_c_overrides_the_bytes() {
 	assert classify_input(object, 'forced.o', '') == .object
 	assert classify_input(object, 'forced.o', 'assembler') == .object
 }
+
+// -external-linker names the program that performs the final link. Both
+// spellings work, the joined one and the separated one, and the value is read
+// rather than recorded: a build that passes the flag and finds the in-house path
+// taken anyway has been told nothing. The -f spelling is not the flag: -f is the
+// feature family and linking is not a feature of the C the program is in.
+fn test_the_external_linker_can_be_named_in_both_spellings() {
+	joined := parse(['-external-linker=ld', 'a.c', 'b.c', '-o', 'out'])!
+	separate := parse(['-external-linker', 'ld', 'a.c', 'b.c', '-o', 'out'])!
+	assert joined.external_linker == 'ld'
+	assert separate.external_linker == 'ld'
+	assert joined.inputs == ['a.c', 'b.c']
+	assert separate.inputs == ['a.c', 'b.c']
+	assert !joined.ignored.contains('-external-linker=ld')
+	assert !separate.ignored.contains('-external-linker')
+	assert parse(['a.c', '-o', 'out'])!.external_linker == ''
+}
+
+fn test_the_external_linker_needs_a_value() {
+	if _ := parse(['a.c', '-external-linker']) {
+		assert false, '-external-linker with nothing after it should be an error'
+	}
+}
+
+// A C compiler may not be the external linker. The compiler exists to replace
+// the C compiler V vendors, so one finishing C compilation would be circular,
+// and the refusal names the flag and points at a linker instead.
+fn test_a_c_compiler_may_not_be_the_external_linker() {
+	for name in ['gcc', 'cc', 'clang', 'c++', 'tcc'] {
+		said := external_linker_refusal(name) or {
+			assert false, '${name} is a C compiler and must be refused'
+			''
+		}
+		assert said.contains('-external-linker=${name}')
+		assert said.contains('a C compiler is not a linker')
+		assert said.contains('ld')
+		assert said.contains('lld')
+	}
+	// The versioned and target-prefixed spellings are the same driver.
+	assert external_linker_refusal('gcc-16') != none
+	assert external_linker_refusal('clang-15') != none
+	assert external_linker_refusal('x86_64-linux-gnu-gcc') != none
+	// A program whose name merely starts with a driver's is a different
+	// program: clangd is a language server, not a compiler.
+	assert external_linker_refusal('ld') == none
+	assert external_linker_refusal('lld') == none
+	assert external_linker_refusal('ld.lld') == none
+	assert external_linker_refusal('ld.gold') == none
+	assert external_linker_refusal('clangd') == none
+}
+
+// lld is the LLVM linkers' generic driver: invoked as `lld` it cannot choose a
+// linker and wants `-flavor gnu` first. Every other name gets nothing before the
+// link, because the GNU linkers would reject the word.
+fn test_an_lld_name_gets_its_flavor_and_others_get_nothing() {
+	assert external_linker_prefix('lld') == ['-flavor', 'gnu']
+	assert external_linker_prefix('ld') == []
+	assert external_linker_prefix('ld.lld') == []
+	assert external_linker_prefix('ld.gold') == []
+}
+
+fn test_the_external_linker_is_in_the_help() {
+	assert usage(false).contains('-external-linker=NAME')
+	assert usage(true).contains('-external-linker')
+}
