@@ -1648,3 +1648,104 @@ fn test_a_two_dimensional_declarator_is_an_array_of_arrays() {
 	assert g.resolved.base.count == 3
 	assert g.resolved.base.base.same(types.int_type())
 }
+
+// A member of an anonymous union is a member of the struct that contains it
+// (6.7.2.1p13), so a read of it resolves at the offset the enclosing object's
+// layout gives it and carries the type the inner declaration wrote. Both members
+// align at four, so the union starts four bytes in, after `tag`, and `i` sits at
+// its beginning.
+fn test_a_member_of_an_anonymous_union_is_read_from_the_enclosing_object() {
+	decl := first('struct S { int tag; union { int i; char d; }; };\nint main() { struct S s; return s.i; }')
+	body := decl.body
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.name == 's'
+	assert member.member == 'i'
+	assert member.offset == 4
+	assert member.typ.same(types.int_type())
+}
+
+// An anonymous struct's members sit at different offsets, which is what a lookup
+// that always answers the first member gets wrong: `x` is a char four bytes in
+// and `y` is an int eight bytes in, so a read of `y` has to answer the second
+// member at its own offset and with its own type rather than `x`'s.
+fn test_a_member_of_an_anonymous_struct_is_read_at_its_own_offset() {
+	decl := first('struct T { int a; struct { char x; int y; }; };\nint main() { struct T t; return t.y; }')
+	body := decl.body
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.member == 'y'
+	assert member.offset == 8
+	assert member.typ.same(types.int_type())
+}
+
+// An anonymous union inside an anonymous struct: the members the inner union
+// contributes are members of the struct it is nested in, which in turn
+// contributes them to the object that holds it, so `b` is read two levels in.
+// The union starts after `head`, and `b` is the second int of the anonymous
+// struct that shares the union's storage.
+fn test_an_anonymous_union_inside_an_anonymous_struct_is_read_through_both() {
+	decl := first('struct N { int head; union { struct { int a; int b; }; int both[2]; }; };\nint main() { struct N n; return n.b; }')
+	body := decl.body
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.member == 'b'
+	assert member.offset == 8
+	assert member.typ.same(types.int_type())
+}
+
+// The control the rule must not move: a named union member beside an anonymous
+// one is reached through its own name and is not promoted. The named union sits
+// four bytes in, so a lookup that confused it with the anonymous one beside it
+// would answer the wrong offset.
+fn test_a_named_union_beside_an_anonymous_one_is_reached_through_its_name() {
+	decl := first('struct R { int ok; union { int err; } named; union { int value; }; };\nint main() { struct R r; return r.named.err; }')
+	body := decl.body
+	returned := body[1].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.member == 'named.err'
+	assert member.offset == 4
+	assert member.typ.same(types.int_type())
+}
+
+// A name an anonymous member contributes that the enclosing struct also writes is
+// a duplicate member, which 6.7.2.1p13's distinctness constraint refuses at the
+// declaration. gcc 16.2.1 refuses `struct D { int x; union { int x; }; };` as
+// `duplicate member 'x'`, and the refusal names the name rather than silently
+// reading one of the two.
+fn test_a_promoted_name_that_collides_with_a_member_is_refused() {
+	result := parsed('struct D { int x; union { int x; }; };\nint main() { return 0; }')
+	mut refused := false
+	for diagnostic in result.diagnostics {
+		if diagnostic.msg == 'a constraint violation: duplicate member x in struct' {
+			refused = true
+		}
+	}
+	assert refused
+}
+
+// Two names two unnamed members contribute colliding with each other are refused
+// the same way, which is what gcc does with `struct { union { int x; }; union {
+// long x; }; };`.
+fn test_two_promoted_names_that_collide_are_refused() {
+	result := parsed('struct F { union { int x; }; union { long x; }; };\nint main() { return 0; }')
+	mut refused := false
+	for diagnostic in result.diagnostics {
+		if diagnostic.msg == 'a constraint violation: duplicate member x in struct' {
+			refused = true
+		}
+	}
+	assert refused
+}
