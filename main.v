@@ -87,6 +87,13 @@ fn main() {
 		eprintln(cli.usage(false))
 		exit(1)
 	}
+	// -external-linker is its own path: it links the inputs this compiler cannot
+	// consume and is taken before the single-input refusals below, because those
+	// refusals are what the flag exists to lift.
+	if opts.external_linker != '' {
+		external_link(opts)
+		return
+	}
 	if opts.inputs.len > 1 {
 		abort('linking more than one input is not implemented yet')
 		return
@@ -544,6 +551,176 @@ fn report(path string, raised []tokenize.Diagnostic, policy diagnostics.Policy) 
 fn abort(message string) {
 	eprintln('vcc: ${message}')
 	exit(1)
+}
+
+// external_link performs the final link with the program -external-linker named.
+//
+// It is the one path that links more than one input and inputs that are not C:
+// each .c input runs the same stages -c runs and becomes a relocatable object, a
+// foreign object or an archive is passed to the linker as it stands, and the
+// linker writes the program. Every failure is reported and ends the run
+// non-zero. The in-house path is never taken in place of a link that was asked
+// for: a link that quietly did nothing is the worst outcome this flag can have,
+// and the reason the tool is resolved before any object is written.
+fn external_link(opts cli.Options) {
+	// A run that stops before a link has nothing for a linker to do. Running the
+	// link anyway would silently drop what the flag asked for, and so would
+	// dropping the flag; either way the command line would not mean what it
+	// says.
+	if opts.compile_only || opts.preprocess || opts.print_ast || opts.dump_macros || opts.deps {
+		abort('-external-linker=${opts.external_linker} performs a link, and -c, -E, -M, -MD, -dM and -print-ast ask for a run that stops before one')
+	}
+	if refusal := cli.external_linker_refusal(opts.external_linker) {
+		abort(refusal)
+	}
+	program := cli.external_linker_path(opts.external_linker) or {
+		abort('cannot find ${opts.external_linker}: -external-linker names a linker the system must have on PATH')
+		return
+	}
+	target := backend.resolve(opts.target) or {
+		abort(err.msg())
+		return
+	}
+	mut objects := []string{}
+	mut all_source := true
+	for index, input in opts.inputs {
+		// The input is read once and classified from its bytes, the same rule
+		// the single-input path uses; a classification by name alone would read
+		// a foreign object as source.
+		source := read_source(input) or {
+			abort('cannot read ${input}: ${err.msg()}')
+			return
+		}
+		match cli.classify_input(source, input, opts.input_type) {
+			.source {
+				bytes := compile_source_object(input, source, opts) or {
+					abort('${input}: ${err.msg()}')
+					return
+				}
+				object := link_object_path(index)
+				write_object(object, bytes) or {
+					abort('cannot write ${object}: ${err.msg()}')
+					return
+				}
+				objects << object
+			}
+			.object, .shared_object, .archive {
+				all_source = false
+				objects << input
+			}
+			.program {
+				abort('${input}: a program is not an input to a link')
+				return
+			}
+		}
+	}
+	out_path := if opts.output != '' {
+		opts.output
+	} else if opts.run {
+		temporary_path()
+	} else {
+		'a.out'
+	}
+	args := target.external_link_arguments(objects, opts.library_dirs, opts.libraries, out_path) or {
+		abort(err.msg())
+		return
+	}
+	// A tool whose name does not say which linker it is gets its own word first
+	// (lld's `-flavor gnu`); everything else gets nothing before the link.
+	mut invocation := cli.external_linker_prefix(opts.external_linker)
+	invocation << args
+	// A file an earlier link left is not allowed to stand in for one this run
+	// did not write: the run reports a failure and the output has to agree.
+	os.rm(out_path) or {}
+	// What happened is said rather than left to be inferred. Every input being C
+	// this compiler could link itself is the case that must not look like the
+	// in-house path was taken quietly, so it says which tool did the link.
+	if all_source {
+		eprintln('vcc: every input is C this compiler could link itself; the link is handed to ${opts.external_linker} because -external-linker was given')
+	} else {
+		eprintln('vcc: the link is handed to ${opts.external_linker} (-external-linker)')
+	}
+	command := link_command_line(program, invocation)
+	if opts.verbose {
+		eprintln('link: ${command}')
+	}
+	status := os.system(command)
+	if status != 0 {
+		// The linker's own stderr reached the terminal as it ran; the status is
+		// carried out rather than replaced, so a failed link is a failed compile
+		// to whatever started it.
+		os.rm(out_path) or {}
+		exit(status)
+	}
+	if opts.run {
+		run_image(out_path, opts.run_args)
+	}
+}
+
+// compile_source_object runs the stages -c runs over one source and answers the
+// bytes of the relocatable object they produce. It states the sequence main()
+// runs for a source because that sequence reports through the command line's
+// warning policy and stops at the first stage that fails; the external link
+// needs the same stages with the object as their product, and sharing the whole
+// sequence would make it carry the verbose hooks and the early modes as well.
+//
+// The emitter is asked for the -c product: a relocatable container, no entry
+// point required, and no import checked, because a linker resolves the symbols
+// of an object and the linker here is the one the flag named.
+fn compile_source_object(path string, source string, opts cli.Options) ![]u8 {
+	processed := preprocess.preprocess(source, path, preprocess.Options{
+		include_dirs:   opts.include_dirs
+		defines:        language_defines(opts)
+		undefines:      opts.undefines
+		standard_dirs:  if opts.nostdinc { []string{} } else { standard_include_dirs() }
+		preludes:       opts.preludes
+		undef_builtins: opts.undef_builtins
+		dialect:        opts.dialect
+	})
+	if report(path, processed.diagnostics, opts.warnings) > 0 {
+		return error('the compile stopped at a diagnostic')
+	}
+	pedantic := standard.pedantic_messages(processed.tokens, standard.Question{
+		mode:         opts.dialect
+		extensions:   opts.vcc_extensions.enabled_names()
+		system_files: system_files(processed.files)
+	})
+	if report(path, pedantic, opts.warnings) > 0 {
+		return error('the compile stopped at a diagnostic')
+	}
+	parsed := parser.parse_for(processed.tokens, parser_target(opts.target))
+	if report(path, parsed.diagnostics, opts.warnings) > 0 {
+		return error('the compile stopped at a diagnostic')
+	}
+	optimized := optimizer.optimize(parsed.unit, opts.optimization)
+	image := codegen.emit(optimized, codegen.Options{
+		target:       opts.target
+		entry:        'main'
+		compile_only: true
+		libraries:    opts.libraries
+		library_dirs: opts.library_dirs
+	})
+	if report(path, image.diagnostics, opts.warnings) > 0 {
+		return error('the compile stopped at a diagnostic')
+	}
+	return image.bytes
+}
+
+// link_object_path is where one input's relocatable object is written on its
+// way to the linker. It is named after the process and the input's place on the
+// command line so that a run over many inputs does not write one over another.
+fn link_object_path(index int) string {
+	return os.join_path(os.temp_dir(), 'vcc-extlink-${os.getpid()}-${index}.o')
+}
+
+// link_command_line is the one place the linker invocation becomes a shell
+// command, with every word quoted so a path with a space survives it.
+fn link_command_line(program string, args []string) string {
+	mut command := os.quoted_path(program)
+	for arg in args {
+		command += ' ' + os.quoted_path(arg)
+	}
+	return command
 }
 
 // standard_include_dirs are the directories searched for <stdio.h> after the -I
