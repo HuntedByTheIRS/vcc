@@ -1118,6 +1118,13 @@ fn (p Parser) aggregate_bytes(declared types.Type) int {
 		element := declared.element() or { return 0 }
 		return p.aggregate_bytes(element)
 	}
+	if declared.kind in [types.Kind.complex_float, .complex_double] {
+		// A complex object is two components stored one after the other, and the
+		// model measured the size: sixteen bytes for a `double _Complex` and
+		// eight for a `float _Complex`. The declaration carries it so that the
+		// frame reserves the whole object rather than one value of it.
+		return p.representation.size_of(declared) or { 0 }
+	}
 	if declared.kind !in [types.Kind.struct_, .union_] || !declared.is_complete() {
 		return 0
 	}
