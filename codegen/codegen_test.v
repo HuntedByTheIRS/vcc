@@ -2971,8 +2971,13 @@ fn test_one_128_bit_value_is_divided_by_another() {
 
 // A divisor of zero is a fault in gcc, in all four forms, and it is the machine's
 // own fault here: the routine reaches a real division by the zero divisor, so the
-// program dies of the same signal gcc's program dies of. The runner this test uses
-// reports that as the number of the signal, 8, where a shell would say 136.
+// program dies of the same signal gcc's program dies of.
+//
+// How a runner reports that death is not the same everywhere, which this test
+// learned from CI: os.execute gives the number of the signal on this machine, 8,
+// and what a shell gives, 128 more, on the runner. So the number is measured here
+// rather than written down, from an int division by the same zero divisor, and what
+// the four forms are held to is that they report the same death the int form did.
 fn test_a_128_bit_division_by_zero_faults() {
 	cases := [
 		'\t__int128 a = 5;\n\t__int128 b = 0;\n\treturn (int)(a / b);',
@@ -2980,10 +2985,14 @@ fn test_a_128_bit_division_by_zero_faults() {
 		'\t__int128 a = 5;\n\t__int128 b = 0;\n\treturn (int)(a % b);',
 		'\tunsigned __int128 a = 5;\n\tunsigned __int128 b = 0;\n\treturn (int)(a % b);',
 	]
+	reference := emit(translation_unit('int main() {\n	int a = 5;\n	int b = 0;\n	return a / b;\n}\n'), Options{})
+	assert reference.diagnostics.len == 0
+	expected := run_image(reference.bytes)
+	assert expected == 8 || expected == 136
 	for source in cases {
 		emitted := emit(translation_unit('int main() {\n${source}\n}'), Options{})
 		assert emitted.diagnostics.len == 0
-		assert run_image(emitted.bytes) == 8
+		assert run_image(emitted.bytes) == expected
 	}
 }
 
