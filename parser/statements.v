@@ -38,6 +38,23 @@ fn (p Parser) starts_a_statement_declaration() bool {
 // closed and nothing else: the closing brace the caller is waiting for is gone
 // with it.
 fn (mut p Parser) parse_statement() ![]ast.Stmt {
+	// A compound literal written anywhere in this statement declares an unnamed
+	// object, and the stores that initialize it belong in front of it. The list
+	// is opened here and closed below: a statement written inside this one opens
+	// a list of its own, so a literal in a condition and one in the body it
+	// guards do not land in the same place.
+	p.compound_pending << []ast.Stmt{}
+	stmts := p.parse_statement_inner() or {
+		p.compound_pending.pop()
+		return error('statement')
+	}
+	fresh := p.compound_pending.pop()
+	mut out := fresh.clone()
+	out << stmts
+	return out
+}
+
+fn (mut p Parser) parse_statement_inner() ![]ast.Stmt {
 	t := p.peek()
 	if t.kind == .punct && t.text == '{' {
 		inner := p.parse_block()!

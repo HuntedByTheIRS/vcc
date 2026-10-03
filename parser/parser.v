@@ -108,6 +108,16 @@ mut:
 	// case_defaults says, one entry per switch being read, whether a default
 	// label has been read in it: a second default in one switch is refused.
 	case_defaults []bool
+	// compound_serial numbers the unnamed objects a compound literal declares,
+	// so each one gets a name of its own that no source text can write.
+	compound_serial int
+	// compound_pending is one list of statements per statement being read,
+	// innermost last. A compound literal (C99 6.5.2.5) is an unnamed object,
+	// so reading one declares a local and the stores that initialize it; those
+	// statements belong in front of the statement the literal was written in,
+	// and this is where they wait until that statement is finished and its list
+	// is put together.
+	compound_pending [][]ast.Stmt
 }
 
 // supported_types are the ones the back end can emit today. The 8-byte integer
@@ -1282,7 +1292,12 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	// is the token after it: a specifier word or a name this file declared as a
 	// type is a conversion, and a name that is not is a value in parentheses.
 	if t.kind == .punct && t.text == '(' && p.starts_type_name(p.peek_at(1)) {
-		return p.parse_cast(t)
+		// A compound literal is a postfix expression and not a conversion,
+		// but it is written the same way: a type name in parentheses. What
+		// follows the closing parenthesis decides which of the two it is - a
+		// brace list is the literal, anything else is the conversion - so the
+		// two are read together and only one of them is built.
+		return p.parse_cast_or_compound(t)
 	}
 	// `++` and `--` are prefix operators here: what follows is the operand they
 	// step, and the value they are worth is the operand after the step. They
@@ -1375,7 +1390,16 @@ fn (mut p Parser) parse_nested(at tokenize.Token) !ast.Expr {
 // the grammar; the second operand is an expression that is not a name and is
 // refused by inc_dec, which is where the refusal belongs.
 fn (mut p Parser) parse_postfix() !ast.Expr {
-	mut expr := p.parse_primary()!
+	return p.postfix_on(p.parse_primary()!)
+}
+
+// postfix_on reads the postfix operators that follow an operand already read,
+// left to right: `x++`, `x--`, the subscript `x[i]` of 6.5.2.1, the call
+// `x(...)`, and the member `x.a`. parse_postfix builds the operand with
+// parse_primary first; a compound literal builds its own operand and comes here
+// with it, because 6.5.2.5 makes the literal a postfix expression too.
+fn (mut p Parser) postfix_on(base ast.Expr) !ast.Expr {
+	mut expr := base
 	for {
 		t := p.peek()
 		if t.kind == .punct && (t.text == '++' || t.text == '--') {
@@ -1581,17 +1605,26 @@ fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !as
 // node carries the void type the way a value conversion carries its type, and a
 // later stage decides from the type whether the expression is in a place that
 // may throw a value away.
-fn (mut p Parser) parse_cast(at tokenize.Token) !ast.Expr {
+// parse_cast_or_compound reads the type name a `(` opens, the `)` that closes
+// it, and then what decides which construct this is: a brace list makes it a
+// compound literal, 6.5.2.5's unnamed object, which is a postfix expression and
+// is handed to the postfix reader so a subscript, a call or a member may follow
+// it; anything else makes it the conversion the type name was written for.
+fn (mut p Parser) parse_cast_or_compound(at tokenize.Token) !ast.Expr {
 	p.next() // (
-	name := p.parse_type_name(1)!
+	spec, d, _ := p.parse_type_name_parts(1)!
 	if !p.expect_punct(')') {
 		return error('unclosed cast')
 	}
+	if p.at_punct('{') {
+		literal := p.parse_compound_literal(spec, d, at)!
+		return p.postfix_on(literal)
+	}
 	operand := p.parse_prefix_operand(at)!
 	return ast.Expr(ast.Cast{
-		spelling: name.spelling
+		spelling: p.spelling_of(spec, d.pointer_count())
 		expr:     operand
-		typ:      name.typ
+		typ:      p.declared_type(spec.clause, d)
 		line:     at.line
 		col:      at.col
 	})
