@@ -923,9 +923,19 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_at = if d.name.len > 0 { d.name_at } else { spec.start }
 				data_type = p.spelling_of(spec, d.pointer_count())
 				data_stars = d.pointer_count()
+				data_clause = p.declared_type(spec.clause, d)
 				data_count = d.array_count()
 				data_array = d.is_array()
-				data_clause = p.declared_type(spec.clause, d)
+				// A name that stands for an array type hides the brackets in
+				// the specifiers, so a file-scope object may be an array the
+				// declarator never wrote: `typedef int vec4[4]; vec4 g;` is an
+				// object of four elements. The count and the array-ness are the
+				// type's, and the image and an index both read them from here.
+				if data_count == 0 && data_clause.is_array() && !data_clause.has_vla()
+					&& data_clause.count > 0 {
+					data_count = data_clause.count
+					data_array = true
+				}
 			}
 			if spec.auto_deduced {
 				// C23's auto takes its type from the initializer, and measured
@@ -1144,7 +1154,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						data_init_long = constant.long_floating
 						literal_refused = p.diagnostics.len > before
 					}
-				} else if p.peek().kind == .string && d.is_array() {
+				} else if p.peek().kind == .string && data_array {
 					// 6.7.8p14: an array of character type may be
 					// initialized by a string literal. The elements become
 					// the same constants a brace list writes, so the image
@@ -1154,7 +1164,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					// report below names the declaration.
 					if literal := p.read_array_string_literal() {
 						declared := p.declared_type(spec.clause, d)
-						if array_takes_string(d, declared, literal) {
+						if array_takes_string(declared, literal) {
 							written := p.file_scope_string_initializer(d, declared, data_name,
 								literal)
 							if written.ok {
@@ -2977,6 +2987,27 @@ fn (p Parser) incomplete_aggregate(spec DeclSpec) bool {
 	return !spec.clause.is_complete() || p.representation.layout(spec.clause) == none
 }
 
+// array_element_supported says the element at the bottom of an array type is one
+// this back end can give storage to: a scalar whose width it knows, a pointer,
+// or a complete aggregate whose layout it computed. It is the question an array
+// a typedef named asks, because a name standing for an array puts the whole type
+// among the specifiers and the element is what decides whether an object of it
+// is storage this compiler has. An element that is itself an array is walked
+// through, since only the scalar at the bottom is stored.
+fn (p Parser) array_element_supported(typ types.Type) bool {
+	mut element := typ
+	for element.is_array() {
+		element = element.element() or { return false }
+	}
+	if element.kind == .pointer || element.kind in emitted_kinds {
+		return true
+	}
+	if element.kind in [types.Kind.struct_, .union_, .enum_] {
+		return element.is_complete() && p.representation.layout(element) != none
+	}
+	return false
+}
+
 // unsupported_type_word is the word among a declaration's specifiers that keeps
 // the back end from giving an object the type it names, or none when every word
 // is one the emitter has a form for. A definition's return type and a
@@ -3018,6 +3049,18 @@ fn (p Parser) unsupported_type_word(spec DeclSpec, stars int) ?string {
 	// case, and the object is the variable-length array.
 	if spec.clause.has_vla() {
 		return none
+	}
+	if spec.clause.is_array() {
+		// A name a typedef gave an array type puts the whole type among the
+		// specifiers: `typedef int t[4];` makes `t x` a declaration of an
+		// object of an array type, and the word that names it is the array
+		// rather than its element. The question is the same one an object of
+		// a written array asks - `int x[4]` is storage this back end has -
+		// so it is asked of the element at the bottom of the type, and the
+		// name is not refused for being the array it stands for.
+		if p.array_element_supported(spec.clause) {
+			return none
+		}
 	}
 	if spec.clause.kind in [types.Kind.struct_, .union_, .enum_] {
 		// A tag that was declared and never defined is not complete, so there is
@@ -4306,14 +4349,18 @@ fn (s ArraySuffix) count_as_step() int {
 	return int(s.count)
 }
 
-// array_takes_string says whether a string literal initializes the array a
-// declarator declared: an array of character type by an ordinary literal and an
-// array of this target's wchar_t, an int, by a wide one. Measured on gcc 16.2.1,
-// `signed char a[] = "x"` and `unsigned char a[] = "x"` are accepted while
-// `int a[] = "x"` and `unsigned int a[] = L"x"` are not, so the element type has
-// to be the literal's own.
-fn array_takes_string(d Declarator, declared types.Type, literal ast.StrLit) bool {
-	if !d.is_array() {
+// array_takes_string says whether a string literal initializes the array an
+// object was declared with: an array of character type by an ordinary literal
+// and an array of this target's wchar_t, an int, by a wide one. Measured on gcc
+// 16.2.1, `signed char a[] = "x"` and `unsigned char a[] = "x"` are accepted
+// while `int a[] = "x"` and `unsigned int a[] = L"x"` are not, so the element
+// type has to be the literal's own.
+//
+// It asks the declared type and not the declarator, because a name a typedef
+// gave an array type is an array the brackets never spelled: `typedef char
+// c4[4]; c4 s = "abc";` is the same initializer as `char s[4] = "abc";`.
+fn array_takes_string(declared types.Type, literal ast.StrLit) bool {
+	if !declared.is_array() {
 		return false
 	}
 	element := declared.element() or { return false }
@@ -4443,8 +4490,12 @@ fn (mut p Parser) file_scope_string_initializer(d Declarator, declared types.Typ
 	values := string_elements(literal)
 	characters := values.len - 1
 	element := declared.element() or { declared }
-	if d.array_sized() {
-		written := d.array_count()
+	// The size a literal is measured against is the array's own. A written
+	// bracket's is the declarator's; a name a typedef gave an array type has
+	// none beside the name, and its size is the type's.
+	sized := d.array_sized() || (!d.is_array() && declared.count > 0)
+	if sized {
+		written := if d.array_sized() { d.array_count() } else { declared.count }
 		if written < characters {
 			p.error_span(literal.line, literal.col, 'a constraint violation: ${name} holds ${written} elements and its initializer writes ${values.len} characters')
 			return ArrayString{}
