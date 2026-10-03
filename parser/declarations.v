@@ -2277,20 +2277,12 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 		} else if body {
 			// The element a store takes: a name, a call, `&x`, a string
 			// literal, or a parenthesized constant this reader has no arm for.
+			// An address of a part of an object is one of these values: at body
+			// scope the object is storage the program has, so `&a[0]` and `&s.b`
+			// are ordinary address expressions a store evaluates where the
+			// declaration runs, and the store places the byte the part starts
+			// at.
 			expr := p.parse_expression() or {
-				p.skip_balanced(open) or {}
-				return error('brace element')
-			}
-			// The address of a *part* of an object is refused by name. gcc 16.2.1
-			// accepts `int a[2]; int *p[2] = {&a[0], &a[1]};`, and the store this
-			// reader makes for one element of an array does not yet place the
-			// byte the part starts at: measured on the binary built from this
-			// tree's base commit, `int *p[1]; p[0] = &a[1];` reads back the
-			// address of `a` rather than of `a[1]`. A wrong address is worse than
-			// a refusal, so the shape is named here. The address of the whole
-			// object, `&x`, is one the store places.
-			if part := address_of_a_part(expr) {
-				p.error_span(part.line, part.col, 'unsupported: the address of a part of ${part.name} is not implemented, and the address of the whole object is not what it names')
 				p.skip_balanced(open) or {}
 				return error('brace element')
 			}
@@ -2318,50 +2310,6 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 		p.skip_balanced(open) or {}
 		return error('brace list')
 	}
-}
-
-// AddressOfAPart is the name an address of a part of an object names together
-// with the place the name is written. A diagnostic about the shape points at the
-// name rather than at the ampersand in front of it, which is the token that looks
-// like an ordinary address and not like the part being addressed.
-struct AddressOfAPart {
-	name string
-	line int
-	col  int
-}
-
-// address_of_a_part is what an address of a part of an object names, and none
-// when the expression is not one: `&name[i]` and `&name.a` address a part of an
-// object, and `&name` addresses the whole thing, which is a value an element
-// store places. The name is empty for a part reached through something other than
-// a name, which has no name to point at.
-fn address_of_a_part(expr ast.Expr) ?AddressOfAPart {
-	if expr is ast.Unary {
-		if expr.op == '&' {
-			inner := expr.expr
-			if inner is ast.Index {
-				if inner.base is ast.Ident {
-					return AddressOfAPart{
-						name: inner.base.name
-						line: inner.base.line
-						col:  inner.base.col
-					}
-				}
-				return AddressOfAPart{
-					line: inner.line
-					col:  inner.col
-				}
-			}
-			if inner is ast.Field {
-				return AddressOfAPart{
-					name: inner.name
-					line: inner.line
-					col:  inner.col
-				}
-			}
-		}
-	}
-	return none
 }
 
 // starts_a_written_constant answers whether the next token begins a written
