@@ -802,6 +802,19 @@ pub fn vla_array_of(base Type, id int) Type {
 	}
 }
 
+// has_vla says the type's size is one the program computes: it is a variable-
+// length array, or an array whose elements are. A pointer to one is a pointer,
+// whose size is a word whatever it addresses.
+pub fn (t Type) has_vla() bool {
+	if t.vla {
+		return true
+	}
+	if t.kind == .array && t.base != unsafe { nil } {
+		return t.base.has_vla()
+	}
+	return false
+}
+
 // function_type is the type of a function returning ret. The parameters are the
 // ones the declarator wrote, adjusted the way 6.7.5.3 asks: a parameter of an
 // array type is a pointer, and a parameter of a function type is a pointer to

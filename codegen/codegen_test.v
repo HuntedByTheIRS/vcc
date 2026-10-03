@@ -3631,3 +3631,57 @@ fn test_a_parameter_written_with_brackets_is_a_pointer_to_its_element() {
 	assert sum.diagnostics.len == 0
 	assert run_image(sum.bytes) == 10
 }
+
+// A variable-length array is storage whose size the program computes where the
+// declaration runs: the frame cannot reserve it, so the declaration lowers the
+// stack pointer by the size it worked out and the array's address is what the
+// stack pointer became. Measured on gcc 16.2.1, the three programs below exit 10,
+// 28 and 14.
+fn test_a_variable_length_array_is_sized_where_its_declaration_runs() {
+	sum := emit(translation_unit('int main(void) { int n = 5; int a[n]; for (int i = 0; i < n; i++) a[i] = i; int s = 0; for (int i = 0; i < n; i++) s += a[i]; return s; }'),
+		Options{})
+	assert sum.diagnostics.len == 0
+	assert run_image(sum.bytes) == 10
+	size := emit(translation_unit('int main(void) { int n = 7; int a[n]; return (int) sizeof a; }'),
+		Options{})
+	assert size.diagnostics.len == 0
+	assert run_image(size.bytes) == 28
+	bounded := emit(translation_unit('int bound(int x) { return x + 2; } int main(void) { int a[bound(3)]; for (int i = 0; i < 5; i++) a[i] = 10 + i; return a[4]; }'),
+		Options{})
+	assert bounded.diagnostics.len == 0
+	assert run_image(bounded.bytes) == 14
+}
+
+// A row of a variable-length array whose element is itself an array is as many
+// bytes as the inner bound says, and that is a value: the subscript computes the
+// stride where it runs instead of scaling by a constant the type cannot carry.
+// Measured on gcc 16.2.1, the two programs below exit 23 and 16.
+fn test_a_two_dimensional_variable_length_array_has_a_run_time_row_stride() {
+	grid := emit(translation_unit('int main(void) { int r = 3; int c = 4; int m[r][c]; for (int i = 0; i < r; i++) for (int j = 0; j < c; j++) m[i][j] = i * 10 + j; return m[2][3]; }'),
+		Options{})
+	assert grid.diagnostics.len == 0
+	assert run_image(grid.bytes) == 23
+	row := emit(translation_unit('int main(void) { int r = 3; int c = 4; int m[r][c]; return (int) sizeof m[0]; }'),
+		Options{})
+	assert row.diagnostics.len == 0
+	assert run_image(row.bytes) == 16
+}
+
+// A typedef of a variable-length array type and a bound of one are the same
+// mechanism: the object is the array, every declaration in a block claims its own
+// storage, and a bound of one is one element. Measured on gcc 16.2.1, the three
+// programs below exit 15, 42 and 220.
+fn test_a_variable_length_array_through_a_typedef_and_a_bound_of_one() {
+	named := emit(translation_unit('int main(void) { int n = 6; typedef int t[n]; t a; for (int i = 0; i < n; i++) a[i] = i * 3; return a[5]; }'),
+		Options{})
+	assert named.diagnostics.len == 0
+	assert run_image(named.bytes) == 15
+	one := emit(translation_unit('int main(void) { int one = 1; int a[one]; a[0] = 42; return a[0]; }'),
+		Options{})
+	assert one.diagnostics.len == 0
+	assert run_image(one.bytes) == 42
+	twice := emit(translation_unit('int main(void) { int n = 3; int a[n]; int b[n]; for (int i = 0; i < n; i++) { a[i] = i; b[i] = i * 10; } return a[2] * 100 + b[2]; }'),
+		Options{})
+	assert twice.diagnostics.len == 0
+	assert run_image(twice.bytes) == 220
+}

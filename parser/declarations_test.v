@@ -1196,9 +1196,9 @@ fn test_a_written_array_bound_is_evaluated_as_a_constant_expression() {
 // level without a size the image can carry, which 6.6 makes a constraint
 // violation. Measured on gcc 16.2.1 under `-std=c99`, `int a[1/0];` and
 // `int n = 3; int a[n];` are both `variably modified 'a' at file scope` and exit
-// 1. A body's bound that is not constant is a different thing and is left to the
-// body's own reader: this compiler does not implement a variable-length array and
-// refuses it there by name.
+// 1. A body's bound that is not constant declares a variable-length array: the
+// object's size is a value the program computes where the declaration runs, so
+// the declaration is kept and carries the expression that sizes it.
 fn test_a_non_constant_bound_at_file_scope_is_a_constraint_violation() {
 	divided := declarations_of('int a[1/0];')
 	assert divided.diagnostics.len == 1
@@ -1213,11 +1213,14 @@ fn test_a_non_constant_bound_at_file_scope_is_a_constraint_violation() {
 	inner := declarations_of('int n = 3;\nint a[3][n];')
 	assert inner.diagnostics.len == 1
 	assert inner.diagnostics[0].msg.contains('a constraint violation')
-	// A body's copy of the named bound stays the variable-length array this
-	// compiler refuses by name rather than the constraint violation.
+	// A body's copy of the named bound is the variable-length array itself: the
+	// declaration carries the expression that sizes it, which is the bound times
+	// the width of an element, and the element width beside it.
 	body := declarations_of('int main(void) { int n = 3; int a[n]; return 0; }')
-	assert body.diagnostics.len == 1
-	assert body.diagnostics[0].msg.contains('an array declaration in a body needs a size')
+	assert body.diagnostics.len == 0
+	decl := body.unit.decls[0].body[1]
+	assert decl.decl_vla_size != none
+	assert decl.decl_stride == 4
 }
 
 // The conditional operator is an operator 6.6p3 leaves in a constant expression,

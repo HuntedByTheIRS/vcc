@@ -1223,6 +1223,29 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			return stmts
 		}
 		declared := p.declared_type(spec.clause, d)
+		// A typedef of a variable-length array type names a type and declares
+		// no object: there is no storage to claim and no statement to make. The
+		// name is already recorded where the declarator was read, so the rest
+		// of the block sees it as the type it names. `typedef int t[n];` is the
+		// shape a variable-length array is declared through.
+		if spec.is_typedef && declared.has_vla() {
+			if p.at_punct('=') {
+				p.error_at(p.peek(), 'unsupported: ${d.name} is a type name, and a type name is not an object to initialize')
+				p.skip_declaration()
+				return stmts
+			}
+			if p.at_punct(',') {
+				p.next()
+				continue
+			}
+			if p.at_punct(';') {
+				p.next()
+				return stmts
+			}
+			p.error_at(p.peek(), 'unsupported: expected , or ; after a declarator, found ${describe(p.peek())}')
+			p.skip_declaration()
+			return stmts
+		}
 		mut init := ?ast.Expr(none)
 		// brace says the initializer was written as a list, elements are its
 		// values as expressions, and list_ok says the list was read. A list that
@@ -1370,11 +1393,21 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				}
 			}
 		}
+		// A variable-length array is storage the program sizes where the
+		// declaration runs, so there are no bytes for an initializer to write
+		// into when the constants are read. gcc 16.2.1 refuses it with
+		// `variable-sized object may not be initialized`.
+		if declared.has_vla() && (brace || from_string || init != none) {
+			p.error_at(d.name_at, 'unsupported: ${d.name} is a variable-length array, and a variable-length array cannot be initialized')
+			p.skip_declaration()
+			return stmts
+		}
 		// An array declaration needs a size, and a brace list or a string
 		// literal is one for an array whose brackets were empty: `int a[] = {1,
 		// 2, 3};` declares a of three. A list the reader refused has already
-		// been named and the size is not reported a second time.
-		if d.is_array() && d.array_count() <= 0 && !brace && !from_string {
+		// been named and the size is not reported a second time. An array whose
+		// bound is a value has its size, so this refusal is not about it.
+		if d.is_array() && d.array_count() <= 0 && !brace && !from_string && !declared.has_vla() {
 			p.error_at(d.array_at(), 'unsupported: an array declaration in a body needs a size that is a number and more than zero')
 			p.skip_declaration()
 			return stmts
@@ -1413,13 +1446,29 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		if union_first != none || struct_brace != none {
 			decl_init = ?ast.Expr(none)
 		}
+		// A variable-length array's size is a value the program computes where
+		// the declaration runs, and the width of one element is the only part
+		// of its type that is not: the frame cannot reserve the object, so the
+		// declaration tells the back end the expression to claim it with and
+		// the width an element store is.
+		mut vla_stride := declaration_stride(declared, p.representation)
+		mut vla_size := ?ast.Expr(none)
+		if declared.has_vla() {
+			vla_size = p.vla_size_expr(declared, d.name_at) or {
+				p.error_at(d.name_at, 'unsupported: ${d.name} is a variable-length array whose size this compiler cannot compute')
+				p.skip_declaration()
+				return stmts
+			}
+			vla_stride = p.vla_element_size(declared)
+		}
 		stmts << ast.Stmt{
-			kind:        .var_decl
-			init:        decl_init
-			decl_name:   d.name
-			decl_type:   p.spelling_of(spec, d.pointer_count())
-			decl_count:  count
-			decl_stride: declaration_stride(declared, p.representation)
+			kind:          .var_decl
+			init:          decl_init
+			decl_name:     d.name
+			decl_type:     p.spelling_of(spec, d.pointer_count())
+			decl_count:    count
+			decl_stride:   vla_stride
+			decl_vla_size: vla_size
 			// The declarator decides whether the object is the aggregate or
 			// something derived from it: `struct S x;` is the object, and
 			// `struct S *p;` is one word holding an address, which the back end
@@ -1427,9 +1476,9 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			// An array of aggregates carries the size of one element here, and
 			// the count it was declared with travels beside it: the frame reserves
 			// the product, and an index scales by the size of one element.
-			bytes:       p.aggregate_bytes(declared)
-			line:        d.name_at.line
-			col:         d.name_at.col
+			bytes:         p.aggregate_bytes(declared)
+			line:          d.name_at.line
+			col:           d.name_at.col
 		}
 		// A union's brace initializer is the one member it names, written at the
 		// beginning of the object: `union U u = {5};` stores 5 into u's first

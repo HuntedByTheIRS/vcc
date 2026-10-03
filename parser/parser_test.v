@@ -675,14 +675,17 @@ fn test_an_object_of_a_tag_with_no_body_is_still_reported() {
 	assert result.unit.decls[0].body.len == 1
 }
 
-// A body's array declaration keeps the size it was given, so what is left to
-// report is a size this reader cannot read as one: a name, a computation, or an
-// empty pair of brackets. The declaration is dropped rather than half-kept.
+// A body's array declaration whose bound is a name is a variable-length array:
+// the object's size is a value the program computes where the declaration runs,
+// so the declaration is kept with that bound and not dropped. What is left to
+// report is a bound that names something this file declares nowhere, which the
+// whole-unit walk reports at the name: `n` is declared nowhere in this program.
 fn test_a_local_array_whose_size_is_not_a_number_is_reported() {
 	result := parsed('int main() { int a[n]; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('needs a size')
-	assert result.unit.decls[0].body.len == 1
+	assert result.diagnostics[0].msg.contains('n is used here and nothing in this file declares it')
+	assert result.unit.decls[0].body.len == 2
+	assert result.unit.decls[0].body[0].decl_vla_size != none
 }
 
 fn test_an_assignment_writes_to_a_name() {
