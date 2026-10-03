@@ -111,13 +111,29 @@ pub const features = [
 		pedantic:  'an asm statement or an assembler name on a declarator'
 		status:    .implemented
 	},
+	// A GNU statement expression, `({ ... })`, is marked by two tokens with nothing
+	// between them and not by a word, so its spelling here is the pair and the
+	// check joins two tokens to find it. The tree reads the construct, so the row
+	// is implemented: `parser/parser.v` reads the group, `ast.StmtExpr` carries it
+	// and `codegen/codegen.v` writes it, and a group used as a value whose last
+	// statement is not an expression statement is refused by name where it is
+	// written. Measured on gcc 16.2.1, it is a GNU extension: c89, c99, c11 and
+	// c23 exit 0 silently and report it only under -pedantic (`ISO C forbids
+	// braced-groups within expressions`, an error under -pedantic-errors), and a
+	// GNU dialect takes it as its own. `gnu: true` is what says that and is the
+	// whole of the row's answer. The one place the answer is coarser than gcc is
+	// `-std=gnu99 -pedantic`, where gcc reports the construct anyway because
+	// -pedantic asks for the ISO standard's answer while this row is allowed in a
+	// GNU mode and the check produces nothing there; the `__int128` row is coarse
+	// the same way, measured the same way, so that is the `gnu` field's limit and
+	// not this row's.
 	Feature{
-		spellings: []
+		spellings: ['({']
 		since:     .none
 		gnu:       true
 		extension: ''
 		pedantic:  'braced-groups within expressions'
-		status:    .unimplemented
+		status:    .implemented
 	},
 	// typeof is C23's specifier, and the bare spelling is a keyword only where
 	// that standard or a GNU dialect is in effect. Measured on gcc 16.2.1,
@@ -534,6 +550,17 @@ fn auto_is_a_type_specifier(tokens []tokenize.Token, at int) bool {
 	return ended.kind == .punct && ended.text in ['=', ';', ',', '[']
 }
 
+// two_token_spelling is the two tokens at `at` written with nothing between them,
+// which is how a construct whose spelling is more than one token is found: `({`
+// opens a braced group and neither token alone is its name. It answers the empty
+// string at the end of the stream, which is no row's spelling.
+fn two_token_spelling(tokens []tokenize.Token, at int) string {
+	if at + 1 >= tokens.len {
+		return ''
+	}
+	return tokens[at].text + tokens[at + 1].text
+}
+
 // uses is the walk itself, over a table the caller hands in rather than over the
 // table above, which is how the rule an extension follows is checked before
 // there is an extension to check it with: the tests bring a table of their own.
@@ -548,7 +575,8 @@ fn uses(tokens []tokenize.Token, table []Feature, question Question) []tokenize.
 			if feature.status == .unimplemented {
 				continue
 			}
-			if !feature.spellings.contains(token.text) {
+			if !feature.spellings.contains(token.text)
+				&& !feature.spellings.contains(two_token_spelling(tokens, i)) {
 				continue
 			}
 			if feature.extension == 'auto' && !auto_is_a_type_specifier(tokens, i) {

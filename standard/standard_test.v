@@ -504,3 +504,39 @@ fn punct(text string) tokenize.Token {
 		file: 'f.c'
 	}
 }
+
+// A GNU statement expression is marked by two tokens with nothing between them
+// and not by a word, so the row carries the pair and the check joins two tokens
+// to find it. Measured on gcc 16.2.1, it is a GNU extension: c89, c99, c11 and
+// c23 take it silently and report it only under -pedantic, and a GNU dialect
+// takes it as its own. The report is the pedantic class, so -Wpedantic is what
+// shows it and -pedantic-errors is what makes it an error.
+fn test_the_braced_group_row_finds_the_pair_and_a_gnu_dialect_takes_it() {
+	rows := features.filter(it.pedantic == 'braced-groups within expressions')
+	assert rows.len == 1
+	assert rows[0].status == .implemented
+	assert rows[0].spellings == ['({']
+	assert rows[0].gnu
+	assert rows[0].extension == ''
+	group := [
+		punct('('),
+		punct('{'),
+		token('1'),
+		punct(';'),
+		punct('}'),
+		punct(')'),
+	]
+	// A parenthesis that opens no brace is not the construct: the row is found
+	// by the pair and not by the punctuation alone.
+	assert uses([punct('('), token('x'), punct(')')], features, asking(.c99)).len == 0
+	assert uses(group, features, asking(.c89)).len == 1
+	assert uses(group, features, asking(.c99)).len == 1
+	assert uses(group, features, asking(.c23)).len == 1
+	// A GNU dialect is where the construct is at home, so nothing is reported
+	// there: the mode that lacks it is the strict one.
+	assert uses(group, features, asking(.gnu99)).len == 0
+	assert uses(group, features, asking(.gnu23)).len == 0
+	report := uses(group, features, asking(.c99))[0]
+	assert report.msg == 'ISO C99 forbids braced-groups within expressions'
+	assert report.warning
+}
