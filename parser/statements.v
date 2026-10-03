@@ -1199,7 +1199,12 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			p.skip_declaration()
 			return stmts
 		}
-		if incomplete {
+		// A typedef names a type and declares no object, so a tag that is
+		// incomplete here is not a size the frame has to find room for: 6.7.2.3
+		// lets `typedef struct U U;` be written before `struct U { ... };`
+		// completes it, and the completion is what makes a later object of the
+		// name possible. The object rule below is asked of everything else.
+		if incomplete && !spec.is_typedef {
 			if offender := p.unsupported_type_word(spec, d.pointer_count()) {
 				p.error_at(spec.start, 'unsupported type ${offender}')
 				// A declaration of a tag with no body is refused here rather than
@@ -1413,23 +1418,33 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		if union_first != none || struct_brace != none {
 			decl_init = ?ast.Expr(none)
 		}
-		stmts << ast.Stmt{
-			kind:        .var_decl
-			init:        decl_init
-			decl_name:   d.name
-			decl_type:   p.spelling_of(spec, d.pointer_count())
-			decl_count:  count
-			decl_stride: declaration_stride(declared, p.representation)
-			// The declarator decides whether the object is the aggregate or
-			// something derived from it: `struct S x;` is the object, and
-			// `struct S *p;` is one word holding an address, which the back end
-			// sizes from the spelling.
-			// An array of aggregates carries the size of one element here, and
-			// the count it was declared with travels beside it: the frame reserves
-			// the product, and an index scales by the size of one element.
-			bytes:       p.aggregate_bytes(declared)
-			line:        d.name_at.line
-			col:         d.name_at.col
+		// A typedef declares a name for a type and no object: there is no
+		// storage to reserve and no statement to run, so nothing is emitted
+		// for it here. The name was recorded in the scope by its declarator,
+		// which is what a later use looks up. This is what lets a typedef of
+		// an aggregate whose body is read afterward stand in a body as it
+		// stands at file scope: gcc 16.2.1 accepts `typedef struct U U;
+		// struct U { int a; };` there, and an object is not involved until
+		// one is declared.
+		if !spec.is_typedef {
+			stmts << ast.Stmt{
+				kind:        .var_decl
+				init:        decl_init
+				decl_name:   d.name
+				decl_type:   p.spelling_of(spec, d.pointer_count())
+				decl_count:  count
+				decl_stride: declaration_stride(declared, p.representation)
+				// The declarator decides whether the object is the aggregate or
+				// something derived from it: `struct S x;` is the object, and
+				// `struct S *p;` is one word holding an address, which the back end
+				// sizes from the spelling.
+				// An array of aggregates carries the size of one element here, and
+				// the count it was declared with travels beside it: the frame reserves
+				// the product, and an index scales by the size of one element.
+				bytes:       p.aggregate_bytes(declared)
+				line:        d.name_at.line
+				col:         d.name_at.col
+			}
 		}
 		// A union's brace initializer is the one member it names, written at the
 		// beginning of the object: `union U u = {5};` stores 5 into u's first

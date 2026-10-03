@@ -208,6 +208,14 @@ fn (p Parser) specifier_clause(spec DeclSpec, tag_clause types.Type) types.Type 
 			clause = types.opaque_type(spec.type_words.join(' '))
 		}
 	}
+	// A name among the specifiers may stand for an aggregate whose body is read
+	// after the name was declared: `typedef struct S S;` takes the tag before
+	// `struct S { int a; };` completes it, and 6.7.2.3 makes that declaration
+	// and this one the same type. The tag namespace holds the completed type, so
+	// the class is resolved through it here, where every specifier resolves,
+	// rather than at any one declaration site. A type that is not an incomplete
+	// aggregate is answered as it is.
+	clause = p.tagged_type(clause)
 	return types.qualified(clause, spec.qualifiers)
 }
 

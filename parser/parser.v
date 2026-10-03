@@ -1148,7 +1148,11 @@ fn (p Parser) tagged_type(aggregate types.Type) types.Type {
 	// A tag is declared under the keyword and the tag as they were written, which
 	// is an unqualified aggregate's description; the qualifiers a type carries are
 	// not part of the name, so `const struct S` asks the same tag as `struct S`.
-	return p.scopes.lookup_tag(types.unqualified(aggregate).describe()) or { aggregate }
+	// The tag's members are the type's, but the qualifiers on the reading that
+	// asked are kept, because `const S x;` written through a typedef of `struct S`
+	// is a const object of the completed type.
+	found := p.scopes.lookup_tag(types.unqualified(aggregate).describe()) or { return aggregate }
+	return types.qualified(found, aggregate.quals)
 }
 
 // aggregate_bytes is how many bytes of storage an object of this type takes when
