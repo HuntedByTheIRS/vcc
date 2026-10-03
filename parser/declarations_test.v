@@ -348,16 +348,72 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	addressed := declarations_of('int a[2] = {name};')
 	assert addressed.diagnostics.len == 1
 	assert addressed.diagnostics[0].msg.contains('does not hold addresses')
-	// The element that is neither a written number nor an address is a
-	// parenthesized constant, which gcc 16.2.1 accepts and this file-scope
-	// reader does not: a body's list is the stores a declaration makes and takes
-	// one, a file-scope list is a constant the image holds and does not.
-	element := declarations_of('int a[2] = {(1)};')
+	// A parenthesized expression that is not a written constant is refused by
+	// name: gcc 16.2.1 folds `(1 + 2)` to 3 and accepts it, and a file-scope
+	// list holds a constant the image writes, which this reader reads only when
+	// the element is a written constant rather than an expression.
+	element := declarations_of('int a[2] = {(1 + 2)};')
 	assert element.diagnostics.len == 1
-	assert element.diagnostics[0].msg.contains('written number')
+	assert element.diagnostics[0].msg.contains('written constant')
 	empty := declarations_of('int a[] = {};')
 	assert empty.diagnostics.len == 1
 	assert empty.diagnostics[0].msg.contains('empty brace initializer')
+}
+
+// V writes every constant it emits as `(type)(value)`, so the C it generates has
+// file-scope const arrays whose first element is a cast of a written constant:
+// `{((u8)(0x08)), 0x00, ...}`. A cast of a written constant is itself a written
+// constant, and the value is the one the conversion makes - measured on gcc
+// 16.2.1, `((u8)(0x08))` is 8, `((unsigned long)(1e1))` is 10, `((double)(0.5))`
+// is 0.5, and `((unsigned long)(0x3ff0000000000000))` is 4607182418800017408, so
+// the wide value reaches the image whole rather than halved. A written constant
+// in parentheses, with a sign in front of them, is the same constant: `(7)` is 7
+// and `-(32)` is -32.
+fn test_a_file_scope_cast_or_parenthesized_constant_is_a_written_constant() {
+	casted := declarations_of('typedef unsigned char u8;
+static const u8 t[4] = {((u8)(0x08)), 0x01, 0x02, 0x03};')
+	assert casted.diagnostics.len == 0
+	assert casted.unit.globals.len == 1
+	assert casted.unit.globals[0].count == 4
+	assert casted.unit.globals[0].inits[0] == 8
+	assert casted.unit.globals[0].inits[1] == 1
+	// A floating constant cast to an integer type is truncated towards zero.
+	truncated := declarations_of('static const unsigned long p[] = {((unsigned long)(1e1))};')
+	assert truncated.diagnostics.len == 0
+	assert truncated.unit.globals[0].inits[0] == 10
+	// A cast to a floating type keeps the value in the class the object holds.
+	fraction := declarations_of('static const double d[] = {((double)(0.5))};')
+	assert fraction.diagnostics.len == 0
+	assert fraction.unit.globals[0].init_floats[0] == 0.5
+	// A value wider than the four bytes an instruction holds reaches the image
+	// whole: 0x3ff0000000000000 is the double 1.0 as its bits, and a table of
+	// these decides a float formatter's behaviour.
+	wide := declarations_of('static const unsigned long pos[] = {((unsigned long)(0x3ff0000000000000))};')
+	assert wide.diagnostics.len == 0
+	assert wide.unit.globals[0].inits[0] == 4607182418800017408
+	// Width and sign are the target type's: a narrowing conversion keeps the low
+	// bytes, and a signed one sign-extends them.
+	narrowed := declarations_of('static const unsigned char n[] = {((unsigned char)(300))};')
+	assert narrowed.diagnostics.len == 0
+	assert narrowed.unit.globals[0].inits[0] == 44
+	signed := declarations_of('static const signed char s[] = {((signed char)(0xFF))};')
+	assert signed.diagnostics.len == 0
+	assert signed.unit.globals[0].inits[0] == -1
+	// A written constant in parentheses, and a sign in front of the parentheses.
+	parenthesized := declarations_of('static const int q[] = {(7), -(32)};')
+	assert parenthesized.diagnostics.len == 0
+	assert parenthesized.unit.globals[0].inits[0] == 7
+	assert parenthesized.unit.globals[0].inits[1] == -32
+	// A cast of a call, a name or an expression is refused by name rather than
+	// converted: gcc 16.2.1 folds `(int)(1 + 2)` to 3 and `(int)(sizeof(int))`
+	// to 4 and accepts both, and this reader refuses them because neither is a
+	// written constant the image may hold.
+	expression := declarations_of('static const int r[] = {((int)(1 + 2))};')
+	assert expression.diagnostics.len == 1
+	assert expression.diagnostics[0].msg.contains('written constant')
+	sized := declarations_of('static const int u[] = {((int)(sizeof(int)))};')
+	assert sized.diagnostics.len == 1
+	assert sized.diagnostics[0].msg.contains('written constant')
 }
 
 // A file-scope list with a nested list or a designator initializes the
