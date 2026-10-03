@@ -1911,13 +1911,28 @@ fn (mut p Parser) parse_cast_or_compound(at tokenize.Token) !ast.Expr {
 		return p.postfix_on(literal)
 	}
 	operand := p.parse_prefix_operand(at)!
+	destination := p.declared_type(spec.clause, d)
 	return ast.Expr(ast.Cast{
-		spelling: p.spelling_of(spec, d.pointer_count())
+		spelling: p.conversion_spelling(spec, d, destination)
 		expr:     decayed_operand(operand)
-		typ:      p.declared_type(spec.clause, d)
+		typ:      destination
 		line:     at.line
 		col:      at.col
 	})
+}
+
+// conversion_spelling is the type a conversion names, as the diagnostic about a
+// conversion quotes it. `spelling_of` writes the specifiers and appends the
+// pointer stars, which is the whole of a declarator that is a run of pointers;
+// a declarator that also wrote a function or an array step wrote a part the
+// stars do not carry, so `(int (*)(int))` came out as `int *` and the message
+// named a destination the program never wrote. The resolved type's own spelling
+// keeps that part, and it is the same type the conversion is about.
+fn (p Parser) conversion_spelling(spec DeclSpec, d Declarator, resolved types.Type) string {
+	if d.steps.len > d.pointer_count() {
+		return resolved.describe()
+	}
+	return p.spelling_of(spec, d.pointer_count())
 }
 
 // decayed_operand applies 6.3.2.1p4 to the operand of a conversion: a function

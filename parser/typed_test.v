@@ -322,9 +322,10 @@ fn test_a_cast_to_a_function_pointer_names_the_function_pointer() {
 		return
 	}
 	conversion := initializer as ast.Cast
-	// The destination as the model resolved it: the specifiers, the parameters,
-	// and the star, and not the star a run of specifiers alone would read.
+	// The destination as the model resolved it and as a diagnostic quotes it:
+	// the specifiers, the parameters, and the star, and not the star alone.
 	assert conversion.typ.describe() == 'int (int) *'
+	assert conversion.spelling == 'int (int) *'
 	// The operand decayed to the pointer, which is the source type the emitter
 	// reads where a value is wanted.
 	assert conversion.expr.typ.describe() == 'int (int) *'
