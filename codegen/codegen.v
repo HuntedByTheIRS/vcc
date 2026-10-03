@@ -4346,8 +4346,12 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 	// is computed, so that the index expression cannot overwrite it on the way.
 	base := e.scratch(expr.line, expr.col)!
 	e.reference(e.target.address_of(base, 0), .global_address, name, e.target.name_of(base))
-	wide := !object.object && object.width == wide_bytes
 	long_double := e.global_array_is_long_double(name)
+	// A 128-bit integer and a long double are both sixteen bytes, but only the
+	// integer has no value this back end reads: an element of a top-level array
+	// of long doubles is the address of its bytes, the same as a local one, so
+	// the wide-object refusal is kept off it.
+	wide := !object.object && object.width == wide_bytes && !long_double
 	e.element_address(base, register, object.width, 0, wide || long_double, expr.typ.is_array(), name,
 		expr.line,
 		expr.col)!
@@ -4360,7 +4364,7 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 		return error('128-bit element')
 	}
-	if !object.floating && !object.single && e.global_is_long_double(name) {
+	if !object.floating && !object.single && e.global_array_is_long_double(name) {
 		// An element of a top-level array of long doubles: its value is the
 		// address element_address left, exactly as a local element of the type.
 		return
