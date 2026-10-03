@@ -118,6 +118,21 @@ pub mut:
 	// `int a[]`, or an array whose bound was not a constant this reader could
 	// read. It means nothing for any other kind.
 	count int
+	// vla says an array's bound was written and is computed at run time rather
+	// than read as a constant: `int a[n]`, and a type a typedef gave that shape.
+	// count is -1 for one, so vla is what tells a variable-length array from an
+	// array whose size was simply not written; indexing and sizeof both need the
+	// distinction, because each of them has to reach the bound as a value instead
+	// of reading count. It is false for every other kind.
+	vla bool
+	// vla_id is where the bound's expression is kept. The model is imported by
+	// the tree and cannot hold one of its nodes, so the reader that made the
+	// type keeps the bound in a table of its own and writes the handle here. It
+	// is zero for a type that is not a variable-length array and for one whose
+	// bound the reader did not keep, and nothing outside the reader reads it:
+	// the tree carries the expression to the back end, and the handle is only
+	// how a later use inside the reader finds it again.
+	vla_id int
 	// members are the members of a struct or a union, in the order they were
 	// written.
 	members []Member
@@ -335,7 +350,14 @@ pub fn (t Type) is_object() bool {
 pub fn (t Type) is_complete() bool {
 	if t.kind == .array {
 		if t.count < 0 {
-			return false
+			// A variable-length array is complete even though its count is not
+			// written: the bound is evaluated at run time and the object has a
+			// size from the moment it is declared. An array whose size was
+			// simply not written is the incomplete one, and a later initializer
+			// or an enclosing declaration is what completes it.
+			if !t.vla {
+				return false
+			}
 		}
 		if t.base == unsafe { nil } {
 			return false
@@ -406,7 +428,7 @@ pub fn (t Type) same(other Type) bool {
 		return false
 	}
 	if t.count != other.count || t.variadic != other.variadic
-		|| t.prototyped != other.prototyped {
+		|| t.prototyped != other.prototyped || t.vla != other.vla {
 		return false
 	}
 	if !(t.kind in [.struct_, .union_] && t.tag != '') {
@@ -764,6 +786,33 @@ pub fn array_of(base Type, count int) Type {
 		base:  &Type{ ...base }
 		count: count
 	}
+}
+
+// vla_array_of is the type of an array of base whose bound is computed at run
+// time: `int a[n]`. Its count is -1 because no constant is written, and vla is
+// what tells it from an array whose brackets were empty. id is the reader's
+// handle on the bound expression, which lives in a table the reader keeps.
+pub fn vla_array_of(base Type, id int) Type {
+	return Type{
+		kind:   .array
+		base:   &Type{ ...base }
+		count:  -1
+		vla:    true
+		vla_id: id
+	}
+}
+
+// has_vla says the type's size is one the program computes: it is a variable-
+// length array, or an array whose elements are. A pointer to one is a pointer,
+// whose size is a word whatever it addresses.
+pub fn (t Type) has_vla() bool {
+	if t.vla {
+		return true
+	}
+	if t.kind == .array && t.base != unsafe { nil } {
+		return t.base.has_vla()
+	}
+	return false
 }
 
 // function_type is the type of a function returning ret. The parameters are the

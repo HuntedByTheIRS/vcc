@@ -242,6 +242,14 @@ pub:
 	decl_name  string
 	decl_type  string
 	decl_count int
+	// decl_vla_size is the number of bytes a variable-length array declaration
+	// claims, as an expression evaluated where the declaration runs: for
+	// `int a[n]` it is `n * sizeof(int)`, and for `int m[r][c]` it is
+	// `r * c * sizeof(int)`. It is none for a declaration whose size is a
+	// constant, which is what the frame reserves for every other object. The
+	// type's vla flag says which declaration this is; a vla declaration without
+	// this expression is not emitted.
+	decl_vla_size ?Expr
 	// decl_stride is the size of one element of an array declaration: what an
 	// index scales by and what the frame reserves a count of. For an array of
 	// arrays it is the whole row, which is the size of the element's own type
@@ -460,8 +468,14 @@ pub:
 	base  Expr
 	index Expr
 	typ   types.Type
-	line  int
-	col   int
+	// vla_stride is the run-time stride of this subscript when the element type
+	// has no size this compiler can fold: for `int m[r][c]`, the stride of
+	// `m[i]` is `c * sizeof(int)`, which is a value and not a constant. It is
+	// none where the stride is a constant, and the emitter then sizes the
+	// element from its type as it always did.
+	vla_stride ?Expr
+	line       int
+	col        int
 }
 
 // Field is one member of an aggregate object, written `x.a`. The object is a name

@@ -305,6 +305,10 @@ struct DeclStep {
 	// this reader read. Empty brackets wrote nothing, and that is the only
 	// pair a later reader may take a size for from an initializer.
 	sized bool
+	// bound_expr is that expression, kept when it was written and did not fold.
+	// It is what a variable-length array's bound is, and it is what the type a
+	// declaration built has to point at.
+	bound_expr ?ast.Expr
 	// at is where the step was written.
 	at tokenize.Token
 	// bound_name, with its line and column, is the first name a written bound
@@ -834,7 +838,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// `variably modified 'a' at file scope` and exit 1. The check is here
 			// and not in the suffix reader because the same suffix is read for a
 			// struct member, whose bound may be one this compiler cannot fold.
-			if !spec.is_typedef && d.is_array() && d.array_bound_is_unreadable() {
+			if !spec.is_typedef && ((d.is_array() && d.array_bound_is_unreadable()) || p.declared_type(spec.clause, d).has_vla()) {
 				if ident := d.array_bound_ident() {
 					// The bound named something the scope did not have. Whether
 					// the file declares that name anywhere is a question only the
@@ -852,7 +856,8 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						at_col:    d.array_at().col
 					}
 				} else {
-					p.error_at(d.array_at(), 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
+					at := if d.is_array() { d.array_at() } else { d.name_at }
+					p.error_at(at, 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
 				}
 				p.skip_declaration()
 				return decls
@@ -2661,6 +2666,13 @@ fn (p Parser) unsupported_type_word(spec DeclSpec, stars int) ?string {
 	// to a type the model cannot size is still one address wide: 6.2.5 lets a
 	// pointer name an incomplete type, and the back end sizes a pointer from the
 	// star and never asks what is under it.
+	// A type whose size the program computes is storage a declaration may have:
+	// the model knows it, and the spelling of a name a typedef gave it would
+	// otherwise be read as a word with no form. `typedef int t[n]; t a;` is the
+	// case, and the object is the variable-length array.
+	if spec.clause.has_vla() {
+		return none
+	}
 	if spec.clause.kind in [types.Kind.struct_, .union_, .enum_] {
 		// A tag that was declared and never defined is not complete, so there is
 		// no size to give an object of it: the refusal names the tag as it was
@@ -3308,6 +3320,7 @@ fn (mut p Parser) parse_declarator(depth int) !Declarator {
 				kind:            .array_step
 				count:           suffix.count_as_step()
 				sized:           suffix.bound != .empty
+				bound_expr:      suffix.bound_expr
 				at:              at
 				bound_name:      p.bound_name
 				bound_name_line: p.bound_name_line
@@ -3414,18 +3427,144 @@ fn apply_step(base types.Type, step DeclStep) types.Type {
 	}
 }
 
+// VlaBound is the bound of one variable-length array type: the expressions the
+// dimensions were written with, innermost dimension first, so the number of
+// dimensions is the length of the list.
+struct VlaBound {
+	bounds []ast.Expr
+}
+
+// record_vla_bound adds a bound to the parser's table and answers the handle a
+// type refers to it by. The handle is one more than the position, so no type has
+// handle zero, which is what `not a variable-length array` is spelled as.
+fn (mut p Parser) record_vla_bound(bounds []ast.Expr) int {
+	p.vla_bounds << VlaBound{
+		bounds: bounds.clone()
+	}
+	return p.vla_bounds.len
+}
+
+// vla_bound_exprs is the bound a handle names, or nothing for the zero handle and
+// for one no type carries.
+fn (p Parser) vla_bound_exprs(id int) []ast.Expr {
+	if id <= 0 || id > p.vla_bounds.len {
+		return []
+	}
+	return p.vla_bounds[id - 1].bounds
+}
+
 // declared_type is the type a specifier and a declarator together name. The
 // declarator's steps are applied in the order it wrote them: a pointer step is a
 // pointer to what is under it, an array step is an array of it, and a function
 // step is a function returning it. A pointer inside parentheses reverses the
 // order of the two around it, which is the whole difference between `int *p[5]`
 // and `int (*p)[5]`.
-fn (p Parser) declared_type(base types.Type, d Declarator) types.Type {
+//
+// A step whose brackets wrote a bound this reader could not evaluate declares a
+// variable-length array: the object's size is a value the program computes where
+// the declaration runs, so the type cannot keep a count and keeps a handle on the
+// bound expression instead. Each dimension gets its own handle, whose bound is
+// that dimension and the ones inside it, so that a subscript can ask the element
+// type what its stride is and get the bounds of the element and not of the whole.
+fn (mut p Parser) declared_type(base types.Type, d Declarator) types.Type {
 	mut typ := base
+	mut bounds := p.vla_bound_exprs(base.vla_id).clone()
 	for step in d.steps {
+		if step.kind == .array_step {
+			if expr := step.bound_expr {
+				bounds << expr
+				typ = types.vla_array_of(typ, p.record_vla_bound(bounds))
+				continue
+			}
+		}
 		typ = apply_step(typ, step)
 	}
 	return typ
+}
+
+// vla_size_expr is how many bytes an array whose size the program computes takes,
+// as an expression to be evaluated where the question is asked: the size of the
+// element at the bottom times the bound of every dimension. It is none for a type
+// whose size is a constant, which the caller answers in the usual way.
+//
+// `int a[n]` is `n * 4`, `int m[r][c]` is `r * c * 4`, and a typedef's array is
+// the same expression with the same bounds. A dimension written as a constant is
+// that constant: `int m[2][c]` is `2 * c * 4`.
+//
+// The result is unsigned long, the type a size_t is, and a bound written as a
+// signed expression is converted to it before it is multiplied, so an unsigned
+// product is what the constant sizeof would have been.
+fn (p Parser) vla_size_expr(typ types.Type, at tokenize.Token) ?ast.Expr {
+	if !typ.is_array() {
+		return none
+	}
+	if typ.count > 0 {
+		element := typ.element() or { return none }
+		inner := p.vla_size_expr(element, at) or { return none }
+		return p.size_product(p.size_constant(typ.count, at), inner, at)
+	}
+	bounds := p.vla_bound_exprs(typ.vla_id)
+	if bounds.len == 0 {
+		return none
+	}
+	mut scalar := typ
+	for scalar.is_array() {
+		scalar = scalar.element() or { return none }
+	}
+	size := p.representation.size_of(scalar) or { return none }
+	mut expr := p.size_constant(size, at)
+	for bound in bounds {
+		expr = p.size_product(expr, p.size_as_unsigned(bound, at), at)
+	}
+	return expr
+}
+
+// vla_element_size is the width of the scalar at the bottom of a variable-length
+// array's type, which is what one element store is as wide as. The object's own
+// size is a value, but the width of one element is not: the bounds are the only
+// part of such a type that is computed.
+fn (p Parser) vla_element_size(typ types.Type) int {
+	mut scalar := typ
+	for scalar.is_array() {
+		scalar = scalar.element() or { return 0 }
+	}
+	return p.representation.size_of(scalar) or { 0 }
+}
+
+// size_constant is a byte count as a constant of the type a size has.
+fn (p Parser) size_constant(value int, at tokenize.Token) ast.Expr {
+	return ast.Expr(ast.IntLit{
+		value: i64(value)
+		text:  '${value}'
+		typ:   types.unsigned_long_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// size_product is one size times another, which is the sign of a size: both are
+// unsigned and the product is.
+fn (p Parser) size_product(left ast.Expr, right ast.Expr, at tokenize.Token) ast.Expr {
+	return ast.Expr(ast.Binary{
+		op:    '*'
+		left:  left
+		right: right
+		typ:   types.unsigned_long_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// size_as_unsigned is a bound written as a signed expression, converted to the
+// type a size has before it is folded into one.
+fn (p Parser) size_as_unsigned(expr ast.Expr, at tokenize.Token) ast.Expr {
+	return ast.Expr(ast.Cast{
+		spelling: 'unsigned long'
+		expr:     expr
+		typ:      types.unsigned_long_type()
+		line:     at.line
+		col:      at.col
+	})
 }
 
 // parameter_spelling is the type a parameter was declared with, written the way
@@ -3765,6 +3904,13 @@ enum ArrayBound {
 struct ArraySuffix {
 	bound ArrayBound
 	count i64
+	// bound_expr is the bound as it was written, kept when it was written and
+	// did not fold. A size the reader could not evaluate is exactly the bound of
+	// a variable-length array: the object's size is a value the program computes
+	// where the declaration runs, so the expression has to reach the emitter
+	// instead of being discarded here. It is none for the brackets that wrote no
+	// size and for a bound that read as a size.
+	bound_expr ?ast.Expr
 }
 
 // count_as_step is the size a declarator step carries for this suffix: the size
@@ -4004,7 +4150,8 @@ fn (mut p Parser) parse_array_suffix(name string) !ArraySuffix {
 					p.bound_name_col = ident.col
 				}
 				return ArraySuffix{
-					bound: .unreadable
+					bound:      .unreadable
+					bound_expr: expr
 				}
 			}
 			if value > 0 {

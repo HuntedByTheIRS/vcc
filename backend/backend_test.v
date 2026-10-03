@@ -1619,3 +1619,47 @@ fn test_a_double_reaches_an_unsigned_word_by_its_range() {
 	assert target.double_to_unsigned_word(eax, xmm0, ecx, xmm1) or { panic('the target description has no such name') } ==
 		x86_64.double_to_unsigned_word(target.describe(eax), target.describe(xmm0), target.describe(ecx), target.describe(xmm1)) or { panic('the target description has no such name') }
 }
+
+fn test_the_dynamic_frame_subtraction_is_the_bytes_that_lower_the_stack() {
+	// sub rsp, rax and sub rsp, r11: the stack pointer is the destination and the
+	// register holding the size is the source, which is the r/m form of the group
+	// opcode. Written out here so a change to the encoding has to be a change to
+	// this expectation.
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	rax := target.reg('rax') or { panic('the target description has no such name') }
+	r11 := target.reg('r11') or { panic('the target description has no such name') }
+	assert target.sub_rsp_register(rax) or { panic('the target description has no such name') } == [
+		u8(0x48),
+		0x29,
+		0xc4,
+	]
+	assert target.sub_rsp_register(r11) or { panic('the target description has no such name') } == [
+		u8(0x4c),
+		0x29,
+		0xdc,
+	]
+}
+
+fn test_the_dynamic_stride_multiply_is_the_bytes_that_scale_an_index() {
+	// imul rax, rcx / imul r11, r12: the destination is in the reg field and the
+	// source in the r/m field, which is the way this two-operand form runs. The
+	// multiply a variable-length array's row stride needs is the same one a wide
+	// pair's cross products use, so it is the machine's existing encoder.
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	rax := target.reg('rax') or { panic('the target description has no such name') }
+	rcx := target.reg('rcx') or { panic('the target description has no such name') }
+	r11 := target.reg('r11') or { panic('the target description has no such name') }
+	r12 := target.reg('r12') or { panic('the target description has no such name') }
+	assert target.multiply_word(rax, rcx) or { panic('the target description has no such name') } == [
+		u8(0x48),
+		0x0f,
+		0xaf,
+		0xc1,
+	]
+	assert target.multiply_word(r11, r12) or { panic('the target description has no such name') } == [
+		u8(0x4d),
+		0x0f,
+		0xaf,
+		0xdc,
+	]
+}

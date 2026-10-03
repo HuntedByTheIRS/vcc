@@ -48,6 +48,13 @@ mut:
 	// needs a width the description does not carry is refused and the node it
 	// belongs to is left unresolved rather than guessed at.
 	representation types.Representation
+	// vla_bounds is the bound expression of every variable-length array type
+	// this unit has built, in the order they were built, and a type refers to
+	// one by its number in this list. The model holds no expression - types
+	// does not know the tree - so the bound lives here and the type carries the
+	// handle to it. A number is one more than the position, so the zero value of
+	// a type's handle means `not a variable-length array`.
+	vla_bounds []VlaBound
 	// pending_base is the type the specifiers just read name, for the declarator
 	// that follows them. A declarator is read in three places - a declaration, a
 	// parameter and a member - and it is the same grammar in all three, so what
@@ -416,6 +423,11 @@ fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map
 		if init := stmt.init {
 			p.check_undeclared_expression(init, mut reported)
 		}
+		// A variable-length array's size expression carries the names its
+		// bounds were written with, at the point the declaration runs.
+		if size := stmt.decl_vla_size {
+			p.check_undeclared_expression(size, mut reported)
+		}
 		if index := stmt.index {
 			p.check_undeclared_expression(index, mut reported)
 		}
@@ -461,6 +473,12 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 		ast.Index {
 			p.check_undeclared_expression(expr.base, mut reported)
 			p.check_undeclared_expression(expr.index, mut reported)
+			// The stride of an element of an array whose bound is a value is an
+			// expression and carries the bound's names: `int m[r][c]` reaches
+			// `c` through the subscript and not through any other node.
+			if stride := expr.vla_stride {
+				p.check_undeclared_expression(stride, mut reported)
+			}
 		}
 		ast.Field {
 			// A member of an expression carries the object's own names inside
@@ -1737,12 +1755,22 @@ fn (mut p Parser) element(base ast.Expr, index ast.Expr, at tokenize.Token) !ast
 			col:  address.col
 		})
 	}
+	// A row of an array whose bound is a value is that many bytes wide, and how
+	// many is a question for the running program: `int m[r][c]`'s stride is
+	// `c * sizeof(int)`. It is left none where the element type has a size this
+	// reader can fold, which is every ordinary array, and the emitter then
+	// scales the index by that size as it always did.
+	mut stride := ?ast.Expr(none)
+	if element.has_vla() {
+		stride = p.vla_size_expr(element, at)
+	}
 	return ast.Expr(ast.Index{
-		base:  address
-		index: count
-		typ:   element
-		line:  at.line
-		col:   at.col
+		base:       address
+		index:      count
+		typ:        element
+		vla_stride: stride
+		line:       at.line
+		col:        at.col
 	})
 }
 
@@ -1908,6 +1936,9 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 		} else {
 			declared := p.declared_type(spec.clause, d)
 			spelling = p.spelling_of(spec, d.pointer_count())
+			if vla := p.vla_size_expr(declared, at) {
+				return vla
+			}
 			size = p.representation.size_of(declared) or {
 				p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler has no size for it')
 				return error('no size for the type')
@@ -1928,6 +1959,12 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 			// says which size could not be answered.
 			p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler did not resolve its type')
 			return error('no type for the operand')
+		}
+		// A variable-length array's size is not a constant, so it is not a
+		// constant expression and the answer is the product of its bounds,
+		// evaluated where the sizeof is asked.
+		if vla := p.vla_size_expr(operand.typ, at) {
+			return vla
 		}
 		size = p.representation.size_of(operand.typ) or {
 			p.error_at(at, 'unsupported: sizeof asks how many bytes ${spelling} takes, and this compiler has no size for ${operand.typ.describe()}')
