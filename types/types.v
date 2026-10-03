@@ -378,6 +378,29 @@ pub fn (t Type) is_const() bool {
 	return t.quals.const_
 }
 
+// has_const_member says whether an aggregate has a const-qualified member,
+// including one inside a member aggregate or an array element, which 6.3.1p1
+// makes the whole object a non-modifiable lvalue: a structure or union is not
+// modifiable when it has any member, recursively through the aggregates and
+// unions it contains, with a const-qualified type.
+pub fn (t Type) has_const_member() bool {
+	if t.kind !in [.struct_, .union_] {
+		return false
+	}
+	for member in t.members {
+		if member.typ.is_const() || member.typ.has_const_member() {
+			return true
+		}
+		if member.typ.kind == .array {
+			element := member.typ.element() or { continue }
+			if element.is_const() || element.has_const_member() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // pointee is the type a pointer points at, and none for anything else.
 pub fn (t Type) pointee() ?Type {
 	if t.kind != .pointer || t.base == unsafe { nil } {

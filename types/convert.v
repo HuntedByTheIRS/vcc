@@ -315,10 +315,49 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 		// of the same type and to nothing else. Two declarations of one tag are
 		// one type, so the copy is the bytes of the object and no conversion is
 		// involved.
-		if to.is_aggregate() && from.is_aggregate() && to.same(from) {
+		//
+		// The top-level qualifiers are not part of that sameness. 6.3.2.1p2
+		// says the value a read lvalue is converted to has the unqualified
+		// version of its type, so `const struct string` read as a value is a
+		// `struct string`, and assigning or passing it where the unqualified
+		// type is wanted is what gcc 16.2.1 accepts. A const-qualified member is
+		// a property of the type rather than of the reading, so two types that
+		// differ in a member's qualifiers are still told apart here. Whether the
+		// object written to may be written at all is a separate question, asked
+		// by `assignment_target_problem` where the target is known to be one.
+		if to.is_aggregate() && from.is_aggregate() && unqualified(to).same(unqualified(from)) {
 			return none
 		}
 		return 'a constraint violation: ${from.describe()} is not assigned to ${to.describe()}, and an object of an aggregate type is assigned to an object of its own type'
+	}
+	return none
+}
+
+// assignment_target_problem is the half of 6.5.16.1 that is about the operand
+// written rather than the operand read: the left operand of an assignment has to
+// be a modifiable lvalue. 6.3.1p1 says an object is not one when it is
+// const-qualified, or when it is a structure or union with a const-qualified
+// member, and a name with a subscript or a member is not one where the object it
+// is read from fails the same test.
+//
+// This is asked apart from `assignment_problem` because the two operands differ
+// in direction. A read value drops its top-level qualifiers, so a `const struct
+// string` may initialize a `struct string`; but an object declared const may not
+// be written at all, and initializing a const object with the same type is the
+// one write that is allowed, which is why the question is asked where the
+// target is known to be written rather than where a type is merely converted.
+//
+// The type does not carry the difference between `const int *p` and `int *const
+// p`, and it does not need to: a pointer's own qualifiers are read off the
+// pointer type and the pointee's from the base, so a target that is a
+// dereference comes here as the pointee's type and a target that is a name comes
+// here as the declared one.
+pub fn assignment_target_problem(to Type) ?string {
+	if to.is_const() {
+		return 'a constraint violation: ${to.describe()} is const-qualified, and a const-qualified object is not a modifiable lvalue'
+	}
+	if to.is_aggregate() && to.has_const_member() {
+		return 'a constraint violation: ${to.describe()} has a const-qualified member, and an object of a type with one is not a modifiable lvalue'
 	}
 	return none
 }
