@@ -1810,19 +1810,27 @@ fn test_an_increment_steps_an_integer_of_any_width() {
 	assert character.diagnostics.len == 0
 }
 
-// A type this compiler does not step is refused by the type it is. A pointer is
-// stepped by the size of what it points at and not by one, so it is refused
-// until the emitter scales the step; a double is a floating value this back end
-// does not step; and a 128-bit integer is an integer with no value to step.
+// A pointer name is a step of the size of what it points at, and the reader
+// accepts one whatever it points at: the stride is the emitter's question,
+// because the size is a fact about the target and not about the spelling. A
+// pointer to a type with no size is refused there, by name.
+fn test_an_increment_of_a_pointer_name_is_read_as_a_step() {
+	int_pointer := parsed('int main(void) { int *p; p++; ++p; p--; return 0; }')
+	assert int_pointer.diagnostics.len == 0
+	char_pointer := parsed('int main(void) { const char *scan; scan++; return 0; }')
+	assert char_pointer.diagnostics.len == 0
+	array_pointer := parsed('int main(void) { int (*p)[3]; p++; return 0; }')
+	assert array_pointer.diagnostics.len == 0
+}
+
+// A type this compiler does not step is refused by the type it is: a double is
+// a floating value this back end does not step, and a 128-bit integer is an
+// integer with no value to step.
 fn test_an_increment_refuses_a_name_this_compiler_does_not_step() {
-	pointer := parsed('int main(void) { int *p; p++; return 0; }')
-	assert pointer.diagnostics.len == 1
-	assert pointer.diagnostics[0].msg.contains('which is int *')
-	assert pointer.diagnostics[0].msg.contains('steps an integer name only')
 	floating := parsed('int main(void) { double d = 0.0; d--; return 0; }')
 	assert floating.diagnostics.len == 1
 	assert floating.diagnostics[0].msg.contains('which is double')
-	assert floating.diagnostics[0].msg.contains('steps an integer name only')
+	assert floating.diagnostics[0].msg.contains('steps an integer or a pointer name only')
 	wide := parsed('int main(void) { __int128 x = 5; x++; return 0; }')
 	assert wide.diagnostics.len == 1
 	assert wide.diagnostics[0].msg.contains('which is __int128')

@@ -1592,11 +1592,13 @@ fn (mut p Parser) element_type(t types.Type, operand ast.Expr, at tokenize.Token
 // plain object, so an element, a member and a literal are named in a diagnostic
 // rather than read as something else.
 //
-// The type has to be an integer the back end moves as a value. The step is one,
-// which is the increment of an integer, so a name of a type this compiler does
-// not step is refused by the type it is. A name whose type the reader never
-// resolved is left for the walk that reports names nothing declares, so an
-// undeclared name gets that message and not this one.
+// The type has to be an integer the back end moves as a value, whose step is
+// one, or a pointer, whose step is the size of what it points at. The reader
+// accepts both and leaves the pointer's stride to the emitter, which has the
+// target's sizes; a pointer to a type with no size is refused there by name. A
+// name whose type the reader never resolved is left for the walk that reports
+// names nothing declares, so an undeclared name gets that message and not this
+// one.
 fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !ast.Expr {
 	match operand {
 		ast.Ident {
@@ -1605,7 +1607,7 @@ fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !as
 				reason := if kind in [.int128, .unsigned_int128] {
 					'and this back end has no ${operand.typ.describe()} value to step'
 				} else {
-					'and this compiler steps an integer name only'
+					'and this compiler steps an integer or a pointer name only'
 				}
 				p.error_at(op, 'unsupported: ${op.text} on ${operand.name}, which is ${operand.typ.describe()}, ${reason}')
 				return error('operand is not a name this compiler steps')
@@ -1627,10 +1629,13 @@ fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !as
 }
 
 // steps_a_value says whether the back end steps a name of this kind as a value
-// of its own width. Every integer kind it stores is a candidate; the two 128-bit
-// kinds are not, because the back end has no value that wide and refuses a name
-// of one by name.
+// of its own width. A pointer is stepped by the size of what it points at, and
+// every integer kind it stores is a candidate; the two 128-bit kinds are not,
+// because the back end has no value that wide and refuses a name of one by name.
 fn steps_a_value(kind types.Kind) bool {
+	if kind == .pointer {
+		return true
+	}
 	return kind.is_integer() && kind !in [.int128, .unsigned_int128]
 }
 
