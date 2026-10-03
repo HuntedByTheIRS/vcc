@@ -142,6 +142,23 @@ pub fn double_arithmetic(opcode u8, dst Register, src Register) ![]u8 {
 	return double_modrm(opcode, dst, src)
 }
 
+// double_operator selects the double operation the language's operator names,
+// turning it into the opcode it computes with. The choice lives here and not in
+// the composition, so a second machine names its own opcodes for the operators
+// rather than accepting this one's.
+pub fn double_operator(op string, dst Register, src Register) ![]u8 {
+	opcode := match op {
+		'+' { double_add }
+		'-' { double_subtract }
+		'*' { double_multiply }
+		'/' { double_divide }
+		else {
+			return error('${name}: ${op} is not an operation this machine computes a double with')
+		}
+	}
+	return double_arithmetic(opcode, dst, src)
+}
+
 // compare_double orders two doubles and sets the flags a comparison reads. The
 // instruction is Comisd: the four orders are read off ZF, CF and PF, and the
 // caller writes one of them into a register because there is no instruction that
@@ -355,6 +372,21 @@ pub fn float_arithmetic(opcode u8, dst Register, src Register) ![]u8 {
 		return error('${name}: ${opcode} is not one of the four operations a float is computed with')
 	}
 	return scalar_modrm(prefix_float, opcode, dst, src)
+}
+
+// float_operator is double_operator's counterpart at four bytes: the language's
+// operator becomes the opcode the machine computes the float with.
+pub fn float_operator(op string, dst Register, src Register) ![]u8 {
+	opcode := match op {
+		'+' { double_add }
+		'-' { double_subtract }
+		'*' { double_multiply }
+		'/' { double_divide }
+		else {
+			return error('${name}: ${op} is not an operation this machine computes a float with')
+		}
+	}
+	return float_arithmetic(opcode, dst, src)
 }
 
 pub fn int_to_float(dst Register, src Register) ![]u8 {

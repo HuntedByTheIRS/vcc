@@ -1681,3 +1681,50 @@ fn test_the_external_link_arguments_come_from_the_target() {
 	assert '-lc' in args
 	assert 'out' in args
 }
+
+// The seam the re-layering is for: a machine that is not the one this file is
+// written against supplies its own encoders, as values on the machine a target
+// carries. If a target still encoded through a module named in backend.v, these
+// bytes could not reach the emitter. The register the encoders take is the
+// machine's own (MachineRegister), so the handle the emitter holds is answered
+// by the machine that published the table.
+fn test_a_second_machine_supplies_its_own_encoders() {
+	register := MachineRegister{
+		name:      'r0'
+		wide_name: 'r0'
+		code:      3
+		width:     4
+		call_arg:  -1
+	}
+	machine := Machine{
+		registers: [register]
+		encoders:  Encoders{
+			halt:           fn () []u8 { return [u8(0x99)] }
+			frame_prologue: fn () []u8 { return [u8(0xaa), 0xbb] }
+			frame_epilogue: fn () []u8 { return [u8(0xcc)] }
+			frame_reserve:  fn (size u32) []u8 { return [u8(0xdd), u8(size)] }
+			mov_imm32:      fn (reg MachineRegister, value u32) ![]u8 {
+				return [u8(reg.code), u8(value)]
+			}
+		}
+	}
+	target := Target{
+		name:    'second-second'
+		arch:    'second'
+		os:      'second'
+		Machine: machine
+		System:  System{}
+	}
+	// None of these bytes is what x86_64 emits: halt is 0x99 and not 0xf4, the
+	// frame reserve carries the size behind 0xdd, and the immediate move reads
+	// the second machine's own register.
+	assert target.halt() == [u8(0x99)]
+	assert target.frame_prologue() == [u8(0xaa), 0xbb]
+	assert target.frame_epilogue() == [u8(0xcc)]
+	assert target.frame_reserve(7) == [u8(0xdd), 7]
+	handle := target.reg('r0') or { panic('the second machine has no r0') }
+	assert target.move_immediate32(handle, 5) or { panic('the second machine refused the move') } == [
+		u8(3),
+		5,
+	]
+}
