@@ -153,6 +153,16 @@ fn (mut p Parser) parse_simple_statement() []ast.Stmt {
 // back as an error, so the reader that knows what ending it was waiting for is
 // the one that resynchronises.
 fn (mut p Parser) parse_expression_statement() !ast.Stmt {
+	// `__real__ x` is x itself, so an assignment through it writes x. The
+	// prefix is transparent to the statement reader the way it is to the
+	// expression reader: what it names is a name the assignment reader already
+	// knows how to write, so the name is read one token in. `__imag__` is not
+	// here because it is a value and not an object, and gcc refuses to assign
+	// to it as well.
+	if p.peek().kind == .identifier && p.peek().text == '__real__' && p.starts_assignment_at(1) {
+		p.next()
+		return p.parse_assignment()!
+	}
 	if p.starts_assignment() {
 		return p.parse_assignment()!
 	}
@@ -256,10 +266,17 @@ fn (mut p Parser) parse_deref_assignment(start tokenize.Token, target ast.Expr, 
 // way and only the second token tells them apart. `==` is a token of its own,
 // so an expression like `x == 1;` is not an assignment.
 fn (p Parser) starts_assignment() bool {
-	if p.peek().kind != .identifier {
+	return p.starts_assignment_at(0)
+}
+
+// starts_assignment_at asks the same question from `at` tokens ahead, which is
+// what a transparent prefix word in front of the name needs: `__real__ x = 1`
+// writes x, so the statement reader has to see the assignment one token in.
+fn (p Parser) starts_assignment_at(at int) bool {
+	if p.peek_at(at).kind != .identifier {
 		return false
 	}
-	next := p.peek_at(1)
+	next := p.peek_at(at + 1)
 	if next.kind == .punct && next.text in assignment_operators {
 		return true
 	}
@@ -274,11 +291,11 @@ fn (p Parser) starts_assignment() bool {
 		// One member is one name, and a path of members is one name per dot or
 		// arrow, so the pairs are walked to the token after the last of them: that
 		// token says whether this writes a member.
-		return p.assignment_after(1)
+		return p.assignment_after(at + 1)
 	}
 	if next.kind == .punct && next.text == '[' {
 		mut depth := 0
-		mut ahead := 1
+		mut ahead := at + 1
 		for {
 			t := p.peek_at(ahead)
 			if t.kind == .eof {
@@ -1377,7 +1394,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						name:       d.name
 						member:     first.name
 						offset:     0
-						spelling:   first.typ.describe()
+						spelling:   first.typ.storage_spelling()
 						typ:        first.typ
 						bitfield:   first.bitfield
 						bit_offset: 0
@@ -1413,7 +1430,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						name:     d.name
 						member:   member.name
 						offset:   layout.offsets[i]
-						spelling: member.typ.describe()
+						spelling: member.typ.storage_spelling()
 						typ:      member.typ
 						line:     d.name_at.line
 						col:      d.name_at.col
@@ -1432,7 +1449,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						name:     d.name
 						member:   member.name
 						offset:   layout.offsets[i]
-						spelling: member.typ.describe()
+						spelling: member.typ.storage_spelling()
 						typ:      member.typ
 						line:     d.name_at.line
 						col:      d.name_at.col

@@ -233,10 +233,12 @@ pub:
 	expr ?Expr
 	// init is the initializer of a declaration, and none for `int x;`.
 	init ?Expr
-	// decl_name and decl_type are a declaration's name and type as written, and
-	// decl_count is how many elements an array declaration has: zero for a
-	// declaration of one value. resolved is the type the declaration resolved
-	// to, and it is the zero value for a statement that declares nothing.
+	// decl_name and decl_type are a declaration's name and the type the back end
+	// reads it as, which is the spelling a typedef name and an enum tag are
+	// spelled out to; decl_count is how many elements an array declaration has:
+	// zero for a declaration of one value. resolved is the type the declaration
+	// resolved to, and it is the zero value for a statement that declares
+	// nothing.
 	decl_name  string
 	decl_type  string
 	decl_count int
@@ -315,6 +317,7 @@ pub type Expr = Binary
 	| Cast
 	| IntLit
 	| FloatLit
+	| ComplexLit
 	| Ident
 	| Call
 	| StrLit
@@ -325,6 +328,27 @@ pub type Expr = Binary
 	| Assign
 	| Comma
 	| StmtExpr
+
+// ComplexLit is one imaginary constant, `1.0i` or `1.0if`. 6.4.4.2 gives a
+// floating constant written with an `i` or `j` suffix an imaginary part of the
+// value it names and a real part of zero, so one node is worth both components
+// and neither a FloatLit nor an IntLit can hold it. `_Complex_I` in
+// <complex.h> is the spelling `1.0if` under an `__extension__`, which is why a
+// program that uses `I` needs this node.
+//
+// The suffix decides the component type the way it does for a real constant: a
+// constant with an `f` is a `float _Complex` and one without is a
+// `double _Complex`. `value` is the coefficient the file wrote, which is the
+// imaginary part; the real part is zero and is not carried, because a written
+// imaginary constant never has one.
+pub struct ComplexLit {
+pub:
+	value f64
+	text  string
+	typ   types.Type
+	line  int
+	col   int
+}
 
 // StmtExpr is a GNU statement expression, `({ ... })`: a brace-enclosed
 // compound statement written where a value is wanted, whose value is the value
@@ -587,10 +611,10 @@ pub:
 }
 
 // IncDec is `++x`, `--x`, `x++` or `x--` written where a value is expected. The
-// operand is a name and not a nested expression: the object this reads, steps
-// and writes is a plain scalar, and a subscript, a member and a literal are
-// refused where the operator is read rather than desugared into a shape the tree
-// has no node for.
+// operand is the object the operator steps, and it is an lvalue: a name, an
+// element, a member or a dereference. What the operand names is a scalar - an
+// integer, a pointer or a floating value - and the reader refuses anything else,
+// and any other expression, where the operator is written.
 //
 // C makes an assignment a statement here and gives the increment no statement of
 // its own, so this is an expression node: it is worth a value, unlike `x = 1`.
@@ -601,7 +625,7 @@ pub:
 pub struct IncDec {
 pub:
 	op      string
-	name    string
+	operand Expr
 	postfix bool
 	typ     types.Type
 	line    int

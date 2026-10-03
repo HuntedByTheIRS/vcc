@@ -635,7 +635,7 @@ fn test_a_declaration_may_name_several_objects() {
 // has no form for is reported where the declaration is written, and what comes
 // after the declaration still parses.
 fn test_a_local_declaration_with_an_unsupported_type_is_reported() {
-	result := parsed('int main() { double _Complex n = 0; return 0; }')
+	result := parsed('int main() { long double _Complex n = 0; return 0; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('unsupported type _Complex')
 	assert result.unit.decls[0].body.len == 1
@@ -1678,12 +1678,12 @@ fn test_a_name_nothing_declares_is_refused_with_the_name_and_its_location() {
 // now, and the type the case is measured with is one this compiler still has no
 // form for.
 fn test_a_name_a_refused_declaration_declares_is_not_reported_again() {
-	result := parsed('int main(void) { double _Complex u = 0; u = 1; return 0; }')
+	result := parsed('int main(void) { long double _Complex u = 0; u = 1; return 0; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('unsupported type _Complex')
 	// The same at the top level, where the declarator was read before the type was
 	// refused and the name was recorded as a matter of course.
-	global := parsed('double _Complex g = 1;\nint main(void) { return g; }')
+	global := parsed('long double _Complex g = 1;\nint main(void) { return g; }')
 	assert global.diagnostics.len == 1
 	assert global.diagnostics[0].msg.contains('unsupported type _Complex')
 }
@@ -1726,7 +1726,9 @@ fn test_the_increment_and_decrement_are_read_as_prefix_and_postfix_values() {
 		return
 	}
 	assert post_increment is ast.IncDec
-	assert (post_increment as ast.IncDec).name == 'i'
+	post_operand := (post_increment as ast.IncDec).operand
+	assert post_operand is ast.Ident
+	assert (post_operand as ast.Ident).name == 'i'
 	assert (post_increment as ast.IncDec).op == '++'
 	assert (post_increment as ast.IncDec).postfix
 	pre_increment := body[2].expr or {
@@ -1776,20 +1778,31 @@ fn test_an_increment_is_read_as_the_step_of_a_for() {
 	assert (expr as ast.IncDec).postfix
 }
 
-// Every operand that is not a name is refused where the operator is written,
-// and the message names the construct it refused: a silently wrong value from an
-// element or a member read as the name beside it is the worst outcome here.
-fn test_an_increment_refuses_every_operand_that_is_not_a_name() {
-	element := parsed('int main(void) { int a[3]; a[0]++; return 0; }')
-	assert element.diagnostics.len == 1
-	assert element.diagnostics[0].msg.contains('on a[...]')
-	assert element.diagnostics[0].msg.contains('implements ++ and -- on a plain name only')
+// Every operand that is not an object is refused where the operator is written,
+// and the message names the construct it refused: a literal has no place to
+// store and a computed value has no identity to step, so neither may be read as
+// something else.
+fn test_an_increment_refuses_every_operand_that_is_not_an_object() {
 	literal := parsed('int main(void) { ++5; return 0; }')
 	assert literal.diagnostics.len == 1
 	assert literal.diagnostics[0].msg.contains('on 5')
+	assert literal.diagnostics[0].msg.contains('steps an object')
+	computed := parsed('int main(void) { int i = 0; (i + 1)++; return 0; }')
+	assert computed.diagnostics.len == 1
+	assert computed.diagnostics[0].msg.contains('a value of +')
+}
+
+// An element, a member and what a pointer points at are objects, and the
+// operator steps each of them in place: the target need not be a plain name.
+fn test_an_increment_steps_an_element_or_a_member() {
+	element := parsed('int main(void) { int a[3]; a[0]++; return 0; }')
+	assert element.diagnostics.len == 0
 	member := parsed('struct S { int a; };\nint main(void) { struct S s; --s.a; return 0; }')
-	assert member.diagnostics.len == 1
-	assert member.diagnostics[0].msg.contains('on s.a')
+	assert member.diagnostics.len == 0
+	arrow := parsed('struct S { int a; };\nint main(void) { struct S s; struct S *p = &s; p->a++; return 0; }')
+	assert arrow.diagnostics.len == 0
+	deref := parsed('int main(void) { int i = 0; int *p = &i; (*p)++; return 0; }')
+	assert deref.diagnostics.len == 0
 }
 
 // The step is one, which is the increment of an integer of any width the back
@@ -1823,14 +1836,19 @@ fn test_an_increment_of_a_pointer_name_is_read_as_a_step() {
 	assert array_pointer.diagnostics.len == 0
 }
 
-// A type this compiler does not step is refused by the type it is: a double is
-// a floating value this back end does not step, and a 128-bit integer is an
-// integer with no value to step.
+// A floating object is stepped by one of its own width, so a double and a float
+// are both read and not refused. A 128-bit integer is still refused by name: it
+// is an integer with no value the back end can step.
+fn test_an_increment_steps_a_floating_object() {
+	double := parsed('int main(void) { double d = 0.0; d--; return 0; }')
+	assert double.diagnostics.len == 0
+	single := parsed('int main(void) { float f = 0.0f; f++; return 0; }')
+	assert single.diagnostics.len == 0
+}
+
+// A type this compiler does not step is refused by the type it is, and a 128-bit
+// integer is an integer with no value to step.
 fn test_an_increment_refuses_a_name_this_compiler_does_not_step() {
-	floating := parsed('int main(void) { double d = 0.0; d--; return 0; }')
-	assert floating.diagnostics.len == 1
-	assert floating.diagnostics[0].msg.contains('which is double')
-	assert floating.diagnostics[0].msg.contains('steps an integer or a pointer name only')
 	wide := parsed('int main(void) { __int128 x = 5; x++; return 0; }')
 	assert wide.diagnostics.len == 1
 	assert wide.diagnostics[0].msg.contains('which is __int128')
@@ -2091,4 +2109,115 @@ fn test_a_cast_of_a_constant_is_an_integer_constant_expression() {
 	one := parsed('int f(int (*g)(void));\nint main(void) { return f((int)1); }')
 	assert one.diagnostics.len == 1
 	assert one.diagnostics[0].msg.contains('integer constant of value zero')
+}
+
+// `__real__` and `__imag__` are what <tgmath.h> wraps its argument in when it
+// asks whether the argument is a floating type. With `__GNUC__` four the header
+// takes its pre-GCC-8 path, and every unary math macro is built on
+// `sizeof (+__real__ (Val))` and `__builtin_classify_type (__real__ (Val))`:
+// read as calls to functions nothing declares, the operand's type stays
+// unresolved and the whole header is refused.
+//
+// gcc 16.2.1 is the oracle, measured with programs that run: for a real operand
+// `__real__ x` is x - the same object, the same type, and `&__real__ x == &x` -
+// and `__imag__ x` is 0 of the operand's own type, char for a char and long long
+// for a long long. `__real__ (x + 1.0)` is 4.0 for x of 3.0.
+//
+// The operand is a cast expression and not a unary expression, so
+// `__real__ (double) 0` is the real part of `(double) 0` and not a type the
+// operator was handed. That is the spelling the header uses.
+fn test_the_real_part_of_a_real_value_is_the_value() {
+	result := parsed('int main(void) { double x = 3.0; double y = __real__ x; return 0; }')
+	assert result.diagnostics.len == 0
+	init := result.unit.decls[0].body[1].init or {
+		assert false
+		return
+	}
+	// `__real__ x` is x, so the initialiser is the name and not a new node.
+	assert init is ast.Ident
+	assert init.typ.kind == types.Kind.double
+}
+
+fn test_the_real_part_is_an_object_and_takes_an_address() {
+	result := parsed('int main(void) { double x = 3.0; int n = &__real__ x == &x; return 0; }')
+	assert result.diagnostics.len == 0
+}
+
+// `__real__ x` is x's own object, so a value written through it is written to x:
+// measured on gcc 16.2.1, `__real__ x = 5.0;` for a double x leaves x holding
+// 5.0. The statement is the write the name already is, with the prefix read past
+// the same way the expression reader reads it. `__imag__ x` is a value and not
+// an object, so gcc refuses to assign to it and so does this reader.
+fn test_the_real_part_of_a_name_is_the_object_an_assignment_writes() {
+	result := parsed('int main(void) { double x = 3.0; __real__ x = 5.0; return 0; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[1].kind == .assign
+	assert body[1].target == 'x'
+	refused := parsed('int main(void) { double x = 3.0; __imag__ x = 5.0; return 0; }')
+	assert refused.diagnostics.len >= 1
+}
+
+fn test_the_imaginary_part_of_a_real_value_is_a_zero_of_its_type() {
+	shapes := [
+		'int main(void) { double x = 3.0; double y = __imag__ x; return 0; }',
+		'int main(void) { int n = 7; int m = __imag__ n; return 0; }',
+	]
+	kinds := [types.Kind.double, types.Kind.int_]
+	for i, source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len == 0
+		init := result.unit.decls[0].body[1].init or {
+			assert false
+			return
+		}
+		if kinds[i] == types.Kind.double {
+			literal := init as ast.FloatLit
+			assert literal.value == 0.0
+		} else {
+			literal := init as ast.IntLit
+			assert literal.value == 0
+		}
+		assert init.typ.kind == kinds[i]
+	}
+}
+
+// The type is the operand's own and not a promoted one: gcc 16.2.1 answers 1 for
+// `__builtin_types_compatible_p (__typeof__ (__imag__ (char) 1), char)`, and
+// sizeof of the same is 1.
+fn test_the_imaginary_part_keeps_the_operands_own_type() {
+	result := parsed('int main(void) { int n = sizeof(__imag__ (char) 1); return 0; }')
+	assert result.diagnostics.len == 0
+	init := result.unit.decls[0].body[0].init or {
+		assert false
+		return
+	}
+	literal := init as ast.IntLit
+	assert literal.value == 1
+}
+
+// gcc 16.2.1 refuses `__real__ (void *) 0` with `wrong type argument to
+// __real__`, so an operand that has no real part is a constraint violation and
+// is named rather than read at the width of something else.
+fn test_a_real_part_of_a_value_that_is_not_arithmetic_is_a_constraint_violation() {
+	result := parsed('int main(void) { double *p = 0; double x = __real__ p; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('a constraint violation')
+	assert result.diagnostics[0].msg.contains('__real__ takes a value of an arithmetic type')
+	assert result.diagnostics[0].msg.contains('double *')
+}
+
+// The complex types are a pair of floating values and their arithmetic is the
+// back end milestone's, so the part of one is refused by name. This is the one
+// place the two names are answered with a message instead of a value.
+fn test_a_part_of_a_complex_value_is_refused_by_name() {
+	shapes := [
+		'int main(void) { double x = __real__ ((double _Complex) 0); return 0; }',
+		'int main(void) { float x = __imag__ ((float _Complex) 0); return 0; }',
+	]
+	for source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len == 1
+		assert result.diagnostics[0].msg.contains('is a pair of values whose arithmetic is the back end milestone')
+	}
 }

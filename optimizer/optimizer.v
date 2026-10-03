@@ -381,6 +381,12 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			// the integer one beside it.
 			return expr
 		}
+		ast.ComplexLit {
+			// An imaginary constant is a value too, and one no pass here folds:
+			// its two components are written at emission, so there is nothing
+			// for this file to compute.
+			return expr
+		}
 		ast.Ident {
 			return expr
 		}
@@ -443,9 +449,16 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			return fold_call(rewritten, opts) or { ast.Expr(rewritten) }
 		}
 		ast.IncDec {
-			// The operand is a name, and a name is not a call to a builtin, so
-			// there is nothing inside the node to rewrite.
-			return expr
+			// The operand is an object, and an object holds no call to a
+			// builtin - but its own subexpressions still come through here.
+			return ast.Expr(ast.IncDec{
+				op:      expr.op
+				operand: rewrite(expr.operand, opts, depth + 1)
+				postfix: expr.postfix
+				typ:     expr.typ
+				line:    expr.line
+				col:     expr.col
+			})
 		}
 		ast.Assign {
 			// Both operands are rewritten, and the clause travels with the

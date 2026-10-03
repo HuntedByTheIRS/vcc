@@ -243,7 +243,17 @@ fn (p Parser) alias_spelling(name string) ?string {
 
 // spelling_of is the type a declaration was written with, with a name this file
 // declared as a type spelled out as the type it names.
+//
+// An enumerated type is spelled out the same way, as the integer type its
+// enumerators require: the back end has a form for `unsigned int` and not for
+// `enum c99_small`, and the clause still names the tag, so the model keeps
+// asking about the tag while the emitter sizes and signs the object from the
+// underlying type. The spelling is what the object is stored as, and `enum
+// c99_small e` stores four bytes the way gcc 16.2.1 does.
 fn (p Parser) spelling_of(spec DeclSpec, stars int) string {
+	if spec.clause.kind == .enum_ && spec.clause.is_complete() {
+		return with_stars(spec.clause.underlying_type().describe(), stars)
+	}
 	if spec.type_words.len == 1 {
 		if spelling := p.alias_spelling(spec.type_words[0]) {
 			return with_stars(spelling, stars)
@@ -2163,7 +2173,7 @@ fn (mut p Parser) write_brace_leaf(typ types.Type, base int, element BraceElemen
 	writes << BraceWrite{
 		offset:   base
 		width:    p.representation.size_of(typ) or { 0 }
-		spelling: typ.describe()
+		spelling: typ.storage_spelling()
 		typ:      typ
 		element:  element
 	}
@@ -2201,7 +2211,7 @@ fn (mut p Parser) collect_leaves(typ types.Type, base int, mut leaves []BraceWri
 			leaves << BraceWrite{
 				offset:   base
 				width:    p.representation.size_of(typ) or { 0 }
-				spelling: typ.describe()
+				spelling: typ.storage_spelling()
 				typ:      typ
 			}
 		}
@@ -2490,7 +2500,7 @@ fn (mut p Parser) struct_member_inits(aggregate types.Type, list BraceList, layo
 			members << ast.MemberInit{
 				offset:   layout.offsets[i]
 				width:    p.representation.size_of(member.typ) or { 0 }
-				spelling: member.typ.describe()
+				spelling: member.typ.storage_spelling()
 				address:  address
 			}
 			continue
@@ -2501,7 +2511,7 @@ fn (mut p Parser) struct_member_inits(aggregate types.Type, list BraceList, layo
 		members << ast.MemberInit{
 			offset:     layout.offsets[i]
 			width:      p.representation.size_of(member.typ) or { 0 }
-			spelling:   member.typ.describe()
+			spelling:   member.typ.storage_spelling()
 			init:       init
 			init_float: init_float
 		}
@@ -2521,10 +2531,14 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	// A return type with a star is one address wide whatever it points at, so
 	// the base type is asked the same question a local of pointer type is: the
 	// emitter sizes the value from the star and never lays out what is under it.
-	// The complex and long double clause below is about a value the emitter has
-	// to give a form to, so it is asked only of a return type that is not a
-	// pointer, and a pointer to one of those types takes the same answer a
-	// pointer object takes.
+	// The `long double` clause below is about a value the emitter has to give a
+	// form to, so it is asked only of a return type that is not a pointer, and a
+	// pointer to one takes the same answer a pointer object takes. A complex
+	// type is a value the emitter does have a form for now: it travels as its
+	// two components through the aggregate path, so `double _Complex` and
+	// `float _Complex` are not refused here, and `long double _Complex` is
+	// refused by its `_Complex` word below because no form for its component
+	// exists.
 	if d.pointer_count() == 0 && spec.clause.kind == .long_double {
 		// The type itself holds now - it has a size, a form and constants - but a
 		// value of it is carried in the x87 stack, whose calling convention this
@@ -2532,14 +2546,6 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 		// the wrong place. The refusal names the stack rather than claiming the
 		// type does not exist.
 		p.error_at(spec.start, 'unsupported: long double is a type the x87 stack carries and this compiler has no calling convention for it yet, so a function cannot return it')
-		return
-	}
-	if d.pointer_count() == 0 && spec.clause.is_complex() {
-		// A type the model knows and the emitter has no form for is a different
-		// answer from a type whose first word is not one the emitter reads:
-		// `double _Complex` is one type, and the refusal names it rather than
-		// naming half of it.
-		p.error_at(spec.start, 'unsupported: ${spec.clause.describe()} is a type this compiler does not emit yet, so a function cannot return it')
 		return
 	}
 	if offender := p.unsupported_type_word(spec, d.pointer_count()) {
@@ -2614,7 +2620,7 @@ fn (p Parser) word_problem(word string) ?string {
 // a pointer name an incomplete type, and the back end sizes a pointer from its
 // star rather than from what it points at.
 fn (p Parser) incomplete_aggregate(spec DeclSpec) bool {
-	if spec.clause.kind !in [types.Kind.struct_, .union_] {
+	if spec.clause.kind !in [types.Kind.struct_, .union_, .enum_] {
 		return false
 	}
 	return !spec.clause.is_complete() || p.representation.layout(spec.clause) == none
@@ -2641,17 +2647,21 @@ fn (p Parser) unsupported_type_word(spec DeclSpec, stars int) ?string {
 	// The words a type is made of, not the storage class in front of them: an
 	// `extern` or a `static` is not a type, and reporting one as an unsupported
 	// type would be reporting the wrong word for the right reason.
-	// An object of an aggregate type is storage of the size the model lays out,
-	// and the words of the declaration say nothing about that size: `struct S`
-	// is a tag, and its members are what decide how many bytes the object is. A
-	// tag written with no body leaves the size unknown, so the refusal is the
+	// An object of an aggregate type or an enumerated type is storage of the
+	// size the model lays out, and the words of the declaration say nothing
+	// about that size: `struct S` is a tag, and its members are what decide how
+	// many bytes the object is. The clause already carries that answer, so the
+	// spelling is not asked the question a second time: `enum c99_small` is one
+	// tag spelled with two words, and splitting the spelling on its spaces
+	// would find no type in `enum` and `c99_small` and refuse a complete type.
+	// A tag written with no body leaves the size unknown, so the refusal is the
 	// tag as it was written.
 	//
 	// `stars` is how many pointer steps the declarator wrote, because a pointer
 	// to a type the model cannot size is still one address wide: 6.2.5 lets a
 	// pointer name an incomplete type, and the back end sizes a pointer from the
 	// star and never asks what is under it.
-	if spec.clause.kind in [types.Kind.struct_, .union_] {
+	if spec.clause.kind in [types.Kind.struct_, .union_, .enum_] {
 		// A tag that was declared and never defined is not complete, so there is
 		// no size to give an object of it: the refusal names the tag as it was
 		// written, and it happens here rather than where the object is used. A
@@ -2680,6 +2690,14 @@ fn (p Parser) unsupported_type_word(spec DeclSpec, stars int) ?string {
 		return none
 	}
 	if spec.type_words.len == 1 {
+		// A single word may still name a type rather than only be a name:
+		// `_Complex` on its own is `double _Complex`, the one specifier word
+		// that is a whole type without a second one. The kind the words name
+		// decides, and a word that names no type at all is asked about as a
+		// name, which is how a typedef resolves.
+		if kind := types.from_specifiers(spec.type_words) {
+			return if kind in emitted_kinds { none } else { spec.type_words[0] }
+		}
 		return p.word_problem(spec.type_words[0])
 	}
 	// More than one word: the type they name decides, and the answer is the first
@@ -2939,9 +2957,12 @@ fn (mut p Parser) parse_tag_specifier(keyword tokenize.Token, depth int) !TagTyp
 	if keyword.text == 'enum' {
 		// An enumerator list declares names and gives them values: each name is
 		// an integer constant, so reading it is what lets a use of it be the
-		// number the enum gave it rather than a name nothing declares.
-		p.parse_enumerator_list(open)!
-		clause := types.enum_type(tag)
+		// number the enum gave it rather than a name nothing declares. The
+		// range of those values is what settles the integer type the enum has,
+		// which is the type an object of it is stored and read as.
+		range := p.parse_enumerator_list(open)!
+		underlying := types.enum_underlying_kind(range.min, range.max)
+		clause := types.enum_type(tag, underlying)
 		p.scopes.declare_tag(spelling, clause)
 		return TagType{
 			spelling: spelling
@@ -2987,8 +3008,26 @@ fn tag_kind(keyword string) types.Kind {
 // computed from `>>>` and `?:` in the enumerator list, and an enum is how a header
 // builds the masks a program compares against, so a number that is wrong is a
 // program that is wrong in silence.
-fn (mut p Parser) parse_enumerator_list(open tokenize.Token) ! {
+// EnumeratorRange is what an enumerator list said about its values: the smallest
+// and largest, and whether it read any at all. The range is what decides the
+// integer type the enum has (see types.enum_underlying_kind), so the reader
+// keeps the numbers rather than throwing them away once each name is declared.
+struct EnumeratorRange {
+	min  i64
+	max  i64
+	read bool
+}
+
+// parse_enumerator_list reads the body of an enum and answers the range of the
+// values it gave its names. A list that read no value at all answers read false,
+// which is what an empty body is.
+fn (mut p Parser) parse_enumerator_list(open tokenize.Token) !EnumeratorRange {
 	mut next := i64(0)
+	mut min := i64(0)
+	mut max := i64(0)
+	mut read := false
+	mut names := []string{}
+	mut values := []i64{}
 	for {
 		t := p.peek()
 		if t.kind == .eof {
@@ -3001,7 +3040,7 @@ fn (mut p Parser) parse_enumerator_list(open tokenize.Token) ! {
 		}
 		if t.kind == .punct && t.text == '}' {
 			p.next()
-			return
+			return p.finish_enumerators(names, values, min, max)
 		}
 		if t.kind != .identifier {
 			p.error_at(t, 'unsupported: an enumerator is a name, found ${describe(t)}')
@@ -3019,9 +3058,27 @@ fn (mut p Parser) parse_enumerator_list(open tokenize.Token) ! {
 		}
 		// An enumeration constant is not an object, so nothing is declared that
 		// could be written to: only the number is recorded, and the name is
-		// marked declared for the check at the end of the unit.
-		p.scopes.declare_constant(name.text, value)
+		// marked declared for the check at the end of the unit. The number is
+		// recorded with the int kind here so that a later enumerator that
+		// names this one folds to the right value; the kind a use of the name
+		// has is not known until the whole list is read, and is written in
+		// finish_enumerators once the enum's own type is settled.
+		p.scopes.declare_constant(name.text, value, .int_)
+		names << name.text
+		values << value
 		p.declared[name.text] = true
+		if !read {
+			min = value
+			max = value
+			read = true
+		} else {
+			if value < min {
+				min = value
+			}
+			if value > max {
+				max = value
+			}
+		}
 		next = value + 1
 		if p.at_punct(',') {
 			p.next()
@@ -3029,10 +3086,28 @@ fn (mut p Parser) parse_enumerator_list(open tokenize.Token) ! {
 		}
 		if p.at_punct('}') {
 			p.next()
-			return
+			return p.finish_enumerators(names, values, min, max)
 		}
 		p.error_at(p.peek(), 'unsupported: expected , or } in an enumerator list, found ${describe(p.peek())}')
 		return error('an enumerator separator')
+	}
+}
+
+// finish_enumerators is what an enumerator list does once the whole list is read
+// and the range of its values is known: it settles the integer type the enum has
+// and records each name with the kind a use of it has. A use of an enumerator can
+// be wider than int (`enum { H = 5000000000 }` names an unsigned long) or stay an
+// int even when the enum is unsigned (`enum { R, G };` names two ints), which is
+// why the kind is written here and not where each name was read.
+fn (mut p Parser) finish_enumerators(names []string, values []i64, min i64, max i64) EnumeratorRange {
+	underlying := types.enum_underlying_kind(min, max)
+	for i in 0 .. names.len {
+		p.scopes.declare_constant(names[i], values[i], types.enum_constant_kind(underlying, values[i]))
+	}
+	return EnumeratorRange{
+		min:  min
+		max:  max
+		read: names.len > 0
 	}
 }
 
@@ -3621,7 +3696,13 @@ fn (p Parser) parameter_type_is_known(spec DeclSpec, stars int) bool {
 	// still a parameter this reader can name: the parameter is one address
 	// whatever the tag turns out to be, which is the same answer a declaration
 	// of a pointer to the tag gets.
-	if spec.clause.kind in [types.Kind.struct_, .union_] {
+	//
+	// An enumerated type is the same question with a different answer: the
+	// enumerators settled its size when the body was read, so a parameter of
+	// one is a width the model has. A tag with no body is an enum nothing has
+	// defined, and a parameter of it is refused the way one of an undefined
+	// struct is.
+	if spec.clause.kind in [types.Kind.struct_, .union_, .enum_] {
 		if stars > 0 {
 			return true
 		}

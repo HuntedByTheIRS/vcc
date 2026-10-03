@@ -136,7 +136,16 @@ pub mut:
 	// declared and never defined is not complete, and nothing may be laid out
 	// in it.
 	complete bool
-	quals    Qualifiers
+	// underlying is the integer type an enumerated type has: the kind its
+	// enumerators require. 6.7.2.2p4 makes it implementation-defined and asks
+	// only that every enumerator be representable; measured, gcc 16.2.1 gives
+	// an enum with no negative enumerator unsigned int when every value fits
+	// unsigned int and unsigned long when one does not, and an enum with a
+	// negative enumerator int or long the same way, so the kind is one of
+	// those four. It is .unknown for a tag whose body has not been read and
+	// for every type that is not an enum.
+	underlying Kind
+	quals      Qualifiers
 }
 
 // Member is one member of a struct or a union. bitfield says the member was
@@ -190,6 +199,33 @@ pub fn (k Kind) is_floating() bool {
 
 pub fn (k Kind) is_complex() bool {
 	return k in [Kind.complex_float, .complex_double, .complex_long_double]
+}
+
+// complex_component is the real type of a complex type: `float` for
+// `float _Complex`, `double` for `double _Complex`, `long double` for
+// `long double _Complex`. It is what 6.3.1.8 calls the corresponding real type
+// and the type the usual arithmetic conversions apply their rules to once the
+// complex part is set aside. A kind that is not complex answers none.
+pub fn (k Kind) complex_component() ?Kind {
+	return match k {
+		.complex_float { Kind.float }
+		.complex_double { Kind.double }
+		.complex_long_double { Kind.long_double }
+		else { none }
+	}
+}
+
+// complex_of is the complex type whose component is this real type, and none for
+// a kind with no complex type. It is where the usual arithmetic conversions land
+// when one operand is complex: the result is complex, and the component is the
+// real type the two components converted to.
+pub fn (k Kind) complex_of() ?Kind {
+	return match k {
+		.float { Kind.complex_float }
+		.double { Kind.complex_double }
+		.long_double { Kind.complex_long_double }
+		else { none }
+	}
 }
 
 pub fn (k Kind) is_arithmetic() bool {
@@ -805,11 +841,16 @@ pub fn incomplete_tag(kind Kind, tag string) Type {
 	}
 }
 
-pub fn enum_type(tag string) Type {
+// enum_type is an enumerated type whose enumerators require the integer kind
+// `underlying`. The tag is what the type was written with and the underlying
+// kind is what its enumerators settled; a type with no enumerators read has no
+// underlying kind, which is what an incomplete tag written as `enum E;` is.
+pub fn enum_type(tag string, underlying Kind) Type {
 	return Type{
-		kind:     .enum_
-		tag:      tag
-		complete: true
+		kind:       .enum_
+		tag:        tag
+		complete:   true
+		underlying: underlying
 	}
 }
 
@@ -828,8 +869,8 @@ pub fn enum_type(tag string) Type {
 // is the exponent field all ones with the integer bit set.
 pub struct LongDouble {
 pub:
-	mantissa  u64
-	sign_exp  u16
+	mantissa u64
+	sign_exp u16
 }
 
 // is_zero says whether the value is a zero of either sign.
@@ -871,6 +912,90 @@ pub fn long_double_from_bytes(object [16]u8) LongDouble {
 		mantissa: mantissa
 		sign_exp: u16(object[8]) | (u16(object[9]) << 8)
 	}
+}
+
+// enum_underlying_kind is the integer kind an enum's enumerators require, from
+// the smallest and largest value the list gave them. Measured, gcc 16.2.1 asks
+// two questions in this order: whether any enumerator is negative, and then how
+// wide the largest one is. An enum with no negative value is unsigned int, and
+// unsigned long when a value does not fit unsigned int; one with a negative
+// value is int, and long when a value does not fit int. The four kinds are the
+// whole answer, because -fshort-enums is off and a value outside the 64-bit
+// range is one this reader did not fold.
+pub fn enum_underlying_kind(min i64, max i64) Kind {
+	if min >= 0 {
+		if max <= u32_max {
+			return .unsigned_int
+		}
+		return .unsigned_long
+	}
+	if min >= i32_min && max <= i32_max {
+		return .int_
+	}
+	return .long
+}
+
+// u32_max, i32_min and i32_max are the bounds the enum rule above is written
+// against: the largest unsigned 32-bit value and the two ends of int. They are
+// spelled here because the rule is about what an int and an unsigned int hold,
+// which is a fact about the C types and not about this machine's word.
+const u32_max = i64(4294967295)
+const i32_min = i64(-2147483648)
+const i32_max = i64(2147483647)
+
+// enum_constant_kind is the integer kind a *use* of an enumerator has, which is
+// not always the kind the enum itself has. Measured, gcc 16.2.1 gives an
+// enumerator of an enum whose underlying type is int or unsigned int the type
+// int when the value fits int and that underlying type when it does not, and
+// gives every enumerator of an enum whose underlying type is long or unsigned
+// long that wider type, even one whose value would fit int. So `enum col { R };
+// enum mid { M = 4000000000 }; enum both { E = -1, F = 4000000000 };` has R and
+// M of type int and unsigned int, and E and F of type long.
+pub fn enum_constant_kind(underlying Kind, value i64) Kind {
+	if underlying in [.long, .unsigned_long] {
+		return underlying
+	}
+	if value >= i32_min && value <= i32_max {
+		return .int_
+	}
+	return underlying
+}
+
+// enum_underlying is the integer kind an enumerated type has, and the type's own
+// kind for every other type. It is what the size of an enum and the signedness
+// of a value of one are read from.
+pub fn (t Type) enum_underlying() Kind {
+	if t.kind == .enum_ {
+		return t.underlying
+	}
+	return t.kind
+}
+
+// underlying_type is the integer type an enumerated type is compatible with:
+// the type its enumerators require. Every other type is itself, which is what
+// makes it safe to ask of any type.
+pub fn (t Type) underlying_type() Type {
+	if t.kind == .enum_ {
+		return scalar(t.enum_underlying()) or { return t }
+	}
+	return t
+}
+
+// storage_spelling is the type as the back end reads it: an enumerated type is
+// spelled as the integer type its enumerators require, and every other type as
+// itself. The back end sizes and signs a value from a spelling, and it has a
+// form for `unsigned int` and none for `enum c99_small`, so an enum's storage is
+// the type gcc 16.2.1 gives it and not the tag it was written with.
+pub fn (t Type) storage_spelling() string {
+	return t.underlying_type().describe()
+}
+
+// is_unsigned_type says whether a value of this type is unsigned, reading an
+// enumerated type as the integer type its enumerators require. It is the
+// question the emitter asks a value before it widens or compares it, and asking
+// the kind alone would answer for an enum as if it were int.
+pub fn (t Type) is_unsigned_type() bool {
+	return t.enum_underlying().is_unsigned()
 }
 
 // qualified is t with the qualifiers of other added, which is how `const int` is

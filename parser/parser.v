@@ -149,7 +149,7 @@ const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long
 // name one of these.
 const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .bool_, .char_, .signed_char,
 	.unsigned_char, .short, .unsigned_short, .double, .float, .long, .unsigned_long, .long_long,
-	.unsigned_long_long, .long_double]
+	.unsigned_long_long, .long_double, .complex_float, .complex_double]
 
 // max_expression_depth bounds how deep one expression nests: a parenthesis, a
 // prefix operator, a cast, a `?:`, a `[` index, a call's argument list and a
@@ -496,9 +496,9 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			}
 		}
 		ast.IncDec {
-			// The name the operator steps is a use of it: `++missing;` names
-			// a missing declaration just as reading the name does.
-			p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
+			// The object the operator steps is a use of it: `++missing;`
+			// names a missing declaration just as reading the name does.
+			p.check_undeclared_expression(expr.operand, mut reported)
 		}
 		ast.Conditional {
 			// All three operands are read, because all three can name
@@ -507,7 +507,7 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_expression(expr.then_expr, mut reported)
 			p.check_undeclared_expression(expr.else_expr, mut reported)
 		}
-		ast.IntLit, ast.StrLit, ast.FloatLit {}
+		ast.IntLit, ast.StrLit, ast.FloatLit, ast.ComplexLit {}
 		ast.Assign {
 			// The target is a use of what it names, and the value is an
 			// expression of its own: both sides are walked.
@@ -775,8 +775,7 @@ fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 // give the type the usual arithmetic conversions put them both in, two void
 // arms give void, and two pointers give the pointer both arms convert to: a
 // pointer to void takes over from a pointer to an object type, and a pointer
-// beside an integer constant of value zero is that pointer's type, which is the
-// null pointer constant rule.
+// beside a null pointer constant is that pointer's type.
 //
 // The answer is a question about the arms and not about which one runs, so it
 // is asked while the expression is read and not where the branch is emitted.
@@ -802,6 +801,20 @@ fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_e
 	if a.is_void() && b.is_void() {
 		return types.void_type()
 	}
+	// 6.5.15p6: a pointer beside a null pointer constant is that pointer, the
+	// same pairing an initializer and an assignment allow. It is asked before
+	// the two-pointer cases below, because a null pointer constant is not a
+	// pointer with a type of its own even when 6.3.2.3p3 spells it as one.
+	// `1 ? (void *)0 : p` is `p`'s type, and so is `1 ? (void *)0 : (T *)0`,
+	// which is the shape `__tgmath_real_type` is built on: without this the
+	// constant's void pointer takes over and the conditional is a void pointer,
+	// dereferencing to void.
+	if a.is_pointer() && p.is_null_pointer_constant(else_expr) {
+		return a
+	}
+	if b.is_pointer() && p.is_null_pointer_constant(then_expr) {
+		return b
+	}
 	if a.is_pointer() && b.is_pointer() {
 		if a.same(b) {
 			return a
@@ -825,14 +838,6 @@ fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_e
 		}
 		p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and they do not point to compatible types')
 		return types.Type{}
-	}
-	// 6.5.15: a pointer beside an integer constant of value zero is that
-	// pointer, the same pairing an initializer and an assignment allow.
-	if a.is_pointer() && p.is_null_constant(else_expr) {
-		return a
-	}
-	if b.is_pointer() && p.is_null_constant(then_expr) {
-		return b
 	}
 	p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and 6.5.15 pairs two arithmetic types, two void types, or two pointers')
 	return types.Type{}
@@ -1066,7 +1071,7 @@ fn (mut p Parser) parse_member(base string, object ?ast.Expr, aggregate types.Ty
 		index:           index
 		member:          written
 		offset:          into + layout.offsets[at]
-		spelling:        member.typ.describe()
+		spelling:        member.typ.storage_spelling()
 		typ:             member.typ
 		bitfield:        member.bitfield
 		bit_offset:      if member.bitfield { layout.bits[at] } else { 0 }
@@ -1118,6 +1123,13 @@ fn (p Parser) aggregate_bytes(declared types.Type) int {
 		element := declared.element() or { return 0 }
 		return p.aggregate_bytes(element)
 	}
+	if declared.kind in [types.Kind.complex_float, .complex_double] {
+		// A complex object is two components stored one after the other, and the
+		// model measured the size: sixteen bytes for a `double _Complex` and
+		// eight for a `float _Complex`. The declaration carries it so that the
+		// frame reserves the whole object rather than one value of it.
+		return p.representation.size_of(declared) or { 0 }
+	}
 	if declared.kind !in [types.Kind.struct_, .union_] || !declared.is_complete() {
 		return 0
 	}
@@ -1134,6 +1146,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Field { '${expr.name}.${expr.member}' }
 		ast.IntLit { expr.text }
 		ast.FloatLit { expr.text }
+		ast.ComplexLit { expr.text }
 		ast.StrLit { 'a string literal' }
 		ast.Call {
 			if _ := expr.callee {
@@ -1145,7 +1158,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Unary { 'a value with ${expr.op} applied to it' }
 		ast.Cast { 'a value converted to ${expr.spelling}' }
 		ast.Binary { 'a value of ${expr.op}' }
-		ast.IncDec { 'a value with ${expr.op} applied to ${expr.name}' }
+		ast.IncDec { 'a value with ${expr.op} applied to ${describe_operand(expr.operand)}' }
 		ast.Conditional { 'a conditional value' }
 		ast.Assign { 'a value assigned to ${describe_operand(expr.target)} with ${expr.op}' }
 		ast.Comma { 'a value of ,' }
@@ -1310,6 +1323,19 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 		p.next()
 		return p.parse_prefix_operand(t)!
 	}
+	// `__real__` and `__imag__` name the two parts of a value. glibc's <tgmath.h>
+	// writes them around the argument it is asking a type question about - it
+	// asks `sizeof (+__real__ (Val))` and `__builtin_classify_type (__real__
+	// (Val))` - and the names are in the reserved namespace the same way
+	// `__extension__` is, so no dialect refuses them and no features.v row gates
+	// them. Read as a call they name a function nothing declares, the operand's
+	// type stays unresolved, and the `sizeof` or `__builtin_classify_type`
+	// around them is refused, which is the whole of the tgmath unary macro.
+	if t.kind == .identifier && (t.text == '__real__' || t.text == '__imag__') {
+		p.next()
+		operand := p.parse_prefix_operand(t)!
+		return p.real_or_imaginary(t, operand)
+	}
 	// A conversion is written as a type name in parentheses, and it is read here
 	// because that is where it binds: `(char *)p + 1` adds one to the address and
 	// not to the char, and `*(int *)p` reads through the pointer rather than
@@ -1379,7 +1405,78 @@ fn (mut p Parser) parse_prefix_operand(op tokenize.Token) !ast.Expr {
 	return operand
 }
 
-// parse_nested reads an expression one level inside the expression being read,
+// real_or_imaginary reads the value `__real__ x` or `__imag__ x` is worth. The
+// two names are gcc extensions rather than anything the C standard defines, and
+// gcc 16.2.1 is the oracle for all of it, measured with programs that run:
+//
+//	double x = 3.0;  __real__ x     is 3.0      and its type is double
+//	                 __imag__ x     is 0        and its type is double
+//	                 __real__(x + 1.0)          is 4.0
+//
+// `__real__ x` is x's own object: `&__real__ x == &x`, and `__real__ x = 4.0`
+// writes x. The type of `__imag__` is the operand's own and not a promoted one:
+// char for a char operand, short for a short, long long for a long long.
+// `__imag__ x` is a value and not an object, so it cannot be assigned to.
+//
+// So `__real__` of an operand of a real arithmetic type is the operand, and
+// returning it as written gives the same object, the same address, the same
+// type, and the operand evaluated once. `__imag__` is a zero of the operand's
+// type, which is a written constant of that type.
+//
+// An operand of a complex type is the one part of this that is out of reach: the
+// complex types are a pair of floating values and their arithmetic is the back
+// end milestone's, so the part is refused by name rather than answered with a
+// value this compiler made up. An operand that is real but not arithmetic has no
+// real part, which is a constraint violation.
+//
+// One measured difference is not modelled: gcc still evaluates the operand of
+// `__imag__` - `__imag__ f()` calls f and answers 0 - and a written zero does
+// not carry that call. Preserving it would need the operand emitted for its
+// effect and the result register cleared afterwards, and the back end has no
+// instruction that clears the floating-point result register.
+fn (mut p Parser) real_or_imaginary(op tokenize.Token, operand ast.Expr) ast.Expr {
+	// An operand the reader did not resolve was refused where it was written,
+	// and a second message about the operator would only repeat the first.
+	if p.is_unresolved(operand) {
+		return p.zero_value(op, types.Type{})
+	}
+	value := p.value_type(operand)
+	if value.is_complex() {
+		p.error_at(op, 'unsupported: ${op.text} names one part of a value, and ${value.describe()} is a pair of values whose arithmetic is the back end milestone')
+		return p.zero_value(op, types.Type{})
+	}
+	if !value.is_arithmetic() {
+		p.error_at(op, 'a constraint violation: ${op.text} takes a value of an arithmetic type, and this one is ${value.describe()}')
+		return p.zero_value(op, types.Type{})
+	}
+	if op.text == '__real__' {
+		return operand
+	}
+	return p.zero_value(op, value)
+}
+
+// zero_value is the constant zero of a type, which is what `__imag__` of a real
+// operand is worth: an int literal for an integer type and a double literal for
+// a floating one, the same two nodes a written constant of that type already is.
+fn (mut p Parser) zero_value(op tokenize.Token, value types.Type) ast.Expr {
+	if value.is_floating() {
+		return ast.Expr(ast.FloatLit{
+			value: 0.0
+			text:  '0.0'
+			typ:   value
+			line:  op.line
+			col:   op.col
+		})
+	}
+	return ast.Expr(ast.IntLit{
+		value: 0
+		text:  '0'
+		typ:   value
+		line:  op.line
+		col:   op.col
+	})
+}
+
 // and charges that level to the nesting count.
 //
 // A `[` index and a call's argument list are each an expression written inside
@@ -1587,53 +1684,63 @@ fn (mut p Parser) element_type(t types.Type, operand ast.Expr, at tokenize.Token
 	return none
 }
 
-// inc_dec builds the node for `++` or `--` on a name, and refuses every other
-// operand where the operator is written: the lvalue this compiler steps is a
-// plain object, so an element, a member and a literal are named in a diagnostic
+// inc_dec builds the node for `++` or `--` on an object, and refuses every other
+// operand where the operator is written: the lvalue this compiler steps is an
+// object - a name, an element, a member or what a pointer points at - so a
+// literal, a call's result and an arithmetic value are named in a diagnostic
 // rather than read as something else.
 //
-// The type has to be an integer the back end moves as a value, whose step is
-// one, or a pointer, whose step is the size of what it points at. The reader
-// accepts both and leaves the pointer's stride to the emitter, which has the
-// target's sizes; a pointer to a type with no size is refused there by name. A
-// name whose type the reader never resolved is left for the walk that reports
-// names nothing declares, so an undeclared name gets that message and not this
-// one.
+// The type has to be a scalar the back end moves as a value: an integer, whose
+// step is one, a pointer, whose step is the size of what it points at, or a
+// floating value, whose step is one of its own width. The reader accepts all
+// three and leaves the pointer's stride to the emitter, which has the target's
+// sizes; a pointer to a type with no size is refused there by name. A name whose
+// type the reader never resolved is left for the walk that reports names nothing
+// declares, so an undeclared name gets that message and not this one.
 fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !ast.Expr {
-	match operand {
-		ast.Ident {
-			kind := operand.typ.kind
-			if kind != .unknown && !steps_a_value(kind) {
-				reason := if kind in [.int128, .unsigned_int128] {
-					'and this back end has no ${operand.typ.describe()} value to step'
-				} else {
-					'and this compiler steps an integer or a pointer name only'
-				}
-				p.error_at(op, 'unsupported: ${op.text} on ${operand.name}, which is ${operand.typ.describe()}, ${reason}')
-				return error('operand is not a name this compiler steps')
-			}
-			return ast.Expr(ast.IncDec{
-				op:      op.text
-				name:    operand.name
-				postfix: postfix
-				typ:     operand.typ
-				line:    op.line
-				col:     op.col
-			})
+	if !steps_an_object(operand) {
+		p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, and this compiler steps an object - a name, an element, a member or what a pointer points at - only')
+		return error('operand is not an object')
+	}
+	kind := operand.typ.kind
+	if kind != .unknown && !steps_a_value(kind) {
+		reason := if kind in [.int128, .unsigned_int128] {
+			'and this back end has no ${operand.typ.describe()} value to step'
+		} else {
+			'and this compiler steps an object of an integer, a pointer or a floating type only'
 		}
-		else {
-			p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, and this compiler implements ++ and -- on a plain name only')
-			return error('operand is not a name')
-		}
+		p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, which is ${operand.typ.describe()}, ${reason}')
+		return error('operand is not a value this compiler steps')
+	}
+	return ast.Expr(ast.IncDec{
+		op:      op.text
+		operand: operand
+		postfix: postfix
+		typ:     operand.typ
+		line:    op.line
+		col:     op.col
+	})
+}
+
+// steps_an_object says whether an expression names an object the operator can
+// step in place: a name, an element, a member, or what a pointer points at. A
+// literal and a computed value are not objects, so they are refused by name
+// rather than read as a place to store.
+fn steps_an_object(operand ast.Expr) bool {
+	return match operand {
+		ast.Ident, ast.Index, ast.Field { true }
+		ast.Unary { operand.op == '*' }
+		else { false }
 	}
 }
 
-// steps_a_value says whether the back end steps a name of this kind as a value
-// of its own width. A pointer is stepped by the size of what it points at, and
-// every integer kind it stores is a candidate; the two 128-bit kinds are not,
-// because the back end has no value that wide and refuses a name of one by name.
+// steps_a_value says whether the back end steps an object of this kind as a
+// value of its own width. A pointer is stepped by the size of what it points
+// at, a floating value by one of its own width, and every integer kind it stores
+// is a candidate; the two 128-bit kinds are not, because the back end has no
+// value that wide and refuses an object of one by name.
 fn steps_a_value(kind types.Kind) bool {
-	if kind == .pointer {
+	if kind == .pointer || kind == .float || kind == .double {
 		return true
 	}
 	return kind.is_integer() && kind !in [.int128, .unsigned_int128]
@@ -1767,9 +1874,25 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	t := p.peek()
 	if t.kind == .number {
 		p.next()
-		// The spelling decides whether this is a floating constant or an
-		// integer one, so the two readers are reached from here rather than
-		// one of them guessing at the other's input.
+		// The spelling decides whether this is an imaginary constant, a
+		// floating constant or an integer one, so the readers are reached
+		// from here rather than one of them guessing at another's input.
+		// The imaginary one is asked first because its spelling also has a
+		// point, which would otherwise send it to the floating reader and
+		// refuse the `i` as a character no floating constant holds.
+		if is_imaginary_constant(t.text) {
+			value, single := parse_imaginary_literal(t.text) or {
+				p.error_at(t, err.msg())
+				return error('bad imaginary literal')
+			}
+			return ast.Expr(ast.ComplexLit{
+				value: value
+				text:  t.text
+				typ:   if single { types.complex_float_type() } else { types.complex_double_type() }
+				line:  t.line
+				col:   t.col
+			})
+		}
 		if is_floating_constant(t.text) {
 			if is_long_double_constant(t.text) {
 				value := parse_long_double_literal(t.text) or {
@@ -1831,8 +1954,8 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		// integer constant expression an array bound or a case label can be
 		// built from. It is asked before the name is resolved, because there is
 		// no storage behind the name to read.
-		if value := p.scopes.lookup_constant(t.text) {
-			return integer_constant(value, t.text, t)
+		if constant := p.scopes.lookup_constant(t.text) {
+			return integer_constant(constant.value, t.text, t, constant.kind)
 		}
 		// The function-name spellings name the function the expression is
 		// written in: `__func__` is C99's (6.4.2.2), and `__FUNCTION__` and
@@ -2308,6 +2431,34 @@ fn (p Parser) is_null_constant(expr ast.Expr) bool {
 	return value == 0
 }
 
+// is_null_pointer_constant says whether an expression is a null pointer
+// constant, which 6.3.2.3p3 defines as the integer constant expression with the
+// value 0, or such an expression cast to void *. The second spelling is not a
+// second kind of value, it is the first one wearing a pointer's clothes, and it
+// is the spelling the tgmath macros use: `(void *) 0` and `(void *) (E)` for an
+// E that is an integer constant expression both convert to any object pointer
+// without a cast, and 6.5.15p6 gives a conditional whose arm is one of them the
+// other arm's pointer type.
+//
+// A cast to an object pointer is not a null pointer constant, however constant
+// the zero under it is. Measured, gcc 16.2.1 refuses `1 ? (double *)0 : (char
+// *)0` with `pointer type mismatch`, and accepts `1 ? (void *)0 : (char *)0`
+// with the type `char *`: the clause names void * and no other pointer.
+//
+// An assignment and a call argument ask the same question through
+// `types.assignment_problem`, which already lets a void pointer convert to any
+// object pointer, so the cast spelling needs no change there.
+fn (p Parser) is_null_pointer_constant(expr ast.Expr) bool {
+	if p.is_null_constant(expr) {
+		return true
+	}
+	if expr is ast.Cast && expr.typ.is_pointer() {
+		pointee := expr.typ.pointee() or { return false }
+		return pointee.kind == .void_ && p.is_null_constant(expr.expr)
+	}
+	return false
+}
+
 // constant_value is the value of an integer constant expression this reader
 // evaluates while it reads: a literal, a literal with a sign in front of it, a
 // cast of one to an integer type, the arithmetic of two values, the shifts, the
@@ -2528,7 +2679,7 @@ fn (p Parser) converted_constant(typ types.Type, operand i64) ?i64 {
 		return if operand != 0 { i64(1) } else { i64(0) }
 	}
 	size := p.representation.size_of(typ) or { return none }
-	return truncate_integer(operand, size, typ.kind.is_unsigned())
+	return truncate_integer(operand, size, typ.is_unsigned_type())
 }
 
 // converted_float_constant is a floating constant converted to an integer type,

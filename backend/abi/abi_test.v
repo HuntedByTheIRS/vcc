@@ -44,6 +44,37 @@ fn test_two_doubles_are_two_floating_registers() {
 	assert answer.second_floating
 }
 
+// A complex value has the shape of a struct of its two components, so the class
+// is the one that shape makes. Measured on gcc 16.2.1 across two translation
+// units, a gcc-built caller and a separately gcc-built callee linked and run:
+// `double _Complex` arrives in two floating registers, one eightbyte each, and
+// `float _Complex` arrives in one because it is eight bytes in all, which is what
+// the two answers below say.
+fn test_a_complex_value_is_classified_as_its_two_components() {
+	double_complex := class(types.complex_double_type())
+	assert double_complex.bytes == 16
+	assert double_complex.count == 2
+	assert double_complex.first_floating
+	assert double_complex.second_floating
+	float_complex := class(types.complex_float_type())
+	assert float_complex.bytes == 8
+	assert float_complex.count == 1
+	assert float_complex.first_floating
+	assert !float_complex.second_floating
+}
+
+// A complex member of a struct makes the eightbyte it lies in the floating file's,
+// the way a double member does, because its components are floating-point values.
+fn test_a_complex_member_makes_an_eightbyte_floating() {
+	answer := class(types.struct_type('complex_and_double', [
+		member('z', types.complex_double_type()),
+	]))
+	assert answer.bytes == 16
+	assert answer.count == 2
+	assert answer.first_floating
+	assert answer.second_floating
+}
+
 // The eightbyte is classified by what it covers, not by what the object is called:
 // an int in the first one makes it the general file's.
 fn test_an_int_and_a_double_are_one_general_register_and_one_floating_one() {

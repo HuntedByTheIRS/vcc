@@ -73,7 +73,13 @@ fn test_the_integer_promotions_of_6_3_1_1() {
 	assert promote(unsigned_char_type()) == 'int'
 	assert promote(short_type()) == 'int'
 	assert promote(unsigned_short_type()) == 'int'
-	assert promote(enum_type('E')) == 'int'
+	assert promote(enum_type('E', .int_)) == 'int'
+	// An enum whose enumerators are non-negative is unsigned int in gcc, and one
+	// whose values do not fit int is long or unsigned long. The promotion is the
+	// underlying type itself in each case, not always int.
+	assert promote(enum_type('E', .unsigned_int)) == 'unsigned int'
+	assert promote(enum_type('E', .long)) == 'long'
+	assert promote(enum_type('E', .unsigned_long)) == 'unsigned long'
 	// The types that are already at least int rank keep their own type.
 	assert promote(int_type()) == 'int'
 	assert promote(unsigned_int_type()) == 'unsigned int'
@@ -139,16 +145,21 @@ fn test_the_usual_arithmetic_conversions_of_6_3_1_8() {
 	assert sum(long_double_type(), char_type()) == 'long double'
 }
 
-fn test_a_conversion_this_milestone_has_no_arithmetic_for_is_refused() {
-	// The complex types are the back end milestone's, and a conversion that
-	// needs one is refused by name rather than approximated with the real type
-	// underneath it. Measured: gcc makes `double _Complex` of a double and a
-	// `double _Complex`, which is arithmetic this compiler does not emit.
-	complex_sum := usual_arithmetic_conversions(double_type(), complex_double_type(), measured.representation()) or {
-		assert err.msg().contains('complex')
-		return
-	}
-	assert complex_sum.kind == .unknown
+fn test_the_usual_arithmetic_conversions_with_a_complex_operand() {
+	// 6.3.1.8: an operand of a complex type makes the result complex, and the
+	// two corresponding real types follow the rules above, so a real operand
+	// takes the component's own rules and the complex part is set aside.
+	// Measured with `_Generic` on gcc 16.2.1: `1.0 + 1.0f * _Complex_I` and
+	// `1.0f + 1.0 * _Complex_I` are both `double _Complex`, `1.0f + 1.0f *
+	// _Complex_I` is `float _Complex`, and `1 + 1.0f * _Complex_I` is
+	// `float _Complex`.
+	assert sum(double_type(), complex_double_type()) == 'double _Complex'
+	assert sum(double_type(), complex_float_type()) == 'double _Complex'
+	assert sum(float_type(), complex_float_type()) == 'float _Complex'
+	assert sum(int_type(), complex_float_type()) == 'float _Complex'
+	assert sum(int_type(), complex_double_type()) == 'double _Complex'
+	assert sum(complex_float_type(), complex_double_type()) == 'double _Complex'
+	assert sum(long_double_type(), complex_double_type()) == 'long double _Complex'
 	// A pointer is not arithmetic, and neither is a name this compiler never
 	// resolved.
 	pointer_sum := usual_arithmetic_conversions(int_type(), pointer_to(int_type()), measured.representation()) or {
@@ -355,10 +366,11 @@ fn test_the_128_bit_types_in_the_conversions() {
 	assert sum(int128_type(), unsigned_long_type()) == '__int128'
 	assert sum(int128_type(), long_long_type()) == '__int128'
 	assert sum(int128_type(), unsigned_long_long_type()) == '__int128'
-	// An enum is int in this model and unsigned int under gcc, which is a
-	// divergence recorded in integer_promotion; the row is __int128 either way,
-	// because a 16-byte type holds every value of a 4-byte one.
-	assert sum(int128_type(), enum_type('E')) == '__int128'
+	// An enum's underlying type is int, unsigned int, long or unsigned long, and
+	// the row is __int128 for each of them, because a 16-byte type holds every
+	// value of a 4-byte or 8-byte one.
+	assert sum(int128_type(), enum_type('E', .int_)) == '__int128'
+	assert sum(int128_type(), enum_type('E', .unsigned_long)) == '__int128'
 	// The same list with the unsigned 128-bit operand, which wins every integer
 	// pairing the same way.
 	assert sum(unsigned_int128_type(), unsigned_int128_type()) == 'unsigned __int128'
@@ -373,7 +385,7 @@ fn test_the_128_bit_types_in_the_conversions() {
 	assert sum(unsigned_int128_type(), unsigned_long_type()) == 'unsigned __int128'
 	assert sum(unsigned_int128_type(), long_long_type()) == 'unsigned __int128'
 	assert sum(unsigned_int128_type(), unsigned_long_long_type()) == 'unsigned __int128'
-	assert sum(unsigned_int128_type(), enum_type('E')) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), enum_type('E', .int_)) == 'unsigned __int128'
 	// Between the two of them the unsigned type wins the way unsigned int wins
 	// over int: neither can hold the other's values and one of them is unsigned.
 	assert sum(int128_type(), unsigned_int128_type()) == 'unsigned __int128'

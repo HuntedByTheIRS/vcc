@@ -614,6 +614,112 @@ fn test_the_null_pointer_constant_is_the_value_of_an_expression() {
 	assert folded.diagnostics.len == 0
 }
 
+// 6.3.2.3p3 counts a cast to void * as a null pointer constant, the same value as
+// the bare zero it wraps, and 6.5.15p6 gives a conditional whose arm is one of
+// them the other arm's pointer type. Measured on gcc 16.2.1,
+// `1 ? (void *)0 : (double *)0`, `1 ? (double *)0 : (void *)0`, `1 ? (void *)0 :
+// d` and `1 ? d : (void *)0` for a `double *d` are all `double *`.
+//
+// This is the shape glibc's <tgmath.h> is built on: `__tgmath_type_if` is
+// `__typeof__ (*(0 ? (__typeof__ (0 ? (T *) 0 : (void *) (E))) 0 : ...))`, and
+// the type it names is T only because `(void *)(E)` for a zero E is a null
+// pointer constant rather than an ordinary void pointer.
+fn test_a_conditional_between_a_void_pointer_constant_and_a_pointer_is_the_pointer() {
+	shapes := [
+		'int h(double *d) { double *p = 1 ? (void *)0 : (double *)0; return 0; }',
+		'int h(double *d) { double *p = 1 ? (double *)0 : (void *)0; return 0; }',
+		'int h(double *d) { double *p = 1 ? (void *)0 : d; return 0; }',
+		'int h(double *d) { double *p = 1 ? d : (void *)0; return 0; }',
+		'int h(double *d) { double *p = 1 ? (void *)(2 - 2) : (double *)0; return 0; }',
+	]
+	for source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len == 0
+		init := result.unit.decls[0].body[0].init or {
+			assert false
+			return
+		}
+		conditional := init as ast.Conditional
+		assert conditional.typ.kind == types.Kind.pointer
+		pointee := conditional.typ.pointee() or {
+			assert false
+			return
+		}
+		assert pointee.kind == types.Kind.double
+	}
+}
+
+// A pointer to void that is not a constant is an ordinary arm of the pointer
+// rule: the other arm does not become its type, the void pointer takes over.
+// Measured on gcc 16.2.1, `1 ? (void *)0 : (void *)d` is `void *` and
+// `1 ? (double *)0 : (void *)1` is `void *` too, because `(void *)1` is not the
+// constant zero.
+fn test_a_conditional_with_a_void_pointer_that_is_not_constant_is_a_void_pointer() {
+	shapes := [
+		'int h(double *d) { void *v = 1 ? (void *)0 : (void *)d; return 0; }',
+		'int h(double *d) { void *v = 1 ? (double *)0 : (void *)d; return 0; }',
+		'int h(double *d) { void *v = 1 ? (double *)0 : (void *)1; return 0; }',
+	]
+	for source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len == 0
+		init := result.unit.decls[0].body[0].init or {
+			assert false
+			return
+		}
+		conditional := init as ast.Conditional
+		assert conditional.typ.kind == types.Kind.pointer
+		pointee := conditional.typ.pointee() or {
+			assert false
+			return
+		}
+		assert pointee.kind == types.Kind.void_
+	}
+}
+
+// 6.3.2.3p3 names void * and no other pointer, so a cast to an object pointer is
+// an ordinary pointer however constant the zero under it is. Measured, gcc
+// 16.2.1 refuses `1 ? (double *)0 : (char *)0` with `pointer type mismatch in
+// conditional expression` and accepts `1 ? (void *)0 : (char *)0` as `char *`.
+fn test_a_cast_to_an_object_pointer_is_not_a_null_pointer_constant() {
+	result := parsed('int main(void) { void *v = 1 ? (double *)0 : (char *)0; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('they do not point to compatible types')
+}
+
+// 6.5.15 reads an arm that is a null pointer constant as the other arm's type,
+// and the type that decides is the one 6.5.15.1 gives a dereference of the
+// conditional. Measured on gcc 16.2.1: `sizeof(*(0 ? (void *)0 : (char *)1))` is
+// 1 and `0 ? (void *)0 : (int *)1` is `int *`, while `0 ? (int *)0 : (char *)0`
+// is refused as a pointer type mismatch, because `(int *)0` is not a null
+// pointer constant, and `sizeof(*(0 ? (void *)1 : (char *)0))` has no size
+// because `(void *)1` is a `void *` and reading through it is void.
+fn test_an_arm_of_a_conditional_that_is_a_null_pointer_constant_takes_the_other_arms_type() {
+	shaped := parsed('int main(void) { return sizeof(*(0 ? (void *)0 : (char *)1)); }')
+	assert shaped.diagnostics.len == 0
+	expr := shaped.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (expr as ast.IntLit).value == 1
+	swapped := parsed('int main(void) { return sizeof(*(0 ? (char *)1 : (void *)0)); }')
+	assert swapped.diagnostics.len == 0
+	other := swapped.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (other as ast.IntLit).value == 1
+	// A cast to a pointer that is not a pointer to void is not a null pointer
+	// constant, so two such arms are a mismatch and not a type.
+	mismatch := parsed('int main(void) { return sizeof(*(0 ? (int *)0 : (char *)0)); }')
+	assert mismatch.diagnostics.len >= 1
+	assert mismatch.diagnostics[0].msg.contains('do not point to compatible types')
+	// Nor is `(void *)1`: it is a `void *`, and reading through it has no size.
+	hollow := parsed('int main(void) { return sizeof(*(0 ? (void *)1 : (char *)0)); }')
+	assert hollow.diagnostics.len == 1
+	assert hollow.diagnostics[0].msg.contains('sizeof asks how many bytes a value with * applied to it takes')
+}
+
 fn test_the_null_pointer_constant_is_the_one_integer_a_pointer_takes() {
 	// Zero is a null pointer constant and converts to any pointer; one is not,
 	// and an argument that is a plain integer is a constraint violation.
@@ -1021,19 +1127,19 @@ fn test_a_member_of_something_without_members_is_refused() {
 
 fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type() {
 	// The name is not what is asked about, the type it names is: `Wide` is a
-	// `double _Complex` here, and the refusal names the word that makes it
-	// complex rather than `Wide`. It happens at the declaration, which is where
-	// the object is defined and not only where something uses it.
-	wider := parsed('typedef double _Complex Wide;\nWide x;')
+	// `long double _Complex` here, and the refusal names the first word of it
+	// rather than `Wide`. It happens at the declaration, which is where the
+	// object is defined and not only where something uses it.
+	wider := parsed('typedef long double _Complex Wide;\nWide x;')
 	assert wider.diagnostics.len == 1
-	assert wider.diagnostics[0].msg == 'unsupported type double'
+	assert wider.diagnostics[0].msg == 'unsupported type long'
 	assert wider.diagnostics[0].line == 2
 	// A parameter is the same question, asked where the call's frame is laid
 	// out, and a parameter is the one place a type of several words is spelled
 	// in full.
-	parameter := parsed('typedef double _Complex Wide;\nint f(Wide b) { return 0; }')
+	parameter := parsed('typedef long double _Complex Wide;\nint f(Wide b) { return 0; }')
 	assert parameter.diagnostics.len == 1
-	assert parameter.diagnostics[0].msg.contains('unsupported type double _Complex')
+	assert parameter.diagnostics[0].msg.contains('unsupported type long double _Complex')
 	// A `long double` is not that case any more: the type has a width and a form,
 	// and what a parameter of the type is refused by is the stack a value of it
 	// travels in.
@@ -1074,29 +1180,35 @@ fn test_a_float_definition_is_read_and_a_long_double_one_is_refused_by_name() {
 	assert prototype.unit.decls[0].ret_type.same(types.long_double_type())
 }
 
-fn test_a_complex_type_is_refused_by_name() {
-	// The model has the complex types and the emitter has no arithmetic for
-	// them, so a definition of one is refused by name and location. The refusal
-	// says which type it was, not the first word of its spelling.
+fn test_the_two_complex_types_the_back_end_moves_are_read() {
+	// The model has the complex types and the back end now hands over the two
+	// it has a width for, so a definition, a parameter and a local of
+	// `double _Complex` or `float _Complex` are all read. Measured on gcc
+	// 16.2.1, which accepts each of these.
 	complex := parsed('double _Complex f(void) { return 0; }')
-	assert complex.diagnostics.len == 1
-	assert complex.diagnostics[0].msg == 'unsupported: double _Complex is a type this compiler does not emit yet, so a function cannot return it'
-	assert complex.diagnostics[0].line == 1
+	assert complex.diagnostics.len == 0
+	assert complex.unit.decls[0].ret_type.same(types.complex_double_type())
+	parameter := parsed('int h(double _Complex z) { return 0; }')
+	assert parameter.diagnostics.len == 0
+	assert parameter.unit.decls[0].params[0].resolved.same(types.complex_double_type())
+	local := parsed('int main(void) { double _Complex z = 0; return 0; }')
+	assert local.diagnostics.len == 0
+	float_local := parsed('int main(void) { float _Complex z = 0; return 0; }')
+	assert float_local.diagnostics.len == 0
+	// A lone `_Complex` is `double _Complex`: measured on gcc 16.2.1, the two
+	// are compatible types and both occupy sixteen bytes.
+	bare := parsed('int main(void) { _Complex z = 0; return 0; }')
+	assert bare.diagnostics.len == 0
+	// `long double _Complex` is a type the back end has no value for, and it is
+	// refused by the word that makes it complex rather than quietly read as a
+	// `double _Complex`, which is a different type of a different width.
+	long_local := parsed('int main(void) { long double _Complex z = 0; return 0; }')
+	assert long_local.diagnostics.len == 1
+	assert long_local.diagnostics[0].msg == 'unsupported type _Complex'
+	// `_Imaginary` is optional in C99 and this compiler has no model for it.
 	imaginary := parsed('_Imaginary g(void) { return 0; }')
 	assert imaginary.diagnostics.len == 1
 	assert imaginary.diagnostics[0].msg == 'unsupported type _Imaginary'
-	// The parameter list names what a parameter was declared with, which is the
-	// one place a type written as two words is spelled in full.
-	parameter := parsed('int h(double _Complex z) { return 0; }')
-	assert parameter.diagnostics.len == 1
-	assert parameter.diagnostics[0].msg == 'unsupported type double _Complex'
-	// A declaration of an object of one is refused by the word that makes it
-	// complex rather than by the `double` in front of it: `double` on its own
-	// is a type this compiler reads, so naming it would name a type that works.
-	local := parsed('int main(void) { double _Complex z = 0; return 0; }')
-	assert local.diagnostics.len == 1
-	assert local.diagnostics[0].msg == 'unsupported type _Complex'
-	assert local.diagnostics[0].line == 1
 }
 
 fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
@@ -1105,11 +1217,11 @@ fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
 	// narrow integer spellings, `short` among them, are not that case any more,
 	// and neither is `long double`, whose type this compiler now lays out: the
 	// type here is one that is still two words with no form, a `typedef` of a
-	// complex type, where the message names the word in front of the `_Complex`
-	// rather than the word that makes it complex.
-	wider := parsed('typedef double _Complex Wide;\nWide h;')
+	// `long double _Complex`, where the message names the first word rather
+	// than the word that makes it complex.
+	wider := parsed('typedef long double _Complex Wide;\nWide h;')
 	assert wider.diagnostics.len == 1
-	assert wider.diagnostics[0].msg == 'unsupported type double'
+	assert wider.diagnostics[0].msg == 'unsupported type long'
 	assert wider.diagnostics[0].line == 2
 	// A `long double` object is a declaration this compiler reads, lays out and
 	// initialises, so it is not refused at all.
@@ -1176,6 +1288,44 @@ fn test_a_floating_suffix_names_the_type_and_the_value_it_has() {
 		assert false
 		return
 	} as ast.FloatLit).typ.same(types.double_type())
+}
+
+fn test_an_imaginary_constant_is_the_complex_value_6_4_4_2_names() {
+	// 6.4.4.2 gives a floating constant written with `i` or `j` an imaginary
+	// part of the value it names and a real part of zero, so the node carries
+	// the coefficient and the complex type its suffix named. Measured on gcc
+	// 16.2.1: `1.0if`, `1.0iF` and `1.0Fi` are all `float _Complex`, and `1.0i`
+	// is `double _Complex`. `_Complex_I` in <complex.h> is `1.0if`, so the
+	// suffix-before-suffix order is the one the header writes.
+	single := first('int main(void) { float _Complex z = 1.0if; return 0; }')
+	single_lit := single.body[0].init or {
+		assert false
+		return
+	} as ast.ComplexLit
+	assert single_lit.typ.same(types.complex_float_type())
+	assert single_lit.value == 1.0
+	assert single_lit.text == '1.0if'
+	// The capital spelling and the other order are the same constant.
+	assert (first('int main(void) { float _Complex z = 1.0Fi; return 0; }').body[0].init or {
+		assert false
+		return
+	} as ast.ComplexLit).typ.same(types.complex_float_type())
+	// No floating suffix is a double complex, and `j` is the other spelling of
+	// the imaginary suffix.
+	wide := first('int main(void) { double _Complex z = 2.0j; return 0; }')
+	wide_lit := wide.body[0].init or {
+		assert false
+		return
+	} as ast.ComplexLit
+	assert wide_lit.typ.same(types.complex_double_type())
+	assert wide_lit.value == 2.0
+	// `l` names a `long double _Complex`, which this compiler has no value for,
+	// and it is refused by name at the constant rather than read as a double.
+	// The declaration is the accepted `float _Complex` so the constant is what
+	// is refused, and not the type it is assigned to.
+	long_imaginary := parsed('int main(void) { float _Complex z = 1.0il; return 0; }')
+	assert long_imaginary.diagnostics.len == 1
+	assert long_imaginary.diagnostics[0].msg.contains('long double complex')
 }
 
 fn test_a_float_constant_is_not_the_double_of_the_same_digits() {

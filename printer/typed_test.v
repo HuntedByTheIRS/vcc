@@ -102,7 +102,11 @@ fn test_one_clause_per_type_in_a_file_the_emitter_can_read() {
 	// The aggregates.
 	assert clause_of_declaration(printed, 'fn origin() struct point') == 'struct point (void)'
 	assert clause_of_declaration(printed, 'fn pick() union value') == 'union value (void)'
-	assert clause_of_declaration(printed, 'fn next() enum colour') == 'enum colour (void)'
+	// An enumerator list settles the integer type the enum has, so the head is
+	// the type gcc gives the enum and the emitter reads, and the clause after
+	// the colon is the tag the model kept. This is the same reading a typedef
+	// name gets: `typedef int T; T f(void);` prints `fn f() int`, not `T`.
+	assert clause_of_declaration(printed, 'fn next() unsigned int') == 'enum colour (void)'
 	// A definition, which the emitter does have a form for.
 	assert clause_of_declaration(printed, 'fn add() int') == 'int (int, int)'
 }
