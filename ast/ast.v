@@ -163,6 +163,11 @@ pub:
 // written into it. The width and the spelling are the member's own type, because
 // a value written into a member is converted the way a store into a member
 // converts it, and at most one of init and init_float is set.
+//
+// A bitfield member has no byte of its own: bitfield says the value is the
+// bit_width bits starting at bit_offset inside the storage unit at offset, which
+// is unit_width bytes wide and which the other members of the same unit share. A
+// member that is not a bitfield leaves those false and zero.
 pub struct MemberInit {
 pub:
 	offset   int
@@ -177,7 +182,11 @@ pub:
 	// the address of an object, or a string literal. It is separate from the two
 	// constants because an address is a reference the layout resolves rather than
 	// bytes written here.
-	address ?AddressInit
+	address    ?AddressInit
+	bitfield   bool
+	bit_offset int
+	bit_width  int
+	unit_width int
 }
 
 pub enum StmtKind {
