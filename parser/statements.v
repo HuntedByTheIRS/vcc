@@ -1935,13 +1935,17 @@ fn store_a_brace_write(name string, at tokenize.Token, write BraceWrite, value a
 		kind:   .assign
 		target: name
 		field:  ast.Field{
-			name:     name
-			member:   write.spelling
-			offset:   write.offset
-			spelling: write.spelling
-			typ:      write.typ
-			line:     at.line
-			col:      at.col
+			name:       name
+			member:     write.spelling
+			offset:     write.offset
+			spelling:   write.spelling
+			typ:        write.typ
+			bitfield:   write.bitfield
+			bit_offset: write.bit_offset
+			bit_width:  write.bit_width
+			unit_width: write.unit_width
+			line:       at.line
+			col:        at.col
 		}
 		expr:   value
 		line:   at.line

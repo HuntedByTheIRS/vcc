@@ -542,6 +542,54 @@ fn test_a_body_list_writes_a_bitfield_member_into_its_own_bits() {
 	assert field.unit_width == 4
 }
 
+// A designated list carries the same bit position a positional one does: the
+// value goes into the field's own bits inside the storage unit it shares, so
+// `{.b = 9}` must not write a whole unit of its own over the field beside it.
+// Measured on gcc 16.2.1, `struct S { unsigned int a : 3; unsigned int b : 5; };
+// struct S s = {.b = 9, .a = 5};` reads a as 5 and b as 9.
+fn test_a_file_scope_designated_list_writes_a_bitfield_member_into_its_own_bits() {
+	result := declarations_of('struct S { unsigned int a : 3; unsigned int b : 5; };\nstruct S s = {.b = 9, .a = 5};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	entries := result.unit.globals[0].member_inits
+	assert entries.len == 2
+	assert entries[0].bitfield
+	assert entries[0].offset == 0
+	assert entries[0].bit_offset == 3
+	assert entries[0].bit_width == 5
+	assert entries[0].unit_width == 4
+	assert (entries[0].init or { -1 }) == 9
+	assert entries[1].bitfield
+	assert entries[1].bit_offset == 0
+	assert (entries[1].init or { -1 }) == 5
+}
+
+// The same in a body: the store the designated list makes carries the field's
+// bits, so the emitter masks and shifts instead of writing the whole unit, and
+// the value beside it stays. Measured on gcc 16.2.1, `struct S s = {.b = 9};`
+// reads a as 0 and b as 9.
+fn test_a_body_designated_list_writes_a_bitfield_member_into_its_own_bits() {
+	result := declarations_of('int main(void) { struct S { unsigned int a : 3; unsigned int b : 5; }; struct S s = {.b = 9}; return s.b; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	mut found := false
+	for stmt in body {
+		if stmt.kind != .assign {
+			continue
+		}
+		if field := stmt.field {
+			if field.bitfield {
+				found = true
+				assert field.offset == 0
+				assert field.bit_offset == 3
+				assert field.bit_width == 5
+				assert field.unit_width == 4
+			}
+		}
+	}
+	assert found
+}
+
 // 6.7.2.1 makes a bitfield's width an integer constant expression, so a width
 // written as an enum name or a sum is the number it folds to. A width that is
 // not positive, one wider than its type, and one the folder cannot compute are
