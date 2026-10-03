@@ -2388,6 +2388,16 @@ fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
 // than read as a zero, because a zero in the storage is a value the declaration
 // did not write.
 fn (mut p Parser) initializer_list_for(written string, elements []BraceElement, name string, at tokenize.Token) ([]i64, []f64) {
+	if written == 'long double' {
+		// An array of long doubles would be a table of sixteen-byte extended
+		// constants, and the two lists this returns carry an integer or a
+		// double; a long double value fits in neither. The elements are refused
+		// by name rather than dropped, because the storage they would have gone
+		// into starts zeroed and a program reading the table would get zeros
+		// with no diagnostic.
+		p.error_at(at, 'unsupported: ${name} is an array of long doubles with a brace initializer, and the extended constants of one have no field to be written into at file scope here')
+		return []i64{}, []f64{}
+	}
 	if written == 'double' || written == 'float' {
 		mut floats := []f64{cap: elements.len}
 		for element in elements {
