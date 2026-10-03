@@ -293,7 +293,7 @@ pub fn standard_defines(mode standard.Mode, emulation Emulation) []string {
 	mut out := []string{}
 	match mode {
 		.c99 { out << '__STRICT_ANSI__=1' }
-		.gnu89, .gnu99, .gnu11, .gnu17, .gnu23 {
+		.gnu89, .gnu99, .gnu11, .gnu17, .gnu23, .gnu29 {
 			if emulation == .none {
 				out << gnu_claim()
 			}

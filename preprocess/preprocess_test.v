@@ -1008,7 +1008,8 @@ fn test_phase_one_is_gated_by_the_dialect_the_command_line_chose() {
 	// which is gnu-like.
 	assert processed_in('int x = 0 ??! 1;', .c99) == ['int', 'x', '=', '0', '|', '1', ';']
 	assert processed_in('int x = 0 ??! 1;', .c11) == ['int', 'x', '=', '0', '|', '1', ';']
-	for mode in [standard.Mode.none, .other, .c23, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23] {
+	for mode in [standard.Mode.none, .other, .c23, .c29, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23,
+		.gnu29] {
 		assert processed_in('int x = 0 ??! 1;', mode) == ['int', 'x', '=', '0', '?', '?', '!',
 			'1', ';']
 	}
@@ -1090,6 +1091,7 @@ fn test_a_gnu_dialect_claims_a_gnu_compiler() {
 	// and what naming one does to this claim is the next test's subject.
 	assert standard_defines(.gnu11, .none).len == 3
 	assert standard_defines(.gnu23, .none).len == 3
+	assert standard_defines(.gnu29, .none).len == 3
 	assert standard_defines(.c89, .none) == []
 	assert standard_defines(.c11, .none) == []
 	assert standard_defines(.other, .none) == []

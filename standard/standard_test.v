@@ -34,6 +34,14 @@ fn test_the_spelling_to_mode_map() {
 	assert from_spelling('gnu23') == .gnu23
 	assert from_spelling('iso9899:1999') == .c99
 	assert from_spelling('iso9899:1990') == .c89
+	// The standard after C23 has two names and both are spellings of it, which
+	// is measured rather than chosen: gcc 16.2.1 takes -std=c2y and -std=gnu2y
+	// and refuses -std=c29 and -std=gnu29 as unrecognized options.
+	assert from_spelling('c29') == .c29
+	assert from_spelling('c2y') == .c29
+	assert from_spelling('iso9899:2029') == .c29
+	assert from_spelling('gnu29') == .gnu29
+	assert from_spelling('gnu2y') == .gnu29
 }
 
 fn test_no_spelling_is_an_error() {
@@ -46,7 +54,8 @@ fn test_no_spelling_is_an_error() {
 }
 
 fn test_a_mode_can_be_written_back() {
-	spellings := ['c89', 'c99', 'c11', 'c17', 'c23', 'gnu89', 'gnu99', 'gnu11', 'gnu17', 'gnu23']
+	spellings := ['c89', 'c99', 'c11', 'c17', 'c23', 'c29', 'gnu89', 'gnu99', 'gnu11', 'gnu17',
+		'gnu23', 'gnu29']
 	for spelling in spellings {
 		assert from_spelling(spelling).spelling() == spelling
 	}
@@ -67,6 +76,11 @@ fn test_a_digraph_comes_with_c99_and_not_with_c89() {
 	assert has_digraphs(.gnu89)
 	assert has_digraphs(.gnu99)
 	assert has_digraphs(.gnu23)
+	// The standard after C23 answers both questions the way C23 does: measured,
+	// `-std=c2y` and `-std=gnu2y` are rc 0 over the digraph and rc 1 with
+	// `trigraph '??!' ignored` over the trigraph.
+	assert has_digraphs(.c29)
+	assert has_digraphs(.gnu29)
 	// No -std is the default dialect, which is gnu-like, and a spelling this
 	// compiler does not implement takes that same answer.
 	assert has_digraphs(.none)
@@ -77,6 +91,33 @@ fn test_a_digraph_comes_with_c99_and_not_with_c89() {
 	assert replaces_trigraphs(.c99) && has_digraphs(.c99)
 	assert !replaces_trigraphs(.c23) && has_digraphs(.c23)
 	assert replaces_trigraphs(.c89) && !has_digraphs(.c89)
+	assert !replaces_trigraphs(.c29) && has_digraphs(.c29)
+	assert !replaces_trigraphs(.gnu29) && has_digraphs(.gnu29)
+}
+
+fn test_the_mode_after_c23_ranks_above_it_and_is_gnu_only_when_gnu() {
+	assert Mode.c29.spelling() == 'c29'
+	assert Mode.gnu29.spelling() == 'gnu29'
+	assert Mode.c29.standard_name() == 'ISO C29'
+	assert Mode.gnu29.standard_name() == 'ISO C29'
+	assert Mode.gnu29.is_gnu()
+	assert !Mode.c29.is_gnu()
+	// Ranked above C23, so a row that became standard in C23 is taken by this
+	// mode rather than reported. A mode left out of the rank match falls to -1
+	// and includes nothing, which would report every C23 row under -std=c29 and
+	// make the newest standard the most restrictive one.
+	assert Mode.c29.includes(.c23)
+	assert Mode.gnu29.includes(.c23)
+	assert Mode.c29.includes(.c99)
+	assert !Mode.c23.includes(.c29)
+	// A mode nobody ranked includes nothing, and that is what `.none` and
+	// `.other` are for.
+	assert !Mode.c29.includes(.none)
+	assert !Mode.c29.includes(.other)
+	// Two spellings, one mode: the working name and the year name the same
+	// standard, so a program may write either and the answers are the same.
+	assert from_spelling('c2y') == from_spelling('c29')
+	assert Mode.c29.standard_name() == Mode.gnu29.standard_name()
 }
 
 fn test_the_gnu_dialects_are_the_ones_that_take_gnu_c() {

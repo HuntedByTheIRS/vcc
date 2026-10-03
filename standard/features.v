@@ -436,6 +436,11 @@ pub fn extension_names() []string {
 //   -std=gnu89 … -std=gnu23, -std=c23        rc 1: `trigraph '??!' ignored, use
 //                                            '-trigraphs' to enable`, and the
 //                                            bytes are the program's
+//   -std=c2y, -std=gnu2y                     rc 1, the same as C23: the next
+//                                            standard does not bring them back.
+//                                            gcc 16.2.1 takes the working
+//                                            spelling and refuses -std=c29, so
+//                                            that is the spelling measured
 //   no -std at all                           rc 1, the same: gcc's own default
 //                                            is a GNU dialect
 //
@@ -464,7 +469,7 @@ pub fn extension_names() []string {
 pub fn replaces_trigraphs(mode Mode) bool {
 	return match mode {
 		.c89, .c99, .c11, .c17 { true }
-		.none, .c23, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23, .other { false }
+		.none, .c23, .c29, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23, .gnu29, .other { false }
 	}
 }
 
@@ -481,7 +486,8 @@ pub fn replaces_trigraphs(mode Mode) bool {
 //
 //	-std=c89            rc 1: `error: expected identifier or '('`, at 1:1
 //	-std=gnu89, -std=c99, -std=c11, -std=c17,
-//	-std=c23, -std=gnu23, and no -std at all   rc 0
+//	-std=c23, -std=gnu23, -std=c2y, -std=gnu2y,
+//	and no -std at all                         rc 0
 //
 // The one mode without them is the strict ISO mode they arrived after, and the
 // GNU dialect of that same standard has them, which is what gcc does with a
@@ -491,7 +497,10 @@ pub fn replaces_trigraphs(mode Mode) bool {
 pub fn has_digraphs(mode Mode) bool {
 	return match mode {
 		.c89 { false }
-		.none, .c99, .c11, .c17, .c23, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23, .other { true }
+		.none, .c99, .c11, .c17, .c23, .c29, .gnu89, .gnu99, .gnu11, .gnu17, .gnu23, .gnu29,
+		.other {
+			true
+		}
 	}
 }
 

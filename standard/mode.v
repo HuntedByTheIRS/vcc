@@ -23,16 +23,24 @@ pub enum Mode {
 	gnu17
 	gnu23
 	gnu29
-	// other: a spelling this compiler does not implement. It is recorded and
-	// nothing else. tcc accepts every spelling there is, including nonsense,
-	// and a compiler V may hand any spelling to must not fail on one, so a
-	// spelling nobody here recognizes is an answer like any other.
+	// other: a spelling that names a language this compiler does not
+	// implement. It is recorded and nothing else. tcc accepts every spelling
+	// there is, including nonsense, and a compiler V may hand any spelling to
+	// must not fail on one, so a spelling nobody here recognizes is an answer
+	// like any other.
 	other
 }
 
 // from_spelling answers the mode a -std= spelling names. The map is total: every
 // string has an answer and no spelling is an error, which is the contract the
 // flag is under and the reason this returns a mode rather than an error.
+//
+// What the next standard is called is not settled, and the map carries both
+// names for it rather than choosing: measured on gcc 16.2.1, which takes
+// `-std=c2y` and `-std=gnu2y` and reports `__STDC_VERSION__ 202500L`, and
+// refuses `-std=c29` and `-std=gnu29` as unrecognized options. The working name
+// is the one a compiler answers to today and the year is the one the standard
+// will be published under, so a program may write either.
 pub fn from_spelling(spelling string) Mode {
 	return match spelling {
 		'c89', 'c90', 'iso9899:1990' {
@@ -80,6 +88,11 @@ pub fn from_spelling(spelling string) Mode {
 // spelling is the spelling a mode is normally written as, so that a mode can be
 // reported the way a command line writes it. `.none` and `.other` are not
 // spellings of anything; the caller keeps the spelling the command line used.
+//
+// A mode with two spellings keeps the one that names the standard rather than
+// the year it was published in, which is what c17 does with c18: reporting
+// `.c29` as `c2y` would name the draft, and reporting `.c17` as `c18` would name
+// the editorial year rather than the standard.
 pub fn (m Mode) spelling() string {
 	return match m {
 		.c89 { 'c89' }
@@ -87,11 +100,13 @@ pub fn (m Mode) spelling() string {
 		.c11 { 'c11' }
 		.c17 { 'c17' }
 		.c23 { 'c23' }
+		.c29 { 'c29' }
 		.gnu89 { 'gnu89' }
 		.gnu99 { 'gnu99' }
 		.gnu11 { 'gnu11' }
 		.gnu17 { 'gnu17' }
 		.gnu23 { 'gnu23' }
+		.gnu29 { 'gnu29' }
 		.none, .other { '' }
 	}
 }
@@ -101,7 +116,7 @@ pub fn (m Mode) spelling() string {
 // from the command line.
 pub fn (m Mode) is_gnu() bool {
 	return match m {
-		.gnu89, .gnu99, .gnu11, .gnu17, .gnu23 { true }
+		.gnu89, .gnu99, .gnu11, .gnu17, .gnu23, .gnu29 { true }
 		else { false }
 	}
 }
@@ -109,6 +124,13 @@ pub fn (m Mode) is_gnu() bool {
 // rank orders the modes by how much of the language they take in, which is the
 // order the standards were published in. A GNU dialect ranks with the standard
 // it extends: gnu11 includes everything C99 ever did.
+//
+// A mode missing from this match ranks below every standard, because the
+// fall-through answer is -1 and `includes` reads a negative rank as a mode that
+// includes nothing. That is the answer `.none` and `.other` want, and it is the
+// wrong answer for a standard: a mode that is missing here refuses every
+// construct the table gives a later standard, so the arm has to be written when
+// the mode is.
 fn (m Mode) rank() int {
 	return match m {
 		.c89, .gnu89 { 0 }
@@ -116,6 +138,7 @@ fn (m Mode) rank() int {
 		.c11, .gnu11 { 2 }
 		.c17, .gnu17 { 3 }
 		.c23, .gnu23 { 4 }
+		.c29, .gnu29 { 5 }
 		else { -1 }
 	}
 }
@@ -142,6 +165,7 @@ pub fn (m Mode) standard_name() string {
 		.c11, .gnu11 { 'ISO C11' }
 		.c17, .gnu17 { 'ISO C17' }
 		.c23, .gnu23 { 'ISO C23' }
+		.c29, .gnu29 { 'ISO C29' }
 		.none, .other { '' }
 	}
 }
