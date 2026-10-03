@@ -272,6 +272,14 @@ mut:
 	// values is the scratch area, one slot per level of expression nesting,
 	// where a half-finished value waits while the other half is computed.
 	values []Slot
+	// callees is where a call through an expression keeps the address it calls
+	// while the arguments are evaluated and loaded, one slot per level of
+	// nesting. It is a list of its own rather than a level of values because an
+	// argument is emitted into the value slot of its own depth, and the last
+	// argument's depth is the one the address would otherwise wait in: the
+	// address has to outlive every argument, and a value slot at that depth
+	// does not.
+	callees []Slot
 	// slot_base is where that area starts for the expression being emitted. It
 	// is zero for an ordinary expression, so a depth indexes the list from its
 	// beginning. A statement expression raises it for the length of its body so
@@ -1024,6 +1032,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// they are sized to.
 	e.frame_used = 0
 	e.values = []Slot{}
+	e.callees = []Slot{}
 	e.slot_base = 0
 	e.wide_left = []Slot{}
 	e.wide_right = []Slot{}
@@ -3071,6 +3080,20 @@ fn (mut e Emitter) value_slot(depth int) Slot {
 		e.values << e.reserve(e.target.word_size)
 	}
 	return e.values[level]
+}
+
+// callee_slot is the frame slot a call through an expression keeps the address
+// it calls in while the arguments are evaluated and the argument registers are
+// loaded. It is keyed by depth the way a value slot is, so a call nested in the
+// argument of another call gets a slot of its own, but it is a separate list:
+// an argument is emitted into the value slot of its own depth, and the address
+// this slot holds has to survive all of them.
+fn (mut e Emitter) callee_slot(depth int) Slot {
+	level := depth + e.slot_base
+	for e.callees.len <= level {
+		e.callees << e.reserve(e.target.word_size)
+	}
+	return e.callees[level]
 }
 
 // push_scope opens a block and pop_scope closes it. Names are found in the
@@ -7492,7 +7515,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	mut indirect := false
 	mut callee_slot := Slot{}
 	if expression := call.callee {
-		callee_slot = e.value_slot(depth + call.args.len)
+		callee_slot = e.callee_slot(depth)
 		e.emit_callee_value(expression, depth + call.args.len + 1)!
 		e.store_accumulator(callee_slot, call.line, call.col)!
 		indirect = true
