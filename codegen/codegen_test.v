@@ -3820,3 +3820,35 @@ fn test_a_typedef_of_a_fixed_size_array_declares_an_object() {
 	assert text.diagnostics.len == 0
 	assert run_image(text.bytes) == 99
 }
+
+// `__attribute__((weak))` in front of a definition is read and the function is
+// emitted and runs like any other: the binding it asks for is a fact about the
+// object's symbol table, which is checked where the object is written, and the
+// program itself is unchanged.
+fn test_a_weak_attribute_on_a_definition_runs() {
+	emitted := emit(translation_unit('__attribute__((weak)) int f(void) { return 7; }\nint main(void) { return f(); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
+}
+
+// `__attribute__((aligned(16)))` on a top-level object is a layout request the
+// image keeps: the object's address is a multiple of sixteen, which it is only
+// when the storage was placed at the alignment the declaration asked for. The
+// same program built by gcc 16.2.1 exits 0.
+fn test_an_aligned_attribute_places_a_top_level_object_at_its_alignment() {
+	emitted := emit(translation_unit('__attribute__((aligned(16))) int g = 3;\nint main(void) { return (int)((unsigned long)&g % 16); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// An attribute this compiler cannot keep stops the program it is written on, and
+// the diagnostic names the attribute and its place rather than the image being
+// written without it.
+fn test_an_unimplemented_attribute_stops_the_program() {
+	refused := translation_unit_refused('__attribute__((packed)) int g = 1;\nint main(void) { return g; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg == "unsupported: the attribute 'packed' is not implemented"
+	assert refused.unit.globals.len == 1
+}

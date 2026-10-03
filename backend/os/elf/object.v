@@ -46,6 +46,10 @@ const shf_execinstr = u64(4)
 // may refer to, and, from elf.v, the function those two sit beside.
 const symbol_local_section = u8(0x03) // binding local (0), type section (3)
 const symbol_global_object = u8(0x11) // binding global (1), type object (1)
+// A weak definition is one a link may replace rather than one that collides with
+// a second: the same names with the weak binding (2) in the upper nibble. It is
+// what `__attribute__((weak))` on a definition asks for.
+const symbol_weak_object = u8(0x21) // binding weak (2), type object (1)
 
 // shn_undef is the section a symbol has when this object does not define it: its
 // definition is somewhere the linker still has to look.
@@ -327,7 +331,15 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 		name_offset)
 	put(mut output, parts.strtab, strtab)
 	put(mut output, parts.shstrtab, shstrtab)
-	emit_object_section_headers(mut output, parts, sizes, names)
+	// An object whose declaration asked for a strict alignment has to have its
+	// section say so, because the section's own alignment is what decides where
+	// a linker places it and therefore where the object starts.
+	data_alignment := if program.globals_alignment > 8 {
+		u64(program.globals_alignment)
+	} else {
+		u64(8)
+	}
+	emit_object_section_headers(mut output, parts, sizes, names, data_alignment)
 	emit_object_header(mut output, target, parts)
 	return output
 }
@@ -450,7 +462,8 @@ fn emit_object_symbols(mut output []u8, parts PartOffsets, program image.Program
 	for name in functions {
 		at := parts.symtab + symbol_index[name] * elf_symbol_size
 		where := program.labels[name] or { 0 }
-		put_symbol(mut output, at, name_offset[name] or { 0 }, symbol_global_function,
+		info := if program.weak[name] { symbol_weak_function } else { symbol_global_function }
+		put_symbol(mut output, at, name_offset[name] or { 0 }, info,
 			section_text, u64(where), 0)
 	}
 	for name in objects {
@@ -459,7 +472,8 @@ fn emit_object_symbols(mut output []u8, parts PartOffsets, program image.Program
 		// An object's size is one element wide, or as many elements as it was
 		// defined with.
 		width := if slot.count > 0 { slot.width * slot.count } else { slot.width }
-		put_symbol(mut output, at, name_offset[name] or { 0 }, symbol_global_object,
+		info := if program.weak[name] { symbol_weak_object } else { symbol_global_object }
+		put_symbol(mut output, at, name_offset[name] or { 0 }, info,
 			section_data, u64(slot.offset), u64(width))
 	}
 	for name in program.imports {
@@ -482,7 +496,7 @@ fn put_symbol(mut output []u8, at int, name int, info u8, section u16, value u64
 // emit_object_section_headers writes the section header table, which a
 // relocatable file needs and a program does not: a linker reads the sections it
 // is told about, and there are no program headers to read instead.
-fn emit_object_section_headers(mut output []u8, parts PartOffsets, sizes PartSizes, names NameOffsets) {
+fn emit_object_section_headers(mut output []u8, parts PartOffsets, sizes PartSizes, names NameOffsets, data_alignment u64) {
 	// The null section is the whole of offset zero in the table, and the zeroes
 	// the file was made of are what belongs there, so nothing is written.
 	put_section_header(mut output, parts.headers + section_text * elf_section_header_size,
@@ -496,7 +510,7 @@ fn emit_object_section_headers(mut output []u8, parts PartOffsets, sizes PartSiz
 		0, 0, 8, 0)
 	put_section_header(mut output, parts.headers + section_data * elf_section_header_size,
 		names.data, sht_progbits, shf_alloc | shf_write, parts.data, sizes.data,
-		0, 0, 8, 0)
+		0, 0, data_alignment, 0)
 	put_section_header(mut output, parts.headers + section_symtab * elf_section_header_size,
 		names.symtab, sht_symtab, 0, parts.symtab, sizes.symtab,
 		section_strtab, first_global_symbol, 8, elf_symbol_size)

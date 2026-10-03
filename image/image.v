@@ -139,6 +139,16 @@ pub mut:
 	// interned for the name it was defined with.
 	globals_blob []u8
 	globals      map[string]GlobalSlot
+	// globals_alignment is the strictest alignment any top-level object asked
+	// for with `__attribute__((aligned(N)))`, and zero when none did. The
+	// storage of the objects has to start at it for an object whose
+	// declaration asked for more than the word size to land at its alignment,
+	// because every object's offset is measured from the start of the blob.
+	globals_alignment int
+	// weak is every function and object this unit defines with a weak symbol
+	// binding, which `__attribute__((weak))` asks for. The object's symbol
+	// table says WEAK rather than GLOBAL for a name in it.
+	weak map[string]bool
 }
 
 // import_data_count is how many of the references inside the writable data name
