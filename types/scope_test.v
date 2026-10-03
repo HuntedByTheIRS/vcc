@@ -188,12 +188,12 @@ fn test_linkage_comes_from_the_storage_class_and_the_scope() {
 fn test_an_enumeration_constant_is_found_with_its_value() {
 	mut table := new_table()
 	assert table.lookup_constant('N') == none
-	table.declare_constant('N', 4)
+	table.declare_constant('N', 4, .int_)
 	value := table.lookup_constant('N') or {
 		assert false
 		return
 	}
-	assert value == 4
+	assert value.value == 4 && value.kind == .int_
 	assert table.lookup_constant('M') == none
 }
 
@@ -201,30 +201,30 @@ fn test_an_enumeration_constant_is_found_with_its_value() {
 // present is the question, not whether the number is true.
 fn test_a_constant_of_zero_is_still_found() {
 	mut table := new_table()
-	table.declare_constant('ZERO', 0)
+	table.declare_constant('ZERO', 0, .int_)
 	value := table.lookup_constant('ZERO') or {
 		assert false
 		return
 	}
-	assert value == 0
+	assert value.value == 0 && value.kind == .int_
 }
 
 // An inner enum hides an outer constant and gives it back when its block ends,
 // which is the same rule the symbols follow.
 fn test_an_inner_constant_shadows_an_outer_one_and_does_not_outlive_it() {
 	mut table := new_table()
-	table.declare_constant('N', 1)
+	table.declare_constant('N', 1, .int_)
 	table.enter()
-	table.declare_constant('N', 2)
+	table.declare_constant('N', 2, .int_)
 	inner := table.lookup_constant('N') or {
 		assert false
 		return
 	}
-	assert inner == 2
+	assert inner.value == 2
 	table.leave()
 	outer := table.lookup_constant('N') or {
 		assert false
 		return
 	}
-	assert outer == 1
+	assert outer.value == 1
 }

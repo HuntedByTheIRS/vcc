@@ -229,10 +229,12 @@ pub:
 	expr ?Expr
 	// init is the initializer of a declaration, and none for `int x;`.
 	init ?Expr
-	// decl_name and decl_type are a declaration's name and type as written, and
-	// decl_count is how many elements an array declaration has: zero for a
-	// declaration of one value. resolved is the type the declaration resolved
-	// to, and it is the zero value for a statement that declares nothing.
+	// decl_name and decl_type are a declaration's name and the type the back end
+	// reads it as, which is the spelling a typedef name and an enum tag are
+	// spelled out to; decl_count is how many elements an array declaration has:
+	// zero for a declaration of one value. resolved is the type the declaration
+	// resolved to, and it is the zero value for a statement that declares
+	// nothing.
 	decl_name  string
 	decl_type  string
 	decl_count int

@@ -251,7 +251,7 @@ fn test_an_aggregate_is_the_same_type_by_its_tag() {
 	]))
 	assert s.describe() == 'struct S'
 	assert union_type('U', members).describe() == 'union U'
-	assert enum_type('E').describe() == 'enum E'
+	assert enum_type('E', .int_).describe() == 'enum E'
 	assert struct_type('', []).describe() == 'struct <anonymous>'
 	assert s.is_aggregate() && s.is_complete()
 }
@@ -314,4 +314,57 @@ fn test_scalar_answers_for_the_kinds_that_have_a_type() {
 	assert scalar(Kind.pointer) == none
 	assert scalar(Kind.unknown) == none
 	assert int_type().is_object() && !function_type(void_type(), [], false, true).is_object()
+}
+
+// The integer type an enum has is settled by the range of its enumerators, one
+// row at a time against gcc 16.2.1. A non-negative enum is unsigned int until a
+// value does not fit, and then unsigned long; an enum with a negative value is
+// int until a value does not fit, and then long. The bounds are the ones the
+// rule is written against: UINT_MAX, INT_MIN and INT_MAX.
+fn test_an_enum_type_is_settled_by_the_range_of_its_enumerators() {
+	assert enum_underlying_kind(0, 0) == .unsigned_int
+	assert enum_underlying_kind(1, 3) == .unsigned_int
+	assert enum_underlying_kind(0, 65535) == .unsigned_int
+	assert enum_underlying_kind(0, 4294967295) == .unsigned_int
+	assert enum_underlying_kind(0, 4294967296) == .unsigned_long
+	assert enum_underlying_kind(0, 9223372036854775807) == .unsigned_long
+	assert enum_underlying_kind(-3, 3) == .int_
+	assert enum_underlying_kind(-2147483648, 2147483647) == .int_
+	assert enum_underlying_kind(-1, 4000000000) == .long
+	assert enum_underlying_kind(-1, 9223372036854775807) == .long
+}
+
+// A use of an enumerator has the type gcc 16.2.1 gives it, which is not always
+// the enum's own type: an enumerator of a 4-byte enum that fits int is an int
+// even when the enum is unsigned int, and every enumerator of a long or unsigned
+// long enum is that wider type.
+fn test_an_enumerator_has_the_type_gcc_gives_a_use_of_it() {
+	assert enum_constant_kind(.unsigned_int, 0) == .int_
+	assert enum_constant_kind(.unsigned_int, 65535) == .int_
+	assert enum_constant_kind(.unsigned_int, 4000000000) == .unsigned_int
+	assert enum_constant_kind(.int_, -3) == .int_
+	assert enum_constant_kind(.int_, 2147483647) == .int_
+	assert enum_constant_kind(.long, -1) == .long
+	assert enum_constant_kind(.long, 4000000000) == .long
+	assert enum_constant_kind(.unsigned_long, 5000000000) == .unsigned_long
+}
+
+// An enumerated type is compatible with the integer type its enumerators
+// require, and carries that type's representation: `underlying_type` answers the
+// scalar, and `storage_spelling` spells it for a back end that has no spelling
+// for the tag.
+fn test_an_enum_answers_with_its_underlying_type() {
+	e := enum_type('E', .unsigned_int)
+	assert e.enum_underlying() == .unsigned_int
+	assert e.underlying_type().describe() == 'unsigned int'
+	assert e.storage_spelling() == 'unsigned int'
+	assert e.is_unsigned_type()
+	assert !enum_type('E', .int_).is_unsigned_type()
+	assert enum_type('E', .long).underlying_type().describe() == 'long'
+	// A type that is not an enum answers with itself, which is what makes these
+	// safe to ask of any type.
+	assert int_type().enum_underlying() == .int_
+	assert int_type().underlying_type().describe() == 'int'
+	assert int_type().storage_spelling() == 'int'
+	assert !int_type().is_unsigned_type()
 }

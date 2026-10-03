@@ -81,10 +81,12 @@ pub fn (r Representation) size_of(t Type) ?int {
 		return lay.size
 	}
 	if t.kind == .enum_ {
-		// An enumerated type has the representation of int on this target.
-		// Measured: gcc 16.2.1 gives every enum, with negative enumerators or
-		// with one above INT_MAX, a size of 4 bytes and an alignment of 4.
-		return r.sizes[Kind.int_] or { return none }
+		// An enumerated type has the representation of the integer type its
+		// enumerators require, which is int, unsigned int, long or unsigned
+		// long: measured, gcc 16.2.1 widens an enum whose enumerators do not
+		// fit int, so the width is read from the underlying kind and not
+		// fixed at int.
+		return r.sizes[t.enum_underlying()] or { return none }
 	}
 	return r.sizes[t.kind] or { return none }
 }
@@ -103,7 +105,7 @@ pub fn (r Representation) align_of(t Type) ?int {
 		return lay.align
 	}
 	if t.kind == .enum_ {
-		return r.aligns[Kind.int_] or { return none }
+		return r.aligns[t.enum_underlying()] or { return none }
 	}
 	return r.aligns[t.kind] or { return none }
 }

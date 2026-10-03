@@ -73,7 +73,13 @@ fn test_the_integer_promotions_of_6_3_1_1() {
 	assert promote(unsigned_char_type()) == 'int'
 	assert promote(short_type()) == 'int'
 	assert promote(unsigned_short_type()) == 'int'
-	assert promote(enum_type('E')) == 'int'
+	assert promote(enum_type('E', .int_)) == 'int'
+	// An enum whose enumerators are non-negative is unsigned int in gcc, and one
+	// whose values do not fit int is long or unsigned long. The promotion is the
+	// underlying type itself in each case, not always int.
+	assert promote(enum_type('E', .unsigned_int)) == 'unsigned int'
+	assert promote(enum_type('E', .long)) == 'long'
+	assert promote(enum_type('E', .unsigned_long)) == 'unsigned long'
 	// The types that are already at least int rank keep their own type.
 	assert promote(int_type()) == 'int'
 	assert promote(unsigned_int_type()) == 'unsigned int'
@@ -355,10 +361,11 @@ fn test_the_128_bit_types_in_the_conversions() {
 	assert sum(int128_type(), unsigned_long_type()) == '__int128'
 	assert sum(int128_type(), long_long_type()) == '__int128'
 	assert sum(int128_type(), unsigned_long_long_type()) == '__int128'
-	// An enum is int in this model and unsigned int under gcc, which is a
-	// divergence recorded in integer_promotion; the row is __int128 either way,
-	// because a 16-byte type holds every value of a 4-byte one.
-	assert sum(int128_type(), enum_type('E')) == '__int128'
+	// An enum's underlying type is int, unsigned int, long or unsigned long, and
+	// the row is __int128 for each of them, because a 16-byte type holds every
+	// value of a 4-byte or 8-byte one.
+	assert sum(int128_type(), enum_type('E', .int_)) == '__int128'
+	assert sum(int128_type(), enum_type('E', .unsigned_long)) == '__int128'
 	// The same list with the unsigned 128-bit operand, which wins every integer
 	// pairing the same way.
 	assert sum(unsigned_int128_type(), unsigned_int128_type()) == 'unsigned __int128'
@@ -373,7 +380,7 @@ fn test_the_128_bit_types_in_the_conversions() {
 	assert sum(unsigned_int128_type(), unsigned_long_type()) == 'unsigned __int128'
 	assert sum(unsigned_int128_type(), long_long_type()) == 'unsigned __int128'
 	assert sum(unsigned_int128_type(), unsigned_long_long_type()) == 'unsigned __int128'
-	assert sum(unsigned_int128_type(), enum_type('E')) == 'unsigned __int128'
+	assert sum(unsigned_int128_type(), enum_type('E', .int_)) == 'unsigned __int128'
 	// Between the two of them the unsigned type wins the way unsigned int wins
 	// over int: neither can hold the other's values and one of them is unsigned.
 	assert sum(int128_type(), unsigned_int128_type()) == 'unsigned __int128'

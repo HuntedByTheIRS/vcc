@@ -1066,7 +1066,7 @@ fn (mut p Parser) parse_member(base string, object ?ast.Expr, aggregate types.Ty
 		index:           index
 		member:          written
 		offset:          into + layout.offsets[at]
-		spelling:        member.typ.describe()
+		spelling:        member.typ.storage_spelling()
 		typ:             member.typ
 		bitfield:        member.bitfield
 		bit_offset:      if member.bitfield { layout.bits[at] } else { 0 }
@@ -1818,8 +1818,8 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		// integer constant expression an array bound or a case label can be
 		// built from. It is asked before the name is resolved, because there is
 		// no storage behind the name to read.
-		if value := p.scopes.lookup_constant(t.text) {
-			return integer_constant(value, t.text, t)
+		if constant := p.scopes.lookup_constant(t.text) {
+			return integer_constant(constant.value, t.text, t, constant.kind)
 		}
 		// The function-name spellings name the function the expression is
 		// written in: `__func__` is C99's (6.4.2.2), and `__FUNCTION__` and
@@ -2512,7 +2512,7 @@ fn (p Parser) converted_constant(typ types.Type, operand i64) ?i64 {
 		return if operand != 0 { i64(1) } else { i64(0) }
 	}
 	size := p.representation.size_of(typ) or { return none }
-	return truncate_integer(operand, size, typ.kind.is_unsigned())
+	return truncate_integer(operand, size, typ.is_unsigned_type())
 }
 
 // converted_float_constant is a floating constant converted to an integer type,

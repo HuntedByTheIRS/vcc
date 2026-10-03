@@ -19,14 +19,14 @@ module types
 // machine, because an int of 16 bits cannot hold 65535, so the representation
 // decides it and a description that does not carry both widths gets a refusal.
 //
-// An enumerated type promotes to int in this model. Measured, gcc 16.2.1 does
-// not agree: `enum E { A }; unsigned int f(unsigned int); unsigned int f(enum E);`
-// is accepted, and the same pair written with int is refused as conflicting
-// types, so gcc gives an enum whose enumerators are non-negative the compatible
-// type unsigned int and promotes it accordingly. This model holds the int
-// reading instead, which is a divergence from gcc recorded here to be settled by
-// the milestone that owns enumerators, because that is where an enumerator's
-// value can decide the compatible type.
+// An enumerated type promotes to the integer type its enumerators require.
+// Measured, gcc 16.2.1 does not promote it to int: `enum E { A }; unsigned int
+// f(unsigned int); unsigned int f(enum E);` is accepted, so an enum whose
+// enumerators are non-negative is compatible with unsigned int, and
+// `_Generic((enum c)0 + 0, ...)` is `unsigned int` for such an enum, `int` for
+// one with a negative enumerator, and `unsigned long`/`long` for one whose
+// values do not fit 32 bits. Every one of those kinds ranks at or above int, so
+// the promotion is the underlying type itself.
 //
 // A type that is not an integer promotes to itself, which is what makes the
 // function safe to call on any operand of an arithmetic expression.
@@ -35,7 +35,7 @@ pub fn integer_promotion(t Type, rep Representation) !Type {
 		return error('${t.describe()} has no promotion: it is not a type this compiler resolved')
 	}
 	if t.kind == .enum_ {
-		return int_type()
+		return t.underlying_type()
 	}
 	if !t.kind.is_integer() {
 		return t
@@ -153,19 +153,23 @@ pub fn value_preserving(to Type, from Type, rep Representation) !bool {
 	if !to.is_integer() || !from.is_integer() {
 		return error('whether ${from.describe()} converts to ${to.describe()} without a change of value is a question about integer types')
 	}
-	if to.kind == from.kind {
+	// An enumerated type is asked about the integer type its enumerators
+	// require, which is the type a value of it converts to and from.
+	to_type := to.underlying_type()
+	from_type := from.underlying_type()
+	if to_type.kind == from_type.kind {
 		return true
 	}
-	to_width := rep.size_of(to) or {
+	to_width := rep.size_of(to_type) or {
 		return error('whether ${from.describe()} converts to ${to.describe()} without a change of value needs the width of ${to.describe()}, which ${missing_note(rep, [
-			to.kind,
-			from.kind,
+			to_type.kind,
+			from_type.kind,
 		])} does not carry')
 	}
-	from_width := rep.size_of(from) or {
+	from_width := rep.size_of(from_type) or {
 		return error('whether ${from.describe()} converts to ${to.describe()} without a change of value needs the width of ${from.describe()}, which ${missing_note(rep, [
-			to.kind,
-			from.kind,
+			to_type.kind,
+			from_type.kind,
 		])} does not carry')
 	}
 	if to_width > from_width {
@@ -176,10 +180,10 @@ pub fn value_preserving(to Type, from Type, rep Representation) !bool {
 	}
 	// The same width: only a signed type can hold everything an unsigned type of
 	// the same width holds, and it cannot.
-	if to.kind.is_unsigned_integer() && from.kind.is_signed_integer() {
+	if to_type.kind.is_unsigned_integer() && from_type.kind.is_signed_integer() {
 		return false
 	}
-	if to.kind.is_signed_integer() && from.kind.is_unsigned_integer() {
+	if to_type.kind.is_signed_integer() && from_type.kind.is_unsigned_integer() {
 		return false
 	}
 	return true

@@ -86,15 +86,22 @@ fn test_an_array_is_its_element_size_times_its_count() {
 	assert measured.representation().size_of(array_of(int_type(), -1)) == none
 }
 
-// An enumerated type has the representation of int. Measured on gcc 16.2.1: an
-// enum with a negative enumerator is size 4 alignment 4 and compatible with int,
-// and an enum with an enumerator above INT_MAX is size 4 alignment 4 and
-// compatible with unsigned int. The size and the alignment are the same either
-// way, which is the part this model answers.
-fn test_an_enumerated_type_has_the_representation_of_the_int_type() {
-	assert size_of(enum_type('E')) == 4
-	assert align_of(enum_type('E')) == 4
-	assert size_of(qualified(enum_type('E'), Qualifiers{
+// An enumerated type has the representation of the integer type its enumerators
+// require. Measured on gcc 16.2.1: an enum whose enumerators all fit int, with or
+// without a negative value, is size 4 alignment 4 and compatible with int or
+// unsigned int; one with a negative value and one above INT_MAX is size 8
+// alignment 8, and one whose values do not fit unsigned int is size 8 alignment
+// 8. The underlying kind carries which of the four it is.
+fn test_an_enumerated_type_has_the_representation_of_its_underlying_type() {
+	assert size_of(enum_type('E', .int_)) == 4
+	assert align_of(enum_type('E', .int_)) == 4
+	assert size_of(enum_type('E', .unsigned_int)) == 4
+	assert align_of(enum_type('E', .unsigned_int)) == 4
+	assert size_of(enum_type('E', .long)) == 8
+	assert align_of(enum_type('E', .long)) == 8
+	assert size_of(enum_type('E', .unsigned_long)) == 8
+	assert align_of(enum_type('E', .unsigned_long)) == 8
+	assert size_of(qualified(enum_type('E', .int_), Qualifiers{
 		const_: true
 	})) == 4
 }
@@ -322,9 +329,9 @@ fn test_a_description_that_does_not_carry_a_kind_refuses_the_question() {
 	assert partial.size_of(int_type()) or { -1 } == 4
 	assert partial.size_of(long_type()) == none
 	assert partial.align_of(long_type()) == none
-	// An enumerated type has the representation of int, so a description that
-	// carries int answers for the enum as well.
-	assert partial.size_of(enum_type('E')) or { -1 } == 4
+	// An enumerated type has the representation of its underlying type, so a
+	// description that carries int answers for the enum whose underlying kind is int.
+	assert partial.size_of(enum_type('E', .int_)) or { -1 } == 4
 	holder := struct_type('holder', [member('a', int_type()), member('b', long_type())])
 	assert partial.layout(holder) == none
 }

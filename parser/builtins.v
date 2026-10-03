@@ -451,7 +451,7 @@ fn (mut p Parser) parse_signbit(at tokenize.Token) !ast.Expr {
 	}
 	if value := constant_double(operand) {
 		return integer_constant(if math.signbit(value) { 1 } else { 0 },
-			'${at.text}(${describe_operand(operand)})', at)
+			'${at.text}(${describe_operand(operand)})', at, types.Kind.int_)
 	}
 	zero := float_constant(0.0, types.double_type(), '0.0', at)
 	one := float_constant(1.0, types.double_type(), '1.0', at)
@@ -477,14 +477,14 @@ fn (mut p Parser) parse_isinf_sign(at tokenize.Token) !ast.Expr {
 		return error('a value')
 	}
 	if value := constant_double(operand) {
-		return integer_constant(isinf_sign_of(value), '${at.text}(${describe_operand(operand)})', at)
+		return integer_constant(isinf_sign_of(value), '${at.text}(${describe_operand(operand)})', at, types.Kind.int_)
 	}
 	positive := float_constant(math.inf(1), types.double_type(), '__builtin_huge_val()', at)
 	negative := float_constant(-math.inf(1), types.double_type(), '-__builtin_huge_val()', at)
 	positive_answer := p.builtin_conditional(p.builtin_binary('==', operand, positive, at),
-		integer_constant(1, '1', at), integer_constant(0, '0', at), at)
+		integer_constant(1, '1', at, types.Kind.int_), integer_constant(0, '0', at, types.Kind.int_), at)
 	return p.builtin_conditional(p.builtin_binary('==', operand, negative, at),
-		integer_constant(-1, '-1', at), positive_answer, at)
+		integer_constant(-1, '-1', at, types.Kind.int_), positive_answer, at)
 }
 
 // isinf_sign_of is gcc's answer for a constant: 1 at positive infinity, -1 at
@@ -523,7 +523,7 @@ fn (mut p Parser) parse_classify_type(at tokenize.Token) !ast.Expr {
 		p.error_at(at, 'unsupported: ${at.text} has no number for ${typ.describe()}, and gcc has none either')
 		return error('no class for the type')
 	}
-	return integer_constant(number, '${at.text}(${describe_operand(operand)})', at)
+	return integer_constant(number, '${at.text}(${describe_operand(operand)})', at, types.Kind.int_)
 }
 
 // type_class is the number gcc's `__builtin_classify_type` gives a type, or none
@@ -586,11 +586,15 @@ fn float_constant(value f64, typ types.Type, text string, at tokenize.Token) ast
 	})
 }
 
-fn integer_constant(value i64, text string, at tokenize.Token) ast.Expr {
+// integer_constant is a use of an integer constant this reader computed: the
+// value and the kind a use of it has. An enumeration constant's kind is the one
+// its enum settled (see types.enum_constant_kind), and every other caller here
+// names an int, which is what a classifying builtin answers.
+fn integer_constant(value i64, text string, at tokenize.Token, kind types.Kind) ast.Expr {
 	return ast.Expr(ast.IntLit{
 		value: value
 		text:  text
-		typ:   types.int_type()
+		typ:   types.scalar(kind) or { types.int_type() }
 		line:  at.line
 		col:   at.col
 	})
