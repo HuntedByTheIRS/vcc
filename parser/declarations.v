@@ -1276,6 +1276,29 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					} else {
 						literal_refused = true
 					}
+				} else if !data_array && spec.clause.kind in [types.Kind.struct_, .union_]
+					&& p.looks_like_compound_literal() {
+					// An aggregate object initialized by a compound literal of
+					// its own type: `string s = (string){ ... }`. At file scope
+					// the literal names an object with static storage duration
+					// and its list holds constant expressions (6.7.8p4), so the
+					// bytes it writes are the bytes this object takes. The list
+					// is walked against the object's type the way a written brace
+					// list is, which is the same bytes with the braces missing.
+					if list := p.compound_literal_list(false) {
+						if general := p.file_scope_general_initializer(spec, d, list, data_name) {
+							data_member_inits = general.members
+							data_bytes = general.bytes
+							data_count = general.count
+							data_resolved = general.resolved
+							data_struct_brace = true
+						} else {
+							data_problem = true
+						}
+					} else {
+						data_problem = true
+						literal_refused = true
+					}
 				} else {
 					constant := p.file_scope_constant()
 					data_init = constant.integer
@@ -2308,7 +2331,7 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 	mut elements := []BraceElement{}
 	list_body := p.pos
 	for {
-		t := p.peek()
+		mut t := p.peek()
 		if t.kind == .eof {
 			p.error_at(open, 'unsupported: unterminated { opened at ${open.line}:${open.col}')
 			return error('unterminated brace initializer')
@@ -2321,7 +2344,27 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 			p.recover_brace_list(open, list_body)
 			return error('brace designator')
 		}
-		if p.at_punct('{') {
+		// The arms below read the token the element begins with, which is the
+		// one after a run of designators: the token peeked before them is a `.`
+		// or a `[` and names the subobject rather than the element, so a
+		// designated element whose value is an address was read as an element
+		// with no arm and refused at the designator.
+		t = p.peek()
+		// A compound literal element, `(T){ v, v }`, is read before the arms
+		// below: what it is worth here is the list it was written with, which
+		// is the list the walk against the subobject's type initializes it
+		// from. A compound literal of an array type answers none with every
+		// token given back, so the arms below read the same tokens.
+		mut compound := ?BraceList(none)
+		if p.looks_like_compound_literal() {
+			compound = p.compound_literal_list(body)
+		}
+		if list := compound {
+			elements << BraceElement{
+				list:        list
+				designators: designators
+			}
+		} else if p.at_punct('{') {
 			list := p.parse_brace_initializer(body) or {
 				p.recover_brace_list(open, list_body)
 				return error('nested brace initializer')
@@ -2336,20 +2379,33 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 				p.recover_brace_list(open, list_body)
 				return error('brace element')
 			}
-			if body && !p.at_punct(',') && !p.at_punct('}') {
+			if !p.at_punct(',') && !p.at_punct('}') {
 				// The constant is the first operand of an expression rather than
 				// the whole element: `{1 + 1}` is one element whose value is two,
 				// which gcc 16.2.1 accepts. What ends an element is the comma or
 				// the closing brace, so any other token after the constant means
 				// the element is longer than it and is read as an expression.
 				p.pos = before
-				expr := p.parse_expression() or {
+				if body {
+					expr := p.parse_expression() or {
+						p.recover_brace_list(open, list_body)
+						return error('brace element')
+					}
+					elements << BraceElement{
+						expr:        expr
+						designators: designators
+					}
+				} else if folded := p.file_scope_element_constant() {
+					// A file-scope list holds the value the expression folds
+					// to, and not the expression that computes it: the image
+					// is written before the program runs.
+					elements << BraceElement{
+						number:      folded
+						designators: designators
+					}
+				} else {
 					p.recover_brace_list(open, list_body)
 					return error('brace element')
-				}
-				elements << BraceElement{
-					expr:        expr
-					designators: designators
 				}
 			} else {
 				elements << BraceElement{
@@ -2357,9 +2413,53 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 					designators: designators
 				}
 			}
-		} else if !body && (t.kind == .identifier || t.kind == .string || (t.kind == .punct && t.text == '&')) {
+		} else if !body && t.kind == .identifier {
+			// A name here is an enumeration constant or an address. An
+			// enumerator is an integer constant expression (6.6p4) and the
+			// value it names is what the element holds, so it is asked for
+			// first: the address reader answers an unprefixed name for both,
+			// and an enumeration constant is not an object with an address.
+			//
+			// An enumerator that is the first term of a longer expression,
+			// `{ E + F }`, is folded like a written constant that is: the
+			// element is the assignment-expression 6.7.8p1 makes it and not
+			// the name it begins with.
+			if constant := p.scopes.lookup_constant(t.text) {
+				after := p.peek_at(1)
+				if !(after.kind == .punct && (after.text == ',' || after.text == '}')) {
+					if folded := p.file_scope_element_constant() {
+						elements << BraceElement{
+							number:      folded
+							designators: designators
+						}
+					} else {
+						p.recover_brace_list(open, list_body)
+						return error('brace element')
+					}
+				} else {
+					p.next()
+					elements << BraceElement{
+						number:      NumberConstant{
+							number: FileConstant{
+								integer: constant.value
+							}
+							at:     t
+						}
+						designators: designators
+					}
+				}
+			} else if address := p.file_scope_address() {
+				elements << BraceElement{
+					address:     address
+					designators: designators
+				}
+			} else {
+				p.recover_brace_list(open, list_body)
+				return error('brace element')
+			}
+		} else if !body && (t.kind == .string || (t.kind == .punct && t.text == '&')) {
 			// Only a token that can start an address takes the address path: a
-			// name, a string literal, or the ampersand in front of one.
+			// string literal, or the ampersand in front of one.
 			if address := p.file_scope_address() {
 				elements << BraceElement{
 					address:     address
@@ -2375,13 +2475,24 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 			// inside parentheses, `(32)`, with a sign in front of them, `-(32)`.
 			// A cast of a written constant is itself a written constant, and the
 			// value is the one the conversion makes, so the element reaches the
-			// image as a number like the ones beside it. A cast of anything else
-			// - a call, a name, an expression - is refused by name, because the
-			// image holds constants and a value written into it that the cast did
-			// not make is worse than the refusal.
+			// image as a number like the ones beside it.
+			//
+			// A shape that is not that one is read as a constant expression: an
+			// element is an assignment-expression (6.7.8p1) and a file-scope one
+			// a constant expression (6.6p4), so `{(1 + 2)}`, `{-1 << 3}` and the
+			// null pointer constant `((void *)0)` are elements whose value the
+			// fold gives. A cast of a call or of a name folds to nothing and is
+			// refused by name, because the image holds constants and a value
+			// written into it that the fold did not make is worse than a
+			// refusal.
 			if constant := p.file_scope_brace_constant() {
 				elements << BraceElement{
 					number:      constant
+					designators: designators
+				}
+			} else if folded := p.file_scope_element_constant() {
+				elements << BraceElement{
+					number:      folded
 					designators: designators
 				}
 			} else {
@@ -2474,6 +2585,106 @@ fn (mut p Parser) file_scope_brace_constant() ?NumberConstant {
 		return constant
 	}
 	return none
+}
+
+// file_scope_element_constant reads one element of a file-scope brace list as a
+// constant expression and answers the value. 6.7.8p1 makes an element an
+// assignment-expression and 6.6p4 lets a file-scope one be a constant
+// expression, so `{1 + 1}`, `{(1 + 1)}` and `{-(1 + 1)}` are elements whose
+// value is two and the fold is what the image holds. A null pointer constant
+// written as a cast of a zero, `(void *)0`, is an address constant (6.3.2.3p3)
+// and is answered as the zero it is, which is what the member it initializes
+// holds.
+//
+// Nothing is read when the shape is not a constant expression: the cursor and
+// every diagnostic are given back, so the caller refuses the element at its own
+// location rather than at the first term of an expression it did not finish.
+// The element has to end at the comma or the closing brace; a longer expression
+// is not one element and answers none.
+fn (mut p Parser) file_scope_element_constant() ?NumberConstant {
+	saved_pos := p.pos
+	saved_diagnostics := p.diagnostics.len
+	saved_depth := p.depth
+	saved_base := p.pending_base
+	saved_storage := p.pending_storage
+	at := p.peek()
+	expr := p.parse_expression() or {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		p.depth = saved_depth
+		p.pending_base = saved_base
+		p.pending_storage = saved_storage
+		return none
+	}
+	p.depth = saved_depth
+	p.pending_base = saved_base
+	p.pending_storage = saved_storage
+	if !p.at_punct(',') && !p.at_punct('}') {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if value := p.constant_value(expr) {
+		return NumberConstant{
+			number: FileConstant{
+				integer: value
+			}
+			at:     at
+		}
+	}
+	if p.is_null_pointer_constant(expr) {
+		return NumberConstant{
+			number: FileConstant{
+				integer: 0
+			}
+			at:     at
+		}
+	}
+	p.pos = saved_pos
+	p.diagnostics = p.diagnostics[..saved_diagnostics]
+	return none
+}
+
+// compound_literal_list reads a compound literal used as the initializer of an
+// aggregate object or as one element of a brace list, `(T){ v, v }`, and answers
+// the list it holds. The unnamed object has static storage duration at file
+// scope and the enclosing block's in a body (6.5.2.5p5), so the list is read the
+// way a brace list at that scope is read: a body's elements are expressions a
+// store takes, a file-scope one's are constants the image holds. The value the
+// literal is worth here is the bytes its list writes, which is what the walk
+// against the object's own type places.
+//
+// A compound literal of an array type answers none and gives every token back
+// without a diagnostic: its value is the address of its first element rather
+// than the bytes of its list, so the place it was written decides which reader
+// takes it and the caller's next arm has to see the same tokens. `int *p[] =
+// {(int[]){1, 2}}` is the shape a body reads that way.
+fn (mut p Parser) compound_literal_list(body bool) ?BraceList {
+	saved := p.pos
+	saved_diagnostics := p.diagnostics.len
+	p.next() // (
+	spec, d, _ := p.parse_type_name_parts(1) or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if !p.expect_punct(')') {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	declared := p.declared_type(spec.clause, d)
+	if declared.is_array() {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	list := p.parse_brace_initializer(body) or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	return list
 }
 
 // file_scope_signed_parenthesized_constant reads a written constant inside one
