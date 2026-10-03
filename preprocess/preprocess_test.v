@@ -196,6 +196,32 @@ fn test_a_header_name_with_a_slash_is_read_as_one_name() {
 	assert result.tokens.map(it.text) == ['int', 'typed', ';']
 }
 
+fn test_an_absolute_include_is_opened_where_it_points() {
+	// An absolute name is the file, so there is nothing to search: both
+	// spellings open it, and it is not in any directory the search would
+	// reach.
+	dir := fixture_directory()
+	header := os.join_path(os.abs_path(dir), 'absolute.h')
+	os.write_file(header, 'int from_absolute;\n') or {}
+	assert os.is_abs_path(header)
+	for name in ['"${header}"', '<${header}>'] {
+		result := preprocess(include_line(name), os.join_path(dir, 'main.c'), Options{})
+		assert result.diagnostics.len == 0
+		assert result.tokens.map(it.text) == ['int', 'from_absolute', ';']
+		assert result.tokens[0].file == header
+	}
+}
+
+fn test_an_absolute_include_that_is_not_there_is_refused_by_name() {
+	// Nothing was searched for, so the message must not claim directories
+	// were looked in.
+	missing := os.join_path(os.abs_path(fixture_directory()), 'no-such-absolute.h')
+	messages := diagnostics_of(include_line('"${missing}"'))
+	assert messages.len == 1
+	assert messages[0].contains(missing)
+	assert !messages[0].contains('looked in')
+}
+
 fn test_an_include_guard_keeps_the_second_read_out() {
 	dir := fixture_directory()
 	os.write_file(os.join_path(dir, 'guarded.h'), '#ifndef GUARDED_H\n#define GUARDED_H\nint once;\n#endif\n') or {}
