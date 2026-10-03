@@ -517,8 +517,9 @@ pub fn usage(all bool) string {
 		out << '  @listfile             expanded before anything else'
 		out << '  -                     read the source from standard input'
 		out << 'The V toolchain also hands the compiler its own GC library,'
-		out << 'thirdparty/tcc/lib/libgc.a, as an ordinary input. It is accepted and'
-		out << 'not linked yet, like any other archive.'
+		out << 'thirdparty/tcc/lib/libgc.a, as an ordinary input. An object or an'
+		out << 'archive is named as such and refused; linking one is not implemented'
+		out << 'yet, and neither is reading one as source.'
 	}
 	return out.join('\n')
 }
