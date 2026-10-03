@@ -256,7 +256,7 @@ fn (mut p Parser) parse_deref_assignment(start tokenize.Token, target ast.Expr, 
 				p.error_at(op, 'unsupported: the compound assignment ${op.text} through a dereference is not implemented')
 				return error('compound assignment through a dereference')
 			}
-			value := p.parse_expression()!
+			value := p.parse_assignment_expression()!
 			// The object written to is the one the pointer points at, so the
 			// value converts to the pointed-at type the same way it does into
 			// a name.
@@ -387,10 +387,14 @@ fn (p Parser) assignment_after(at int) bool {
 }
 
 // parse_assignment reads `name = expr`. C makes an assignment an expression;
-// this tree makes it a statement, because a statement is where it is written in
-// almost every line of C there is. The target is the name alone: an lvalue with
-// a subscript or a dereference is not a name the tree can hold, and the
-// expression reader reports it where it stopped.
+// this tree also has a statement of kind assign, which is where an assignment
+// stands in almost every line of C and where its target can name a place the
+// expression node does not carry, an element of an array or a member of a name.
+// The value is read by the assignment-expression reader, so the value written is
+// another assignment where the source writes one: `a = b = 5` writes 5 into b and
+// then b into a. The target is the name alone: an lvalue with a subscript or a
+// dereference is not a name the tree can hold, and the expression reader reports
+// it where it stopped.
 fn (mut p Parser) parse_assignment() !ast.Stmt {
 	t := p.next() // the name
 	mut index := ?ast.Expr(none)
@@ -429,7 +433,7 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 	}
 	op := p.next() // = or a compound spelling
 	if op.text == '=' {
-		expr := p.parse_expression()!
+		expr := p.parse_assignment_expression()!
 		// An element of a pointer is the same subscript an element of an array
 		// is, but the object it is addressed from is a value rather than a place
 		// in the frame, so the target is carried as the element node with the
@@ -490,7 +494,7 @@ fn (mut p Parser) parse_subscript_assignment(index ast.Index) !ast.Stmt {
 		p.error_at(op, 'unsupported: the compound assignment ${op.text} to an element is not implemented')
 		return error('compound assignment to an element')
 	}
-	value := p.parse_expression()!
+	value := p.parse_assignment_expression()!
 	p.check_assignment(index.typ, value, op)
 	return ast.Stmt{
 		kind:      .assign
@@ -512,7 +516,7 @@ fn (mut p Parser) parse_member_assignment(member ast.Field) !ast.Stmt {
 		p.error_at(op, 'unsupported: the compound assignment ${op.text} to the member ${member.name}.${member.member} is not implemented')
 		return error('compound assignment to a member')
 	}
-	value := p.parse_expression()!
+	value := p.parse_assignment_expression()!
 	p.check_assignment(member.typ, value, op)
 	return ast.Stmt{
 		kind:  .assign
@@ -597,7 +601,7 @@ fn (mut p Parser) parse_compound_assignment(target tokenize.Token, op tokenize.T
 		p.error_at(op, 'unsupported: the compound assignment ${op.text} is not implemented')
 		return error('compound assignment')
 	}
-	right := p.parse_expression()!
+	right := p.parse_assignment_expression()!
 	// What the assignment reads is the target itself, and for an element that is
 	// the element rather than the array: the subscript is written into the tree
 	// again, so that `a[i] += 1` means `a[i] = a[i] + 1`.
@@ -670,7 +674,7 @@ fn (mut p Parser) parse_if_statement() ![]ast.Stmt {
 		return []ast.Stmt{}
 	}
 	p.compound_unstable++
-	cond := p.parse_expression() or {
+	cond := p.parse_assignment_expression() or {
 		p.compound_unstable--
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -697,8 +701,9 @@ fn (mut p Parser) parse_if_statement() ![]ast.Stmt {
 }
 
 // parse_while_statement reads `while (cond) stmt`. The condition is what has to
-// be true for the loop to go round again, and it is read by the expression
-// reader, so a comparison or two of them joined need nothing here.
+// be true for the loop to go round again, and it is read by the assignment
+// expression reader, so a comparison, an assignment, or two of them joined need
+// nothing here.
 fn (mut p Parser) parse_while_statement() ![]ast.Stmt {
 	t := p.next() // while
 	if !p.expect_punct('(') {
@@ -706,7 +711,7 @@ fn (mut p Parser) parse_while_statement() ![]ast.Stmt {
 		return []ast.Stmt{}
 	}
 	p.compound_unstable++
-	cond := p.parse_expression() or {
+	cond := p.parse_assignment_expression() or {
 		p.compound_unstable--
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -744,7 +749,7 @@ fn (mut p Parser) parse_do_while_statement() ![]ast.Stmt {
 		return []ast.Stmt{}
 	}
 	p.compound_unstable++
-	cond := p.parse_expression() or {
+	cond := p.parse_assignment_expression() or {
 		p.compound_unstable--
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -867,7 +872,7 @@ fn (mut p Parser) parse_switch_statement() ![]ast.Stmt {
 		return []ast.Stmt{}
 	}
 	p.compound_unstable++
-	cond := p.parse_expression() or {
+	cond := p.parse_assignment_expression() or {
 		p.compound_unstable--
 		p.skip_statement()
 		return []ast.Stmt{}
