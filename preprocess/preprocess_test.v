@@ -336,6 +336,34 @@ fn test_a_macro_can_be_called_inside_the_argument_of_another() {
 		'+', '2', '+', '2']
 }
 
+fn test_a_name_hidden_inside_an_argument_stays_hidden_when_the_replacement_is_read() {
+	// O's argument is expanded on its own, and C's replacement names C, so the C
+	// the argument's expansion leaves standing is text and not a use of C.
+	// Reading the whole replacement again must not turn it back into a use. A
+	// stack of the names being expanded cannot tell: by the time the replacement
+	// is read again the argument's own macro has left the stack. gcc and tcc
+	// write these same tokens, and glibc's <tgmath.h> nests macros this way.
+	source := '#define R(a, F) ((a) + F(a))\n#define S(v, c) R((v), c)\n#define C(v) S(v, C)\n#define O(a) [a]\nO(C(1))\n'
+	assert processed(source) == ['[', '(', '(', '(', '1', ')', ')', '+', 'C', '(', '(', '1', ')',
+		')', ')', ']']
+}
+
+fn test_a_macro_produced_by_an_expansion_is_a_use_of_it() {
+	// SAME's replacement names RET. That RET did not come from RET's own
+	// replacement, so it is a use and is expanded: the other half of the rule
+	// above, and the half a stack also gets right.
+	source := '#define SAME(v, c) RET((v), c, c)\n#define RET(a, b, d) ((a) + b + d)\nSAME(3, k)\n'
+	assert processed(source) == ['(', '(', '(', '3', ')', ')', '+', 'k', '+', 'k', ')']
+}
+
+fn test_a_macro_is_expanded_inside_a_typeof_operand() {
+	// __typeof__ is the parser's and not the preprocessor's, so a macro in its
+	// operand has to have been replaced before the parser sees it. glibc's
+	// <tgmath.h> relies on that when it spells a type as an expression.
+	assert processed('#define T double\n__typeof__(T) x;\n') == ['__typeof__', '(', 'double', ')',
+		'x', ';']
+}
+
 fn test_a_comma_inside_parentheses_is_part_of_the_argument() {
 	assert processed('#define F(a, b) a b\nF((1, 2), 3)\n') == ['(', '1', ',', '2', ')', '3']
 }
