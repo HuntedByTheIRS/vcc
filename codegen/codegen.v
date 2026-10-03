@@ -2025,8 +2025,78 @@ fn (mut e Emitter) address_of_object(expr ast.Expr, depth int) !void {
 		e.append(e.target.address_of_slot(frame, i32(object.offset), register))
 		return
 	}
+	if expr.typ.kind in [.struct_, .union_] {
+		// An object of an aggregate type that is not a name, a member or an
+		// element has no storage of its own: it is materialized into a
+		// temporary of this level and the address of that is what the object
+		// is worth. A conditional whose two arms have the same struct type is
+		// the shape C99 6.5.15p3 gives that type to and 6.5.16 then assigns
+		// from, and V's own generated C writes one at hello.c:2699.
+		object := e.aggregate_object(expr, depth + 1)!
+		frame := e.frame_pointer(expr_line(expr), expr_col(expr))!
+		register := e.accumulator(expr_line(expr), expr_col(expr))!
+		e.append(e.target.address_of_slot(frame, i32(object.offset), register))
+		return
+	}
 	e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: an object handed over by value has to be a name, an element or a member, and this expression is not one')
 	return error('not an object')
+}
+
+// aggregate_object evaluates an object of an aggregate type into storage and
+// answers the frame slot that holds it. It is the aggregate counterpart of
+// complex_object, and for the same reason: no register holds an object, so an
+// expression that is not a name, a member or an element is computed into a
+// temporary of this level. What makes the result a value rather than a name for
+// the arm the conditional chose is that the arm's bytes are copied, which is
+// the copy 6.5.16 assigns from.
+fn (mut e Emitter) aggregate_object(expr ast.Expr, depth int) !Slot {
+	size := e.representation.size_of(expr.typ) or {
+		e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: ${expr.typ.describe()} is an object whose size this back end does not know')
+		return error('unknown object size')
+	}
+	object := e.reserve(size)
+	e.emit_aggregate_into(object, expr, depth + 1)!
+	return object
+}
+
+// emit_aggregate_into writes the value of an expression of an aggregate type
+// into an object the caller has reserved. A conditional is the shape this
+// exists for: the condition picks an arm, and that arm's bytes are copied into
+// the destination so neither arm is aliased. Every other shape reaching here is
+// an object with no path in this back end yet, and it is refused with the same
+// words a name, an element or a member are not needed for.
+fn (mut e Emitter) emit_aggregate_into(destination Slot, expr ast.Expr, depth int) !void {
+	if expr is ast.Conditional {
+		e.emit_condition(expr.cond, depth + 1, expr.line, expr.col)!
+		else_label := e.label()
+		end_label := e.label()
+		e.branch(.branch_zero, else_label, expr.line, expr.col)!
+		e.copy_aggregate_arm(destination, expr.then_expr, depth)!
+		e.jump(end_label)!
+		e.place(else_label)
+		e.copy_aggregate_arm(destination, expr.else_expr, depth)!
+		e.place(end_label)
+		return
+	}
+	e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: an object handed over by value has to be a name, an element or a member, and this expression is not one')
+	return error('not an object')
+}
+
+// copy_aggregate_arm copies one arm of a conditional into storage this level
+// reserved. The destination's address is parked in a value slot and the arm is
+// written through assign_object, which is the copy an assignment between two
+// objects makes: a call's result arrives in the registers its class names and
+// is stored, and anything else is an object of the same type whose bytes are
+// read from its own address.
+fn (mut e Emitter) copy_aggregate_arm(destination Slot, arm ast.Expr, depth int) !void {
+	line := expr_line(arm)
+	col := expr_col(arm)
+	frame := e.frame_pointer(line, col)!
+	register := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(frame, i32(destination.offset), register))
+	address := e.value_slot(depth)
+	e.store_accumulator(address, line, col)!
+	return e.assign_object(address, destination.width, arm, line, col, depth)
 }
 
 // field_address leaves the address of a member in the accumulator, whatever the

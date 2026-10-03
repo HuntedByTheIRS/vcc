@@ -1411,11 +1411,20 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				brace = true
 				if list := p.parse_brace_initializer(true) {
 					list_ok = true
-					if !list.is_a_flat_number_list() {
+					if !list.is_a_flat_number_list() || (!array_object
+						&& spec.clause.kind in [types.Kind.struct_, .union_]
+						&& (list.elements.len == 0 || has_aggregate_member(spec.clause))) {
 						// A nested list, a designator, or an element that is
 						// an expression: the list is walked against the
 						// object's type and each write becomes the store the
 						// declaration makes at the subobject it reached.
+						//
+						// An object with an aggregate member is walked too: a
+						// value for a subobject that is an array or a struct
+						// reaches a leaf the member store does not place, and a
+						// subobject the list does not reach is the implicit zero
+						// 6.7.8p21 gives it. An empty list is a list of no
+						// written values, so every leaf is that zero.
 						general_list = list
 					} else if d.pointer_count() == 0 && spec.clause.kind == .struct_ {
 						// A struct's brace initializer gives each value to a
@@ -1433,24 +1442,31 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						if list.elements.len > 1 {
 							p.error_at(list.at, 'a constraint violation: ${d.name} holds one value and its initializer writes ${list.elements.len}')
 						}
-						init = p.constant_expr(list.elements[0].number or { NumberConstant{} })
-						if d.pointer_count() == 0 && spec.clause.kind == .union_ {
-							// The value initializes the union's first member,
-							// which sits at the beginning of the object. A first
-							// member that is itself an aggregate takes a list of
-							// its own, which is not a shape this reader has.
-							if spec.clause.members.len == 0 {
-								p.error_at(p.peek(), 'unsupported: ${spec.clause.describe()} has no first member to initialize')
-								p.skip_declaration()
-								return stmts
+						// `{}` writes no value, so the object ends zero: a
+						// local's frame slot is not zeroed, unlike storage in
+						// the image, so the zero is stored here.
+						if list.elements.len > 0 {
+							init = p.constant_expr(list.elements[0].number or { NumberConstant{} })
+							if d.pointer_count() == 0 && spec.clause.kind == .union_ {
+								// The value initializes the union's first member,
+								// which sits at the beginning of the object. A first
+								// member that is itself an aggregate takes a list of
+								// its own, which is not a shape this reader has.
+								if spec.clause.members.len == 0 {
+									p.error_at(p.peek(), 'unsupported: ${spec.clause.describe()} has no first member to initialize')
+									p.skip_declaration()
+									return stmts
+								}
+								first := spec.clause.members[0]
+								if first.typ.kind in [types.Kind.struct_, .union_, .array] {
+									p.error_at(p.peek(), 'unsupported: the first member of ${spec.clause.describe()} is an object of the type ${first.typ.describe()}, and a brace initializer for one is not implemented')
+									p.skip_declaration()
+									return stmts
+								}
+								union_first = first
 							}
-							first := spec.clause.members[0]
-							if first.typ.kind in [types.Kind.struct_, .union_, .array] {
-								p.error_at(p.peek(), 'unsupported: the first member of ${spec.clause.describe()} is an object of the type ${first.typ.describe()}, and a brace initializer for one is not implemented')
-								p.skip_declaration()
-								return stmts
-							}
-							union_first = first
+						} else {
+							init = zero_initializer(d.name_at)
 						}
 					} else {
 						// A written size smaller than the list is the same
@@ -1573,6 +1589,16 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		mut count := if array_count > 0 { array_count } else { elements.len }
 		if from_string && array_sized {
 			count = array_count
+		}
+		if array_object && array_count <= 0 && count == 0 && general_list == none && brace && list_ok
+			&& elements.len == 0 && !from_string && !declared.has_vla() {
+			// An array with empty brackets takes its size from the list, and an
+			// empty list writes no element to give it one. gcc 16.2.1 refuses
+			// the shape as `zero or negative size array`, so it is refused by
+			// name rather than reserved as an object of no elements.
+			p.error_at(d.array_at(), 'unsupported: ${d.name} is an array whose size an empty brace initializer does not write, and its brackets wrote none')
+			p.skip_declaration()
+			return stmts
 		}
 		if list := general_list {
 			// A nested list, a designator or an expression: the size of an array
