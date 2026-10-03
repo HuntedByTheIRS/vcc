@@ -204,87 +204,71 @@ fn test_the_rule_can_be_given_a_target() {
 // elf_of is the beginning of an ELF64 file of one e_type: the magic, the class
 // and data bytes, and the two bytes of the type at offset 16. Classification
 // reads no more than this, so a file this long is a file it decides.
-fn elf_of(kind u16) []u8 {
+fn elf_of(kind u16) string {
 	mut bytes := [u8(0x7f), `E`, `L`, `F`, u8(2), u8(1), u8(1), u8(0)]
 	bytes << []u8{len: 8}
 	bytes << u8(kind & 0xff)
 	bytes << u8((kind >> 8) & 0xff)
-	return bytes
+	return bytes.bytestr()
 }
 
-fn input_scratch_dir() string {
-	dir := os.join_path(os.temp_dir(), 'vcc_cli_input_${os.getpid()}')
-	os.mkdir_all(dir) or { panic(err) }
-	return dir
+fn input_scratch(name string) string {
+	return os.join_path(os.temp_dir(), 'vcc_cli_input_${os.getpid()}_${name}')
 }
 
 // An object and an archive are link inputs and not source, and the kind is read
-// off the file rather than off its name. Reading an object as source is the bug
+// off the bytes rather than off the name. Reading an object as source is the bug
 // this pins: it reported an unexpected character from inside the ELF header,
-// which is a wrong reading of a file that is not the wrong kind of file only
-// because nobody had said what it was.
+// which is a wrong reading of a file fed to the wrong stage.
+//
+// The bytes classified here are the ones the driver hands over, and the last
+// case reads a real file back so that what a file's own contents come to is
+// covered and not only what the helper writes.
 fn test_an_object_or_an_archive_is_classified_and_named() {
-	dir := input_scratch_dir()
-	object := os.join_path(dir, 'from_vcc.o')
-	os.write_file_array(object, elf_of(1)) or { panic(err) }
-	assert classify_input(object, '') == .object
-	said := input_refusal(object, classify_input(object, ''))
-	assert said.contains(object)
+	object := elf_of(1)
+	assert classify_input(object, 'from_vcc.o', '') == .object
+	said := input_refusal('from_vcc.o', .object)
+	assert said.contains('from_vcc.o')
 	assert said.contains('relocatable object')
 
-	archive := os.join_path(dir, 'libgc.a')
-	os.write_file_array(archive, '!<arch>\n'.bytes()) or { panic(err) }
-	assert classify_input(archive, '') == .archive
-	assert input_refusal(archive, .archive).contains('archive')
+	archive := '!<arch>\n'
+	assert classify_input(archive, 'libgc.a', '') == .archive
+	assert input_refusal('libgc.a', .archive).contains('archive')
 
 	// The other two containers an ELF can be, so that a program or a shared
 	// object handed to the compiler is named as itself and not as an object.
-	shared := os.join_path(dir, 'libm.so')
-	os.write_file_array(shared, elf_of(3)) or { panic(err) }
-	assert classify_input(shared, '') == .shared_object
-	program := os.join_path(dir, 'a.out')
-	os.write_file_array(program, elf_of(2)) or { panic(err) }
-	assert classify_input(program, '') == .program
+	assert classify_input(elf_of(3), 'libm.so', '') == .shared_object
+	assert classify_input(elf_of(2), 'a.out', '') == .program
 
-	// The name is the fallback for a file whose magic is not one the reader
-	// knows, which is a truncated object or a linker script carrying a
-	// library's name.
-	script := os.join_path(dir, 'libdl.so')
-	os.write_file(script, 'GROUP ( /lib/libdl.so.2 )\n') or { panic(err) }
-	assert classify_input(script, '') == .shared_object
-	named := os.join_path(dir, 'cache.tmp.c.o')
-	os.write_file(named, 'not an elf at all\n') or { panic(err) }
-	assert classify_input(named, '') == .object
-
-	for path in [object, archive, shared, program, script, named] {
-		os.rm(path) or {}
-	}
+	path := input_scratch('real_object.o')
+	os.write_file_array(path, object.bytes()) or { panic(err) }
+	on_disk := os.read_file(path) or { panic(err) }
+	assert classify_input(on_disk, path, '') == .object
+	os.rm(path) or {}
 }
 
-// What is left is source, and a -x naming a C language says so regardless of the
-// name the file carries: gcc reads `-x c foo.o` as C and so does this.
-fn test_what_is_left_is_source_and_x_can_say_so() {
-	dir := input_scratch_dir()
-	source := os.join_path(dir, 'seven.c')
-	os.write_file(source, 'int main(void) { return 0; }\n') or { panic(err) }
-	assert classify_input(source, '') == .source
+// The name is the fallback for bytes that are not a container this reader knows,
+// which is a truncated object or a linker script carrying a library's name, and
+// what is left is source: a source file, an empty file, and standard input,
+// which has no name to fall back on either.
+fn test_the_name_decides_what_the_bytes_do_not() {
+	assert classify_input('not an elf at all\n', 'cache.tmp.c.o', '') == .object
+	assert classify_input('GROUP ( /lib/libdl.so.2 )\n', 'libdl.so', '') == .shared_object
+	assert classify_input('int main(void) { return 0; }\n', 'seven.c', '') == .source
+	assert classify_input('', 'empty.c', '') == .source
+	assert classify_input('int main(void) { return 0; }\n', '-', '') == .source
+}
 
-	// A path that cannot be opened is left to the driver's own message about
-	// the file it could not read, rather than guessed at here.
-	assert classify_input(os.join_path(dir, 'nothing_here.c'), '') == .source
-	// Standard input has no file behind it and is source.
-	assert classify_input('-', '') == .source
-
-	object := os.join_path(dir, 'forced.o')
-	os.write_file_array(object, elf_of(1)) or { panic(err) }
-	assert classify_input(object, 'c') == .source
-	assert classify_input(object, 'c-header') == .source
-	assert classify_input(object, '') == .object
-	// -x none is gcc's way of cancelling an earlier -x, so it declares nothing.
-	assert classify_input(object, 'none') == .object
-	assert classify_input(object, 'assembler') == .object
-
-	for path in [source, object] {
-		os.rm(path) or {}
-	}
+// A -x naming a C language says the input is C whatever the bytes are, which is
+// how gcc reads `-x c foo.o`. -x none is gcc's way of cancelling an earlier -x
+// and declares nothing, and a -x this compiler has no reader for is left to the
+// bytes rather than taken for a promise.
+fn test_x_naming_c_overrides_the_bytes() {
+	object := elf_of(1)
+	assert classify_input(object, 'forced.o', 'c') == .source
+	assert classify_input(object, 'forced.o', 'c-header') == .source
+	assert classify_input(object, 'forced.o', 'cpp-output') == .source
+	assert classify_input(object, 'forced.o', 'none') == .object
+	assert classify_input(object, 'forced.o', '') == .object
+	assert classify_input(object, 'forced.o', 'assembler') == .object
 }
