@@ -1149,7 +1149,7 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 		// and rdx = -1.
 		e.emit_value(expr, 0)!
 		if !e.wide_value(expr) {
-			e.widen_word_pair(expr.typ.kind.is_unsigned(), e.narrow_width(expr.typ), stmt.line,
+			e.widen_word_pair(expr.typ.is_unsigned_type(), e.narrow_width(expr.typ), stmt.line,
 				stmt.col)!
 		}
 		e.append(e.target.frame_epilogue())
@@ -1422,7 +1422,7 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 		// store moves the integer the conversion produced and not the bits of
 		// the double. The pointed-at type is the destination and it is resolved
 		// here, so its signedness is read off it rather than off a spelling.
-		e.convert_to_int(expr, unary.typ.kind.is_unsigned(), width, stmt.line, stmt.col)!
+		e.convert_to_int(expr, unary.typ.is_unsigned_type(), width, stmt.line, stmt.col)!
 		value := e.accumulator(stmt.line, stmt.col)!
 		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 		e.append(e.target.store_indirect(address_register, value, width)!)
@@ -2226,7 +2226,7 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 	if e.floating_of(expr) {
 		// The element's type is the destination, and it is resolved here, so
 		// its signedness is read off it.
-		e.convert_to_int(expr, index.typ.kind.is_unsigned(), width, stmt.line, stmt.col)!
+		e.convert_to_int(expr, index.typ.is_unsigned_type(), width, stmt.line, stmt.col)!
 		value := e.accumulator(stmt.line, stmt.col)!
 		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 		e.append(e.target.store_indirect(address_register, value, width)!)
@@ -2506,7 +2506,7 @@ fn (mut e Emitter) emit_switch(stmt ast.Stmt) !void {
 		return error('switch without an expression')
 	}
 	width := e.converted_width(cond.typ) or { e.target.word_size }
-	unsigned := cond.typ.kind.is_unsigned()
+	unsigned := cond.typ.is_unsigned_type()
 	e.emit_expr(cond)!
 	e.extend_operand_to_word(cond, stmt.line, stmt.col)!
 	operand := e.reserve(e.target.word_size)
@@ -2900,7 +2900,7 @@ fn (e Emitter) writes_a_128(written string) bool {
 // `unsigned` and `unsigned int` are one type, and neither is `unsigned long`.
 fn (e Emitter) written_is_unsigned(written string) bool {
 	typ := types.from_words(written.split(' ')) or { return false }
-	return typ.kind.is_unsigned()
+	return typ.is_unsigned_type()
 }
 
 // declares_a_bool says whether a written type is `_Bool`, which is the question a
@@ -3518,7 +3518,7 @@ fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
 	double_register := e.float_accumulator(line, col)!
 	width := e.storage_width(expr.typ) or { 0 }
 	if width == 8 {
-		if expr.typ.kind.is_unsigned() {
+		if expr.typ.is_unsigned_type() {
 			// An eight-byte unsigned value fills the whole register, so there
 			// is no upper half to clear and the four-byte fix does not carry.
 			// The value is split at 2^63, which is a sequence the machine
@@ -3533,7 +3533,7 @@ fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
 		e.append(e.target.signed_word_to_double(double_register, integer)!)
 		return
 	}
-	if expr.typ.kind.is_unsigned() && width == 4 {
+	if expr.typ.is_unsigned_type() && width == 4 {
 		// A four-byte unsigned value can be at or above 2^31, which is where the
 		// signed conversion reads the top bit as a sign. A narrower unsigned type
 		// is already below that boundary, and a source eight bytes wide is the
@@ -4241,7 +4241,7 @@ fn (mut e Emitter) emit_general_index(expr ast.Index, depth int) !void {
 		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${expr.typ.describe()} is not a value this back end reads')
 		return error('unsupported element type')
 	}
-	e.load_indirect_value(address, address, expr.typ.kind.is_unsigned(), width)!
+	e.load_indirect_value(address, address, expr.typ.is_unsigned_type(), width)!
 }
 
 // emit_element_address leaves in the accumulator the address of the element
@@ -4751,7 +4751,12 @@ fn (mut e Emitter) low_word_of_object(expr ast.Expr, width int, line int, col in
 }
 
 fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
-	target := cast.typ
+	// A cast to an enumerated type is a cast to the integer type its
+	// enumerators require: the value a program gets is that type's, and the
+	// width and signedness come from it. Measured, `(unsigned int)(enum c)0`
+	// under gcc 16.2.1 is an unsigned int, and the instruction is the one that
+	// conversion takes.
+	target := cast.typ.underlying_type()
 	if target.kind in [.int128, .unsigned_int128] {
 		// A conversion *to* a 128-bit type is the value widened into the pair, the
 		// same widening a 128-bit operation does to a narrower operand: the word
@@ -4775,7 +4780,7 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		// The slot holds the pair the widening writes, which is two words whatever
 		// the narrower type's width was: widen_into_pair stores both of them.
 		slot := e.reserve(wide_bytes)
-		e.widen_into_pair(slot, cast.expr.typ.kind.is_unsigned(), width, cast.line, cast.col)!
+		e.widen_into_pair(slot, cast.expr.typ.is_unsigned_type(), width, cast.line, cast.col)!
 		return e.load_pair(slot, cast.line, cast.col)
 	}
 	if target.kind !in [.int_, .unsigned_int, .bool_, .char_, .signed_char, .unsigned_char, .short,
@@ -4836,10 +4841,10 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 			// The conversion is made at the destination's width, so a 64-bit
 			// integer target is the eight-byte truncation and nothing here
 			// widens a value that is already whole.
-			e.convert_to_int(cast.expr, target.kind.is_unsigned(), e.target.word_size, cast.line, cast.col)!
+			e.convert_to_int(cast.expr, target.is_unsigned_type(), e.target.word_size, cast.line, cast.col)!
 			return
 		}
-		e.convert_to_int(cast.expr, target.kind.is_unsigned(), e.storage_width(target) or { 0 }, cast.line, cast.col)!
+		e.convert_to_int(cast.expr, target.is_unsigned_type(), e.storage_width(target) or { 0 }, cast.line, cast.col)!
 	}
 	register := e.accumulator(cast.line, cast.col)!
 	// The width of the value in the register now, which decides whether a
@@ -4854,7 +4859,7 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		// widens an int to a long with cltq and an unsigned int with a 32-bit
 		// move.
 		if source == 4 {
-			if cast.expr.typ.kind.is_unsigned() {
+			if cast.expr.typ.is_unsigned_type() {
 				e.append(e.target.move_register32(register, register)!)
 			} else {
 				e.append(e.target.sign_extend_word(register, register)!)
@@ -4877,7 +4882,7 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 				// int keeps its sign, and an unsigned int takes zeros. Measured
 				// on gcc 16.2.1: `(char *)0xffffffffu` is the address
 				// 0xffffffff, which sign-extending would have made all ones.
-				if cast.expr.typ.kind.is_unsigned() {
+				if cast.expr.typ.is_unsigned_type() {
 					e.append(e.target.move_register32(register, register)!)
 				} else {
 					e.append(e.target.sign_extend_word(register, register)!)
@@ -4945,7 +4950,7 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 // by the instruction that moves one rather than at a width here, and a type the
 // back end has no load for answers none.
 fn (e Emitter) storage_width(t types.Type) ?int {
-	return match t.kind {
+	return match t.enum_underlying() {
 		.bool_, .char_, .signed_char, .unsigned_char { 1 }
 		.short, .unsigned_short { 2 }
 		.int_, .unsigned_int { 4 }
@@ -5007,7 +5012,7 @@ fn (mut e Emitter) load_bitfield(register backend.Register, field ast.Field, wid
 // treated as a pointer: a pointer is eight bytes too, and the machine's word is
 // what an address moves in.
 fn (e Emitter) eight_byte_integer(t types.Type) bool {
-	return t.kind in [types.Kind.long, .unsigned_long, .long_long, .unsigned_long_long]
+	return t.enum_underlying() in [types.Kind.long, .unsigned_long, .long_long, .unsigned_long_long]
 }
 
 // step_is_wide says whether an operation computes at the width of a word, which is
@@ -5035,7 +5040,7 @@ fn (e Emitter) comparison_is_unsigned(step ast.Binary) bool {
 	common := types.usual_arithmetic_conversions(step.left.typ, step.right.typ, e.representation) or {
 		return false
 	}
-	return common.kind.is_unsigned()
+	return common.is_unsigned_type()
 }
 
 // emit_deref reads through an address: the operand is computed into the register,
@@ -5065,7 +5070,7 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 		e.diagnostics << problem(unary.line, unary.col, 'unsupported: * reads through an address of ${unary.typ.describe()}, and this back end reads ints, chars, doubles and pointers only')
 		return error('unsupported pointed-at type')
 	}
-	e.load_indirect_value(address, address, unary.typ.kind.is_unsigned(), width)!
+	e.load_indirect_value(address, address, unary.typ.is_unsigned_type(), width)!
 }
 
 // emit_binary writes a binary operation. The left spine of an operator chain is
@@ -5331,7 +5336,7 @@ fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
 	if e.wide_value(step.left) {
 		e.store_pair(left, step.line, step.col)!
 	} else {
-		e.widen_into_pair(left, step.left.typ.kind.is_unsigned(), e.narrow_width(step.left.typ), step.line, step.col)!
+		e.widen_into_pair(left, step.left.typ.is_unsigned_type(), e.narrow_width(step.left.typ), step.line, step.col)!
 	}
 	if step.op in ['<<', '>>'] {
 		// The right operand of a shift is a count rather than a value of the pair's
@@ -5357,7 +5362,7 @@ fn (mut e Emitter) emit_wide_step(step ast.Binary, depth int) !void {
 	if e.wide_value(step.right) {
 		e.store_pair(right, step.line, step.col)!
 	} else {
-		e.widen_into_pair(right, step.right.typ.kind.is_unsigned(), e.narrow_width(step.right.typ), step.line, step.col)!
+		e.widen_into_pair(right, step.right.typ.is_unsigned_type(), e.narrow_width(step.right.typ), step.line, step.col)!
 	}
 	e.load_pair(left, step.line, step.col)!
 	return e.apply_wide_binary(step, left, right, depth)
@@ -5983,7 +5988,7 @@ fn (mut e Emitter) extend_operand_to_word(operand ast.Expr, line int, col int) !
 		return
 	}
 	register := e.accumulator(line, col)!
-	if operand.typ.kind.is_unsigned() {
+	if operand.typ.is_unsigned_type() {
 		e.append(e.target.move_register32(register, register)!)
 	} else {
 		e.append(e.target.sign_extend_word(register, register)!)
@@ -6228,7 +6233,7 @@ fn (mut e Emitter) apply_binary(binary ast.Binary, wide bool) !void {
 	// had. The signedness is the type the operands convert to, because that is the
 	// type the operation is defined on: `0xffffffffu / 1` is 4294967295 and not -1,
 	// and `18446744073709551615UL / 3` is 6148914691236517205.
-	unsigned := binary.typ.kind.is_unsigned()
+	unsigned := binary.typ.is_unsigned_type()
 	match binary.op {
 		'+' {
 			if wide {
@@ -6322,7 +6327,7 @@ fn (mut e Emitter) apply_binary(binary ast.Binary, wide bool) !void {
 			// cleared, and then the shift reads the sign the language means. A
 			// value eight bytes wide is the whole register already and needs
 			// neither instruction.
-			unsigned_shift := binary.left.typ.kind.is_unsigned()
+			unsigned_shift := binary.left.typ.is_unsigned_type()
 			if !wide {
 				if unsigned_shift {
 					e.append(e.target.move_register32(result, result)!)
@@ -6491,7 +6496,7 @@ fn (mut e Emitter) move_to_scratch(line int, col int) !void {
 // eight bytes in the floating-point file and a pointer is the machine's word, and
 // a type the back end has no register for answers none.
 fn (e Emitter) converted_width(t types.Type) ?int {
-	return match t.kind {
+	return match t.enum_underlying() {
 		.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short, .int_,
 		.unsigned_int {
 			4
@@ -7341,7 +7346,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			if e.wide_value(arg) {
 				e.store_pair(pair, line, col)!
 			} else {
-				e.widen_into_pair(pair, arg.typ.kind.is_unsigned(), e.narrow_width(arg.typ), line,
+				e.widen_into_pair(pair, arg.typ.is_unsigned_type(), e.narrow_width(arg.typ), line,
 					col)!
 			}
 			continue
@@ -7798,14 +7803,14 @@ fn (e Emitter) argument_is_single(call ast.Call, position int) bool {
 // argument_is_double makes.
 fn (e Emitter) argument_is_unsigned(call ast.Call, position int, arg ast.Expr) bool {
 	if parameter := call_parameter(call, position) {
-		return parameter.kind.is_unsigned()
+		return parameter.is_unsigned_type()
 	}
 	if unsigneds := e.unsigned_params[call.name] {
 		if position < unsigneds.len {
 			return unsigneds[position]
 		}
 	}
-	return arg.typ.kind.is_unsigned()
+	return arg.typ.is_unsigned_type()
 }
 
 // pair_argument_registers are the two consecutive general registers that carry a
