@@ -524,8 +524,8 @@ fn test_the_long_long_suffixes_are_part_of_the_number() {
 fn test_a_hexadecimal_float_is_one_number() {
 	// 6.4.4.2: a hexadecimal floating constant is `0x`, its digits, a point, an
 	// exponent letter and a binary exponent. The lexer keeps all of it as one
-	// number, which is the whole of what makes the parser's refusal of it a
-	// refusal of one construct rather than of three.
+	// number, which is what lets the parser read it as one constant rather than
+	// as three tokens standing in a row.
 	assert texts('0x1p3 0x1.8p-4 0x1P+3f 0x.8p3') == ['0x1p3', '0x1.8p-4', '0x1P+3f', '0x.8p3',
 		'']
 	assert kinds('0x1p3') == [.number, .eof]

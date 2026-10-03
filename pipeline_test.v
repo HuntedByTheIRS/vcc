@@ -2176,13 +2176,23 @@ fn test_a_float_is_four_bytes_and_its_value_is_the_four_byte_one() {
 		os.rm(source) or {}
 		os.rm(binary) or {}
 	}
-	// The hexadecimal spelling of a float is refused by name rather than read as
-	// the double of the same digits.
-	text := 'int main(void) { return 0x1.8p3f; }\n'
-	lexed := tokenize.lex(text)
-	parsed := parser.parse(lexed.tokens)
-	assert parsed.diagnostics.len == 1
-	assert parsed.diagnostics[0].msg.contains('hexadecimal floating constants are not implemented')
+	// The hexadecimal spelling reads to the same value as the decimal one,
+	// which is what makes it a spelling rather than a different number.
+	// Measured on gcc 16.2.1, which returns 1 for each of these as well.
+	hex_cases := [
+		'int main(void) { return 0x1.8p3f == 12.0f; }',
+		'int main(void) { return 0x1.8p3 == 12.0; }',
+		'int main(void) { return 0x.8p1 == 1.0; }',
+		'int main(void) { return 0x1p-2 == 0.25; }',
+		'int main(void) { return 0x0.1p4 == 1.0; }',
+	]
+	for i, source_text in hex_cases {
+		source := scratch('hex_float_${i}.c')
+		binary := scratch('hex_float_${i}')
+		assert compile_and_run([source, '-o', binary], '${source_text}\n') == 1
+		os.rm(source) or {}
+		os.rm(binary) or {}
+	}
 }
 
 // The arithmetic happens at four bytes. A float step rounds where a double one of

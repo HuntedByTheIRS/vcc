@@ -1,5 +1,6 @@
 module parser
 
+import math
 import strconv
 
 // Literal conversion. Both of these report instead of guessing: a constant that
@@ -30,23 +31,14 @@ fn parse_integer_literal(text string) !i64 {
 	if body.len > 1 && body[0] == `0` && (body[1] == `x` || body[1] == `X`) {
 		base = 16
 		digits = body[2..]
-		// A hexadecimal floating constant is a construct, and not a digit that
-		// the base does not have. gcc refuses `0x1.8` as `hexadecimal floating
-		// constants require an exponent` and compiles `0x1p3`, so reporting the
-		// `p` as a digit base 16 is missing says the wrong thing about what the
-		// program wrote. Its value needs a float type, which is the C2 lane's
-		// work and the emitter's, so what is owed here is the honest half: the
-		// refusal names the construct, and the caller reports the token this
-		// text was read from, so it is named at its location too.
-		if digits.contains('p') || digits.contains('P') {
-			return error('${text}: hexadecimal floating constants are not implemented')
-		}
-		// `0x1.8` is the same construct short of its exponent, which gcc also
-		// refuses, in these words: `hexadecimal floating constants require an
-		// exponent`. Naming it is the same answer as above, and better than
-		// reporting the point as a digit base 16 is missing.
-		if digits.contains('.') {
-			return error('${text}: hexadecimal floating constants require an exponent')
+		// A point or a `p` exponent makes the token a hexadecimal floating
+		// constant, and the floating reader takes it. The main path never sends
+		// one here, because is_floating_constant routes it, but `_BitInt` and
+		// bitfield widths read their number directly, and a width written as a
+		// float is not a width. Saying that is better than reporting the `p` as
+		// a digit base 16 is missing.
+		if digits.contains('.') || digits.contains('p') || digits.contains('P') {
+			return error('${text}: not an integer constant')
 		}
 	} else if body.len > 1 && body[0] == `0` && (body[1] == `b` || body[1] == `B`) {
 		base = 2
@@ -85,28 +77,36 @@ const max_u64 = u64(18446744073709551615)
 // rather than an integer one. 6.4.4.2 makes that a question about the spelling
 // and not about the value: a decimal constant is floating when it has a point or
 // an exponent, so `1.0` and `1e3` are floating and `1` is not. A hexadecimal
-// constant is decided by its `p` exponent instead, and those are refused by name
-// in the integer reader, so this reads past them rather than calling `0x1E` a
-// decimal constant with an exponent.
+// constant is floating when it is spelled as a hexadecimal floating constant, a
+// point or a `p` exponent: `0x1.8p3` and `0x1p3` are, and `0x1E` is the integer
+// 30. The `p` is what tells `0x1p3` from a hexadecimal integer, because `e` is a
+// digit of base 16 and `p` is not, so neither can be read as the other's marker.
 fn is_floating_constant(text string) bool {
 	if text.len > 1 && text[0] == `0` && (text[1] == `x` || text[1] == `X`) {
-		return false
+		return text.contains('.') || text.contains('p') || text.contains('P')
 	}
 	return text.contains('.') || text.contains('e') || text.contains('E')
 }
 
-// parse_floating_literal reads a decimal floating constant into the value it
-// names. The suffix decides the type, and this answers with the value that type
-// holds: a constant written with an `f` is a float, so the digits are rounded to
-// single precision here and the answer is the double that float is. That is the
-// whole point of the suffix: `0.1f` and `0.1` are different values, and reading
-// the first as a double would give the program a number it did not write.
+// parse_floating_literal reads a floating constant into the value it names. A
+// hexadecimal constant is a different shape answering the same question, what
+// value the spelling names, so it is handed to its own reader; everything below
+// is the decimal form.
+//
+// The suffix decides the type, and this answers with the value that type holds:
+// a constant written with an `f` is a float, so the digits are rounded to single
+// precision here and the answer is the double that float is. That is the whole
+// point of the suffix: `0.1f` and `0.1` are different values, and reading the
+// first as a double would give the program a number it did not write.
 //
 // The `l` suffix names a long double, which this compiler has no value for, so
 // it is refused by name. Any other suffix is refused by the character scan
 // below, because a constant this reader does not take is reported rather than
 // read as the part it recognises.
 fn parse_floating_literal(text string) !f64 {
+	if text.len > 1 && text[0] == `0` && (text[1] == `x` || text[1] == `X`) {
+		return parse_hex_floating_literal(text)
+	}
 	mut body := text
 	mut single := false
 	if body.len > 0 {
@@ -182,6 +182,232 @@ fn parse_floating_literal(text string) !f64 {
 		return f64(f32(value))
 	}
 	return value
+}
+
+// parse_hex_floating_literal reads a hexadecimal floating constant, which C99
+// 6.4.4.2 spells as `0x`, hexadecimal digits with an optional point, and a
+// binary exponent introduced by `p` or `P`. The exponent is required. Without
+// one, `0x1E` is a hexadecimal integer and `0x1.8` is neither an integer nor a
+// constant, which is why gcc 16.2.1 refuses `0x1.8` with `hexadecimal floating
+// constants require an exponent`.
+//
+// The value of a hexadecimal floating constant is a scaled power of two, so it
+// is a dyadic rational and can be held exactly. The reader rounds it to the
+// width the suffix names with the rule the hardware uses, to nearest with ties
+// to even, so the bits it produces are the bits gcc's reader produces from the
+// same spelling. A value past the range of its type becomes an infinity, which
+// is what gcc 16.2.1 warns about and then compiles.
+fn parse_hex_floating_literal(text string) !f64 {
+	if text.len < 2 || text[0] != `0` || (text[1] != `x` && text[1] != `X`) {
+		return error('${text}: not a hexadecimal floating constant')
+	}
+	body := text[2..]
+	mut exponent_at := -1
+	for i, ch in body {
+		if ch == `p` || ch == `P` {
+			exponent_at = i
+			break
+		}
+	}
+	if exponent_at < 0 {
+		return error('${text}: hexadecimal floating constants require an exponent')
+	}
+	mantissa := body[..exponent_at]
+	exponent := body[exponent_at + 1..]
+	// The significand: hexadecimal digits with at most one point, and at least
+	// one digit of either kind. `0x.8` has none before the point and `0x.p1`
+	// none after it, and both are short of a significand.
+	mut digits := []u8{}
+	mut fractional := 0
+	mut point_seen := false
+	for ch in mantissa {
+		if ch == `.` {
+			if point_seen {
+				return error('${text}: not a floating constant')
+			}
+			point_seen = true
+			continue
+		}
+		if digit_value(ch, 16) == none {
+			return error('${text}: ${ch.ascii_str()} is not part of a hexadecimal floating constant')
+		}
+		digits << ch
+		if point_seen {
+			fractional++
+		}
+	}
+	if digits.len == 0 {
+		return error('${text}: a hexadecimal floating constant has no digits')
+	}
+	// The binary exponent: a sign and decimal digits, the digits required,
+	// which is what makes `0x1p` and `0x1p+` mistakes rather than numbers.
+	mut i := 0
+	mut negative := false
+	if i < exponent.len && (exponent[i] == `+` || exponent[i] == `-`) {
+		negative = exponent[i] == `-`
+		i++
+	}
+	mut magnitude := 0
+	mut exponent_digits := 0
+	for i < exponent.len {
+		ch := exponent[i]
+		if ch < `0` || ch > `9` {
+			break
+		}
+		// The exponent is only compared against the range of the type, so once
+		// it is past any range the accumulator stops growing. A long run of
+		// digits then cannot overflow it, and the sign still travels.
+		if magnitude < 1000000 {
+			magnitude = magnitude * 10 + int(ch - `0`)
+		}
+		exponent_digits++
+		i++
+	}
+	if exponent_digits == 0 {
+		return error('${text}: an exponent with no digits')
+	}
+	suffix := exponent[i..]
+	mut single := false
+	if suffix.len == 1 && (suffix[0] == `f` || suffix[0] == `F`) {
+		single = true
+	} else if suffix.len == 1 && (suffix[0] == `l` || suffix[0] == `L`) {
+		return error('${text}: a long double literal names a type this compiler does not implement')
+	} else if suffix.len > 0 {
+		return error('${text}: ${suffix[0].ascii_str()} is not part of a floating constant')
+	}
+	if negative {
+		magnitude = -magnitude
+	}
+	// The digits name the integer D and the value is D * 16^-fractional * 2^exp,
+	// which is D * 2^(exp - 4*fractional).
+	return hex_scaled_to_float(digits, magnitude - 4 * fractional, single)
+}
+
+// hex_scaled_to_float converts D * 2^e, where D is the hexadecimal integer whose
+// digits are `digits`, to the floating type named, rounding to nearest with ties
+// to even. It handles the subnormal range and overflows to an infinity, which is
+// the value the hardware and gcc produce for the same spelling.
+fn hex_scaled_to_float(digits []u8, e int, single bool) f64 {
+	mut start := 0
+	for start < digits.len && digits[start] == `0` {
+		start++
+	}
+	if start == digits.len {
+		return 0.0
+	}
+	d := digits[start..]
+	nbits := 4 * (d.len - 1) + nibble_bits(d[0])
+	// The unbiased exponent of D's most significant bit.
+	u0 := nbits - 1 + e
+	p := if single { 24 } else { 53 }
+	emin := if single { -126 } else { -1022 }
+	emax := if single { 127 } else { 1023 }
+	bias := if single { 127 } else { 1023 }
+	frac_bits := p - 1
+	sub := emin - frac_bits
+	// The unit the answer rounds to: a normal value to the last bit its own
+	// leading exponent allows, a subnormal to the last bit the format holds,
+	// which is a fixed position rather than one that moves with the value.
+	step := if u0 >= emin { u0 - frac_bits } else { sub }
+	mut m := round_bits(d, nbits, e, step)
+	mut pattern := u64(0)
+	if u0 >= emin {
+		mut field := u0 + bias
+		// A carry out of the significand raises the exponent by one, and m
+		// becomes the leading bit alone.
+		if m == (u64(1) << p) {
+			m >>= 1
+			field++
+		}
+		if field > (emax + bias) {
+			return hex_infinity(single)
+		}
+		pattern = (u64(field) << frac_bits) | (m & ((u64(1) << frac_bits) - 1))
+	} else {
+		if m >= (u64(1) << frac_bits) {
+			// A carry out of the subnormal range has reached the smallest
+			// normal, whose exponent field is one and whose fraction is zero.
+			pattern = u64(1) << frac_bits
+		} else {
+			pattern = m
+		}
+	}
+	if single {
+		return f64(math.f32_from_bits(u32(pattern)))
+	}
+	return math.f64_from_bits(pattern)
+}
+
+// round_bits is the number of units of 2^step that D * 2^e is nearest, rounding
+// to nearest with ties to even against the bits below the unit. D's hexadecimal
+// digits are read most significant first; the unit sits `step - e` bits above
+// D's last bit, so that many bits are dropped, and a negative count means D is
+// narrower than the unit and the value is exact.
+fn round_bits(d []u8, nbits int, e int, step int) u64 {
+	shift := step - e
+	mut m := u64(0)
+	if shift <= 0 {
+		for k in 0 .. nbits {
+			bit := if hex_bit(d, nbits - 1 - k) { u64(1) } else { u64(0) }
+			m = (m << 1) | bit
+		}
+		return m << (-shift)
+	}
+	for k in 0 .. (nbits - shift) {
+		bit := if hex_bit(d, nbits - 1 - k) { u64(1) } else { u64(0) }
+		m = (m << 1) | bit
+	}
+	guard := hex_bit(d, shift - 1)
+	mut sticky := false
+	for k in 0 .. (shift - 1) {
+		if hex_bit(d, k) {
+			sticky = true
+			break
+		}
+	}
+	// Round up when the dropped part is past half, or is exactly half with an
+	// odd unit, which is the tie going to the even neighbour.
+	if guard && (sticky || ((m & 1) == 1)) {
+		m++
+	}
+	return m
+}
+
+// hex_bit is bit `i` of D, counting from the least significant bit, where D's
+// hexadecimal digits are held most significant first. A position the digits do
+// not reach is a zero bit.
+fn hex_bit(digits []u8, i int) bool {
+	if i < 0 {
+		return false
+	}
+	at := digits.len - 1 - i / 4
+	if at < 0 || at >= digits.len {
+		return false
+	}
+	value := digit_value(digits[at], 16) or { return false }
+	return (value & (1 << (i % 4))) != 0
+}
+
+// nibble_bits is how many bits a hexadecimal digit has, four when the top bit is
+// set and fewer otherwise. The first digit of a significand is never zero.
+fn nibble_bits(v u8) int {
+	mut bits := 4
+	mut mask := u8(8)
+	for (v & mask) == 0 {
+		bits--
+		mask >>= 1
+	}
+	return bits
+}
+
+// hex_infinity is the infinity a hexadecimal floating constant past the range of
+// its type becomes. gcc 16.2.1 warns `floating constant exceeds range` and
+// compiles the infinity, so the value is the one it produced.
+fn hex_infinity(single bool) f64 {
+	if single {
+		return f64(math.f32_from_bits(u32(0x7f800000)))
+	}
+	return math.f64_from_bits(u64(0x7ff0000000000000))
 }
 
 // parse_character_literal reads a character constant into its value. The result

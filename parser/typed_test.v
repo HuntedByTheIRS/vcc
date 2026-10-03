@@ -1186,16 +1186,19 @@ fn test_a_float_constant_is_not_the_double_of_the_same_digits() {
 
 fn test_the_long_double_suffix_is_still_refused_by_name() {
 	// `l` names a type this compiler has no value for, and it is refused by
-	// name at the constant rather than read as a double. The hexadecimal form
-	// is not implemented at all, with or without a suffix, and its refusal
-	// names the construct rather than the suffix on the end of it.
+	// name at the constant rather than read as a double. A hexadecimal
+	// constant carries the same suffix and gets the same answer, while the `f`
+	// suffix on one is a float, which is a value this compiler has.
 	long_double := parsed('double f(void) { return 1.5L; }')
 	assert long_double.diagnostics.len == 1
 	assert long_double.diagnostics[0].msg.contains('long double literal')
 	assert long_double.diagnostics[0].col == 25
-	hex := parsed('double f(void) { return 0x1.8p3f; }')
-	assert hex.diagnostics.len == 1
-	assert hex.diagnostics[0].msg.contains('hexadecimal floating constants')
+	hex_long := parsed('double f(void) { return 0x1.8p3L; }')
+	assert hex_long.diagnostics.len == 1
+	assert hex_long.diagnostics[0].msg.contains('long double literal')
+	assert hex_long.diagnostics[0].col == 25
+	hex_float := parsed('double f(void) { return 0x1.8p3f; }')
+	assert hex_float.diagnostics.len == 0
 }
 
 fn test_a_mixed_operation_is_a_double_on_both_sides() {
