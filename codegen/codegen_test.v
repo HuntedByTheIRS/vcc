@@ -652,6 +652,14 @@ fn test_the_extended_type_is_refused_where_it_is_not_converted_to_a_double() {
 		Options{})
 	assert element.diagnostics.len == 0
 	assert run_image(element.bytes) == 1
+	// A long double used as a subscript: the value of one is the address of its
+	// bytes, so an index of the type would scale that address and read from
+	// nowhere. The conversion an index needs is refused by name.
+	subscript := emit(translation_unit('int main(void) { int a[2]; a[0] = 7; a[1] = 9; long double i = 1.0L; return a[i]; }'),
+		Options{})
+	assert subscript.diagnostics.len == 1
+	assert subscript.diagnostics[0].msg.contains('long double')
+	assert subscript.bytes.len == 0
 	// A brace initializer for a top-level array of long doubles has no field to
 	// hold its extended constants, so it is refused by name rather than written
 	// as the zeros the storage starts with. The refusal is the reader's, so the

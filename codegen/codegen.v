@@ -2127,6 +2127,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned an element of it, and it is not an array')
 				return error('not an array')
 			}
+			e.check_subscript_index(subscript)!
 			e.emit_expr_at(subscript, depth)!
 			register := e.accumulator(stmt.line, stmt.col)!
 			base := e.scratch(stmt.line, stmt.col)!
@@ -2220,6 +2221,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an element of ${stmt.target} is written, and ${stmt.target} is not an array')
 		return error('not an array')
 	}
+	e.check_subscript_index(subscript)!
 	e.emit_expr_at(subscript, depth)!
 	base := e.frame_pointer(stmt.line, stmt.col)!
 	register := e.accumulator(stmt.line, stmt.col)!
@@ -4386,6 +4388,19 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 // An element that is itself an array is worth the address of its first element,
 // which is what an array's name is worth, and it is what `arr[0][1]` needs `arr[0]`
 // to be.
+// check_subscript_index refuses an extended value used as a subscript. A
+// subscript is an integer the back end loads into a general register, and the
+// value of a long double is the address of its bytes, so an index of the type
+// would be that address scaled by the element size and read from nowhere: gcc
+// converts the index to an integer, and that conversion is one this back end
+// refuses by name everywhere else.
+fn (mut e Emitter) check_subscript_index(index ast.Expr) !void {
+	if e.long_double_of(index) {
+		e.diagnostics << problem(expr_line(index), expr_col(index), 'unsupported: a long double is used as a subscript, and converting an index from a value of that type is not a conversion this back end makes')
+		return error('long double subscript')
+	}
+}
+
 fn (mut e Emitter) emit_index(expr ast.Index, depth int) !void {
 	if expr.base is ast.Ident {
 		name := (expr.base as ast.Ident).name
@@ -4411,6 +4426,7 @@ fn (mut e Emitter) emit_index(expr ast.Index, depth int) !void {
 // reference the layout fills in.
 fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, local bool, slot Slot) !void {
 	if local {
+		e.check_subscript_index(expr.index)!
 		e.emit_expr_at(expr.index, depth + 1)!
 		base := e.frame_pointer(expr.line, expr.col)!
 		register := e.accumulator(expr.line, expr.col)!
@@ -4458,6 +4474,7 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 	// element is an offset from the address of the object rather than from the
 	// frame.
 	object := e.global_of(name) or { return error('unknown name') }
+	e.check_subscript_index(expr.index)!
 	e.emit_expr_at(expr.index, depth + 1)!
 	register := e.accumulator(expr.line, expr.col)!
 	// The address of the object goes into the scratch register after the index
@@ -4542,6 +4559,7 @@ fn (mut e Emitter) emit_element_address(expr ast.Index, depth int) !void {
 	e.emit_base_address(expr.base, depth + 1)!
 	base := e.value_slot(depth)
 	e.store_accumulator(base, expr.line, expr.col)!
+	e.check_subscript_index(expr.index)!
 	e.emit_expr_at(expr.index, depth + 1)!
 	index := e.accumulator(expr.line, expr.col)!
 	other := e.scratch(expr.line, expr.col)!
