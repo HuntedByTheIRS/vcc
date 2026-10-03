@@ -3710,6 +3710,41 @@ fn test_a_long_chain_of_conditionals_compiles_and_runs() {
 	assert run_image(emitted.bytes) == 1
 }
 
+// 6.5.15p3 gives a conditional whose two arms are the same structure type that
+// type, and 6.5.16 copies it wherever a value of it is wanted. Before this the
+// emitter had a path only for a name, a member and an element, so every value
+// use of such a conditional was refused. The program below checks an
+// initializer, an assignment, a call argument, a return value and a member read
+// and exits 0 when all five are the arm's own value.
+fn test_a_conditional_of_two_same_structure_arms_is_used_as_a_value() {
+	used := emit(translation_unit('typedef struct { int a; int b; } S; S x = {1, 2}; S y = {3, 4}; int take(S v) { return v.a * 10 + v.b; } S mk(int c) { S p = {1, 2}; S q = {3, 4}; return c ? p : q; } int main(void) { S z = 1 ? x : y; if (z.a != 1 || z.b != 2) return 1; S w = 0 ? x : y; if (w.a != 3 || w.b != 4) return 2; S zz; zz = 0 ? x : y; if (zz.a != 3 || zz.b != 4) return 3; if (take(1 ? x : y) != 12) return 4; if (take(0 ? x : y) != 34) return 5; S r = mk(1); if (r.a != 1 || r.b != 2) return 6; S s = mk(0); if (s.a != 3 || s.b != 4) return 7; if ((1 ? x : y).a != 1) return 8; if ((0 ? x : y).b != 4) return 9; return 0; }'),
+		Options{})
+	assert used.diagnostics.len == 0
+	assert run_image(used.bytes) == 0
+}
+
+// The result of the conditional is the arm's value and not a second name for
+// it: writing through the result must leave both arms alone. An implementation
+// that answered with the arm's address instead of a copy would write 99 into x
+// or y and the checks below would report it.
+fn test_a_conditional_of_two_same_structure_arms_is_copied_not_aliased() {
+	aliased := emit(translation_unit('typedef struct { int a; int b; } S; S x = {1, 2}; S y = {3, 4}; int main(void) { S z = 0 ? x : y; z.a = 99; if (z.a != 99) return 1; if (x.a != 1) return 2; if (y.a != 3) return 3; if (y.b != 4) return 4; S v = 1 ? x : y; v.a = 99; if (x.a != 1) return 5; if (y.a != 3) return 6; return 0; }'),
+		Options{})
+	assert aliased.diagnostics.len == 0
+	assert run_image(aliased.bytes) == 0
+}
+
+// A member of what a conditional is worth is read from the temporary the
+// conditional's value is materialized into: the first member is the second
+// arm's and the second member is the first arm's, so a fix that always took one
+// arm would report it.
+fn test_the_arm_a_structure_conditional_selects_is_the_one_that_runs() {
+	selected := emit(translation_unit('typedef struct { int a; int b; } S; S x = {1, 2}; S y = {3, 4}; int main(void) { if ((0 ? x : y).a != 3) return 1; if ((0 ? x : y).b != 4) return 2; if ((1 ? x : y).a != 1) return 3; if ((1 ? x : y).b != 2) return 4; return 0; }'),
+		Options{})
+	assert selected.diagnostics.len == 0
+	assert run_image(selected.bytes) == 0
+}
+
 // A member is read from any expression the reader can build, not only a name: a
 // chained arrow through a linked list, an element of an array of structs, and
 // the object a call hands back by value. Measured on gcc 16.2.1, the four
