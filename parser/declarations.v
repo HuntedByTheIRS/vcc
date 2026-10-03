@@ -1010,6 +1010,16 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 							data_problem = true
 							literal_refused = true
 						}
+					} else if p.looks_like_compound_literal() {
+						// An unnamed object with static storage duration, defined
+						// in the image like any other top-level object, whose
+						// address initializes this pointer.
+						if address := p.file_scope_compound_literal() {
+							data_address = address
+						} else {
+							data_problem = true
+							literal_refused = true
+						}
 					} else if address := p.file_scope_address() {
 						data_address = address
 					} else {

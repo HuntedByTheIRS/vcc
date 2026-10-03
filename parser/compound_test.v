@@ -72,3 +72,21 @@ fn test_sizeof_a_compound_literal_is_a_constant() {
 	assert value is ast.IntLit
 	assert (value as ast.IntLit).value == 12
 }
+
+fn test_a_file_scope_compound_literal_is_a_static_object() {
+	result := compound_parsed('int *p = (int[]){1, 2, 3};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 2
+	object := result.unit.globals[0]
+	assert object.name.starts_with('__vcc_compound_')
+	assert object.count == 3
+	assert object.inits == [i64(1), 2, 3]
+	p := result.unit.globals[1]
+	assert p.name == 'p'
+	address := p.address or {
+		assert false
+		return
+	}
+	assert address.name == object.name
+	assert !address.string
+}

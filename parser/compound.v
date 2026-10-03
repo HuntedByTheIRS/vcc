@@ -28,11 +28,12 @@ fn (mut p Parser) parse_compound_literal(spec DeclSpec, d Declarator, at tokeniz
 		return error('compound literal initializer')
 	}
 	if p.compound_pending.len == 0 {
-		// A compound literal outside a statement is one whose object would live
-		// in the image rather than in a frame, and that object is not built
-		// here.
-		p.error_at(at, 'unsupported: a compound literal at file scope is not implemented')
-		return error('compound literal at file scope')
+		// A compound literal outside a statement is one whose object lives in
+		// the image rather than in a frame. The one shape this reader builds
+		// there is a pointer initialized by an array literal, which the
+		// file-scope reader recognizes before it gets here.
+		p.error_at(at, 'unsupported: a compound literal here is not one this compiler builds')
+		return error('compound literal outside a statement')
 	}
 	name := p.compound_name()
 	target, stmts := p.compound_literal_object(name, spec, d, at, list)
@@ -133,4 +134,91 @@ fn (mut p Parser) compound_literal_size(spec DeclSpec, d Declarator, list BraceL
 		}
 	}
 	return p.representation.size_of(target)
+}
+
+// looks_like_compound_literal says whether the tokens at the cursor are a
+// compound literal written where only a brace list after the closing
+// parenthesis can tell it from a conversion. The parenthesis are matched
+// without reading anything, because the answer decides which reader runs and a
+// reader that guessed would have to be undone.
+fn (p Parser) looks_like_compound_literal() bool {
+	if !p.at_punct('(') || !p.starts_type_name(p.peek_at(1)) {
+		return false
+	}
+	mut depth := 0
+	mut i := p.pos
+	for i < p.tokens.len {
+		t := p.tokens[i]
+		if t.kind == .punct {
+			if t.text == '(' {
+				depth++
+			} else if t.text == ')' {
+				depth--
+				if depth == 0 {
+					next := i + 1
+					return next < p.tokens.len && p.tokens[next].kind == .punct
+						&& p.tokens[next].text == '{'
+				}
+			}
+		}
+		i++
+	}
+	return false
+}
+
+// file_scope_compound_literal reads a compound literal written as the
+// initializer of an object at file scope, where the unnamed object it names has
+// static storage duration rather than the enclosing block's. The object is a
+// definition in the image like any other top-level object, with a name of the
+// reader's own, and the value the literal is worth is that object's address:
+// `int *p = (int[]){1, 2, 3};` defines an int[3] holding 1, 2 and 3 and
+// initializes p with the address of its first element, which is what decays an
+// array to a pointer.
+//
+// The shape is read for an array whose element is a scalar, which is what an
+// image writes as a run of constants. An array of aggregates and a struct
+// literal would need the member walk the file-scope reader already does for a
+// named object, and neither is a shape the tests here settle, so each is
+// refused by name rather than written wrong.
+fn (mut p Parser) file_scope_compound_literal() ?ast.AddressInit {
+	at := p.peek()
+	name := p.compound_name()
+	p.next() // (
+	spec, d, _ := p.parse_type_name_parts(1) or { return none }
+	if !p.expect_punct(')') {
+		return none
+	}
+	list := p.parse_brace_initializer(false) or { return none }
+	declared := p.declared_type(spec.clause, d)
+	if !declared.is_array() {
+		p.error_at(at, 'unsupported: a compound literal at file scope is implemented for an array of a scalar type, and this one is of the type ${declared.describe()}')
+		return none
+	}
+	element := declared.element() or { return none }
+	if element.kind in [types.Kind.struct_, .union_, .array, .unknown] {
+		p.error_at(at, 'unsupported: a compound literal at file scope is implemented for an array of a scalar type, and its element is ${element.describe()}')
+		return none
+	}
+	mut count := d.array_count()
+	if count <= 0 {
+		count = list.elements.len
+	}
+	written := p.spelling_of(spec, 0)
+	inits, init_floats := p.initializer_list_for(written, list.elements, name, at)
+	p.declared[name] = true
+	p.globals << ast.Global{
+		name:        name
+		typ:         written
+		resolved:    types.array_of(element, count)
+		count:       count
+		inits:       inits
+		init_floats: init_floats
+		line:        at.line
+		col:         at.col
+	}
+	return ast.AddressInit{
+		name: name
+		line: at.line
+		col:  at.col
+	}
 }
