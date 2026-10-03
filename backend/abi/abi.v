@@ -145,7 +145,13 @@ pub fn pair_places(target backend.Target, first_floating bool, second_floating b
 // takes in a frame, which is asked by the parser, because a question about the
 // calling convention is only ever asked about an object that is handed over.
 fn object_bytes(r types.Representation, declared types.Type) int {
-	if declared.kind !in [types.Kind.struct_, .union_, .complex_float, .complex_double]
+	if declared.kind in [types.Kind.complex_float, types.Kind.complex_double] {
+		// A complex object is not a struct and has no members to lay out: its
+		// size is the one the model measured for the type, which is two
+		// components one after the other.
+		return r.size_of(declared) or { 0 }
+	}
+	if declared.kind !in [types.Kind.struct_, .union_]
 		|| !declared.is_complete() {
 		return 0
 	}
