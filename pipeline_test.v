@@ -3313,10 +3313,10 @@ fn test_a_file_scope_auto_defines_an_object_of_the_initializer_type() {
 // file-scope object and an assignment into one, an element of a const array, and
 // a read through a `const S *`.
 //
-// An assignment into a struct member of the aggregate type is not here because
-// this back end stores no member of an aggregate type at all, which the second
-// program measures: that shape is refused with or without const, and it is a
-// back-end limit rather than the qualifier rule this test is for.
+// An assignment into a struct member of the aggregate type is one of the
+// positions now: the member takes a copy of the object's bytes, and the second
+// program compiles and runs to measure it. Measured on gcc 16.2.1, `S x = {5};
+// struct Holder h; h.m = x; return h.m.a;` exits 5.
 fn test_a_const_qualified_aggregate_reads_in_the_positions_that_take_it() {
 	source := scratch('constagg.c')
 	binary := scratch('constagg')
@@ -3338,13 +3338,11 @@ fn test_a_const_qualified_aggregate_reads_in_the_positions_that_take_it() {
 	assert compile_and_run([source, '-o', binary], program) == 21
 	os.rm(source) or {}
 	os.rm(binary) or {}
-	// The member-of-aggregate shape is the back end's limit and not the
-	// qualifier's: a plain value into the same member is refused the same way.
+	// The member-of-aggregate shape is the same copy now, and the qualifier rule
+	// reads a const-qualified aggregate the same way.
 	member := scratch('constagg_member.c')
-	image := compile([member, '-o', scratch('constagg_member')],
-		'typedef struct { int a; } S;\nstruct Holder { S m; };\nint main(void) { S x = {5}; struct Holder h; h.m = x; return h.m.a; }\n')
-	assert image.diagnostics.len == 1
-	assert image.diagnostics[0].msg.contains('member h.m')
+	assert compile_and_run([member, '-o', scratch('constagg_member')],
+		'typedef struct { int a; } S;\nstruct Holder { S m; };\nint main(void) { S x = {5}; struct Holder h; h.m = x; return h.m.a; }') == 5
 	os.rm(member) or {}
 }
 
@@ -3361,4 +3359,21 @@ fn test_writing_an_object_that_is_not_modifiable_is_refused() {
 	object := parser.parse(tokenize.lex(const_object).tokens)
 	assert object.diagnostics.len >= 1
 	assert object.diagnostics[0].msg.contains('const-qualified')
+}
+
+// A designated member of a compound literal whose own type is an aggregate takes
+// the element as its value, so the designator resolves against the literal's own
+// type and not against the member's: `(Info){.file = S}` copies S into the member
+// and the program reads 4 and x back out. Measured on gcc 16.2.1, the same
+// program prints `4 x` and exits 0.
+fn test_a_designated_aggregate_member_of_a_compound_literal_is_copied() {
+	source := scratch('desig_agg.c')
+	binary := scratch('desig_agg')
+	program := 'typedef struct { char *str; long len; } string;\n' +
+		'typedef struct { long line_no; string file; string mod; } Info;\n' +
+		'static string S = {"x", 1};\n' +
+		"int main(void) { Info d = (Info){.line_no = 4, .file = S, .mod = S}; return (d.line_no == 4 && d.file.len == 1 && d.mod.len == 1 && d.file.str[0] == 'x') ? 0 : 7; }\n"
+	assert compile_and_run([source, '-o', binary], program) == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
 }
