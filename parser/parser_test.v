@@ -774,6 +774,47 @@ fn test_a_comma_expression_is_left_associative_and_worth_its_right_operand() {
 	assert (outer.right as ast.Assign).op == '='
 }
 
+// A comma in a for's init or update is 6.5.17's comma operator written where
+// the value is thrown away: the clauses run in the order they were written, so
+// the desugared block holds each of them as its own statement. `for (i = 0, j =
+// 10; i < j; i++, j--) ;` is the corpus's own line, and it was refused before
+// this reader existed because the init and update were read by a reader that
+// stops at the comma.
+fn test_a_for_init_and_update_read_a_comma() {
+	result := parsed('int main() { int i; int j; for (i = 0, j = 10; i < j; i++, j--) ; return 0; }')
+	assert result.diagnostics.len == 0
+	block := result.unit.decls[0].body[2]
+	assert block.kind == .block
+	head := block.body
+	// The two init clauses, then the loop the desugaring writes.
+	assert head.len == 3
+	assert head[0].kind == .assign
+	assert head[1].kind == .assign
+	loop := head[2]
+	assert loop.kind == .while_stmt
+	assert loop.step.len == 2
+	assert loop.step[0].kind == .expr_stmt
+	assert loop.step[1].kind == .expr_stmt
+}
+
+// A for's condition is an expression, so a comma there is the comma operator:
+// gcc 16.2.1 runs `for (i = 0; i < 5, i < 3; i++) ;` three times, because the
+// condition is worth its right operand. The reader keeps the comma as one
+// condition rather than stopping at it, which is what the corpus's line needs
+// for the init and update and what a bare comma condition needs of its own.
+fn test_a_for_condition_reads_a_comma_expression() {
+	result := parsed('int main() { int i; for (i = 0; i < 5, i < 3; i++) ; return i; }')
+	assert result.diagnostics.len == 0
+	loop := result.unit.decls[0].body[1].body[1]
+	assert loop.kind == .while_stmt
+	cond := loop.cond or {
+		assert false
+		return
+	}
+	assert cond is ast.Comma
+	assert (cond as ast.Comma).typ.kind == .int_
+}
+
 // A GNU statement expression is `({ ... })`: a brace-enclosed compound statement
 // in parentheses, read as a primary expression. Its value is the value of its
 // last statement when that statement is an expression, and the statements before

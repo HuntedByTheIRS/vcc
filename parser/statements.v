@@ -961,6 +961,25 @@ fn (mut p Parser) case_constant(expr ast.Expr) ?i64 {
 	return value
 }
 
+// parse_for_clause_statements reads a for clause whose value is thrown away:
+// an expression, and while a comma follows, another. 6.5.17 makes `A , B`
+// sequence A before B and makes the pair worth B; where the value is discarded
+// that is the two written in order, which is what the head and step lists
+// already hold, so a comma in an init or an update is a second statement and
+// not a new node. The commas an argument list and a brace initializer write
+// stay separators, because this reader descends through the statement reader
+// and never through the parenthesized-expression reader that reads a comma as
+// an operator.
+fn (mut p Parser) parse_for_clause_statements() ![]ast.Stmt {
+	mut stmts := []ast.Stmt{}
+	stmts << p.parse_expression_statement()!
+	for p.at_punct(',') {
+		p.next()
+		stmts << p.parse_expression_statement()!
+	}
+	return stmts
+}
+
 // parse_for_statement reads `for (A; B; C) D` and writes the loop it means: a
 // block holding A, then a while whose condition is B and whose body is D with C
 // after it. The tree has a while and no for, so a reader that never saw the
@@ -972,6 +991,10 @@ fn (mut p Parser) case_constant(expr ast.Expr) ?i64 {
 // loop only a break ends: the language says the condition is a nonzero constant
 // there, so the tree spells it 1, which is the same loop in the shape this tree
 // has.
+//
+// A comma in A or C is the comma operator, `A , B`, written where the value is
+// thrown away: both are read as clauses in the order they were written, which
+// is the same loop.
 fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 	t := p.next() // for
 	if !p.expect_punct('(') {
@@ -986,7 +1009,7 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 		// that every header has, which is where the condition starts.
 		head = p.parse_local_declaration()
 	} else {
-		stmt := p.parse_expression_statement() or {
+		head = p.parse_for_clause_statements() or {
 			p.skip_statement()
 			return []ast.Stmt{}
 		}
@@ -994,7 +1017,6 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 			p.skip_statement()
 			return []ast.Stmt{}
 		}
-		head << stmt
 	}
 	mut cond := ast.Expr(ast.IntLit{
 		value: 1
@@ -1004,7 +1026,7 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 	})
 	if !p.at_punct(';') {
 		p.compound_unstable++
-		cond = p.parse_expression() or {
+		cond = p.parse_comma_expression() or {
 			p.compound_unstable--
 			p.skip_statement()
 			return []ast.Stmt{}
@@ -1018,13 +1040,12 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 	mut step := []ast.Stmt{}
 	if !p.at_punct(')') {
 		p.compound_unstable++
-		stmt := p.parse_expression_statement() or {
+		step = p.parse_for_clause_statements() or {
 			p.compound_unstable--
 			p.skip_statement()
 			return []ast.Stmt{}
 		}
 		p.compound_unstable--
-		step << stmt
 	}
 	if !p.expect_punct(')') {
 		p.skip_statement()
