@@ -2271,8 +2271,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned an element of it, and it is not an array')
 				return error('not an array')
 			}
-			e.check_subscript_index(subscript)!
-			e.emit_expr_at(subscript, depth)!
+			e.emit_subscript_index(subscript, depth)!
 			register := e.accumulator(stmt.line, stmt.col)!
 			base := e.scratch(stmt.line, stmt.col)!
 			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, e.target.name_of(base))
@@ -2365,8 +2364,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an element of ${stmt.target} is written, and ${stmt.target} is not an array')
 		return error('not an array')
 	}
-	e.check_subscript_index(subscript)!
-	e.emit_expr_at(subscript, depth)!
+	e.emit_subscript_index(subscript, depth)!
 	register := e.accumulator(stmt.line, stmt.col)!
 	mut base := e.frame_pointer(stmt.line, stmt.col)!
 	mut offset := slot.offset
@@ -4610,12 +4608,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 				return error('128-bit value')
 			}
-			if slot.bytes > 0 {
+			if slot.bytes > 0 && slot.count == 0 {
 				// The name of an object of an aggregate type is the object, and
 				// a value of a struct type is not a value this back end moves:
 				// a member of it and its address are, so the refusal names the
 				// shape that is not implemented instead of reading the object's
-				// first bytes as an int.
+				// first bytes as an int. An array of such objects is not one of
+				// them: its name is the address of its first element, which is
+				// what the array branch below answers and what `p = t` needs.
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is an object of an aggregate type, and using it as a value is not implemented; a member of it, or its address, is')
 				return error('aggregate value')
 			}
@@ -4793,6 +4793,22 @@ fn (mut e Emitter) check_subscript_index(index ast.Expr) !void {
 	}
 }
 
+// emit_subscript_index reads the index of a subscript and widens it to a word
+// before the element address scales it. 6.5.6p8 converts the index to the
+// pointer's arithmetic type, and a signed value of four bytes would otherwise
+// arrive zero-extended: an index of -1 read at four bytes is 4294967295, which
+// scaled by the element size lands four gigabytes past the base rather than at
+// the element before it. extend_operand_to_word widens a signed index with its
+// sign and leaves an unsigned one zero-extended, which is the same conversion
+// for that type, and does nothing to a value already a word wide.
+// emit_pointer_step widens the index of `p + i` the same way. The widened value
+// is left in the accumulator, where both element-address paths expect the index.
+fn (mut e Emitter) emit_subscript_index(index ast.Expr, depth int) !void {
+	e.check_subscript_index(index)!
+	e.emit_expr_at(index, depth)!
+	e.extend_operand_to_word(index, expr_line(index), expr_col(index))!
+}
+
 fn (mut e Emitter) emit_index(expr ast.Index, depth int) !void {
 	if expr.base is ast.Ident {
 		name := (expr.base as ast.Ident).name
@@ -4818,8 +4834,7 @@ fn (mut e Emitter) emit_index(expr ast.Index, depth int) !void {
 // reference the layout fills in.
 fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, local bool, slot Slot) !void {
 	if local {
-		e.check_subscript_index(expr.index)!
-		e.emit_expr_at(expr.index, depth + 1)!
+		e.emit_subscript_index(expr.index, depth + 1)!
 		base := e.frame_pointer(expr.line, expr.col)!
 		register := e.accumulator(expr.line, expr.col)!
 		e.element_address(base, register, slot.width, slot.offset, slot.wide || slot.long_double,
@@ -4866,8 +4881,7 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 	// element is an offset from the address of the object rather than from the
 	// frame.
 	object := e.global_of(name) or { return error('unknown name') }
-	e.check_subscript_index(expr.index)!
-	e.emit_expr_at(expr.index, depth + 1)!
+	e.emit_subscript_index(expr.index, depth + 1)!
 	register := e.accumulator(expr.line, expr.col)!
 	// The address of the object goes into the scratch register after the index
 	// is computed, so that the index expression cannot overwrite it on the way.
@@ -4954,8 +4968,7 @@ fn (mut e Emitter) emit_element_address(expr ast.Index, depth int) !void {
 	e.emit_base_address(expr.base, depth + 1)!
 	base := e.value_slot(depth)
 	e.store_accumulator(base, expr.line, expr.col)!
-	e.check_subscript_index(expr.index)!
-	e.emit_expr_at(expr.index, depth + 1)!
+	e.emit_subscript_index(expr.index, depth + 1)!
 	index := e.accumulator(expr.line, expr.col)!
 	other := e.scratch(expr.line, expr.col)!
 	e.load_argument(base, other, e.target.word_size, expr.line, expr.col)!
@@ -4978,8 +4991,7 @@ fn (mut e Emitter) emit_dynamic_element_address(expr ast.Index, stride_expr ast.
 	e.emit_expr_at(stride_expr, depth + 1)!
 	stride_slot := e.reserve(e.target.word_size)
 	e.store_accumulator(stride_slot, expr.line, expr.col)!
-	e.check_subscript_index(expr.index)!
-	e.emit_expr_at(expr.index, depth + 1)!
+	e.emit_subscript_index(expr.index, depth + 1)!
 	index_slot := e.reserve(e.target.word_size)
 	e.store_accumulator(index_slot, expr.line, expr.col)!
 	e.emit_base_address(expr.base, depth + 1)!

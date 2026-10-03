@@ -326,6 +326,36 @@ fn test_a_member_read_through_a_top_level_pointer_reads_the_object() {
 	assert run_image(written.bytes) == 59
 }
 
+// A pointer to an aggregate is an ordinary pointer for a subscript: `e[i]` is
+// `*(e + i)`, so the index is scaled by the size of the aggregate and the
+// member that follows is read from the element the address names, not from the
+// first element every time. An array of aggregates is an array like any other,
+// so it decays to the address of its first element in `e = t`, and a union is
+// an aggregate here as much as a struct is. Measured with gcc 16.2.1, the
+// programs below exit 135, 1, 6, 6 and 8.
+fn test_a_subscript_through_a_pointer_to_an_aggregate_reads_the_element() {
+	every := emit(translation_unit('struct S { int a, b; }; int main(void) { struct S t[3] = {{1,2},{3,4},{5,6}}; struct S *e = t; return e[0].a * 100 + e[1].a * 10 + e[2].a; }'),
+		Options{})
+	assert every.diagnostics.len == 0
+	assert run_image(every.bytes) == 135
+	negative := emit(translation_unit('struct S { int a, b; }; int main(void) { struct S t[3] = {{1,2},{3,4},{5,6}}; struct S *e = &t[1]; return e[-1].a; }'),
+		Options{})
+	assert negative.diagnostics.len == 0
+	assert run_image(negative.bytes) == 1
+	union_ := emit(translation_unit('union U { int i; char c; }; int main(void) { union U a[2]; union U *u = a; a[0].i = 1; a[1].i = 6; return u[1].i; }'),
+		Options{})
+	assert union_.diagnostics.len == 0
+	assert run_image(union_.bytes) == 6
+	row := emit(translation_unit('int main(void) { int m[2][3] = {{1,2,3},{4,5,6}}; int (*r)[3] = m; return r[1][2]; }'),
+		Options{})
+	assert row.diagnostics.len == 0
+	assert run_image(row.bytes) == 6
+	with_array := emit(translation_unit('struct A { int v[3]; }; int main(void) { struct A q[2]; struct A *p = q; q[1].v[2] = 8; return p[1].v[2]; }'),
+		Options{})
+	assert with_array.diagnostics.len == 0
+	assert run_image(with_array.bytes) == 8
+}
+
 // A top-level pointer whose initializer is an address holds that address in the
 // image: the address of an object, the bytes of a string literal, the address of
 // a function this unit defines, and the address of one the loader resolves, each
