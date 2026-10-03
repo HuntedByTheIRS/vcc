@@ -1836,14 +1836,19 @@ fn test_an_increment_of_a_pointer_name_is_read_as_a_step() {
 	assert array_pointer.diagnostics.len == 0
 }
 
-// A type this compiler does not step is refused by the type it is: a double is
-// a floating value this back end does not step, and a 128-bit integer is an
-// integer with no value to step.
+// A floating object is stepped by one of its own width, so a double and a float
+// are both read and not refused. A 128-bit integer is still refused by name: it
+// is an integer with no value the back end can step.
+fn test_an_increment_steps_a_floating_object() {
+	double := parsed('int main(void) { double d = 0.0; d--; return 0; }')
+	assert double.diagnostics.len == 0
+	single := parsed('int main(void) { float f = 0.0f; f++; return 0; }')
+	assert single.diagnostics.len == 0
+}
+
+// A type this compiler does not step is refused by the type it is, and a 128-bit
+// integer is an integer with no value to step.
 fn test_an_increment_refuses_a_name_this_compiler_does_not_step() {
-	floating := parsed('int main(void) { double d = 0.0; d--; return 0; }')
-	assert floating.diagnostics.len == 1
-	assert floating.diagnostics[0].msg.contains('which is double')
-	assert floating.diagnostics[0].msg.contains('steps an object of an integer or a pointer type only')
 	wide := parsed('int main(void) { __int128 x = 5; x++; return 0; }')
 	assert wide.diagnostics.len == 1
 	assert wide.diagnostics[0].msg.contains('which is __int128')

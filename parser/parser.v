@@ -1593,13 +1593,13 @@ fn (mut p Parser) element_type(t types.Type, operand ast.Expr, at tokenize.Token
 // literal, a call's result and an arithmetic value are named in a diagnostic
 // rather than read as something else.
 //
-// The type has to be an integer the back end moves as a value, whose step is
-// one, or a pointer, whose step is the size of what it points at. The reader
-// accepts both and leaves the pointer's stride to the emitter, which has the
-// target's sizes; a pointer to a type with no size is refused there by name. A
-// name whose type the reader never resolved is left for the walk that reports
-// names nothing declares, so an undeclared name gets that message and not this
-// one.
+// The type has to be a scalar the back end moves as a value: an integer, whose
+// step is one, a pointer, whose step is the size of what it points at, or a
+// floating value, whose step is one of its own width. The reader accepts all
+// three and leaves the pointer's stride to the emitter, which has the target's
+// sizes; a pointer to a type with no size is refused there by name. A name whose
+// type the reader never resolved is left for the walk that reports names nothing
+// declares, so an undeclared name gets that message and not this one.
 fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !ast.Expr {
 	if !steps_an_object(operand) {
 		p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, and this compiler steps an object - a name, an element, a member or what a pointer points at - only')
@@ -1610,7 +1610,7 @@ fn (mut p Parser) inc_dec(op tokenize.Token, operand ast.Expr, postfix bool) !as
 		reason := if kind in [.int128, .unsigned_int128] {
 			'and this back end has no ${operand.typ.describe()} value to step'
 		} else {
-			'and this compiler steps an object of an integer or a pointer type only'
+			'and this compiler steps an object of an integer, a pointer or a floating type only'
 		}
 		p.error_at(op, 'unsupported: ${op.text} on ${describe_operand(operand)}, which is ${operand.typ.describe()}, ${reason}')
 		return error('operand is not a value this compiler steps')
@@ -1639,11 +1639,11 @@ fn steps_an_object(operand ast.Expr) bool {
 
 // steps_a_value says whether the back end steps an object of this kind as a
 // value of its own width. A pointer is stepped by the size of what it points
-// at, and every integer kind it stores is a candidate; the two 128-bit kinds are
-// not, because the back end has no value that wide and refuses an object of one
-// by name.
+// at, a floating value by one of its own width, and every integer kind it stores
+// is a candidate; the two 128-bit kinds are not, because the back end has no
+// value that wide and refuses an object of one by name.
 fn steps_a_value(kind types.Kind) bool {
-	if kind == .pointer {
+	if kind == .pointer || kind == .float || kind == .double {
 		return true
 	}
 	return kind.is_integer() && kind !in [.int128, .unsigned_int128]

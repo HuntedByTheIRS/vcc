@@ -1975,6 +1975,40 @@ fn test_a_pointer_step_uses_the_size_of_what_it_points_at() {
 	os.rm(binary) or {}
 }
 
+// A floating object is stepped by one of its own width, at the width it is
+// stored with: a double adds 1.0 in eight bytes and a float 1.0f in four. The
+// name, the member read through a dot and the member read through `->` are the
+// same step, and the postfix form is worth what the object held. The programs
+// are run, so what is checked is the bytes rather than the intent. Measured on
+// gcc 16.2.1, which exits 9, 5, 5, 18, 8, 14 and 6.
+fn test_a_floating_object_is_stepped_by_one_of_its_width() {
+	source := scratch('incdec_float.c')
+	binary := scratch('incdec_float')
+	double_name := compile_and_run([source, '-o', binary],
+		'int main(void) { double d = 2.5; d++; d++; return (int)(d * 2); }\n')
+	assert double_name == 9
+	double_postfix := compile_and_run([source, '-o', binary],
+		'int main(void) { double d = 2.5; double x = d++; return (int)(x * 2); }\n')
+	assert double_postfix == 5
+	float_decrement := compile_and_run([source, '-o', binary],
+		'int main(void) { float f = 3.5f; f--; return (int)(f * 2); }\n')
+	assert float_decrement == 5
+	float_member := compile_and_run([source, '-o', binary],
+		'struct S { float f; };\nint main(void) { struct S s; s.f = 1.25f; s.f++; return (int)(s.f * 8); }\n')
+	assert float_member == 18
+	double_arrow := compile_and_run([source, '-o', binary],
+		'struct S { double d; };\nint main(void) { struct S s; s.d = 1.0; struct S *p = &s; p->d++; return (int)(s.d * 4); }\n')
+	assert double_arrow == 8
+	double_element := compile_and_run([source, '-o', binary],
+		'int main(void) { double a[2] = {1.0, 2.5}; a[1]++; return (int)(a[1] * 4); }\n')
+	assert double_element == 14
+	double_element_postfix := compile_and_run([source, '-o', binary],
+		'int main(void) { double a[2] = {1.0, 2.5}; double old = a[0]++; return (int)(old * 2) + (int)(a[0] * 2); }\n')
+	assert double_element_postfix == 6
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // A pointer whose pointed-at type has no size has no step to compute: `void *`
 // is the standing case, and a pointer to a function and to an undefined struct
 // are the same shape. Refused by name where the operator is written.

@@ -3372,6 +3372,12 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 			// member.
 			e.writes_a_double(expr.spelling) || e.writes_a_float(expr.spelling)
 		}
+		ast.IncDec {
+			// The value is the object after the step, whose class is the
+			// object's own: a double or a float name, element or member is a
+			// floating value, and the reader resolved that type for the node.
+			expr.typ.kind != .unknown && expr.typ.is_floating()
+		}
 		ast.Call {
 			// A call that hands an object back hands its bytes over in the
 			// register its class names, so the floating class is the same answer
@@ -3449,6 +3455,11 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 		}
 		ast.Field {
 			e.writes_a_float(expr.spelling)
+		}
+		ast.IncDec {
+			// The same question at four bytes: the object is a float, so the
+			// value the operator leaves in the floating file is one.
+			expr.typ.kind == .float
 		}
 		ast.Call {
 			// The same question at four bytes, and the reader's clause is the
@@ -4623,7 +4634,8 @@ fn (mut e Emitter) inc_dec_step(expr ast.IncDec) !i32 {
 // element, a member, or what a pointer points at - and each is read, stepped and
 // written back in place. A name keeps the frame-and-image path it has always had;
 // the other three go through the object's own address, which is the machinery an
-// assignment already uses for an lvalue.
+// assignment already uses for an lvalue. A floating object is a step of its own
+// width rather than a count of bytes, so it is handled separately.
 //
 // The step is one for an integer, added for `++` and subtracted for `--`, and
 // the size of what is pointed at for a pointer, which is the step 6.5.2.4 gives
@@ -4639,6 +4651,9 @@ fn (mut e Emitter) inc_dec_step(expr ast.IncDec) !i32 {
 // the width of the object, so an int wraps at four bytes rather than producing a
 // value no int holds.
 fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
+	if expr.typ.kind == .float || expr.typ.kind == .double {
+		return e.emit_inc_dec_floating(expr, depth)
+	}
 	step := e.inc_dec_step(expr)!
 	operand := expr.operand
 	if operand is ast.Ident {
@@ -4732,6 +4747,61 @@ fn (mut e Emitter) emit_inc_dec_object(expr ast.IncDec, step i32, depth int) !vo
 	e.append(e.target.store_indirect(address_register, register, width)!)
 	if expr.postfix {
 		e.load_accumulator(old, expr.line, expr.col)!
+	}
+}
+
+// emit_inc_dec_floating steps an object of a floating type, which is one add or
+// subtract of the right width: a float by 1.0f at four bytes and a double by 1.0
+// at eight. The step is not a byte count - there is no stride for a value that is
+// not a pointer - so the object's address is taken and the value is read into the
+// floating-point register, the constant is loaded into the scratch one, and the
+// arithmetic is the same instruction a `d + 1.0` uses. The postfix form parks the
+// old value in a slot the way the integer path does and reads it back at the end.
+fn (mut e Emitter) emit_inc_dec_floating(expr ast.IncDec, depth int) !void {
+	single := expr.typ.kind == .float
+	e.inc_dec_address(expr.operand, depth + 1)!
+	address := e.value_slot(depth)
+	e.store_accumulator(address, expr.line, expr.col)!
+	address_register := e.scratch(expr.line, expr.col)!
+	e.load_argument(address, address_register, e.target.word_size, expr.line, expr.col)!
+	value := e.float_accumulator(expr.line, expr.col)!
+	if single {
+		e.append(e.target.load_float_indirect(address_register, value)!)
+	} else {
+		e.append(e.target.load_double_indirect(address_register, value)!)
+	}
+	old := if expr.postfix { e.value_slot(depth + 1) } else { Slot{} }
+	if expr.postfix {
+		if single {
+			e.store_single_accumulator(old, expr.line, expr.col)!
+		} else {
+			e.store_double_accumulator(old, expr.line, expr.col)!
+		}
+	}
+	other := e.float_scratch(expr.line, expr.col)!
+	if single {
+		e.intern_single(1.0)
+		e.reference(e.target.load_float_constant(other, 0)!, .single_constant, single_key(1.0),
+			e.target.name_of(other))
+	} else {
+		e.intern_double(1.0)
+		e.reference(e.target.load_double_constant(other, 0)!, .float_constant, float_key(1.0),
+			e.target.name_of(other))
+	}
+	op := if expr.op == '++' { '+' } else { '-' }
+	if single {
+		e.append(e.target.float_arithmetic(op, value, other)!)
+		e.append(e.target.store_float_indirect(address_register, value)!)
+	} else {
+		e.append(e.target.double_arithmetic(op, value, other)!)
+		e.append(e.target.store_double_indirect(address_register, value)!)
+	}
+	if expr.postfix {
+		if single {
+			e.load_single_accumulator(old, expr.line, expr.col)!
+		} else {
+			e.load_double_accumulator(old, expr.line, expr.col)!
+		}
 	}
 }
 
