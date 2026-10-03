@@ -73,6 +73,17 @@ fn test_sizeof_a_compound_literal_is_a_constant() {
 	assert (value as ast.IntLit).value == 12
 }
 
+fn test_a_nonconstant_literal_in_a_reevaluated_place_is_refused() {
+	result := compound_parsed('int main(void) { int i = 0; return i ? (int[]){i}[0] : 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('may evaluate it a number of times')
+}
+
+fn test_a_constant_literal_in_a_reevaluated_place_is_read() {
+	result := compound_parsed('int main(void) { int i = 0; while ((int[]){1}[0]) { i++; } return i; }')
+	assert result.diagnostics.len == 0
+}
+
 fn test_a_file_scope_compound_literal_is_a_static_object() {
 	result := compound_parsed('int *p = (int[]){1, 2, 3};')
 	assert result.diagnostics.len == 0

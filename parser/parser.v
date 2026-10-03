@@ -118,6 +118,13 @@ mut:
 	// and this is where they wait until that statement is finished and its list
 	// is put together.
 	compound_pending [][]ast.Stmt
+	// compound_unstable counts the places being read whose expression may be
+	// evaluated a number of times the enclosing statement does not describe: a
+	// condition, a loop's third part, the right operand of `&&` or `||`, and an
+	// arm of `?:`. A compound literal is built where its statement begins,
+	// which is the same object only when everything in its list is a constant,
+	// so a list with an expression in it is refused where this is not zero.
+	compound_unstable int
 }
 
 // supported_types are the ones the back end can emit today. The 8-byte integer
@@ -734,18 +741,24 @@ fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 		p.error_at(question, 'expression is nested more than ${max_expression_depth} levels deep')
 		return error('expression nested too deeply')
 	}
+	p.compound_unstable++
 	then_expr := p.parse_expression() or {
+		p.compound_unstable--
 		p.depth--
 		return error('a conditional expression')
 	}
+	p.compound_unstable--
 	if !p.expect_punct(':') {
 		p.depth--
 		return error('a conditional expression without its colon')
 	}
+	p.compound_unstable++
 	else_expr := p.parse_expression() or {
+		p.compound_unstable--
 		p.depth--
 		return error('a conditional expression')
 	}
+	p.compound_unstable--
 	p.depth--
 	return ast.Expr(ast.Conditional{
 		cond:      condition
@@ -839,7 +852,19 @@ fn (mut p Parser) parse_binary(min_precedence int) !ast.Expr {
 			break
 		}
 		p.next()
-		right := p.parse_binary(precedence + 1)!
+		short_circuit := t.text in ['&&', '||']
+		if short_circuit {
+			p.compound_unstable++
+		}
+		right := p.parse_binary(precedence + 1) or {
+			if short_circuit {
+				p.compound_unstable--
+			}
+			return error('binary operand')
+		}
+		if short_circuit {
+			p.compound_unstable--
+		}
 		left = ast.Expr(ast.Binary{
 			op:    t.text
 			left:  left

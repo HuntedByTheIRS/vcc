@@ -606,10 +606,13 @@ fn (mut p Parser) parse_if_statement() ![]ast.Stmt {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	p.compound_unstable++
 	cond := p.parse_expression() or {
+		p.compound_unstable--
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	p.compound_unstable--
 	if !p.expect_punct(')') {
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -639,10 +642,13 @@ fn (mut p Parser) parse_while_statement() ![]ast.Stmt {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	p.compound_unstable++
 	cond := p.parse_expression() or {
+		p.compound_unstable--
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	p.compound_unstable--
 	if !p.expect_punct(')') {
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -674,10 +680,13 @@ fn (mut p Parser) parse_do_while_statement() ![]ast.Stmt {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	p.compound_unstable++
 	cond := p.parse_expression() or {
+		p.compound_unstable--
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	p.compound_unstable--
 	if !p.expect_punct(')') {
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -794,10 +803,13 @@ fn (mut p Parser) parse_switch_statement() ![]ast.Stmt {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	p.compound_unstable++
 	cond := p.parse_expression() or {
+		p.compound_unstable--
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	p.compound_unstable--
 	if !p.expect_punct(')') {
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -991,10 +1003,13 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 		col:   t.col
 	})
 	if !p.at_punct(';') {
+		p.compound_unstable++
 		cond = p.parse_expression() or {
+			p.compound_unstable--
 			p.skip_statement()
 			return []ast.Stmt{}
 		}
+		p.compound_unstable--
 	}
 	if !p.expect_punct(';') {
 		p.skip_statement()
@@ -1002,10 +1017,13 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 	}
 	mut step := []ast.Stmt{}
 	if !p.at_punct(')') {
+		p.compound_unstable++
 		stmt := p.parse_expression_statement() or {
+			p.compound_unstable--
 			p.skip_statement()
 			return []ast.Stmt{}
 		}
+		p.compound_unstable--
 		step << stmt
 	}
 	if !p.expect_punct(')') {

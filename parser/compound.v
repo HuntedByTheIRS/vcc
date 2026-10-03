@@ -23,9 +23,34 @@ import types
 // which is where the object has to be created before the expression that reads
 // it runs. `parse_statement` opens one list per statement for this to be
 // appended to.
+
+// brace_list_is_constant says whether a brace list initializes its object
+// without running anything: every element is a written constant - a number, a
+// character or an address - rather than an expression the program evaluates,
+// and a nested list is constant the same way. An object built from such a list
+// holds the same bytes wherever it is built, so building it at the start of the
+// statement is the object the literal would have built in place.
+fn brace_list_is_constant(elements []BraceElement) bool {
+	for element in elements {
+		if element.expr != none {
+			return false
+		}
+		if list := element.list {
+			if !brace_list_is_constant(list.elements) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 fn (mut p Parser) parse_compound_literal(spec DeclSpec, d Declarator, at tokenize.Token) !ast.Expr {
 	list := p.parse_brace_initializer(true) or {
 		return error('compound literal initializer')
+	}
+	if p.compound_unstable > 0 && !brace_list_is_constant(list.elements) {
+		p.error_at(at, 'unsupported: a compound literal whose initializer is not constant is built where its statement begins, and this one is written inside a condition, a loop step or a short-circuited operand, where the standard may evaluate it a number of times the statement does not describe')
+		return error('compound literal in a re-evaluated place')
 	}
 	if p.compound_pending.len == 0 {
 		// A compound literal outside a statement is one whose object lives in
