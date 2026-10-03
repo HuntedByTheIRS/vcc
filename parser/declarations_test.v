@@ -413,6 +413,63 @@ fn test_a_file_scope_struct_brace_initializer_writes_each_member() {
 	assert second == 6
 }
 
+// `typedef struct S S;` takes the tag before `struct S { int a; int b; };`
+// completes it, and 6.7.2.3 makes the two declarations one type. Measured, gcc
+// 16.2.1 compiles the program and `s.a + s.b` is 3. Reading the definition is
+// what gives the initializer two members to place: a type that never saw the
+// body has none, and the declaration was refused as `s has 0 members and its
+// initializer writes 2`.
+fn test_a_typedef_before_the_struct_body_sees_the_definition() {
+	result := declarations_of('typedef struct S S;\nstruct S { int a; int b; };\nS s = {1, 2};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	assert object.resolved.is_complete()
+	assert object.bytes == 8
+	assert object.member_inits.len == 2
+	assert object.member_inits[0].offset == 0
+	assert object.member_inits[1].offset == 4
+	// Two names for one tag are one type, and the definition each was written
+	// before is the same definition.
+	two := declarations_of('typedef struct S S;\ntypedef struct S T;\nstruct S { int a; int b; };\nS s = {1, 2};\nT t = {3, 4};')
+	assert two.diagnostics.len == 0
+	assert two.unit.globals.len == 2
+	assert two.unit.globals[0].bytes == 8
+	assert two.unit.globals[1].bytes == 8
+}
+
+// A typedef of a pointer to the tag is a complete object before the body is
+// read, which is what `FILE *f;` needs: 6.2.5 sizes a pointer from its star and
+// never asks what is under it. The tag's members are still the definition's
+// once it is read.
+fn test_a_typedef_of_a_pointer_to_the_tag_stays_complete() {
+	result := declarations_of('typedef struct S *SP;\nstruct S { int a; int b; };\nSP p;')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	assert object.resolved.is_complete()
+	assert object.resolved.kind == .pointer
+}
+
+// A GNU attribute may follow a struct's closing brace, and 6.7 makes the
+// declaration valid with it: `struct T { int a; } __attribute__((aligned(16)));`.
+// This compiler has no attribute model, so the attribute is read past and not
+// recorded, the same as one written after a declarator. Refusing it would refuse
+// a declaration gcc 16.2.1 accepts, and V's prelude writes exactly this shape.
+fn test_an_attribute_after_a_struct_body_is_read_past() {
+	result := declarations_of('struct T { int a; } __attribute__((aligned(16)));\nstruct T t = {5};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	assert result.unit.globals[0].name == 't'
+	// The same attribute between the body and the declarator name, which is how
+	// V's prelude writes `} __attribute__((aligned(16))) v_int128_t;`.
+	named := declarations_of('struct T { int a; } __attribute__((aligned(16))) named;\nstruct T other = {6};')
+	assert named.diagnostics.len == 0
+	assert named.unit.globals.len == 2
+	assert named.unit.globals[0].name == 'named'
+	assert named.unit.globals[1].name == 'other'
+}
+
 // A struct whose member is itself an aggregate takes a list of its own, which a
 // flat list does not write, so the declaration is refused by name rather than
 // laid out with a member written at a guessed offset. Measured, gcc 16.2.1

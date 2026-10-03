@@ -664,6 +664,29 @@ fn test_a_local_pointer_to_a_tag_with_no_body_is_accepted() {
 	assert tagged.unit.decls[0].body[0].decl_type == 'union U *'
 }
 
+// A typedef written inside a body names a type and declares no object, so a tag
+// whose body is read after it is not storage the frame has to size. gcc 16.2.1
+// accepts `typedef struct U U; struct U { int a; int b; };` in a body and lays
+// the later object out from the completed type; the tag declaration and the
+// typedef both declare no statement, so the object is the first thing the body
+// holds.
+fn test_a_local_typedef_of_a_struct_read_before_its_body_sees_the_definition() {
+	result := parsed('int main() { typedef struct U U; struct U { int a; int b; }; U u = {1, 2}; return u.a + u.b; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	// The tag declaration and the typedef both declare no statement: the object
+	// is the first statement, its brace initializer the next two stores, and the
+	// return comes last.
+	assert body.len == 4
+	assert body[0].kind == .var_decl
+	assert body[0].decl_name == 'u'
+	assert body[0].decl_type == 'struct U'
+	assert body[0].resolved.is_complete()
+	assert body[0].resolved.members.len == 2
+	assert body[1].kind == .assign
+	assert body[3].kind == .return_stmt
+}
+
 // The pointer is what makes the object complete, so an object of the tag is
 // still refused with the tag named. gcc 16.2.1 refuses it too ("storage size of
 // 'x' isn't known"), which is what keeps the acceptance above from being a

@@ -208,6 +208,14 @@ fn (p Parser) specifier_clause(spec DeclSpec, tag_clause types.Type) types.Type 
 			clause = types.opaque_type(spec.type_words.join(' '))
 		}
 	}
+	// A name among the specifiers may stand for an aggregate whose body is read
+	// after the name was declared: `typedef struct S S;` takes the tag before
+	// `struct S { int a; };` completes it, and 6.7.2.3 makes that declaration
+	// and this one the same type. The tag namespace holds the completed type, so
+	// the class is resolved through it here, where every specifier resolves,
+	// rather than at any one declaration site. A type that is not an incomplete
+	// aggregate is answered as it is.
+	clause = p.tagged_type(clause)
 	return types.qualified(clause, spec.qualifiers)
 }
 
@@ -2747,6 +2755,19 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 		}
 		if t.kind != .identifier {
 			break
+		}
+		// A GNU attribute or assembler name can sit anywhere among the
+		// specifiers, including between a tag's closing brace and the
+		// declarator: `struct T { int a; } __attribute__((aligned(16)));` and
+		// `} __attribute__((aligned(16))) v_int128_t;` are how V's generated C
+		// writes one. They are read past and not recorded, the same way one
+		// after a declarator is (see skip_gnu_postfix): this compiler has no
+		// attribute model, and a declaration that carries one is valid C that
+		// must not be refused for it. Reading it here is what keeps the
+		// attribute from being read as the declarator's name.
+		if t.text in gnu_postfix {
+			p.skip_gnu_postfix()!
+			continue
 		}
 		if t.text in storage_classes {
 			p.next()
