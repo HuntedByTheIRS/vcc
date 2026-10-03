@@ -1913,10 +1913,32 @@ fn (mut p Parser) parse_cast_or_compound(at tokenize.Token) !ast.Expr {
 	operand := p.parse_prefix_operand(at)!
 	return ast.Expr(ast.Cast{
 		spelling: p.spelling_of(spec, d.pointer_count())
-		expr:     operand
+		expr:     decayed_operand(operand)
 		typ:      p.declared_type(spec.clause, d)
 		line:     at.line
 		col:      at.col
+	})
+}
+
+// decayed_operand applies 6.3.2.1p4 to the operand of a conversion: a function
+// designator written where a value is wanted is the pointer to that function.
+// The operand of a cast is such a place, and the back end classifies the source
+// of a conversion by its type, so an operand that is still the function type
+// itself has no width for the conversion to widen and `(int (*)(int))inc` was
+// refused as though the destination were an object pointer. `&f` is that
+// conversion written out - the same value the emitter already writes for a bare
+// function name - and it is what makes the conversion the pointer-to-pointer
+// conversion 6.3.2.3p8 allows, to a different function type and back.
+fn decayed_operand(operand ast.Expr) ast.Expr {
+	if !operand.typ.is_function() {
+		return operand
+	}
+	return ast.Expr(ast.Unary{
+		op:   '&'
+		expr: operand
+		typ:  types.decay(operand.typ)
+		line: operand.line
+		col:  operand.col
 	})
 }
 

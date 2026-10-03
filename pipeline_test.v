@@ -156,6 +156,26 @@ fn test_a_call_through_a_function_pointer_is_the_address_it_holds() {
 	os.rm(binary) or {}
 }
 
+// 6.3.2.3p8 allows a pointer to a function of one type to convert to a pointer
+// to a function of another type, and 6.3.2.1p4 makes a function designator
+// written where a value is wanted the pointer to that function, so this
+// conversion has a pointer on both sides. The designator is one, and the back
+// end refused it while the operand was still the function type itself, which
+// has no width for the conversion to widen. Measured on gcc 16.2.1, the first
+// program exits 42 and the second exits 0.
+fn test_a_function_designator_is_converted_to_the_function_pointer() {
+	source := scratch('cast_function.c')
+	binary := scratch('cast_function')
+	matched := compile_and_run([source, '-o', binary], 'static int inc(int x) { return x + 1; } int main(void) { int (*fp)(int) = (int (*)(int))inc; return fp(41); }')
+	assert matched == 42
+	// A conversion to a different function type: the value is already the
+	// address, so no instruction is written and the program runs to zero.
+	discarded := compile_and_run([source, '-o', binary], 'static int inc(int x) { return x + 1; } int main(void) { void (*v)(void) = (void (*)(void))inc; (void)v; return 0; }')
+	assert discarded == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // A function whose return type is a pointer hands one word back in the register
 // an int comes back in, so the value needs no new machinery and it is usable
 // where the call is written: a local, a dereference, a subscript of the call, an

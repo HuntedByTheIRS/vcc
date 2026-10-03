@@ -308,6 +308,31 @@ fn test_a_cast_is_read_as_a_conversion_to_the_type_it_names() {
 	assert (cast_to_void.expr as ast.Ident).name == 'x'
 }
 
+// 6.3.2.3p8 lets a pointer to a function of one type convert to a pointer to a
+// function of another type, so `(int (*)(int))` names a function pointer and
+// not the `int *` a spelling of the specifiers and their stars alone would
+// read. The operand of the conversion is used as a value, and 6.3.2.1p4 makes
+// the function designator written there the pointer to the function: that
+// pointer is the type the back end classifies the source of the conversion by,
+// where the function type itself had no width for the conversion to widen.
+fn test_a_cast_to_a_function_pointer_names_the_function_pointer() {
+	result := checked('static int inc(int x) { return x + 1; } int main(void) { int (*fp)(int) = (int (*)(int))inc; return 0; }')
+	initializer := result.unit.decls[1].body[0].init or {
+		assert false
+		return
+	}
+	conversion := initializer as ast.Cast
+	// The destination as the model resolved it: the specifiers, the parameters,
+	// and the star, and not the star a run of specifiers alone would read.
+	assert conversion.typ.describe() == 'int (int) *'
+	// The operand decayed to the pointer, which is the source type the emitter
+	// reads where a value is wanted.
+	assert conversion.expr.typ.describe() == 'int (int) *'
+	designator := conversion.expr as ast.Unary
+	assert designator.op == '&'
+	assert (designator.expr as ast.Ident).name == 'inc'
+}
+
 fn test_an_extension_marker_is_a_prefix_and_not_a_storage_class() {
 	// __extension__ opens a declaration specifier list, and it can prefix an
 	// expression too. A cast never opens with a storage class, so
