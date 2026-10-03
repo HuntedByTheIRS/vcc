@@ -597,6 +597,43 @@ fn test_the_line_and_the_file_are_where_they_were_written() {
 	assert processed('#define HERE __LINE__\nHERE\nHERE\n') == ['2', '3']
 }
 
+// <stdatomic.h> builds its memory_order enum out of these: `memory_order_relaxed
+// = __ATOMIC_RELAXED`. Measured, gcc 16.2.1 predefines all six under -std=c99,
+// -std=gnu99, -std=c11 and -std=gnu11 alike, so this compiler defines them in
+// every mode rather than only under the GNU spellings.
+fn test_the_memory_orders_are_predefined() {
+	assert processed('__ATOMIC_RELAXED') == ['0']
+	assert processed('__ATOMIC_CONSUME') == ['1']
+	assert processed('__ATOMIC_ACQUIRE') == ['2']
+	assert processed('__ATOMIC_RELEASE') == ['3']
+	assert processed('__ATOMIC_ACQ_REL') == ['4']
+	assert processed('__ATOMIC_SEQ_CST') == ['5']
+	// The header's enum is the shape that failed: the name arrived as an
+	// identifier the folder had no value for.
+	assert processed('enum order { relaxed = __ATOMIC_RELAXED, seq = __ATOMIC_SEQ_CST };') == [
+		'enum',
+		'order',
+		'{',
+		'relaxed',
+		'=',
+		'0',
+		',',
+		'seq',
+		'=',
+		'5',
+		'}',
+		';',
+	]
+	// The two HLE hints gcc also predefines on x86 stay undefined: an atomic call
+	// here does not honour them, so a header must not take the path that asks for
+	// one.
+	assert processed('#ifdef __ATOMIC_HLE_ACQUIRE\nint yes;\n#else\nint no;\n#endif\n') == [
+		'int',
+		'no',
+		';',
+	]
+}
+
 fn test_a_header_can_ask_about_a_construct_and_be_told_no() {
 	assert processed('#if __has_attribute(__nothrow__)\nint x;\n#endif\n') == []
 	assert processed('#ifdef __has_attribute\nint x;\n#endif\n') == ['int', 'x', ';']
