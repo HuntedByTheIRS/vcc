@@ -399,6 +399,13 @@ fn (mut p Processor) include(tok tokenize.Token, args string, after bool) {
 	}
 	from := p.frames.last().path
 	found := p.find_include(name, angled, from, after) or {
+		if os.is_abs_path(name) {
+			// No directory was searched and none would have been, so the
+			// message says why rather than listing places that were never
+			// consulted.
+			p.problem(tok, 'cannot find ${include_name(name, angled)}; an absolute path is opened where it points')
+			return
+		}
 		looked := p.searched_dirs(angled, from, after)
 		if looked.len == 0 {
 			p.problem(tok, 'cannot find ${include_name(name, angled)}, and there is no directory after the one this file was found in to look in')
@@ -458,13 +465,30 @@ struct Located {
 // find_include looks for a header the way C says to: one written with quotes is
 // looked for beside the file that wrote the line before it is looked for
 // anywhere else, one written with angle brackets is not, and after that both
-// come to the -I directories and then the standard ones.
+// come to the -I directories and then the standard ones. A name that is an
+// absolute path names the file and takes none of those steps.
 //
 // `after` leaves out both the directory beside the includer and the directories
 // up to and including the one this file was found in. That is the whole of what
 // the include_next spelling means, and it is what lets a header that is
 // installed twice hand the rest of its contents to the copy that follows it.
 fn (mut p Processor) find_include(name string, angled bool, from string, after bool) ?Located {
+	if os.is_abs_path(name) {
+		// An absolute name is the file, so no search applies: 6.10.2p3
+		// leaves the way a q-char-sequence is found implementation-defined,
+		// and the compilers this tree is measured against (gcc and tcc) open
+		// an absolute path as it stands, for either spelling and whether or
+		// not the line is an include_next. Joining it to a directory instead
+		// produces `/usr/local/include//usr/include/stdio.h`, which is
+		// nothing.
+		if os.is_file(name) {
+			return Located{
+				path:  name
+				index: -1
+			}
+		}
+		return none
+	}
 	if !angled && !after {
 		beside := os.join_path(os.dir(from), name)
 		if os.is_file(beside) {
