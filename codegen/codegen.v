@@ -1180,6 +1180,16 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 	if e.returning == 'double' {
 		return e.convert_to_double(expr, line, col)
 	}
+	if e.long_double_of(expr) {
+		// The one conversion out of the extended type this back end writes is
+		// the conversion to a double, which is the branch above. Every other
+		// return type is a conversion it does not make, and the value the
+		// expression left is the address of its sixteen bytes, so returning it
+		// unconverted would hand the caller that address as an int or a float.
+		// It is refused by name, the way the same conversion is refused at a
+		// cast, a store and an argument.
+		return e.refuse_a_long_double_conversion(e.returning, line, col)
+	}
 	if e.returning == 'float' {
 		// A function returning a float rounds what it returns to four bytes,
 		// which is the conversion the language makes and the reason the value a
