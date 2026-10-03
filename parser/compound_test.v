@@ -242,3 +242,33 @@ fn test_a_file_scope_designator_names_a_promoted_member() {
 	result := compound_parsed('struct G { int x; union { int y; }; };\nstruct G g = { .x = 3, .y = 4 };\nint main(void) { return g.y; }')
 	assert result.diagnostics.len == 0
 }
+
+// A compound literal is an element a brace list may hold, because 6.7.8p1 makes
+// an element an assignment-expression and 6.5.2.5 makes a compound literal one.
+// In a body the element is the subobject's own bytes rather than a second
+// object: the walk against the element's type stores each scalar where it
+// belongs, so `{(struct S){1, 2}, (struct S){3, 4}}` writes 1, 2, 3 and 4. This
+// was refused as `__vcc_compound_0 is an object of an aggregate type, and using
+// it as a value is not implemented`.
+fn test_a_body_brace_element_may_be_a_compound_literal() {
+	result := compound_parsed('struct S { int a; int b; };\nint main(void) { struct S arr[2] = {(struct S){1, 2}, (struct S){3, 4}}; return arr[0].a + arr[1].b; }')
+	assert result.diagnostics.len == 0
+	mut main := result.unit.decls[0]
+	for decl in result.unit.decls {
+		if decl.name == 'main' {
+			main = decl
+		}
+	}
+	mut values := []i64{}
+	for stmt in main.body {
+		if stmt.kind != .assign {
+			continue
+		}
+		if value := stmt.expr {
+			if value is ast.IntLit && (value as ast.IntLit).value != 0 {
+				values << (value as ast.IntLit).value
+			}
+		}
+	}
+	assert values == [1, 2, 3, 4]
+}

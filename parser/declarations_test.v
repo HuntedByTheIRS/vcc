@@ -529,6 +529,45 @@ fn test_a_file_scope_constant_expression_element_is_folded() {
 	assert refused.diagnostics[0].msg.contains('written constant')
 }
 
+// A compound literal is an element an aggregate list may hold, because 6.7.8p1
+// makes an element an assignment-expression and 6.5.2.5 makes a compound
+// literal one. At file scope the literal's object has static storage duration
+// and its elements are constant expressions (6.7.8p4), so the bytes its list
+// writes are the bytes the element takes. Measured on gcc 16.2.1,
+// `string a[2] = {(string){"a", 1, 1}, (string){"bb", 2, 1}};` prints `a 1 bb
+// 2`, and the two strings' own addresses are the two literals.
+fn test_a_file_scope_compound_literal_element_initializes_an_aggregate() {
+	source := 'typedef struct { char *str; int len; int is_lit; } string;\nstatic string a[2] = {(string){"a", 1, 1}, (string){"bb", 2, 1}};'
+	result := declarations_of(source)
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	assert object.count == 2
+	assert object.bytes == 16
+	entries := object.member_inits
+	assert entries.len == 6
+	// The first member of each string is an address the layout resolves, and
+	// the two beside it are the numbers the list wrote.
+	assert entries[0].offset == 0
+	assert entries[0].address != none
+	assert entries[1].offset == 8
+	assert (entries[1].init or { -1 }) == 1
+	assert entries[2].offset == 12
+	assert (entries[2].init or { -1 }) == 1
+	assert entries[3].offset == 16
+	assert entries[3].address != none
+	assert entries[4].offset == 24
+	assert (entries[4].init or { -1 }) == 2
+	// A compound literal initializing a whole aggregate object is the same
+	// object's brace list, and its values reach the members the same way.
+	direct := declarations_of('struct S { int a; int b; };\nstatic struct S s = (struct S){5, 6};')
+	assert direct.diagnostics.len == 0
+	assert direct.unit.globals.len == 1
+	assert direct.unit.globals[0].member_inits.len == 2
+	assert (direct.unit.globals[0].member_inits[0].init or { -1 }) == 5
+	assert (direct.unit.globals[0].member_inits[1].init or { -1 }) == 6
+}
+
 // A struct's brace initializer at file scope gives each value to a member in the
 // order the members were written, and each constant carries the byte the layout
 // gave that member. Measured on gcc 16.2.1, `struct S s = {5, 6};` returns 56 for

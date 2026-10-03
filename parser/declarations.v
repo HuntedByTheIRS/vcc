@@ -1276,6 +1276,29 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					} else {
 						literal_refused = true
 					}
+				} else if !data_array && spec.clause.kind in [types.Kind.struct_, .union_]
+					&& p.looks_like_compound_literal() {
+					// An aggregate object initialized by a compound literal of
+					// its own type: `string s = (string){ ... }`. At file scope
+					// the literal names an object with static storage duration
+					// and its list holds constant expressions (6.7.8p4), so the
+					// bytes it writes are the bytes this object takes. The list
+					// is walked against the object's type the way a written brace
+					// list is, which is the same bytes with the braces missing.
+					if list := p.compound_literal_list(false) {
+						if general := p.file_scope_general_initializer(spec, d, list, data_name) {
+							data_member_inits = general.members
+							data_bytes = general.bytes
+							data_count = general.count
+							data_resolved = general.resolved
+							data_struct_brace = true
+						} else {
+							data_problem = true
+						}
+					} else {
+						data_problem = true
+						literal_refused = true
+					}
 				} else {
 					constant := p.file_scope_constant()
 					data_init = constant.integer
@@ -2327,7 +2350,21 @@ fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 		// designated element whose value is an address was read as an element
 		// with no arm and refused at the designator.
 		t = p.peek()
-		if p.at_punct('{') {
+		// A compound literal element, `(T){ v, v }`, is read before the arms
+		// below: what it is worth here is the list it was written with, which
+		// is the list the walk against the subobject's type initializes it
+		// from. A compound literal of an array type answers none with every
+		// token given back, so the arms below read the same tokens.
+		mut compound := ?BraceList(none)
+		if p.looks_like_compound_literal() {
+			compound = p.compound_literal_list(body)
+		}
+		if list := compound {
+			elements << BraceElement{
+				list:        list
+				designators: designators
+			}
+		} else if p.at_punct('{') {
 			list := p.parse_brace_initializer(body) or {
 				p.recover_brace_list(open, list_body)
 				return error('nested brace initializer')
@@ -2606,6 +2643,48 @@ fn (mut p Parser) file_scope_element_constant() ?NumberConstant {
 	p.pos = saved_pos
 	p.diagnostics = p.diagnostics[..saved_diagnostics]
 	return none
+}
+
+// compound_literal_list reads a compound literal used as the initializer of an
+// aggregate object or as one element of a brace list, `(T){ v, v }`, and answers
+// the list it holds. The unnamed object has static storage duration at file
+// scope and the enclosing block's in a body (6.5.2.5p5), so the list is read the
+// way a brace list at that scope is read: a body's elements are expressions a
+// store takes, a file-scope one's are constants the image holds. The value the
+// literal is worth here is the bytes its list writes, which is what the walk
+// against the object's own type places.
+//
+// A compound literal of an array type answers none and gives every token back
+// without a diagnostic: its value is the address of its first element rather
+// than the bytes of its list, so the place it was written decides which reader
+// takes it and the caller's next arm has to see the same tokens. `int *p[] =
+// {(int[]){1, 2}}` is the shape a body reads that way.
+fn (mut p Parser) compound_literal_list(body bool) ?BraceList {
+	saved := p.pos
+	saved_diagnostics := p.diagnostics.len
+	p.next() // (
+	spec, d, _ := p.parse_type_name_parts(1) or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if !p.expect_punct(')') {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	declared := p.declared_type(spec.clause, d)
+	if declared.is_array() {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	list := p.parse_brace_initializer(body) or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	return list
 }
 
 // file_scope_signed_parenthesized_constant reads a written constant inside one
