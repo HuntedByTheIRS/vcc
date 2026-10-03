@@ -26,7 +26,7 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__builtin_inf', '__builtin_inff', '__builtin_infl', '__builtin_nan', '__builtin_nanf',
 	'__builtin_nanl', '__builtin_nans', '__builtin_nansf', '__builtin_nansl', '__builtin_classify_type',
 	'__builtin_isinf_sign', '__builtin_signbit', '__builtin_signbitf', '__builtin_signbitl',
-	'__builtin_signbitf128',
+	'__builtin_signbitf128', 
 	// The nine machine builtins are in this same list for the same reason, and in
 	// one place only: the reader routes them here, and the check for a name
 	// nothing declares consults this list, because no program can write a
@@ -428,7 +428,7 @@ fn (mut p Parser) atomic_target(at tokenize.Token, spelling string, expr ast.Exp
 	kind := pointee.enum_underlying()
 	if kind !in [types.Kind.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short,
 		.int_, .unsigned_int, .long, .unsigned_long, .long_long, .unsigned_long_long, .pointer] {
-		p.error_at(at, 'unsupported: ${spelling} operates on ${pointee.describe()}, and this back end reads and writes ints, chars and pointers with the machine\'s atomic instructions')
+		p.error_at(at, "unsupported: ${spelling} operates on ${pointee.describe()}, and this back end reads and writes ints, chars and pointers with the machine's atomic instructions")
 		return none
 	}
 	return pointee
