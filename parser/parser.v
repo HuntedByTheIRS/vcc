@@ -775,8 +775,7 @@ fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 // give the type the usual arithmetic conversions put them both in, two void
 // arms give void, and two pointers give the pointer both arms convert to: a
 // pointer to void takes over from a pointer to an object type, and a pointer
-// beside an integer constant of value zero is that pointer's type, which is the
-// null pointer constant rule.
+// beside a null pointer constant is that pointer's type.
 //
 // The answer is a question about the arms and not about which one runs, so it
 // is asked while the expression is read and not where the branch is emitted.
@@ -802,6 +801,20 @@ fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_e
 	if a.is_void() && b.is_void() {
 		return types.void_type()
 	}
+	// 6.5.15p6: a pointer beside a null pointer constant is that pointer, the
+	// same pairing an initializer and an assignment allow. It is asked before
+	// the two-pointer cases below, because a null pointer constant is not a
+	// pointer with a type of its own even when 6.3.2.3p3 spells it as one.
+	// `1 ? (void *)0 : p` is `p`'s type, and so is `1 ? (void *)0 : (T *)0`,
+	// which is the shape `__tgmath_real_type` is built on: without this the
+	// constant's void pointer takes over and the conditional is a void pointer,
+	// dereferencing to void.
+	if a.is_pointer() && p.is_null_pointer_constant(else_expr) {
+		return a
+	}
+	if b.is_pointer() && p.is_null_pointer_constant(then_expr) {
+		return b
+	}
 	if a.is_pointer() && b.is_pointer() {
 		if a.same(b) {
 			return a
@@ -825,14 +838,6 @@ fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_e
 		}
 		p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and they do not point to compatible types')
 		return types.Type{}
-	}
-	// 6.5.15: a pointer beside an integer constant of value zero is that
-	// pointer, the same pairing an initializer and an assignment allow.
-	if a.is_pointer() && p.is_null_constant(else_expr) {
-		return a
-	}
-	if b.is_pointer() && p.is_null_constant(then_expr) {
-		return b
 	}
 	p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and 6.5.15 pairs two arithmetic types, two void types, or two pointers')
 	return types.Type{}
@@ -2356,6 +2361,34 @@ fn callable_signature(callee ast.Expr) ?types.Type {
 fn (p Parser) is_null_constant(expr ast.Expr) bool {
 	value := p.constant_value(expr) or { return false }
 	return value == 0
+}
+
+// is_null_pointer_constant says whether an expression is a null pointer
+// constant, which 6.3.2.3p3 defines as the integer constant expression with the
+// value 0, or such an expression cast to void *. The second spelling is not a
+// second kind of value, it is the first one wearing a pointer's clothes, and it
+// is the spelling the tgmath macros use: `(void *) 0` and `(void *) (E)` for an
+// E that is an integer constant expression both convert to any object pointer
+// without a cast, and 6.5.15p6 gives a conditional whose arm is one of them the
+// other arm's pointer type.
+//
+// A cast to an object pointer is not a null pointer constant, however constant
+// the zero under it is. Measured, gcc 16.2.1 refuses `1 ? (double *)0 : (char
+// *)0` with `pointer type mismatch`, and accepts `1 ? (void *)0 : (char *)0`
+// with the type `char *`: the clause names void * and no other pointer.
+//
+// An assignment and a call argument ask the same question through
+// `types.assignment_problem`, which already lets a void pointer convert to any
+// object pointer, so the cast spelling needs no change there.
+fn (p Parser) is_null_pointer_constant(expr ast.Expr) bool {
+	if p.is_null_constant(expr) {
+		return true
+	}
+	if expr is ast.Cast && expr.typ.is_pointer() {
+		pointee := expr.typ.pointee() or { return false }
+		return pointee.kind == .void_ && p.is_null_constant(expr.expr)
+	}
+	return false
 }
 
 // constant_value is the value of an integer constant expression this reader

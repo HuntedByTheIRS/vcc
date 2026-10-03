@@ -614,6 +614,112 @@ fn test_the_null_pointer_constant_is_the_value_of_an_expression() {
 	assert folded.diagnostics.len == 0
 }
 
+// 6.3.2.3p3 counts a cast to void * as a null pointer constant, the same value as
+// the bare zero it wraps, and 6.5.15p6 gives a conditional whose arm is one of
+// them the other arm's pointer type. Measured on gcc 16.2.1,
+// `1 ? (void *)0 : (double *)0`, `1 ? (double *)0 : (void *)0`, `1 ? (void *)0 :
+// d` and `1 ? d : (void *)0` for a `double *d` are all `double *`.
+//
+// This is the shape glibc's <tgmath.h> is built on: `__tgmath_type_if` is
+// `__typeof__ (*(0 ? (__typeof__ (0 ? (T *) 0 : (void *) (E))) 0 : ...))`, and
+// the type it names is T only because `(void *)(E)` for a zero E is a null
+// pointer constant rather than an ordinary void pointer.
+fn test_a_conditional_between_a_void_pointer_constant_and_a_pointer_is_the_pointer() {
+	shapes := [
+		'int h(double *d) { double *p = 1 ? (void *)0 : (double *)0; return 0; }',
+		'int h(double *d) { double *p = 1 ? (double *)0 : (void *)0; return 0; }',
+		'int h(double *d) { double *p = 1 ? (void *)0 : d; return 0; }',
+		'int h(double *d) { double *p = 1 ? d : (void *)0; return 0; }',
+		'int h(double *d) { double *p = 1 ? (void *)(2 - 2) : (double *)0; return 0; }',
+	]
+	for source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len == 0
+		init := result.unit.decls[0].body[0].init or {
+			assert false
+			return
+		}
+		conditional := init as ast.Conditional
+		assert conditional.typ.kind == types.Kind.pointer
+		pointee := conditional.typ.pointee() or {
+			assert false
+			return
+		}
+		assert pointee.kind == types.Kind.double
+	}
+}
+
+// A pointer to void that is not a constant is an ordinary arm of the pointer
+// rule: the other arm does not become its type, the void pointer takes over.
+// Measured on gcc 16.2.1, `1 ? (void *)0 : (void *)d` is `void *` and
+// `1 ? (double *)0 : (void *)1` is `void *` too, because `(void *)1` is not the
+// constant zero.
+fn test_a_conditional_with_a_void_pointer_that_is_not_constant_is_a_void_pointer() {
+	shapes := [
+		'int h(double *d) { void *v = 1 ? (void *)0 : (void *)d; return 0; }',
+		'int h(double *d) { void *v = 1 ? (double *)0 : (void *)d; return 0; }',
+		'int h(double *d) { void *v = 1 ? (double *)0 : (void *)1; return 0; }',
+	]
+	for source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len == 0
+		init := result.unit.decls[0].body[0].init or {
+			assert false
+			return
+		}
+		conditional := init as ast.Conditional
+		assert conditional.typ.kind == types.Kind.pointer
+		pointee := conditional.typ.pointee() or {
+			assert false
+			return
+		}
+		assert pointee.kind == types.Kind.void_
+	}
+}
+
+// 6.3.2.3p3 names void * and no other pointer, so a cast to an object pointer is
+// an ordinary pointer however constant the zero under it is. Measured, gcc
+// 16.2.1 refuses `1 ? (double *)0 : (char *)0` with `pointer type mismatch in
+// conditional expression` and accepts `1 ? (void *)0 : (char *)0` as `char *`.
+fn test_a_cast_to_an_object_pointer_is_not_a_null_pointer_constant() {
+	result := parsed('int main(void) { void *v = 1 ? (double *)0 : (char *)0; return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('they do not point to compatible types')
+}
+
+// 6.5.15 reads an arm that is a null pointer constant as the other arm's type,
+// and the type that decides is the one 6.5.15.1 gives a dereference of the
+// conditional. Measured on gcc 16.2.1: `sizeof(*(0 ? (void *)0 : (char *)1))` is
+// 1 and `0 ? (void *)0 : (int *)1` is `int *`, while `0 ? (int *)0 : (char *)0`
+// is refused as a pointer type mismatch, because `(int *)0` is not a null
+// pointer constant, and `sizeof(*(0 ? (void *)1 : (char *)0))` has no size
+// because `(void *)1` is a `void *` and reading through it is void.
+fn test_an_arm_of_a_conditional_that_is_a_null_pointer_constant_takes_the_other_arms_type() {
+	shaped := parsed('int main(void) { return sizeof(*(0 ? (void *)0 : (char *)1)); }')
+	assert shaped.diagnostics.len == 0
+	expr := shaped.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (expr as ast.IntLit).value == 1
+	swapped := parsed('int main(void) { return sizeof(*(0 ? (char *)1 : (void *)0)); }')
+	assert swapped.diagnostics.len == 0
+	other := swapped.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (other as ast.IntLit).value == 1
+	// A cast to a pointer that is not a pointer to void is not a null pointer
+	// constant, so two such arms are a mismatch and not a type.
+	mismatch := parsed('int main(void) { return sizeof(*(0 ? (int *)0 : (char *)0)); }')
+	assert mismatch.diagnostics.len >= 1
+	assert mismatch.diagnostics[0].msg.contains('do not point to compatible types')
+	// Nor is `(void *)1`: it is a `void *`, and reading through it has no size.
+	hollow := parsed('int main(void) { return sizeof(*(0 ? (void *)1 : (char *)0)); }')
+	assert hollow.diagnostics.len == 1
+	assert hollow.diagnostics[0].msg.contains('sizeof asks how many bytes a value with * applied to it takes')
+}
+
 fn test_the_null_pointer_constant_is_the_one_integer_a_pointer_takes() {
 	// Zero is a null pointer constant and converts to any pointer; one is not,
 	// and an argument that is a plain integer is a constraint violation.
