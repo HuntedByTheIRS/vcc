@@ -1423,11 +1423,15 @@ fn (mut p Parser) parse_prefix_operand(op tokenize.Token) !ast.Expr {
 // type, and the operand evaluated once. `__imag__` is a zero of the operand's
 // type, which is a written constant of that type.
 //
-// An operand of a complex type is the one part of this that is out of reach: the
-// complex types are a pair of floating values and their arithmetic is the back
-// end milestone's, so the part is refused by name rather than answered with a
-// value this compiler made up. An operand that is real but not arithmetic has no
-// real part, which is a constraint violation.
+// An operand of a complex type is a pair of components, and the part is the one
+// the operator names: `__real__ z` is the first component of the pair and
+// `__imag__ z` the second, at the component's own type. The node carries the
+// operand and the operator so the back end can read the component out of the
+// pair; the value is real and lives in one register, so the node's own type is
+// the component's. A `long double _Complex` component is a width this compiler
+// does not carry, so that operand is refused by name rather than read at the
+// width of a double. An operand that is real but not arithmetic has no real
+// part, which is a constraint violation.
 //
 // One measured difference is not modelled: gcc still evaluates the operand of
 // `__imag__` - `__imag__ f()` calls f and answers 0 - and a written zero does
@@ -1442,8 +1446,7 @@ fn (mut p Parser) real_or_imaginary(op tokenize.Token, operand ast.Expr) ast.Exp
 	}
 	value := p.value_type(operand)
 	if value.is_complex() {
-		p.error_at(op, 'unsupported: ${op.text} names one part of a value, and ${value.describe()} is a pair of values whose arithmetic is the back end milestone')
-		return p.zero_value(op, types.Type{})
+		return p.complex_part(op, operand, value)
 	}
 	if !value.is_arithmetic() {
 		p.error_at(op, 'a constraint violation: ${op.text} takes a value of an arithmetic type, and this one is ${value.describe()}')
@@ -1453,6 +1456,36 @@ fn (mut p Parser) real_or_imaginary(op tokenize.Token, operand ast.Expr) ast.Exp
 		return operand
 	}
 	return p.zero_value(op, value)
+}
+
+// complex_part is the value `__real__ z` or `__imag__ z` is worth when z has a
+// complex type: one component of the pair, at the component's own type. The node
+// carries the operand so the back end can read the component the operator names
+// out of storage; its own type is the component's, since a part of a complex
+// value is a real value.
+//
+// A component this compiler has no width for is refused by name rather than read
+// at the width of a double: `long double _Complex` is carried by the model and
+// not by the back end, which moves the two widths the machine's complex types
+// use. The refusal names the operand's type and the operator, so the site says
+// which part of which value was out of reach.
+fn (mut p Parser) complex_part(op tokenize.Token, operand ast.Expr, value types.Type) ast.Expr {
+	kind := value.kind.complex_component() or {
+		p.error_at(op, 'unsupported: ${op.text} takes a value of a complex type, and ${value.describe()} has no component this compiler can read')
+		return p.zero_value(op, types.Type{})
+	}
+	if kind == .long_double {
+		p.error_at(op, 'unsupported: ${op.text} reads one part of ${value.describe()}, and this compiler does not carry a long double component')
+		return p.zero_value(op, types.Type{})
+	}
+	component := types.scalar(kind) or { types.Type{} }
+	return ast.Expr(ast.Unary{
+		op:   op.text
+		expr: operand
+		typ:  component
+		line: op.line
+		col:  op.col
+	})
 }
 
 // zero_value is the constant zero of a type, which is what `__imag__` of a real

@@ -4491,6 +4491,13 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// the address and the value is at it.
 		return e.emit_deref(unary, depth)
 	}
+	if unary.op == '__real__' || unary.op == '__imag__' {
+		// One part of a complex value is the component the operator names, read
+		// out of the pair into a floating-point register. The value is real and
+		// lives in one register, which is why the node's own type is the
+		// component's and the paths that want a floating value reach here.
+		return e.emit_complex_part(unary, depth)
+	}
 	if e.wide_value(unary.expr) {
 		// A 128-bit operand is a pair rather than a value in the accumulator, so
 		// the operators it has a meaning for are computed on the pair.
@@ -6901,6 +6908,11 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 				// at it belongs to: a char arrives as the int it is promoted to,
 				// an int as itself, and a pointer as the machine's word.
 				e.converted_width(expr.typ)
+			} else if expr.op == '__real__' || expr.op == '__imag__' {
+				// One component of a complex value, at the component's own
+				// width: a part is a real value of the component's type, so the
+				// node's own type answers the same way a converted value's does.
+				e.converted_width(expr.typ)
 			} else {
 				e.width_of_at(expr.expr, depth + 1) or { return none }
 			}
@@ -9021,6 +9033,40 @@ fn (mut e Emitter) complex_step(value backend.Register, other backend.Register, 
 		return
 	}
 	e.append(e.target.double_arithmetic(op, value, other)!)
+}
+
+// emit_complex_part reads the component `__real__` or `__imag__` names out of a
+// complex value into the floating-point register a real value lives in. The
+// operand is materialised as an object first, because a complex value is two
+// registers and never the accumulator; a name whose storage is the frame answers
+// with that storage and nothing is copied, and everything else is computed into a
+// temporary of this level. The real part is the first component of the pair and
+// the imaginary part the second, at the width the component has: eight bytes for
+// a `double _Complex` and four for a `float _Complex`.
+//
+// The parser refuses an operand whose component this back end has no width for,
+// and this is asked again here because the emitter reads types rather than the
+// reader's decisions: a `long double _Complex` is a component this back end does
+// not move, and reading it at the width of a double would be a wrong value.
+fn (mut e Emitter) emit_complex_part(unary ast.Unary, depth int) !void {
+	line := unary.line
+	col := unary.col
+	value := unary.expr.typ
+	if !value.kind.is_complex() {
+		e.diagnostics << problem(line, col, 'unsupported: ${unary.op} reads one part of a complex value, and this operand is ${value.describe()}')
+		return error('not a complex operand')
+	}
+	if value.kind == .complex_long_double {
+		e.diagnostics << problem(line, col, 'unsupported: ${unary.op} reads one part of ${value.describe()}, and this back end does not move a long double component')
+		return error('long double complex part')
+	}
+	object := e.complex_object_as(unary.expr, value, depth + 1)!
+	which := if unary.op == '__imag__' { 1 } else { 0 }
+	single := complex_component_single(value)
+	frame := e.frame_pointer(line, col)!
+	register := e.float_accumulator(line, col)!
+	offset := object.offset + complex_component_offset(value, which)
+	e.load_complex_component(frame, register, offset, single)!
 }
 
 // complex_object evaluates a complex expression into storage and answers the

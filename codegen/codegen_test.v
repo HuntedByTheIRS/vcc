@@ -2880,6 +2880,34 @@ fn test_a_complex_quotient_is_refused_by_name() {
 	assert emitted.bytes.len == 0
 }
 
+// The part of a complex value is the component `__real__` or `__imag__` names,
+// and what the operator is worth is not the operand. A program that compares the
+// part with the component, uses it as one, passes it onward and writes it through
+// an assignment runs only if the read is the component; the parenthesised
+// spelling glibc's <tgmath.h> wraps its arguments in is the same value. Measured
+// on gcc 16.2.1, the program below exits 0.
+fn test_the_part_of_a_complex_value_is_the_component_it_names() {
+	source := 'int main() {' +
+		' double _Complex z = 3.0 + 4.0i;' +
+		' double _Complex w = 1.0 - 2.0i;' +
+		' if (__real__ z != 3.0) { return 1; }' +
+		' if (__imag__ z != 4.0) { return 2; }' +
+		' if (__real__ (z) != 3.0) { return 3; }' +
+		' if (__imag__ (z) != 4.0) { return 4; }' +
+		' if (__real__ (z + w) != 4.0) { return 5; }' +
+		' if (__imag__ (z * w) != -2.0) { return 6; }' +
+		' double r = __imag__ z;' +
+		' if (r != 4.0) { return 7; }' +
+		' if (__imag__ z + 1.0 != 5.0) { return 8; }' +
+		' float _Complex f = 1.5f + 2.5fi;' +
+		' if (__real__ f != 1.5f) { return 9; }' +
+		' if (__imag__ f != 2.5f) { return 10; }' +
+		' return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_a_double_comparison_answers_the_int_a_branch_reads() {
 	// A comparison of two doubles reads the flags the floating compare leaves,
 	// which are not the integer ones: the sign of a double lives in the top bit of
