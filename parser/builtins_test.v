@@ -318,7 +318,7 @@ fn test_type_class_covers_every_kind_the_question_reaches() {
 		assert false
 		return
 	} == 9
-	assert type_class(types.enum_type('E')) or {
+	assert type_class(types.enum_type('E', .int_)) or {
 		assert false
 		return
 	} == 1
