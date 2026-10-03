@@ -137,6 +137,14 @@ fn (mut p Processor) collect_arguments(tokens []Piece, from int, tok tokenize.To
 // a file looks like, what a call inside a replacement looks like, and what a
 // call in the controlling expression of an #if looks like.
 fn (mut p Processor) expand_all(tokens []tokenize.Token) []tokenize.Token {
+	// A run with no name that could expand is handed back as it stands. Every
+	// token of straight-line code would otherwise be copied into a Piece, read
+	// again, and copied into a new token list, none of which can change it: the
+	// copies are what a macro use costs, and a run without one should not pay
+	// them. A file of ordinary code is almost entirely runs of this kind.
+	if !p.may_expand(tokens) {
+		return tokens
+	}
 	mut pieces := []Piece{cap: tokens.len}
 	for t in tokens {
 		pieces << Piece{
@@ -148,6 +156,26 @@ fn (mut p Processor) expand_all(tokens []tokenize.Token) []tokenize.Token {
 		out << piece.tok
 	}
 	return out
+}
+
+// may_expand says whether any token of a run is a name the expander would act
+// on: a macro the table knows, one of the names whose value depends on where it
+// is used, or the _Pragma operator. A run with none of them expands to itself,
+// which is what lets expand_all hand it back without copying it.
+//
+// The names are exactly the ones expand_pieces looks at. A name the program
+// defined itself is in the macro table and so answers here too, which is what
+// keeps a program that defines __LINE__ for itself on the slow path.
+fn (p Processor) may_expand(tokens []tokenize.Token) bool {
+	for t in tokens {
+		if t.kind != .identifier {
+			continue
+		}
+		if t.text in p.macros || t.text == '_Pragma' || is_dynamic_builtin_name(t.text) {
+			return true
+		}
+	}
+	return false
 }
 
 // expand_pieces is expand_all over tokens that carry what they are hidden from,

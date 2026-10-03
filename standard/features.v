@@ -553,15 +553,42 @@ fn auto_is_a_type_specifier(tokens []tokenize.Token, at int) bool {
 	return ended.kind == .punct && ended.text in ['=', ';', ',', '[']
 }
 
-// two_token_spelling is the two tokens at `at` written with nothing between them,
-// which is how a construct whose spelling is more than one token is found: `({`
-// opens a braced group and neither token alone is its name. It answers the empty
-// string at the end of the stream, which is no row's spelling.
-fn two_token_spelling(tokens []tokenize.Token, at int) string {
-	if at + 1 >= tokens.len {
-		return ''
+// spelling_is_the_pair says whether `spelling` is the two tokens `first` and
+// `second` written with nothing between them. It compares the bytes rather than
+// joining the two texts first: the join was a heap string per row per token, and
+// the answer does not need the string. A two-token spelling is how a construct
+// whose spelling is more than one token is found, `({` for a braced group.
+fn spelling_is_the_pair(spelling string, first string, second string) bool {
+	if spelling.len != first.len + second.len {
+		return false
 	}
-	return tokens[at].text + tokens[at + 1].text
+	for k in 0 .. first.len {
+		if spelling[k] != first[k] {
+			return false
+		}
+	}
+	for k in 0 .. second.len {
+		if spelling[first.len + k] != second[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// spelling_matches says whether one of a row's spellings is the token `text` or
+// the two tokens `text` and `after` written with nothing between them. `has_after`
+// is false at the end of the stream, where there is no second token and so no
+// pair to match.
+fn spelling_matches(spellings []string, text string, after string, has_after bool) bool {
+	for spelling in spellings {
+		if spelling == text {
+			return true
+		}
+		if has_after && spelling_is_the_pair(spelling, text, after) {
+			return true
+		}
+	}
+	return false
 }
 
 // uses is the walk itself, over a table the caller hands in rather than over the
@@ -574,12 +601,18 @@ fn uses(tokens []tokenize.Token, table []Feature, question Question) []tokenize.
 	// the C89 storage class, and only the tokens after the word say which. See
 	// auto_is_a_type_specifier.
 	for i, token in tokens {
+		// The two-token spelling is looked for by comparing a row's spelling
+		// against the two texts rather than by joining them. The join was a
+		// heap string per (token, row) pair, and on V's own generated C this
+		// walk is 5.1M tokens times 18 rows, every one of them a string that
+		// found nothing.
+		has_after := i + 1 < tokens.len
+		after := if has_after { tokens[i + 1].text } else { '' }
 		for feature in table {
 			if feature.status == .unimplemented {
 				continue
 			}
-			if !feature.spellings.contains(token.text)
-				&& !feature.spellings.contains(two_token_spelling(tokens, i)) {
+			if !spelling_matches(feature.spellings, token.text, after, has_after) {
 				continue
 			}
 			if feature.extension == 'auto' && !auto_is_a_type_specifier(tokens, i) {

@@ -604,18 +604,34 @@ fn (mut p Processor) run() {
 		// because that is what lets a use reach past itself for its arguments
 		// and what lets the text after a replacement finish a use that the
 		// replacement started.
-		mut segment := []tokenize.Token{}
+		start := p.frames[i].pos
 		for p.frames[i].pos < p.frames[i].tokens.len {
 			t := p.frames[i].tokens[p.frames[i].pos]
 			if t.kind == .directive || t.kind == .eof {
 				break
 			}
-			segment << p.mapped(t)
 			p.frames[i].pos++
 		}
-		if segment.len > 0 && p.reading() && !p.frames[i].silent {
-			for expanded in p.expand_all(segment) {
-				p.emit(expanded)
+		end := p.frames[i].pos
+		if end > start && p.reading() && !p.frames[i].silent {
+			if p.frames[i].line_delta == 0 && p.frames[i].report_path == '' {
+				// Nothing in this file has renumbered what follows, so a token
+				// is handed on where it was read and the run is a slice of the
+				// file rather than a copy of it. `mapped` would return every
+				// one of them unchanged; the copy is what a `#line` costs and a
+				// file that wrote none should not pay it.
+				run := p.frames[i].tokens[start..end]
+				for expanded in p.expand_all(run) {
+					p.emit(expanded)
+				}
+			} else {
+				mut segment := []tokenize.Token{cap: end - start}
+				for k in start .. end {
+					segment << p.mapped(p.frames[i].tokens[k])
+				}
+				for expanded in p.expand_all(segment) {
+					p.emit(expanded)
+				}
 			}
 		}
 		if p.frames[i].pos < p.frames[i].tokens.len {
