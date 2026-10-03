@@ -7926,6 +7926,18 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 				width := e.type_width(typ.describe()) or { 4 }
 				return if width < 4 { 4 } else { width }
 			}
+			// A call the unit declares no return type for is one the reader
+			// built itself from a spelling in the compiler's own namespace: the
+			// machine builtins and the argument-list operations. The type the
+			// reader resolved onto the call is the only thing that says how
+			// wide its value is, and a 64-bit fetch whose result was sized at
+			// four bytes would be refused where it is stored in a 64-bit
+			// object.
+			if expr.name !in e.returns {
+				if width := e.converted_width(expr.typ) {
+					return width
+				}
+			}
 			width := e.type_width(e.returns[expr.name]) or { 4 }
 			if width < 4 { 4 } else { width }
 		}
