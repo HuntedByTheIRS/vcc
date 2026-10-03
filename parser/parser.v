@@ -2956,6 +2956,90 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 	return none
 }
 
+// floating_constant_value is the value of a floating constant expression this
+// reader evaluates while it reads: a floating literal, a sign in front of one, a
+// cast of an integer or a floating constant to a floating type, the arithmetic
+// of two such values, and the conditional. It is what a file-scope object of a
+// floating type, or an element of a brace initializer for one, holds: the image
+// is written before the program runs, so the value is what goes into it and not
+// the expression that computes it.
+//
+// A step is evaluated in the class its own operands give it, which is what the
+// usual arithmetic conversions do: an operand of an integer type is folded by
+// the integer folder and widened here, and `1 / 2` stays the zero it is rather
+// than becoming the half of a floating division. A shape that is not one of
+// these answers none, so an element this reader cannot evaluate is refused by
+// name rather than written as a value the fold did not make.
+fn (p Parser) floating_constant_value(expr ast.Expr) ?f64 {
+	if expr is ast.FloatLit {
+		return expr.value
+	}
+	if expr is ast.Unary {
+		if expr.op != '-' && expr.op != '+' {
+			return none
+		}
+		operand := p.floating_constant_value(expr.expr) or { return none }
+		return if expr.op == '-' { -operand } else { operand }
+	}
+	if expr is ast.Cast {
+		if !expr.typ.kind.is_floating() {
+			return none
+		}
+		if value := p.floating_constant_value(expr.expr) {
+			return value
+		}
+		if value := p.constant_value(expr.expr) {
+			return f64(value)
+		}
+		return none
+	}
+	if expr is ast.Binary {
+		if !expr.typ.kind.is_floating() {
+			return none
+		}
+		left := p.floating_operand_value(expr.left) or { return none }
+		right := p.floating_operand_value(expr.right) or { return none }
+		return match expr.op {
+			'+' { left + right }
+			'-' { left - right }
+			'*' { left * right }
+			'/' {
+				if right == 0.0 {
+					return none
+				}
+				left / right
+			}
+			else { none }
+		}
+	}
+	if expr is ast.Conditional {
+		if !expr.typ.kind.is_floating() {
+			return none
+		}
+		condition := p.constant_value(expr.cond) or { return none }
+		if condition != 0 {
+			return p.floating_constant_value(expr.then_expr) or { return none }
+		}
+		return p.floating_constant_value(expr.else_expr) or { return none }
+	}
+	return none
+}
+
+// floating_operand_value is one operand of a floating step: its floating value
+// when it is a floating expression, and the integer folder's value widened when
+// it is a constant of an integer type. The two classes are read apart rather
+// than both through the double folder, so a step whose own operands are integers
+// keeps the integer arithmetic the language gives it.
+fn (p Parser) floating_operand_value(expr ast.Expr) ?f64 {
+	if value := p.floating_constant_value(expr) {
+		return value
+	}
+	if value := p.constant_value(expr) {
+		return f64(value)
+	}
+	return none
+}
+
 // apply_constant_step is the arithmetic constant_value folds one binary step
 // with. It is the match the binary arm used to hold inline, moved out so the
 // left-spine loop and the callers answer the same value for an operator.

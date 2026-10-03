@@ -3352,6 +3352,28 @@ fn test_a_double_and_an_int_convert_both_ways() {
 	assert run_image(emitted.bytes) == 7
 }
 
+// A double array at the top level holds the value its element's floating
+// constant expression folds to, which is what V's generated C writes for
+// `math__bernoulli` and the other tables. Measured on gcc 16.2.1, the program
+// below exits 83: (1.0 / 12.0) * 1000 truncated is 83. The element with no
+// parentheses is the same value, and used to write no object at all.
+fn test_a_top_level_double_array_folds_a_floating_constant_expression() {
+	parenthesized := emit(translation_unit('const double b[2] = {(1.0) / ((((6.0) * (2.0)) * (1.0))), 2.0};\nint main(void) { return (int)(b[0] * 1000.0); }'),
+		Options{})
+	assert parenthesized.diagnostics.len == 0
+	assert run_image(parenthesized.bytes) == 83
+	bare := emit(translation_unit('const double b[2] = {1.0 / 12.0, 2.0};\nint main(void) { return (int)(b[0] * 1000.0); }'),
+		Options{})
+	assert bare.diagnostics.len == 0
+	assert run_image(bare.bytes) == 83
+	// The read is not a special case of the initializer: the same arithmetic
+	// over a value the machine reads at run time still works.
+	literal := emit(translation_unit('const double b[2] = {1.0, 2.0};\nint main(void) { return (int)(b[0] * 1000.0); }'),
+		Options{})
+	assert literal.diagnostics.len == 0
+	assert run_image(literal.bytes) == 232
+}
+
 fn test_the_logical_not_of_a_double_is_a_comparison_with_zero() {
 	// `!d` compares the value with zero, and zero comes from the exclusive-or of a
 	// register with itself. That instruction is the packed-double one and not the

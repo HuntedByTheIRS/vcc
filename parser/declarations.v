@@ -2168,22 +2168,31 @@ fn (mut p Parser) folded_file_initializer() ?FileConstant {
 		p.diagnostics = p.diagnostics[..saved_diagnostics]
 		return none
 	}
-	value := p.constant_value(expr) or {
-		p.pos = saved_pos
-		p.diagnostics = p.diagnostics[..saved_diagnostics]
-		// An address difference is a constant (6.6) equal to the distance
-		// between two parts of an object, but its two terms are relocations
-		// the layout settles and their difference is not a number this reader
-		// folds. The shape is refused by name rather than read as a number
-		// that would be wrong.
-		if p.is_address_difference(expr) {
-			p.error_at(p.peek(), 'unsupported: an address difference in a static initializer is not implemented, and the address of one part of an object less another is a relocation the layout settles rather than a number written here')
+	if value := p.constant_value(expr) {
+		return FileConstant{
+			integer: value
 		}
-		return none
 	}
-	return FileConstant{
-		integer: value
+	// An element of a floating object is a floating constant expression, which
+	// the integer folder above does not evaluate: `const double b[2] = {(1.0) /
+	// ((((6.0) * (2.0)) * (1.0))), 2.0};` is a value the image writes, and V's
+	// generated C is full of them.
+	if float := p.floating_constant_value(expr) {
+		return FileConstant{
+			floating: float
+		}
 	}
+	p.pos = saved_pos
+	p.diagnostics = p.diagnostics[..saved_diagnostics]
+	// An address difference is a constant (6.6) equal to the distance
+	// between two parts of an object, but its two terms are relocations
+	// the layout settles and their difference is not a number this reader
+	// folds. The shape is refused by name rather than read as a number
+	// that would be wrong.
+	if p.is_address_difference(expr) {
+		p.error_at(p.peek(), 'unsupported: an address difference in a static initializer is not implemented, and the address of one part of an object less another is a relocation the layout settles rather than a number written here')
+	}
+	return none
 }
 
 // is_an_address says whether an expression is one whose value is an address: the
@@ -2596,6 +2605,13 @@ fn (mut p Parser) file_scope_brace_constant() ?NumberConstant {
 // and is answered as the zero it is, which is what the member it initializes
 // holds.
 //
+// A floating constant expression is the other class of value an element may be:
+// 6.6p4 makes one a constant expression, and the element of a double array is
+// written into the image as the value it folds to, so `{(1.0) / (12.0)}` is the
+// same bytes as the literal `8.3333333333333332e-02` and not the division the
+// program would make at run time. It is answered as a floating constant, which
+// is what the object's own conversion then places.
+//
 // Nothing is read when the shape is not a constant expression: the cursor and
 // every diagnostic are given back, so the caller refuses the element at its own
 // location rather than at the first term of an expression it did not finish.
@@ -2628,6 +2644,14 @@ fn (mut p Parser) file_scope_element_constant() ?NumberConstant {
 		return NumberConstant{
 			number: FileConstant{
 				integer: value
+			}
+			at:     at
+		}
+	}
+	if float := p.floating_constant_value(expr) {
+		return NumberConstant{
+			number: FileConstant{
+				floating: float
 			}
 			at:     at
 		}

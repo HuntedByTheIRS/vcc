@@ -529,6 +529,43 @@ fn test_a_file_scope_constant_expression_element_is_folded() {
 	assert refused.diagnostics[0].msg.contains('written constant')
 }
 
+// A floating constant expression is a value a file-scope initializer may hold
+// (6.6p4), and the bytes the image writes are the value it folds to. Measured on
+// gcc 16.2.1, the first program below holds 0.083333333333333329 in b[0] and
+// prints 83 for `(int)(b[0] * 1000.0)`. The parenthesized element in V's
+// generated C is the shape this reads, and `{1.0 / 12.0, 2.0}` is the same value
+// written without the parentheses: it used to be accepted with the object left
+// out of the unit entirely, so a later read of b[0] failed with a message about
+// the name rather than about the initializer.
+fn test_a_file_scope_floating_constant_expression_element_is_folded() {
+	parenthesized := declarations_of('const double b[2] = {(1.0) / ((((6.0) * (2.0)) * (1.0))), 2.0};')
+	assert parenthesized.diagnostics.len == 0
+	assert parenthesized.unit.globals.len == 1
+	object := parenthesized.unit.globals[0]
+	assert object.count == 2
+	assert object.inits.len == 0
+	assert object.init_floats.len == 2
+	assert object.init_floats[0] == 1.0 / 12.0
+	assert object.init_floats[1] == 2.0
+	// The same element with no parentheses around the first term is the same
+	// value in the image, and not a declaration that writes no object.
+	bare := declarations_of('const double b[2] = {1.0 / 12.0, 2.0};')
+	assert bare.diagnostics.len == 0
+	assert bare.unit.globals.len == 1
+	assert bare.unit.globals[0].init_floats.len == 2
+	assert bare.unit.globals[0].init_floats[0] == 1.0 / 12.0
+	assert bare.unit.globals[0].init_floats[1] == 2.0
+	// A scalar floating object folds an expression rather than only a literal.
+	scalar := declarations_of('double g = 1.5 + 1.5;')
+	assert scalar.diagnostics.len == 0
+	assert (scalar.unit.globals[0].init_float or { 0.0 }) == 3.0
+	// An expression over a name is not a constant: the element is refused by
+	// name rather than written as a value the fold did not make.
+	refused := declarations_of('int y = 1; static const double c[2] = {(1.0 + y), 2.0};')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('written constant')
+}
+
 // A compound literal is an element an aggregate list may hold, because 6.7.8p1
 // makes an element an assignment-expression and 6.5.2.5 makes a compound
 // literal one. At file scope the literal's object has static storage duration
@@ -1269,8 +1306,11 @@ fn test_a_file_scope_initializer_that_is_an_integer_constant_expression_is_folde
 		assert value == expected
 	}
 	// The expressions that are not integer constant expressions stay refused.
+	// A floating operand is the one entry that left this list: a floating
+	// constant expression is a file-scope constant (6.6p4) and is folded now,
+	// so the refusal that covers it is a floating expression over a name.
 	refused := [
-		'double g = 1.5 + 1.5;',
+		'int y = 1;\ndouble g = y + 1.5;',
 		'int n = 4;\nint g = n;',
 		'int f(void);\nint g = f();',
 		'int g = (1, 2);',
