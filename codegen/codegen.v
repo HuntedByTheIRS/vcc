@@ -130,6 +130,11 @@ struct LoopLabels {
 	// is_switch says this entry is a switch statement and not a loop, so a
 	// continue in its body looks past it for the loop it belongs to.
 	is_switch bool
+	// scopes_at_entry is how many scopes were open where the loop began. The
+	// loop's own body is the next scope, so a break or a continue leaves every
+	// scope from here on, and that is what says which blocks' variable-length
+	// array storage the jump has to give back before it goes.
+	scopes_at_entry int
 }
 
 // CaseTarget is one case or default label of the switch being emitted: the
@@ -254,6 +259,20 @@ mut:
 	// the block it was declared in and the ones inside it, which is where a
 	// declaration gets its slot and its width from.
 	scopes []map[string]Slot
+	// vla_saves is the stack of blocks being emitted, one entry per scope in
+	// scopes and in the same order: the frame offset of the word a scope saved
+	// the stack pointer in when it first declared a variable-length array, or
+	// -1 for a scope that never did. A block gives its storage back when it
+	// ends by restoring the stack pointer from that word, and the same word is
+	// what a break, a continue or a goto leaving the block restores from.
+	vla_saves []int
+	// vla_label_counts is, for every named label of the function being emitted,
+	// how many variable-length array scopes enclose it. A goto that leaves such
+	// scopes puts the stack pointer back to the innermost one its target sits
+	// in, and the count is what names that scope without the emitter having to
+	// match scope identities across the two walks. It is empty for a function
+	// that declares no variable-length array.
+	vla_label_counts map[string]int
 	// frame_used is how many bytes of frame the function being emitted has
 	// claimed: its parameters, its locals and the slots an expression needs.
 	frame_used int
@@ -358,6 +377,12 @@ mut:
 // subtraction are what put the stack pointer there, and both are needed for a
 // called function to find the stack as it expects.
 const frame_alignment = 16
+
+// vla_no_save is the entry a scope that has not claimed variable-length array
+// storage carries in the emitter's save stack. A real entry is a frame offset,
+// which is negative, so -1 is a value no offset can be and the two are told
+// apart by comparing against this rather than by the sign of the offset.
+const vla_no_save = -1
 
 // max_emit_depth is the nesting an expression may have before it is reported.
 // Parentheses are the only way to get deeper in the grammar, and a tree past
@@ -807,6 +832,14 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// that was written after it.
 	frame_at := e.program.text.len + e.target.frame_immediate_offset()
 	e.append(e.target.frame_reserve(0))
+	// A goto that leaves a block claiming a variable-length array's storage
+	// restores the stack pointer from the scope it lands inside, and the pre-pass
+	// records how many such scopes enclose each named label. A function that
+	// declares no such array has none to leave and skips the walk.
+	e.vla_label_counts = map[string]int{}
+	if function_has_vla(decl.body) {
+		e.vla_label_counts = vla_label_counts(decl.body)
+	}
 	e.push_scope()
 	// The numbers a walk through the unnamed arguments starts from are this
 	// function's and not the last one's, so they are reset here whatever the
@@ -1057,6 +1090,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	e.values = []Slot{}
 	e.callees = []Slot{}
 	e.slot_base = 0
+	e.vla_saves = []int{}
 	e.wide_left = []Slot{}
 	e.wide_right = []Slot{}
 	e.wide_scratch = []Slot{}
@@ -1423,9 +1457,11 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 // the bytes are rounded up to the alignment a call needs and subtracted from the
 // stack pointer, and the address the stack pointer became is kept as the array's
 // base. The size before rounding is kept too, because that is what sizeof answers
-// with. Nothing is released at the end of a block; the epilogue's move of the
-// stack pointer back to the frame pointer gives every declaration in the function
-// back at once.
+// with. The stack pointer before the subtraction is saved when the block has not
+// saved one yet, and the block's exit puts it back: that is what gives the
+// storage back at the end of the block rather than only at the end of the
+// function, so a loop body that declares an array does not grow the stack every
+// time round.
 fn (mut e Emitter) emit_vla_decl(stmt ast.Stmt, size_expr ast.Expr) !void {
 	if stmt.init != none {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is a variable-length array, and a variable-length array may not be initialized')
@@ -1439,6 +1475,22 @@ fn (mut e Emitter) emit_vla_decl(stmt ast.Stmt, size_expr ast.Expr) !void {
 	register := e.accumulator(stmt.line, stmt.col)!
 	base := e.frame_pointer(stmt.line, stmt.col)!
 	e.append(e.target.store_slot(base, i32(slot.vla_size), register, e.target.word_size)!)
+	// The stack pointer before this declaration's storage is subtracted is what
+	// the block puts back when it ends, so the first variable-length array in a
+	// block saves it into a frame slot the block's exit restores from. A later
+	// declaration in the same block needs no save of its own: putting the stack
+	// pointer back to the first one gives all of them back at once. The save is
+	// written before the subtraction and not after, because after it the stack
+	// pointer is the array's base and no longer the value to return to.
+	if e.vla_saves.len > 0 && e.vla_saves[e.vla_saves.len - 1] == vla_no_save {
+		restore := e.reserve(e.target.word_size)
+		save_stack := e.target.stack_pointer() or {
+			e.diagnostics << problem(stmt.line, stmt.col, '${e.target.name}: the machine has no stack pointer to save before a variable-length array claims its storage')
+			return error('no stack pointer')
+		}
+		e.append(e.target.store_slot(base, i32(restore.offset), save_stack, e.target.word_size)!)
+		e.vla_saves[e.vla_saves.len - 1] = restore.offset
+	}
 	// Round up to the boundary a call needs, so that a call inside the body
 	// reaches a function whose frame is aligned, and lower the stack pointer by
 	// that much. What the stack pointer becomes is where the array starts.
@@ -2623,8 +2675,9 @@ fn (mut e Emitter) emit_while(stmt ast.Stmt) !void {
 	// The body can leave by jumping to either end of the loop, so both labels
 	// are known while it is emitted.
 	e.loops << LoopLabels{
-		break_to:    end
-		continue_to: continue_to
+		break_to:        end
+		continue_to:     continue_to
+		scopes_at_entry: e.scopes.len
 	}
 	e.emit_branch_body(stmt.body)!
 	e.loops.pop()
@@ -2654,8 +2707,9 @@ fn (mut e Emitter) emit_do_while(stmt ast.Stmt) !void {
 	test := e.label()
 	e.place(top)
 	e.loops << LoopLabels{
-		break_to:    end
-		continue_to: test
+		break_to:        end
+		continue_to:     test
+		scopes_at_entry: e.scopes.len
 	}
 	e.emit_branch_body(stmt.body)!
 	e.loops.pop()
@@ -2692,12 +2746,17 @@ fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
 			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: break outside a loop or a switch')
 			return error('break outside a loop or a switch')
 		}
+		// A break leaves the loop or switch, and with it every block it opened:
+		// the storage those blocks claimed goes back before the jump, so a body
+		// that declared a variable-length array does not leak it by breaking out.
+		e.restore_vla_scopes_above(e.loops[e.loops.len - 1].scopes_at_entry)
 		e.jump(e.loops[e.loops.len - 1].break_to)!
 		return
 	}
 	mut at := e.loops.len - 1
 	for at >= 0 {
 		if !e.loops[at].is_switch {
+			e.restore_vla_scopes_above(e.loops[at].scopes_at_entry)
 			e.jump(e.loops[at].continue_to)!
 			return
 		}
@@ -2768,9 +2827,10 @@ fn (mut e Emitter) emit_switch(stmt ast.Stmt) !void {
 	// The body runs with the switch as the break target and without a continue
 	// target of its own, which is what the entry says.
 	e.loops << LoopLabels{
-		break_to:    end
-		continue_to: ''
-		is_switch:   true
+		break_to:        end
+		continue_to:     ''
+		is_switch:       true
+		scopes_at_entry: e.scopes.len
 	}
 	e.switches << SwitchState{
 		cases: cases
@@ -2929,6 +2989,30 @@ fn (mut e Emitter) emit_goto(stmt ast.Stmt) !void {
 			line: stmt.line
 			col:  stmt.col
 		}
+	}
+	// A goto that leaves a block which claimed a variable-length array's storage
+	// gives that storage back before it jumps, because the block's own exit is not
+	// reached. The label's enclosing scopes are a prefix of the goto's, so the
+	// count of them names the innermost one the label sits in and the stack
+	// pointer is put back to what that scope saved. A label inside no such scope
+	// takes the outermost one, whose saved value is the frame's own stack
+	// pointer.
+	mut active := []int{}
+	for offset in e.vla_saves {
+		if offset != vla_no_save {
+			active << offset
+		}
+	}
+	if active.len > 0 {
+		enclosing := e.vla_label_counts[stmt.label]
+		mut at := 0
+		if enclosing > 0 {
+			at = enclosing - 1
+			if at >= active.len {
+				at = active.len - 1
+			}
+		}
+		e.restore_stack_pointer(active[at])
 	}
 	e.jump(e.named_label(stmt.label))!
 }
@@ -3297,10 +3381,155 @@ fn (mut e Emitter) callee_slot(depth int) Slot {
 // shadows one outside it and does not outlive it.
 fn (mut e Emitter) push_scope() {
 	e.scopes << map[string]Slot{}
+	e.vla_saves << vla_no_save
 }
 
 fn (mut e Emitter) pop_scope() {
+	// A block that claimed a variable-length array's storage gives it back where
+	// the block ends: the stack pointer goes back to what it was before the
+	// block's first such declaration subtracted from it, so a loop whose body
+	// declares one does not grow the stack every time round.
+	if e.vla_saves.len > 0 {
+		offset := e.vla_saves[e.vla_saves.len - 1]
+		if offset != vla_no_save {
+			e.restore_stack_pointer(offset)
+		}
+		e.vla_saves.pop()
+	}
 	e.scopes.pop()
+}
+
+// restore_stack_pointer puts the stack pointer back to the value a block saved in
+// a frame slot before it claimed a variable-length array's storage. That word is
+// written by the declaration and read here, at the block's exit or on the way out
+// of it, and it is the whole of what giving the storage back costs.
+fn (mut e Emitter) restore_stack_pointer(offset int) {
+	base := e.target.frame_pointer() or { return }
+	stack := e.target.stack_pointer() or { return }
+	bytes := e.target.load_slot(base, i32(offset), stack, e.target.word_size) or { return }
+	e.append(bytes)
+}
+
+// restore_vla_scopes_above gives back the storage every variable-length array
+// scope opened at or above depth claimed, which is what a break, a continue or a
+// goto leaving those scopes has to do before it jumps. The outermost such scope
+// is the one restored: its saved pointer is the lowest of them, so putting the
+// stack pointer back to it gives every inner one back at once.
+fn (mut e Emitter) restore_vla_scopes_above(depth int) {
+	mut at := depth
+	for at < e.vla_saves.len {
+		if e.vla_saves[at] != vla_no_save {
+			e.restore_stack_pointer(e.vla_saves[at])
+			return
+		}
+		at++
+	}
+}
+
+// VlaCounter counts, for each named label of a function, how many scopes that
+// declared a variable-length array enclose it. active has one entry per scope
+// being walked, in the nesting order emission uses, and says whether that scope
+// has declared one yet. A scope's entry becomes true when its first such
+// declaration is met, because a label written before a declaration is not
+// enclosed by the storage that declaration claims.
+struct VlaCounter {
+mut:
+	active []bool
+	counts map[string]int
+}
+
+// vla_label_counts walks a function body and answers, for every named label, how
+// many variable-length array scopes enclose it. The walk is the one emission
+// makes — statements in order, a block's contents where the block is, an if's two
+// arms, a loop's body before its step — so a count names the scope emission will
+// have on its stack when the label is reached.
+fn vla_label_counts(body []ast.Stmt) map[string]int {
+	mut counter := VlaCounter{
+		counts: map[string]int{}
+	}
+	counter.scope(body)
+	return counter.counts
+}
+
+fn (mut c VlaCounter) scope(stmts []ast.Stmt) {
+	c.active << false
+	for stmt in stmts {
+		c.statement(stmt)
+	}
+	c.active.pop()
+}
+
+fn (mut c VlaCounter) statement(stmt ast.Stmt) {
+	match stmt.kind {
+		.block { c.scope(stmt.body) }
+		.var_decl {
+			if stmt.decl_vla_size != none && c.active.len > 0 {
+				c.active[c.active.len - 1] = true
+			}
+		}
+		.if_stmt {
+			if stmt.then_body.len > 0 {
+				c.scope(stmt.then_body)
+			}
+			if stmt.else_body.len > 0 {
+				c.scope(stmt.else_body)
+			}
+		}
+		.while_stmt {
+			if stmt.body.len > 0 {
+				c.scope(stmt.body)
+			}
+			// A for loop's step runs in the scope around the loop, which is where
+			// emission writes it, so it is walked without opening a scope.
+			for step in stmt.step {
+				c.statement(step)
+			}
+		}
+		.do_while_stmt {
+			if stmt.body.len > 0 {
+				c.scope(stmt.body)
+			}
+		}
+		.switch_stmt {
+			if stmt.body.len > 0 {
+				c.scope(stmt.body)
+			}
+		}
+		.label_stmt {
+			mut enclosing := 0
+			for declared in c.active {
+				if declared {
+					enclosing++
+				}
+			}
+			c.counts[stmt.label] = enclosing
+		}
+		else {}
+	}
+}
+
+// function_has_vla says whether any statement in a function declares a
+// variable-length array, so that the label pre-pass runs only where a goto could
+// have storage to give back.
+fn function_has_vla(stmts []ast.Stmt) bool {
+	for stmt in stmts {
+		if statement_has_vla(stmt) {
+			return true
+		}
+	}
+	return false
+}
+
+fn statement_has_vla(stmt ast.Stmt) bool {
+	match stmt.kind {
+		.block { return function_has_vla(stmt.body) }
+		.var_decl { return stmt.decl_vla_size != none }
+		.if_stmt { return function_has_vla(stmt.then_body) || function_has_vla(stmt.else_body) }
+		.while_stmt { return function_has_vla(stmt.body) || function_has_vla(stmt.step) }
+		.do_while_stmt { return function_has_vla(stmt.body) }
+		.switch_stmt { return function_has_vla(stmt.body) }
+		else { return false }
+	}
 }
 
 fn (e Emitter) lookup(name string) ?Slot {
