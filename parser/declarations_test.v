@@ -336,10 +336,12 @@ fn test_a_written_zero_bound_is_zero_for_a_string_initializer() {
 }
 
 // A shape the reader does not implement is refused by name: an element that
-// begins with neither a written number nor an address, and an empty pair of
-// braces. Measured on gcc 16.2.1, `int a[] = {};` under `-std=gnu99` is
-// `ISO C forbids empty initializer braces before C23` and `zero or negative
-// size array`.
+// begins with neither a written number nor an address. An array whose brackets
+// wrote no size takes its size from the list, and an empty list writes no
+// element to give it one: measured on gcc 16.2.1, `int a[] = {};` is `ISO C
+// forbids empty initializer braces before C23` under `-std=gnu99` and then
+// `zero or negative size array`, so the empty-list refusal that used to live in
+// the reader is now the size this declaration has no answer for.
 fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	// A name is read as an address, which is what a pointer's initializer is, so
 	// on an object that holds no address the element is named for that: gcc
@@ -355,26 +357,29 @@ fn test_a_file_scope_list_shape_that_is_not_implemented_is_named() {
 	element := declarations_of('int a[2] = {(1 + 2)};')
 	assert element.diagnostics.len == 1
 	assert element.diagnostics[0].msg.contains('written constant')
+	// An empty list writes no value, so it gives an array with empty brackets
+	// no size to be.
 	empty := declarations_of('int a[] = {};')
 	assert empty.diagnostics.len == 1
-	assert empty.diagnostics[0].msg.contains('empty brace initializer')
+	assert empty.diagnostics[0].msg.contains('empty brace initializer does not write')
 }
 
 // A brace list whose element read fails leaves the cursor where it was, so the
 // statements after the list are still the statements of the body that holds it.
-// The empty list below is refused by name - measured on gcc 16.2.1 it is an
-// object of zero, and this reader refuses it - and the point of this test is
-// what the refusal does to the rest of the body. Before the recovery the failed
-// read left the cursor in front of the list's own closing brace, the block
-// reader took that brace for the end of the function, and every statement after
-// it was reported as `expected a declaration` at file scope: the shape at
-// hello.c 3437 did that to eight statements of `_vinit`.
+// The element below is refused by name - a designator with no `=` is not a
+// value this reader writes - and the point of this test is what the refusal does
+// to the rest of the body. Before the recovery the failed read left the cursor
+// in front of the list's own closing brace, the block reader took that brace for
+// the end of the function, and every statement after it was reported as
+// `expected a declaration` at file scope: the shape at hello.c 3437 did that to
+// eight statements of `_vinit`. The empty list in that shape is read now, so the
+// failing element is a designator missing its value.
 fn test_a_failed_brace_element_leaves_the_reader_in_the_function() {
-	result := declarations_of('struct T { int a; }; struct S { int typ; struct T *obj; int boxed; }; struct S g; void *memdup(const void *p, unsigned long n); int main(void) { g = (struct S){.typ = 1, .obj = (struct T *)memdup(&(struct T){}, sizeof(struct T)), .boxed = 1}; g.typ = 6; return g.typ; }')
-	// One diagnostic, the empty list refused by name. The cascade that used to
+	result := declarations_of('struct T { int a; }; struct S { int typ; struct T *obj; int boxed; }; struct S g; void *memdup(const void *p, unsigned long n); int main(void) { g = (struct S){.typ = 1, .obj = (struct T *)memdup(&(struct T){.a 1}, sizeof(struct T)), .boxed = 1}; g.typ = 6; return g.typ; }')
+	// One diagnostic, the element refused by name. The cascade that used to
 	// report every statement after the assignment is gone.
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('empty brace initializer')
+	assert result.diagnostics[0].msg.contains('expected =')
 	mut main := result.unit.decls[0]
 	for decl in result.unit.decls {
 		if decl.name == 'main' {
@@ -572,16 +577,62 @@ fn test_an_attribute_after_a_struct_body_is_read_past() {
 	assert named.unit.globals[1].name == 'other'
 }
 
-// A struct whose member is itself an aggregate takes a list of its own, which a
-// flat list does not write, so the declaration is refused by name rather than
-// laid out with a member written at a guessed offset. Measured, gcc 16.2.1
-// accepts `struct S s = {1, 2, 3};` for it by brace elision, so the refusal is
-// this reader's and it says which construct it is.
+// A list for a struct whose member is itself an aggregate is walked against the
+// object's type: a positional value elides into the scalar subobject it reaches
+// (6.7.8p20) and a subobject the list does not reach holds the zero 6.7.8p21
+// gives it. Measured on gcc 16.2.1, `struct S s = {1, 2, 3};` reads t.x 1, t.y
+// 2 and n 3, and `struct A a = {0};` on a struct whose member is an array reads
+// the whole object as zero. This shape used to be refused by name.
 fn test_a_file_scope_list_for_a_struct_with_an_aggregate_member_is_refused() {
 	result := declarations_of('struct T { int x; int y; };\nstruct S { struct T t; int n; };\nstruct S s = {1, 2, 3};')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('a value is not written into an object of that type')
-	assert result.unit.globals.len == 0
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	assert object.bytes == 12
+	assert object.member_inits.len == 3
+	assert object.member_inits[0].offset == 0
+	assert object.member_inits[1].offset == 4
+	assert object.member_inits[2].offset == 8
+	first := object.member_inits[0].init or {
+		assert false
+		return
+	}
+	second := object.member_inits[1].init or {
+		assert false
+		return
+	}
+	third := object.member_inits[2].init or {
+		assert false
+		return
+	}
+	assert first == 1
+	assert second == 2
+	assert third == 3
+	// `{0}` on a struct whose only member is an array elides the zero into the
+	// first element and leaves the rest to the implicit zero.
+	zeroed := declarations_of('struct A { int a[3]; };\nstruct A x = {0};')
+	assert zeroed.diagnostics.len == 0
+	assert zeroed.unit.globals.len == 1
+	assert zeroed.unit.globals[0].bytes == 12
+	assert zeroed.unit.globals[0].member_inits.len == 1
+	assert zeroed.unit.globals[0].member_inits[0].offset == 0
+	only := zeroed.unit.globals[0].member_inits[0].init or {
+		assert false
+		return
+	}
+	assert only == 0
+	// `{}` writes no value at all: every subobject is the implicit zero.
+	empty := declarations_of('struct A { int a[3]; int n; };\nstruct A x = {};')
+	assert empty.diagnostics.len == 0
+	assert empty.unit.globals.len == 1
+	assert empty.unit.globals[0].bytes == 16
+	assert empty.unit.globals[0].member_inits.len == 0
+	// A written value that is not the aggregate's has no place at the subobject:
+	// an address written into an int element is refused by name rather than laid
+	// down where a read would take it.
+	address := declarations_of('int n;\nstruct A { int a[2]; };\nstruct A x = {&n};')
+	assert address.diagnostics.len == 1
+	assert address.diagnostics[0].msg.contains('an address initializes an object of the type int')
 }
 
 // A bitfield member takes its value into the field's own bits inside the storage
@@ -975,13 +1026,87 @@ fn test_a_body_struct_brace_initializer_zeroes_the_members_it_did_not_write() {
 	assert (zero as ast.IntLit).value == 0
 }
 
-// An object of a struct type in a body whose member is itself an aggregate takes
-// a list of its own, which a flat list does not write, so the declaration is
-// refused by name once rather than stored at a guessed offset.
+// An object of a struct type in a body whose member is itself an aggregate is
+// initialized leaf by leaf: every scalar subobject is stored zero first, because
+// a frame slot starts as whatever was there and 6.7.8p21 makes the subobjects
+// the list did not reach hold zero, and then each value the list wrote is stored
+// over it. Measured on gcc 16.2.1, `struct S s = {1, 2, 3};` reads t.x 1, t.y 2
+// and n 3, and `struct A x = {};` reads every member as zero.
 fn test_a_body_list_for_a_struct_with_an_aggregate_member_is_refused() {
 	result := declarations_of('struct T { int x; int y; };\nstruct S { struct T t; int n; };\nint main(void) { struct S s = {1, 2, 3}; return 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('a value is not written into an object of that type')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	// The declaration, one zero store per scalar leaf, the three written values,
+	// and the return.
+	assert body.len == 8
+	assert body[0].kind == .var_decl
+	expected := [i64(0), 0, 0, 1, 2, 3]
+	for i in 0 .. expected.len {
+		assert body[i + 1].kind == .assign
+		value := body[i + 1].expr or {
+			assert false
+			return
+		}
+		assert value is ast.IntLit
+		assert (value as ast.IntLit).value == expected[i]
+	}
+	assert body[7].kind == .return_stmt
+	// `{}` writes no value, so the leaves it does not write get the zero store
+	// and nothing is written over them: the empty list is the limit case.
+	empty := declarations_of('struct A { int a[3]; int n; };\nint main(void) { struct A x = {}; return 0; }')
+	assert empty.diagnostics.len == 0
+	empty_body := empty.unit.decls[0].body
+	assert empty_body.len == 6
+	for i in 0 .. 4 {
+		assert empty_body[i + 1].kind == .assign
+		zero := empty_body[i + 1].expr or {
+			assert false
+			return
+		}
+		assert zero is ast.IntLit
+		assert (zero as ast.IntLit).value == 0
+	}
+}
+
+// An empty brace list is a list of no written values: 6.7.8p21 leaves every
+// subobject of the object zero, at file scope because the storage starts zeroed
+// and in a body because every leaf is stored zero. Measured on gcc 16.2.1, a
+// struct of scalars and an int both read zero for `= {}`. A value that has no
+// conversion to the subobject it would go into is still refused by name: the null
+// pointer constant is the one integer a pointer member takes, and a number
+// written for one that is not zero is named.
+fn test_an_empty_brace_list_writes_no_value() {
+	scalar := declarations_of('struct S { int a; int b; };\nstruct S s = {};')
+	assert scalar.diagnostics.len == 0
+	assert scalar.unit.globals.len == 1
+	assert scalar.unit.globals[0].bytes == 8
+	assert scalar.unit.globals[0].member_inits.len == 0
+	number := declarations_of('int x = {};')
+	assert number.diagnostics.len == 0
+	assert number.unit.globals.len == 1
+	assert number.unit.globals[0].init == none
+	array := declarations_of('int a[3] = {};')
+	assert array.diagnostics.len == 0
+	assert array.unit.globals.len == 1
+	assert array.unit.globals[0].count == 3
+	assert array.unit.globals[0].inits.len == 0
+	// A struct whose aggregate member is left to the walk: a nonzero number has
+	// no place in a pointer element, so each one is refused rather than written
+	// where a read would take it as an address.
+	pin := declarations_of('struct A { int *p[2]; int n; };\nstruct A x = {5, 6, 7};')
+	assert pin.diagnostics.len == 2
+	assert pin.diagnostics[0].msg.contains('which is a pointer')
+	assert pin.diagnostics[1].msg.contains('which is a pointer')
+	// In a body the object is stored zero leaf by leaf, because a frame slot is
+	// not zeroed the way storage in the image is.
+	body := declarations_of('struct S { int a; int b; };\nint main(void) { struct S s = {}; return 0; }')
+	assert body.diagnostics.len == 0
+	body_stmts := body.unit.decls[0].body
+	assert body_stmts.len == 4
+	assert body_stmts[0].kind == .var_decl
+	assert body_stmts[1].kind == .assign
+	assert body_stmts[2].kind == .assign
+	assert body_stmts[3].kind == .return_stmt
 }
 
 // A file-scope initializer that is a number the literal reader refuses gets the

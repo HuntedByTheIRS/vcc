@@ -835,6 +835,11 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// first has its own diagnostic at its own location, and the second is what
 	// the report below is for.
 	mut literal_refused := false
+	// empty_brace says the initializer was `{}`, a list of no written values.
+	// The object is defined and every byte of it is zero (C23 6.7.9, 6.7.8p21),
+	// which is the same storage a definition with no initializer has, so the
+	// report for an initializer that wrote nothing does not apply to it.
+	mut empty_brace := false
 	for {
 		d := p.parse_declarator(0) or {
 			p.skip_declaration()
@@ -1019,10 +1024,24 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					// knows the elements are addresses.
 					data_brace = true
 					if list := p.parse_brace_initializer(false) {
-						if !list.is_a_flat_list() {
+						if list.elements.len == 0 {
+							empty_brace = true
+						}
+						if !list.is_a_flat_list() || (!data_array
+							&& spec.clause.kind in [types.Kind.struct_, .union_]
+							&& (list.elements.len == 0 || has_aggregate_member(spec.clause))) {
 							// A nested list or a designator: the list is
 							// walked against the object's type and each write
 							// lands at the byte its subobject starts at.
+							//
+							// An object with an aggregate member is walked too:
+							// `{0}` on a struct whose member is an array or a
+							// struct elides the zero into the member's first
+							// scalar and leaves the rest of it to the implicit
+							// zero 6.7.8p21 gives it, which is a subobject no
+							// store of one member places. An empty list is a
+							// list of no written values, so every subobject is
+							// that implicit zero.
 							if general := p.file_scope_general_initializer(spec, d, list, data_name) {
 								data_member_inits = general.members
 								data_bytes = general.bytes
@@ -1114,18 +1133,22 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.elements.len}')
 									data_problem = true
 								}
-								element := list.elements[0]
-								if element.address != none {
-									// The object's type is not a pointer: a
-									// pointer's braces are read as a table
-									// before this arm, and an address has no
-									// conversion to another scalar.
-									p.error_at(list.at, 'unsupported: ${data_name} is not of pointer type, and its initializer writes an address')
-									data_problem = true
-								} else if number := element.number {
-									data_init, data_init_float = initializer_for(data_type, number.number.integer,
-										number.number.floating)
-									data_init_long = number.number.long_floating
+								// `{}` writes no value: the object keeps the
+								// zeros its storage starts with.
+								if list.elements.len > 0 {
+									element := list.elements[0]
+									if element.address != none {
+										// The object's type is not a pointer: a
+										// pointer's braces are read as a table
+										// before this arm, and an address has no
+										// conversion to another scalar.
+										p.error_at(list.at, 'unsupported: ${data_name} is not of pointer type, and its initializer writes an address')
+										data_problem = true
+									} else if number := element.number {
+										data_init, data_init_float = initializer_for(data_type, number.number.integer,
+											number.number.floating)
+										data_init_long = number.number.long_floating
+									}
 								}
 							}
 						} else {
@@ -1137,6 +1160,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 							// is what its size is.
 							if data_count > 0 && list.elements.len > data_count {
 								p.error_at(list.at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${list.elements.len}')
+								data_problem = true
+							}
+							if list.elements.len == 0 && !d.array_sized() {
+								// An array with empty brackets takes its size from the
+								// list, and an empty list writes no element to give it
+								// one. gcc 16.2.1 refuses the shape as `zero or
+								// negative size array`, so the refusal is by name
+								// rather than an object of no elements.
+								p.error_at(list.at, 'unsupported: ${data_name} is an array whose size an empty brace initializer does not write, and its brackets wrote none')
 								data_problem = true
 							}
 							if data_count == 0 {
@@ -1369,7 +1401,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			}
 			return decls
 		}
-		if data_defined && data_init == none && data_init_float == none && data_inits.len == 0
+		if data_defined && !empty_brace && data_init == none && data_init_float == none && data_inits.len == 0
 			&& data_init_floats.len == 0 && data_init_long == none && !data_string && data_address == none
 			&& data_address_inits.len == 0 {
 			// Either way the definition is refused. When the initializer was a
@@ -2240,9 +2272,16 @@ struct BraceList {
 fn (mut p Parser) parse_brace_initializer(body bool) !BraceList {
 	open := p.next() // {
 	if p.at_punct('}') {
+		// An empty list writes no values. C23 6.7.9 makes `{}` a list of no
+		// initializers, gcc 16.2.1 accepts it in every earlier mode as a GNU
+		// extension, and 6.7.8p21 leaves every subobject of the object zero.
+		// The list is answered empty rather than refused, and the object keeps
+		// the zeros its storage starts with.
 		p.next()
-		p.error_at(open, 'unsupported: an empty brace initializer is not implemented')
-		return error('empty brace initializer')
+		return BraceList{
+			elements: []BraceElement{}
+			at:       open
+		}
 	}
 	// A shape that stops the reader is reported and the rest of the list is
 	// read past to its closing brace, so that the token after the list is where
@@ -3052,6 +3091,24 @@ fn (mut p Parser) write_bit_leaf(member types.Member, bit_offset int, base int, 
 // write_brace_leaf appends the one write an element makes for a scalar subobject
 // of the given type at the given byte.
 fn (mut p Parser) write_brace_leaf(typ types.Type, base int, element BraceElement, mut writes []BraceWrite) {
+	if address := element.address {
+		// An address is a value of a pointer type and has no conversion to
+		// another scalar (6.3.2.3). Writing one into a member that does not
+		// hold a pointer is a value the declaration did not write, so it is
+		// refused by name rather than laid down where a read would take it.
+		if typ.kind !in [types.Kind.pointer, .unknown] {
+			p.error_span(address.line, address.col, 'unsupported: an address initializes an object of the type ${typ.describe()}, which is not a pointer')
+			return
+		}
+	} else if number := element.number {
+		// The one integer a pointer takes is the null pointer constant, which
+		// is a written zero (6.3.2.3p3); any other number is a value with no
+		// conversion to the pointer's type.
+		if typ.kind == .pointer && (number.number.integer or { i64(0) }) != 0 {
+			p.error_span(number.at.line, number.at.col, 'unsupported: the number ${number.number.integer or { i64(0) }} initializes an object of the type ${typ.describe()}, which is a pointer')
+			return
+		}
+	}
 	writes << BraceWrite{
 		offset:   base
 		width:    p.representation.size_of(typ) or { 0 }
@@ -3441,6 +3498,23 @@ fn members_taking_values(aggregate types.Type) []int {
 		indices << i
 	}
 	return indices
+}
+
+// has_aggregate_member says a struct or union has a member that is itself an
+// object with subobjects: an array, a struct or a union. Such a member is not a
+// scalar a store places in one word, so a list on a type that has one is walked
+// against the object's type rather than placed member by member: the walk gives
+// each written value the byte of the subobject it reaches and leaves the
+// subobjects the list did not reach to the implicit zero 6.7.8p21 gives them.
+// A bitfield is not one of these: its value goes into its own bits, which the
+// member-by-member reader places.
+fn has_aggregate_member(typ types.Type) bool {
+	for member in typ.members {
+		if member.typ.kind in [types.Kind.struct_, .union_, .array] {
+			return true
+		}
+	}
+	return false
 }
 
 // struct_member_inits makes each element a struct's brace initializer wrote the
