@@ -1859,6 +1859,22 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 }
 
 fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr, depth int) !void {
+	if e.writes_a_complex(member.spelling) {
+		// A member of a complex type is two components inside another object,
+		// and the store is the two-component copy a local of the type takes,
+		// written at the member's own address. The object the member lies in
+		// may be a pointer's target or a top-level object, so the store cannot
+		// be an offset from the frame.
+		destination := types.from_words(member.spelling.split(' ')) or {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end has no complex type of that spelling to write')
+			return error('unsupported member type')
+		}
+		e.field_address(member, depth + 1, stmt.line, stmt.col)!
+		address := e.value_slot(depth)
+		e.store_accumulator(address, stmt.line, stmt.col)!
+		source := e.complex_object_as(expr, destination, depth + 1)!
+		return e.copy_complex_into(address, source, destination.kind, stmt.line, stmt.col)
+	}
 	if e.writes_a_128(member.spelling) {
 		// A member of that width takes a value narrower than it the way an object
 		// of the type does, through the member's own address: the object the
@@ -2147,10 +2163,19 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	e.emit_expr_at(subscript, depth)!
 	base := e.frame_pointer(stmt.line, stmt.col)!
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.element_address(base, register, slot.width, slot.offset, slot.wide, false, stmt.target,
-		stmt.line, stmt.col)!
+	e.element_address(base, register, slot.width, slot.offset, slot.wide, slot.complex,
+		stmt.target, stmt.line, stmt.col)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
+	if slot.complex {
+		// An element of an array of complex values is two components at an
+		// address the index computed, and it takes the same two-component copy
+		// a local of the type takes. The stride is the element size, so its
+		// width is what says which of the two complex types this is.
+		kind := if slot.width == 4 { types.Kind.complex_float } else { types.Kind.complex_double }
+		source := e.complex_object_as(expr, complex_type_of(kind), depth + 1)!
+		return e.copy_complex_into(address, source, kind, stmt.line, stmt.col)
+	}
 	if slot.wide {
 		// An element of that width takes the two words an object of the type takes,
 		// through the element's own address.
@@ -4061,6 +4086,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			// read at the width of the member's type. A double member is read
 			// with the instruction that moves one rather than with the integer
 			// load of the same width.
+			if e.writes_a_complex(expr.spelling) {
+				// The member is two components, and this is the value question,
+				// which is the one this back end has no answer for; the
+				// member's own address is the part that works, and every
+				// context that places a complex value goes through it.
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and a value of that type is two components where this back end keeps one value in a register')
+				return error('unsupported member type')
+			}
 			if e.writes_a_128(expr.spelling) {
 				// The object holds a member of that width, and the read is the
 				// value question, which is the one this back end has no answer
@@ -8912,6 +8945,42 @@ fn (mut e Emitter) copy_complex_frame(source Slot, destination Slot, width int, 
 		e.append(e.target.load_slot(base, i32(source.offset + done), register, 8)!)
 		e.append(e.target.store_slot(base, i32(destination.offset + done), register, 8)!)
 		done += 8
+	}
+}
+
+// complex_object_bytes is the whole object: two components of the width above,
+// which is the sixteen bytes measured for a `double _Complex` and the eight for
+// a `float _Complex`.
+fn complex_object_bytes(kind types.Kind) int {
+	return 2 * complex_component_width(complex_type_of(kind))
+}
+
+// copy_complex_into writes a complex object's components to the address a slot
+// holds. A member of a complex type takes this rather than the frame copy,
+// because the object the member lies in may be a pointer's target and the store
+// then cannot be an offset from the frame.
+fn (mut e Emitter) copy_complex_into(address Slot, source Slot, kind types.Kind, line int, col int) !void {
+	single := kind == .complex_float
+	step := complex_component_width(complex_type_of(kind))
+	bytes := complex_object_bytes(kind)
+	frame := e.frame_pointer(line, col)!
+	base := e.scratch(line, col)!
+	e.load_argument(address, base, e.target.word_size, line, col)!
+	mut offset := 0
+	for offset < bytes {
+		if offset > 0 {
+			e.append(e.target.add_immediate(base, offset))
+		}
+		if single {
+			value := e.float_accumulator(line, col)!
+			e.append(e.target.load_float_slot(frame, i32(source.offset + offset), value)!)
+			e.append(e.target.store_float_indirect(base, value)!)
+		} else {
+			value := e.float_accumulator(line, col)!
+			e.append(e.target.load_double_slot(frame, i32(source.offset + offset), value)!)
+			e.append(e.target.store_double_indirect(base, value)!)
+		}
+		offset += step
 	}
 }
 
