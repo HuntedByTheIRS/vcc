@@ -142,6 +142,21 @@ fn test_the_target_can_be_named() {
 	assert parse(['-target', 'x86_64-linux', 'x.c'])!.target == 'x86_64-linux'
 }
 
+fn test_the_emulation_can_be_named() {
+	assert parse(['-femulation=gcc', 'x.c'])!.emulation == .gcc
+	assert parse(['-femulation', 'clang', 'x.c'])!.emulation == .clang
+	assert parse(['-femulation=tcc', 'x.c'])!.emulation == .tcc
+	assert parse(['x.c'])!.emulation == .none
+}
+
+fn test_an_unknown_emulation_is_refused() {
+	if _ := parse(['-femulation=msvc', 'x.c']) {
+		assert false, 'a compiler this one cannot present itself as should be refused'
+	} else {
+		assert err.msg().contains('gcc, clang and tcc')
+	}
+}
+
 fn test_bench_lines_carry_the_phase_and_the_time() {
 	lines := bench_lines([Phase{
 		name:   'lex'
