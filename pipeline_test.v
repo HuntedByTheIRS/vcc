@@ -1078,6 +1078,35 @@ fn test_a_library_named_with_l_is_the_one_a_symbol_resolves_from() {
 	os.rm(binary) or {}
 }
 
+// A complex value from a library call, its component read and compared. A report
+// once read this shape as a silent wrong value, and the measurement that settles
+// it is gcc's own: gcc constant-folds `cpow(2.0, 3.0)` to exactly 8.0, while the
+// runtime glibc `cpow` on this machine answers 7.9999999999999982 - one ULP below
+// 8.0 - and `gcc -O0 -fno-builtin` on the same source answers with the runtime
+// value too. This compiler calls the library and folds no floating builtin, so
+// `__real__ cpow(2.0, 3.0) == 8.0` is false in it, and the component it reads is
+// bit-for-bit the one gcc reads with the fold off. The program below uses a
+// library call whose result IS exact, so the comparison is a claim about the read
+// and not about the library. Measured on gcc 16.2.1, it exits 0.
+fn test_a_component_read_from_a_library_call_is_the_value_the_library_wrote() {
+	source := scratch('complex_call.c')
+	binary := scratch('complex_call')
+	program := 'double _Complex csqrt(double _Complex);\n' +
+		'int main(void) {\n' +
+		'    double _Complex c = csqrt(-4.0);\n' +
+		'    if (__real__ c != 0.0) { return 1; }\n' +
+		'    if (__imag__ c != 2.0) { return 2; }\n' +
+		'    double r = __real__ c;\n' +
+		'    if (r != 0.0) { return 3; }\n' +
+		'    if (__real__ c == 0.0 && __imag__ c == 2.0) { return 0; }\n' +
+		'    return 4;\n' +
+		'}\n'
+	exit_status := compile_and_run(['-lm', source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // The other half of that: with the library not named, the compile is refused and
 // the symbol is named. It used to compile and die at load saying which symbol it
 // could not find, which was silent at compile time, and a build that trusts the

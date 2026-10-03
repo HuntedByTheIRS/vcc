@@ -263,6 +263,38 @@ fn test_a_read_through_an_address_reads_the_value_at_it() {
 	assert run_image(signed.bytes) == 200
 }
 
+// PointerDifferenceCase is one program whose `main` returns a pointer difference
+// and the status it exits with. A negative difference reaches the status through
+// its low byte, which is 252 for -4.
+struct PointerDifferenceCase {
+	source string
+	status int
+}
+
+// Subtracting one pointer from another is a `ptrdiff_t` whose value is the byte
+// difference divided by the size of one pointed-at element (6.5.6p9). The size is
+// what makes the same addresses count differently through a `char *`, an `int *`
+// and a struct pointer. Measured with gcc 16.2.1, each program below exits with
+// the status beside it; the negative difference is the sign the division has to
+// keep, and a difference used as an index is the count reached by a subscript.
+fn test_the_difference_of_two_pointers_is_a_count_of_elements() {
+	cases := [
+		PointerDifferenceCase{'int main() { int a[6]; int *p = a; int *q = a + 4; return q - p; }', 4},
+		PointerDifferenceCase{'int main() { int a[6]; int *p = a; int *q = a + 4; return p - q; }', 252},
+		PointerDifferenceCase{'int main() { char a[20]; char *p = a; char *q = a + 16; return q - p; }', 16},
+		PointerDifferenceCase{'struct S { int x, y, z; }; int main() { struct S a[5]; struct S *p = &a[1]; struct S *q = &a[4]; return q - p; }', 3},
+		PointerDifferenceCase{'int main() { int a[6]; int *p = a; int *q = a + 4; return (q - p) == 4; }', 1},
+		PointerDifferenceCase{'int main() { int a[6]; int *p = a; int *q = a + 4; return (p - q) < 0; }', 1},
+		PointerDifferenceCase{'int main() { int a[6] = {5,6,7,8,9,10}; int *p = a; int *q = a + 4; return a[(q - p) - 2]; }', 7},
+		PointerDifferenceCase{'int main() { int a[6]; int *p = a + 5; int *q = a + 1; return (q - p) + 10; }', 6},
+	]
+	for case in cases {
+		emitted := emit(translation_unit(case.source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == case.status
+	}
+}
+
 // A pointer object declared at the top level is storage in the image, and the
 // object it points at is reached through the address it holds rather than
 // answered from its own bytes. Measured with gcc 16.2.1, the programs below
@@ -2902,6 +2934,34 @@ fn test_the_part_of_a_complex_value_is_the_component_it_names() {
 		' float _Complex f = 1.5f + 2.5fi;' +
 		' if (__real__ f != 1.5f) { return 9; }' +
 		' if (__imag__ f != 2.5f) { return 10; }' +
+		' return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// The component of a complex value a call hands back is the value the call wrote
+// into storage, not a stale slot: the operand is materialised before the
+// component is loaded, so the address the returned object was stored at is the
+// address the load reads. The program below reads a component off a call result,
+// compares it with `==`, stores it to a plain double and compares that, and reads
+// a component straight off a call; a load at the wrong offset or out of the wrong
+// slot answers a different number here. The callee is compiled by this compiler,
+// so the value is exact and the comparison is about the read rather than about a
+// library's rounding; a call into libm whose result is not exact is the subject
+// of the pipeline test beside it. Measured on gcc 16.2.1, this program exits 0.
+fn test_a_component_read_from_a_call_result_is_the_value_the_call_wrote() {
+	source := 'double _Complex make(void) { return 8.0 + 0.0i; }' +
+		' int main(void) {' +
+		' double _Complex c = make();' +
+		' if (__real__ c != 8.0) { return 1; }' +
+		' if (__imag__ c != 0.0) { return 2; }' +
+		' double r = __real__ c;' +
+		' if (r != 8.0) { return 3; }' +
+		' double i = __imag__ c;' +
+		' if (i != 0.0) { return 4; }' +
+		' if (__real__ make() != 8.0) { return 5; }' +
+		' if (__real__ c + 1.0 != 9.0) { return 6; }' +
 		' return 0; }'
 	emitted := emit(translation_unit(source), Options{})
 	assert emitted.diagnostics.len == 0

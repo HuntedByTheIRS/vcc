@@ -6096,10 +6096,12 @@ fn (mut e Emitter) emit_wide_unary(unary ast.Unary, depth int) !void {
 	}
 }
 
-// is_pointer_step says whether a step is one of the two operators that add an
-// integer to an address or subtract one from it: `p + 1`, `1 + p` and `p - 1`.
-// 6.5.6 scales the integer by the size of the pointed-at type, which is why the
-// step is not the integer addition the rest of the arithmetic is.
+// is_pointer_step says whether a step is one of the operators that add an
+// integer to an address, subtract one from it, or subtract one address from
+// another: `p + 1`, `1 + p`, `p - 1` and `q - p`. 6.5.6 scales the integer by the
+// size of the pointed-at type and divides two addresses' byte difference by the
+// same size, which is why none of these is the integer operation the rest of the
+// arithmetic is.
 fn (e Emitter) is_pointer_step(step ast.Binary) bool {
 	if step.op == '+' || step.op == '-' {
 		return e.is_a_pointer(step.left) || e.is_a_pointer(step.right)
@@ -6129,12 +6131,11 @@ fn (e Emitter) pointed_size(expr ast.Expr) ?int {
 	return none
 }
 
-// emit_pointer_step writes an address plus or minus an index: the address is the
-// base's own value, the index is scaled by the size of one pointed-at element,
-// and the two are added. `p + 1` and `1 + p` are the same address because
-// addition commutes, and `p - 1` is the same address with the scaled index
-// negated. A step that is not one of those, and a difference of two addresses,
-// are refused by name rather than read as an integer addition.
+// emit_pointer_step writes an address plus or minus an index, or the difference
+// of two addresses. For an index: the address is the base's own value, the index
+// is scaled by the size of one pointed-at element, and the two are added. `p + 1`
+// and `1 + p` are the same address because addition commutes, and `p - 1` is the
+// same address with the scaled index negated.
 //
 // The spine walk has already put the step's left operand in the accumulator, so
 // the left side is not emitted again: it is parked while the right side runs, and
@@ -6144,8 +6145,7 @@ fn (mut e Emitter) emit_pointer_step(step ast.Binary, depth int) !void {
 	left_is_address := e.is_a_pointer(step.left)
 	right_is_address := e.is_a_pointer(step.right)
 	if left_is_address && right_is_address {
-		e.diagnostics << problem(step.line, step.col, 'unsupported: ${step.op} on two addresses is not implemented, and the difference of two pointers is a count this back end does not divide by the size of an element')
-		return error('pointer step')
+		return e.emit_pointer_difference(step, depth)
 	}
 	if !left_is_address && step.op != '+' {
 		e.diagnostics << problem(step.line, step.col, 'unsupported: the subtraction of an address from an integer is not implemented')
@@ -6193,6 +6193,69 @@ fn (mut e Emitter) emit_pointer_step(step ast.Binary, depth int) !void {
 		e.append(e.target.imul_immediate(index, stride))
 	}
 	e.append(e.target.add_reg64(address, index))
+}
+
+// emit_pointer_difference writes `q - p` for two addresses: the difference of
+// their byte values divided by the size of one pointed-at element, which is the
+// count 6.5.6p9 asks for. The count is 6.5.6p9's `ptrdiff_t`, which the reader
+// types as a signed `long` on this target, so the division is the signed one: a
+// difference that reads the bytes as unsigned answers `p - q` with a huge
+// positive count where the language asks for a negative one.
+//
+// The spine walk has already put the left address in the accumulator, so the left
+// side is parked while the right side runs; the right address is copied to the
+// scratch register, the left is loaded back into the accumulator, and the two are
+// subtracted at the width of a word. The element size is a constant the reader
+// and this back end both know, so it reaches the divisor register as an immediate
+// and the pair the accumulator and the register above it form is divided by it.
+//
+// The difference of two byte addresses is exact in the element size, so the signed
+// division has no remainder to drop. A pair whose element type has no size, or
+// whose two element types differ, was refused where it was written, and the size
+// read here is the left operand's own.
+//
+// Measured on gcc 16.2.1: for `int a[6]` with `p = &a[0]` and `q = &a[4]`, `q - p`
+// is 4 and `p - q` is -4; over the same addresses through `char *` they are 16 and
+// -16; and `(q - p) < 0` is 1 for the negative one, which is the signedness this
+// division keeps.
+fn (mut e Emitter) emit_pointer_difference(step ast.Binary, depth int) !void {
+	if step.op != '-' {
+		e.diagnostics << problem(step.line, step.col, 'unsupported: the sum of two addresses is not an expression this compiler types')
+		return error('sum of two addresses')
+	}
+	stride := e.difference_stride(step) or {
+		e.diagnostics << problem(step.line, step.col, 'unsupported: the difference of two addresses counts elements of ${step.left.typ.describe()}, and this back end has no size for one')
+		return error('no element size for a difference')
+	}
+	base := e.value_slot(depth)
+	e.store_accumulator(base, step.line, step.col)!
+	e.emit_expr_at(step.right, depth + 1)!
+	right := e.accumulator(step.line, step.col)!
+	left := e.scratch(step.line, step.col)!
+	e.append(e.target.move_register64(left, right)!)
+	e.load_argument(base, right, e.target.word_size, step.line, step.col)!
+	e.append(e.target.subtract_word(right, left)!)
+	if stride != 1 {
+		e.append(e.target.move_immediate64(left, u64(stride))!)
+		e.append(e.target.divide_word(left)!)
+	}
+}
+
+// difference_stride is how many bytes one element of the difference's pointed-at
+// type takes, which is what the byte difference is divided by. It is the element
+// size `pointed_size` already answers for an array or a pointer, with one case
+// added: the GNU dialects accept the difference of two `void *`, whose pointed-at
+// type has no size, and gcc 16.2.1 counts such a difference in bytes, so a `void *`
+// steps by one. Measured on gcc 16.2.1 with `-std=gnu99`: `void *a = b, *c = b + 5;`
+// gives `c - a` as 5.
+fn (e Emitter) difference_stride(step ast.Binary) ?int {
+	if step.left.typ.is_pointer() {
+		pointee := step.left.typ.pointee() or { return none }
+		if pointee.is_void() {
+			return 1
+		}
+	}
+	return e.pointed_size(step.left)
 }
 
 fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
