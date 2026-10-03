@@ -345,6 +345,15 @@ fn (mut p Processor) define_builtins() {
 	}
 }
 
+// is_dynamic_builtin_name says whether a name is one the expander answers from
+// the place it was used rather than from the macro table, which is the set
+// dynamic_builtin switches on. It is written down once so a caller asking
+// whether a run can expand consults the same list the expander does.
+fn is_dynamic_builtin_name(text string) bool {
+	return text in ['__LINE__', '__FILE__', '__BASE_FILE__', '__COUNTER__', '__INCLUDE_LEVEL__',
+		'__DATE__', '__TIME__', '__TIMESTAMP__']
+}
+
 // dynamic_builtin answers the macros whose value depends on where they are used
 // rather than on what the compiler knows: __LINE__ is the line it was written
 // on, __FILE__ is the file it was written in, and __COUNTER__ is how many times
