@@ -60,6 +60,30 @@ pub mut:
 	show_paths    bool
 	bench         bool
 	debug         bool
+	// The -print- family asks the compiler a question and stops, which is how a
+	// build tool finds out where the compiler's files are without compiling
+	// anything. Each records the question rather than answering it: the answers
+	// need the target and the system's directories, which this module does not
+	// read, so the driver gathers them and this file only holds the flag surface.
+	// A value flag keeps its own "was it given" bit because an empty name is a
+	// question too.
+	print_search_dirs            bool
+	print_libgcc_file_name       bool
+	print_file_name              string
+	print_file_name_given        bool
+	print_prog_name              string
+	print_prog_name_given        bool
+	print_multiarch              bool
+	print_multi_directory        bool
+	print_multi_lib              bool
+	print_multi_os_directory     bool
+	print_sysroot                bool
+	print_sysroot_headers_suffix bool
+	// verbose is -verbose: report what the compiler is doing in detail. gcc
+	// spells this -v, which is already the version here (as it is in tcc, whose
+	// command line this one keeps), so the long spelling is the free one. It
+	// writes to stderr so that it cannot corrupt a -E or a -print- answer.
+	verbose bool
 	// inhibit_warnings is -w: the one boolean a caller that only wants "was -w
 	// given" reads. What the warning flags actually decide is per class, which
 	// is what the policy below is for, and this is that policy's suppress.
@@ -188,6 +212,30 @@ pub fn parse(args []string) !Options {
 			opts.run = true
 		} else if arg == '-bench' {
 			opts.bench = true
+		} else if arg == '-print-search-dirs' {
+			opts.print_search_dirs = true
+		} else if arg == '-print-libgcc-file-name' {
+			opts.print_libgcc_file_name = true
+		} else if arg.starts_with('-print-file-name=') {
+			opts.print_file_name = arg['-print-file-name='.len..]
+			opts.print_file_name_given = true
+		} else if arg.starts_with('-print-prog-name=') {
+			opts.print_prog_name = arg['-print-prog-name='.len..]
+			opts.print_prog_name_given = true
+		} else if arg == '-print-multiarch' {
+			opts.print_multiarch = true
+		} else if arg == '-print-multi-directory' {
+			opts.print_multi_directory = true
+		} else if arg == '-print-multi-lib' {
+			opts.print_multi_lib = true
+		} else if arg == '-print-multi-os-directory' {
+			opts.print_multi_os_directory = true
+		} else if arg == '-print-sysroot' {
+			opts.print_sysroot = true
+		} else if arg == '-print-sysroot-headers-suffix' {
+			opts.print_sysroot_headers_suffix = true
+		} else if arg == '-verbose' {
+			opts.verbose = true
 		} else if opts.warnings.accept(arg) {
 			// The diagnostic policy took the flag: -w, -W<class>, -Wno-<class>,
 			// -Werror=<class>, -pedantic or -pedantic-errors. A -W spelling about
@@ -327,6 +375,31 @@ fn expand_list_files(args []string) ![]string {
 	return out
 }
 
+// asks_query says whether a -print- flag was written, which is what makes the
+// run a question rather than a compile: it answers and stops, so it needs no
+// input file and a build tool can ask it before it has one.
+pub fn (opts Options) asks_query() bool {
+	return opts.print_search_dirs || opts.print_libgcc_file_name
+		|| opts.print_file_name_given || opts.print_prog_name_given
+		|| opts.print_multiarch || opts.print_multi_directory || opts.print_multi_lib
+		|| opts.print_multi_os_directory || opts.print_sysroot
+		|| opts.print_sysroot_headers_suffix
+}
+
+// search_dirs_text renders `-print-search-dirs` in the shape gcc uses: where the
+// compiler is, where its helper programs are looked for, and where its libraries
+// are looked for. gcc names its private install tree and its cc1/as/collect2
+// directories; this compiler is one binary that runs no program, so the caller
+// passes the directory the binary is in and no program directories, and the
+// libraries are the ones the linker really searches.
+pub fn search_dirs_text(install string, program_dirs []string, library_dirs []string) string {
+	mut out := []string{}
+	out << 'install: ${install}'
+	out << 'programs: =${program_dirs.join(':')}'
+	out << 'libraries: =${library_dirs.join(':')}'
+	return out.join('\n')
+}
+
 // bench_lines renders the per-phase timings `-bench` prints.
 pub fn bench_lines(phases []Phase) []string {
 	mut out := []string{}
@@ -385,6 +458,26 @@ pub fn usage(all bool) string {
 	out << '  -fvcc-exts=all            or every name the compiler has'
 	out << '  -fno-vcc-exts=NAME        turn one off again'
 	out << '  -fno-vcc-exts=all         or all of them'
+	out << ''
+	out << 'Query options, which answer a question and stop without compiling (gcc'
+	out << 'spells these the same way; each needs no input file and exits 0):'
+	out << '  -print-search-dirs        the directories searched for programs and libraries'
+	out << '  -print-file-name=NAME     the file NAME resolves to, or NAME unchanged when'
+	out << '                            the search does not have it'
+	out << '  -print-libgcc-file-name   the libgcc.a the search has, or the name when it has'
+	out << '                            none: this compiler links no libgcc'
+	out << '  -print-prog-name=NAME     the program NAME; this compiler runs no external'
+	out << '                            program, so the name comes back unchanged'
+	out << '  -print-multiarch          the target multiarch tuple'
+	out << '  -print-multi-directory    the subdirectory of the variant compiled: .'
+	out << '  -print-multi-lib          the variant and its options: .;'
+	out << '  -print-multi-os-directory the system library directory relative to this'
+	out << '                            compiler: .'
+	out << '  -print-sysroot            the sysroot: empty, this compiler uses the host'
+	out << '  -print-sysroot-headers-suffix  the headers suffix: empty, as the sysroot is'
+	out << '  -verbose                  report the phases, the files read, the search'
+	out << '                            paths and the libraries resolved to stderr,'
+	out << '                            without changing what is compiled'
 	if all {
 		out << ''
 		out << 'What a replacement for the bundled tcc is asked to accept, and what'
@@ -410,6 +503,11 @@ pub fn usage(all bool) string {
 		out << '  -print-ast            nothing is written and nothing is linked; the dump is'
 		out << '                        the tree after the optimizer, which is what the emitter'
 		out << '                        would see'
+		out << '  -print-* queries      print where a file, a program, the sysroot or the'
+		out << '                        library search directories are, and stop without'
+		out << '                        compiling anything; gcc spells these the same way'
+		out << '  -verbose              report what the compiler did to stderr without'
+		out << '                        changing what it compiled'
 		out << '  -O<level>             -O0 through -O3, and -Os; every level is recorded,'
 		out << '                        and -O1 upwards turns on the passes that exist'
 		out << '  -fno-builtin          calls to abs and friends stay calls; the reserved'
