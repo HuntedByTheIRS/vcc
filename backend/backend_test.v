@@ -1698,7 +1698,7 @@ fn test_a_second_machine_supplies_its_own_encoders() {
 	}
 	machine := Machine{
 		registers: [register]
-		encoders:  Encoders{
+		encoders:  x86_64.Encoders{
 			halt:           fn () []u8 { return [u8(0x99)] }
 			frame_prologue: fn () []u8 { return [u8(0xaa), 0xbb] }
 			frame_epilogue: fn () []u8 { return [u8(0xcc)] }

@@ -3,149 +3,19 @@ module backend
 import backend.arch.x86_64
 import backend.os.linux
 
-// MachineRegister is a register in the machine's own terms, the form its
-// encodings take. It is named once here so the encoder fields below and the
-// target's own data speak the machine's register type without every line
-// naming the machine module.
+// MachineRegister is a register in the machine's own terms, the form the
+// machine's encodings take. It is the machine's Register under the name this
+// module's own data speaks: the two register tables a Machine holds and the
+// conversion from a handle back to a register. Naming it once here keeps those
+// sites from spelling the machine module.
 pub type MachineRegister = x86_64.Register
-
-// Encoders is the machine's instruction set as the target carries it: one value
-// per encoding, so composing a target is what decides which machine's bytes the
-// emitter writes. It is a struct of function fields and not an interface, so a
-// Target stays a plain value and nothing on the path a compile takes allocates.
-// A field is filled by the composition that installs a machine; one a machine
-// left unset is nil, and a call through it would fault, which is what an
-// incomplete machine deserves.
-pub struct Encoders {
-pub:
-	adc_immediate                   fn (MachineRegister, i32) ![]u8             = unsafe { nil }
-	adc_reg64                       fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	add_immediate                   fn (MachineRegister, i32) []u8              = unsafe { nil }
-	add_reg32                       fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	add_reg64                       fn (MachineRegister, MachineRegister) []u8  = unsafe { nil }
-	address_of_element              fn (MachineRegister, MachineRegister, int, i32, MachineRegister) ![]u8 = unsafe { nil }
-	address_of_slot                 fn (MachineRegister, i32, MachineRegister) []u8                        = unsafe { nil }
-	align_stack                     fn () []u8                                  = unsafe { nil }
-	and_immediate                   fn (MachineRegister, i32) ![]u8             = unsafe { nil }
-	and_reg64                       fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	call_register                   fn (MachineRegister) ![]u8                  = unsafe { nil }
-	call_rel32                      fn (i32) []u8 = unsafe { nil }
-	call_rip_slot                   fn (i32) []u8 = unsafe { nil }
-	cdq                             fn () []u8    = unsafe { nil }
-	cmp_reg32                       fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	cmp_reg64                       fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	compare_double                  fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	compare_float                   fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	cqo                             fn () []u8                 = unsafe { nil }
-	div_reg32                       fn (MachineRegister) ![]u8 = unsafe { nil }
-	div_reg64                       fn (MachineRegister) ![]u8 = unsafe { nil }
-	double_arithmetic               fn (string, MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	double_to_float                 fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	double_to_int                   fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	double_to_signed_word           fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	double_to_unsigned_int          fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	double_to_unsigned_word         fn (MachineRegister, MachineRegister, MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	float_arithmetic                fn (string, MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	float_to_double                 fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	float_to_int                    fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	frame_epilogue                  fn () []u8                                  = unsafe { nil }
-	frame_prologue                  fn () []u8                                  = unsafe { nil }
-	frame_reserve                   fn (u32) []u8                               = unsafe { nil }
-	halt                            fn () []u8                                  = unsafe { nil }
-	idiv_reg32                      fn (MachineRegister) ![]u8                  = unsafe { nil }
-	idiv_reg64                      fn (MachineRegister) ![]u8                  = unsafe { nil }
-	imul_immediate                  fn (MachineRegister, i32) []u8              = unsafe { nil }
-	imul_reg32                      fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	imul_reg64                      fn (MachineRegister) ![]u8                  = unsafe { nil }
-	imul_word64                     fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	int_to_double                   fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	int_to_float                    fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	jump_nonzero_rel32              fn (i32) []u8                                         = unsafe { nil }
-	jump_rel32                      fn (i32) []u8                                         = unsafe { nil }
-	jump_zero_rel32                 fn (i32) []u8                                         = unsafe { nil }
-	lea_rip                         fn (MachineRegister, i32) []u8                        = unsafe { nil }
-	load_double_extended            fn (MachineRegister) ![]u8                            = unsafe { nil }
-	load_double_indirect            fn (MachineRegister, MachineRegister) ![]u8           = unsafe { nil }
-	load_double_rip                 fn (MachineRegister, i32) ![]u8                       = unsafe { nil }
-	load_double_slot                fn (MachineRegister, i32, MachineRegister) ![]u8      = unsafe { nil }
-	load_extended                   fn (MachineRegister) ![]u8                            = unsafe { nil }
-	load_float_indirect             fn (MachineRegister, MachineRegister) ![]u8           = unsafe { nil }
-	load_float_rip                  fn (MachineRegister, i32) ![]u8                       = unsafe { nil }
-	load_float_slot                 fn (MachineRegister, i32, MachineRegister) ![]u8      = unsafe { nil }
-	load_indirect                   fn (MachineRegister, MachineRegister, int) ![]u8      = unsafe { nil }
-	load_indirect_unsigned          fn (MachineRegister, MachineRegister, int) ![]u8      = unsafe { nil }
-	load_int_extended               fn (MachineRegister) ![]u8                            = unsafe { nil }
-	load_rip_slot                   fn (MachineRegister, i32) []u8                        = unsafe { nil }
-	load_slot                       fn (MachineRegister, i32, MachineRegister, int) ![]u8 = unsafe { nil }
-	load_slot_unsigned              fn (MachineRegister, i32, MachineRegister, int) ![]u8 = unsafe { nil }
-	load_word_extended              fn (MachineRegister) ![]u8                          = unsafe { nil }
-	mov_imm32                       fn (MachineRegister, u32) ![]u8                     = unsafe { nil }
-	mov_imm64                       fn (MachineRegister, u64) ![]u8                     = unsafe { nil }
-	mov_reg32                       fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	mov_reg64                       fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	move_double                     fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	move_float                      fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	movzx_byte                      fn (MachineRegister) ![]u8                          = unsafe { nil }
-	mul_reg64                       fn (MachineRegister) ![]u8                          = unsafe { nil }
-	neg_reg32                       fn (MachineRegister) ![]u8                          = unsafe { nil }
-	neg_reg64                       fn (MachineRegister) ![]u8                          = unsafe { nil }
-	negate_double                   fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	negate_single                   fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	not_reg32                       fn (MachineRegister) ![]u8                          = unsafe { nil }
-	not_reg64                       fn (MachineRegister) ![]u8                          = unsafe { nil }
-	or_reg64                        fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	push_register                   fn (MachineRegister) []u8                           = unsafe { nil }
-	sbb_reg64                       fn (MachineRegister, MachineRegister) ![]u8         = unsafe { nil }
-	set_condition                   fn (Condition, MachineRegister) ![]u8               = unsafe { nil }
-	set_float_condition             fn (string, MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	shift_left_narrow               fn (MachineRegister) ![]u8                      = unsafe { nil }
-	shift_left_word_register        fn (MachineRegister) ![]u8                      = unsafe { nil }
-	shift_right_arithmetic          fn (MachineRegister, u8) ![]u8                  = unsafe { nil }
-	shift_right_arithmetic_narrow   fn (MachineRegister) ![]u8                      = unsafe { nil }
-	shift_right_arithmetic_register fn (MachineRegister) ![]u8                      = unsafe { nil }
-	shift_right_narrow              fn (MachineRegister) ![]u8                      = unsafe { nil }
-	shift_right_word_register       fn (MachineRegister) ![]u8                      = unsafe { nil }
-	shl_reg64                       fn (MachineRegister, u8) ![]u8                  = unsafe { nil }
-	shld_immediate                  fn (MachineRegister, MachineRegister, u8) ![]u8 = unsafe { nil }
-	shld_register                   fn (MachineRegister, MachineRegister) ![]u8     = unsafe { nil }
-	shr_reg64                       fn (MachineRegister, u8) ![]u8                  = unsafe { nil }
-	shrd_immediate                  fn (MachineRegister, MachineRegister, u8) ![]u8 = unsafe { nil }
-	shrd_register                   fn (MachineRegister, MachineRegister) ![]u8     = unsafe { nil }
-	sign_extend_byte                fn (MachineRegister) ![]u8                      = unsafe { nil }
-	sign_extend_half                fn (MachineRegister) ![]u8                      = unsafe { nil }
-	sign_extend_word                fn (MachineRegister, MachineRegister) ![]u8     = unsafe { nil }
-	signed_word_to_double           fn (MachineRegister, MachineRegister) ![]u8     = unsafe { nil }
-	stack_release                   fn (u32) []u8                                         = unsafe { nil }
-	store_double_extended           fn (MachineRegister) ![]u8                            = unsafe { nil }
-	store_double_indirect           fn (MachineRegister, MachineRegister) ![]u8           = unsafe { nil }
-	store_double_slot               fn (MachineRegister, i32, MachineRegister) ![]u8      = unsafe { nil }
-	store_extended                  fn (MachineRegister) ![]u8                            = unsafe { nil }
-	store_float_indirect            fn (MachineRegister, MachineRegister) ![]u8           = unsafe { nil }
-	store_float_slot                fn (MachineRegister, i32, MachineRegister) ![]u8      = unsafe { nil }
-	store_indirect                  fn (MachineRegister, MachineRegister, int) ![]u8      = unsafe { nil }
-	store_int_extended              fn (MachineRegister) ![]u8                            = unsafe { nil }
-	store_slot                      fn (MachineRegister, i32, MachineRegister, int) ![]u8 = unsafe { nil }
-	store_word_extended             fn (MachineRegister) ![]u8                  = unsafe { nil }
-	sub_reg32                       fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	sub_reg64                       fn (MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	sub_rsp_register                fn (MachineRegister) ![]u8                  = unsafe { nil }
-	test_byte_immediate             fn (MachineRegister, u8) ![]u8              = unsafe { nil }
-	test_reg32                      fn (MachineRegister) ![]u8                  = unsafe { nil }
-	test_reg64                      fn (MachineRegister) ![]u8                  = unsafe { nil }
-	trap                            fn () []u8 = unsafe { nil }
-	unsigned_int_to_double          fn (MachineRegister, MachineRegister) ![]u8                  = unsafe { nil }
-	unsigned_word_to_double         fn (MachineRegister, MachineRegister, MachineRegister) ![]u8 = unsafe { nil }
-	xor_reg64                       fn (MachineRegister, MachineRegister) ![]u8                  = unsafe { nil }
-	zero_double                     fn (MachineRegister) ![]u8 = unsafe { nil }
-	zero_extend_half                fn (MachineRegister) ![]u8 = unsafe { nil }
-}
 
 // Machine is the machine half of a composition. It holds the machine's own
 // data, so the register file's element type is the machine's and not this
 // module's; what the shape fixes is what a second machine has to supply: a
 // register file, the width of a register, the number a container header gives
-// the architecture, the register a result is left in, and the floating-point
-// file.
+// the architecture, the register a result is left in, the floating-point file,
+// and the encoders for the instructions.
 pub struct Machine {
 pub:
 	registers []MachineRegister
@@ -179,7 +49,7 @@ pub:
 	frame_reserve_immediate int
 	// encoders is the machine's instruction set, composed into the target as a
 	// value: the emitter's instructions come from here and not from a module.
-	encoders Encoders
+	encoders x86_64.Encoders
 }
 
 // System is the system half of a composition. It holds the system's own data:
@@ -252,128 +122,7 @@ fn x86_64_linux() Target {
 		relocation_call:         x86_64.relocation_call
 		relocation_pc_relative:  x86_64.relocation_pc_relative
 		frame_reserve_immediate: x86_64.frame_reserve_immediate
-		encoders:                Encoders{
-			adc_immediate:                   x86_64.adc_immediate
-			adc_reg64:                       x86_64.adc_reg64
-			add_immediate:                   x86_64.add_immediate
-			add_reg32:                       x86_64.add_reg32
-			add_reg64:                       x86_64.add_reg64
-			address_of_element:              x86_64.address_of_element
-			address_of_slot:                 x86_64.address_of_slot
-			align_stack:                     x86_64.align_stack
-			and_immediate:                   x86_64.and_immediate
-			and_reg64:                       x86_64.and_reg64
-			call_register:                   x86_64.call_register
-			call_rel32:                      x86_64.call_rel32
-			call_rip_slot:                   x86_64.call_rip_slot
-			cdq:                             x86_64.cdq
-			cmp_reg32:                       x86_64.cmp_reg32
-			cmp_reg64:                       x86_64.cmp_reg64
-			compare_double:                  x86_64.compare_double
-			compare_float:                   x86_64.compare_float
-			cqo:                             x86_64.cqo
-			div_reg32:                       x86_64.div_reg32
-			div_reg64:                       x86_64.div_reg64
-			double_arithmetic:               x86_64.double_operator
-			double_to_float:                 x86_64.double_to_float
-			double_to_int:                   x86_64.double_to_int
-			double_to_signed_word:           x86_64.double_to_signed_word
-			double_to_unsigned_int:          x86_64.double_to_unsigned_int
-			double_to_unsigned_word:         x86_64.double_to_unsigned_word
-			float_arithmetic:                x86_64.float_operator
-			float_to_double:                 x86_64.float_to_double
-			float_to_int:                    x86_64.float_to_int
-			frame_epilogue:                  x86_64.frame_epilogue
-			frame_prologue:                  x86_64.frame_prologue
-			frame_reserve:                   x86_64.frame_reserve
-			halt:                            x86_64.halt
-			idiv_reg32:                      x86_64.idiv_reg32
-			idiv_reg64:                      x86_64.idiv_reg64
-			imul_immediate:                  x86_64.imul_immediate
-			imul_reg32:                      x86_64.imul_reg32
-			imul_reg64:                      x86_64.imul_reg64
-			imul_word64:                     x86_64.imul_word64
-			int_to_double:                   x86_64.int_to_double
-			int_to_float:                    x86_64.int_to_float
-			jump_nonzero_rel32:              x86_64.jump_nonzero_rel32
-			jump_rel32:                      x86_64.jump_rel32
-			jump_zero_rel32:                 x86_64.jump_zero_rel32
-			lea_rip:                         x86_64.lea_rip
-			load_double_extended:            x86_64.load_double_extended
-			load_double_indirect:            x86_64.load_double_indirect
-			load_double_rip:                 x86_64.load_double_rip
-			load_double_slot:                x86_64.load_double_slot
-			load_extended:                   x86_64.load_extended
-			load_float_indirect:             x86_64.load_float_indirect
-			load_float_rip:                  x86_64.load_float_rip
-			load_float_slot:                 x86_64.load_float_slot
-			load_indirect:                   x86_64.load_indirect
-			load_indirect_unsigned:          x86_64.load_indirect_unsigned
-			load_int_extended:               x86_64.load_int_extended
-			load_rip_slot:                   x86_64.load_rip_slot
-			load_slot:                       x86_64.load_slot
-			load_slot_unsigned:              x86_64.load_slot_unsigned
-			load_word_extended:              x86_64.load_word_extended
-			mov_imm32:                       x86_64.mov_imm32
-			mov_imm64:                       x86_64.mov_imm64
-			mov_reg32:                       x86_64.mov_reg32
-			mov_reg64:                       x86_64.mov_reg64
-			move_double:                     x86_64.move_double
-			move_float:                      x86_64.move_float
-			movzx_byte:                      x86_64.movzx_byte
-			mul_reg64:                       x86_64.mul_reg64
-			neg_reg32:                       x86_64.neg_reg32
-			neg_reg64:                       x86_64.neg_reg64
-			negate_double:                   x86_64.negate_double
-			negate_single:                   x86_64.negate_single
-			not_reg32:                       x86_64.not_reg32
-			not_reg64:                       x86_64.not_reg64
-			or_reg64:                        x86_64.or_reg64
-			push_register:                   x86_64.push_register
-			sbb_reg64:                       x86_64.sbb_reg64
-			set_condition:                   x86_64.set_condition
-			set_float_condition:             x86_64.set_float_condition
-			shift_left_narrow:               x86_64.shift_left_narrow
-			shift_left_word_register:        x86_64.shift_left_word_register
-			shift_right_arithmetic:          x86_64.shift_right_arithmetic
-			shift_right_arithmetic_narrow:   x86_64.shift_right_arithmetic_narrow
-			shift_right_arithmetic_register: x86_64.shift_right_arithmetic_register
-			shift_right_narrow:              x86_64.shift_right_narrow
-			shift_right_word_register:       x86_64.shift_right_word_register
-			shl_reg64:                       x86_64.shl_reg64
-			shld_immediate:                  x86_64.shld_immediate
-			shld_register:                   x86_64.shld_register
-			shr_reg64:                       x86_64.shr_reg64
-			shrd_immediate:                  x86_64.shrd_immediate
-			shrd_register:                   x86_64.shrd_register
-			sign_extend_byte:                x86_64.sign_extend_byte
-			sign_extend_half:                x86_64.sign_extend_half
-			sign_extend_word:                x86_64.sign_extend_word
-			signed_word_to_double:           x86_64.signed_word_to_double
-			stack_release:                   x86_64.stack_release
-			store_double_extended:           x86_64.store_double_extended
-			store_double_indirect:           x86_64.store_double_indirect
-			store_double_slot:               x86_64.store_double_slot
-			store_extended:                  x86_64.store_extended
-			store_float_indirect:            x86_64.store_float_indirect
-			store_float_slot:                x86_64.store_float_slot
-			store_indirect:                  x86_64.store_indirect
-			store_int_extended:              x86_64.store_int_extended
-			store_slot:                      x86_64.store_slot
-			store_word_extended:             x86_64.store_word_extended
-			sub_reg32:                       x86_64.sub_reg32
-			sub_reg64:                       x86_64.sub_reg64
-			sub_rsp_register:                x86_64.sub_rsp_register
-			test_byte_immediate:             x86_64.test_byte_immediate
-			test_reg32:                      x86_64.test_reg32
-			test_reg64:                      x86_64.test_reg64
-			trap:                            x86_64.trap
-			unsigned_int_to_double:          x86_64.unsigned_int_to_double
-			unsigned_word_to_double:         x86_64.unsigned_word_to_double
-			xor_reg64:                       x86_64.xor_reg64
-			zero_double:                     x86_64.zero_double
-			zero_extend_half:                x86_64.zero_extend_half
-		}
+		encoders:                x86_64.encoders()
 	}
 	system := System{
 		syscalls:          linux.syscalls(x86_64.name)
