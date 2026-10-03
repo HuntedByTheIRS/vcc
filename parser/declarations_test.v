@@ -482,14 +482,64 @@ fn test_a_file_scope_list_for_a_struct_with_an_aggregate_member_is_refused() {
 	assert result.unit.globals.len == 0
 }
 
-// A bitfield member is a value written into a field of a storage unit, and the
-// store this tree emits for a member writes the whole unit, so a value for one
-// is refused by name rather than written where the field is not.
-fn test_a_file_scope_list_for_a_struct_with_a_bitfield_member_is_refused() {
+// A bitfield member takes its value into the field's own bits inside the storage
+// unit it shares with the members beside it, so a value for one is placed rather
+// than refused. Measured on gcc 16.2.1, `struct B { unsigned int a : 3; int n; };
+// struct B b = {5, 1};` reads a as 5 and n as 1.
+fn test_a_file_scope_list_for_a_struct_with_a_bitfield_member_places_the_value() {
 	result := declarations_of('struct B { unsigned int a : 3; int n; };\nstruct B b = {5, 1};')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('bitfield')
-	assert result.unit.globals.len == 0
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	entries := result.unit.globals[0].member_inits
+	assert entries.len == 2
+	assert entries[0].bitfield
+	assert entries[0].offset == 0
+	assert entries[0].bit_offset == 0
+	assert entries[0].bit_width == 3
+	assert entries[0].unit_width == 4
+	assert (entries[0].init or { -1 }) == 5
+	assert !entries[1].bitfield
+	assert entries[1].offset == 4
+	assert (entries[1].init or { -1 }) == 1
+}
+
+// An unnamed bitfield is not a member a positional list writes: 6.7.2.1p12 skips
+// it, and a zero-width one only moves the next member to a unit boundary. The
+// value after the skipped field goes to the member after it. Measured on gcc
+// 16.2.1, `struct T { unsigned int a : 3; unsigned int : 0; unsigned int d : 2; };
+// struct T t = {5, 3};` reads a as 5, d as 3 and is eight bytes.
+fn test_an_unnamed_bitfield_is_skipped_by_a_positional_list() {
+	result := declarations_of('struct T { unsigned int a : 3; unsigned int : 0; unsigned int d : 2; };\nstruct T t = {5, 3};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	assert object.bytes == 8
+	entries := object.member_inits
+	assert entries.len == 2
+	assert entries[0].bitfield && entries[0].offset == 0 && entries[0].bit_offset == 0
+	assert (entries[0].init or { -1 }) == 5
+	assert entries[1].bitfield && entries[1].offset == 4 && entries[1].bit_offset == 0
+	assert (entries[1].init or { -1 }) == 3
+}
+
+// In a body a bitfield member's value becomes a store that carries the field's
+// bits, so the emitter masks and shifts instead of writing the whole unit. A
+// negative constant written into a signed field is read as the type of its
+// operand, which is what gcc does: measured, `struct B b = {-3};` returns -3.
+fn test_a_body_list_writes_a_bitfield_member_into_its_own_bits() {
+	result := declarations_of('int main(void) { struct B { signed int b : 5; }; struct B x = {-3}; return x.b; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[0].kind == .var_decl
+	assert body[1].kind == .assign
+	field := body[1].field or {
+		assert false
+		return
+	}
+	assert field.bitfield
+	assert field.bit_offset == 0
+	assert field.bit_width == 5
+	assert field.unit_width == 4
 }
 
 // A character constant is a written constant too: 6.4.4.4 gives it the value of
