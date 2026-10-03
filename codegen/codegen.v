@@ -4453,7 +4453,12 @@ fn (mut e Emitter) emit_base_address(base ast.Expr, depth int) !void {
 // already the address of its first element, which is why `&a` and `a` are worth
 // the same address here: the language tells those two types apart, and this back
 // end has no types to tell them apart with.
-fn (mut e Emitter) emit_address(unary ast.Unary) !void {
+//
+// depth is the level the address is taken at, and it travels through because
+// the address of an array element and the address of a member of a non-name
+// object are computed through the frame slot of that level. A level one too
+// shallow lands on a slot an enclosing call already parked an argument in.
+fn (mut e Emitter) emit_address(unary ast.Unary, depth int) !void {
 	register := e.accumulator(unary.line, unary.col)!
 	if unary.expr is ast.Ident {
 		name := unary.expr.name
@@ -4486,13 +4491,13 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 		// The member's address is the object's address plus the byte the layout
 		// put the member at, which is the same computation a member read makes
 		// and stops short of the read.
-		e.field_address(unary.expr, 0, unary.line, unary.col)!
+		e.field_address(unary.expr, depth, unary.line, unary.col)!
 		return
 	}
 	if unary.expr is ast.Index {
 		// The element's address, which is what the subscript computes before it
 		// reads or writes through it.
-		e.emit_element_address(unary.expr, 0)!
+		e.emit_element_address(unary.expr, depth)!
 		return
 	}
 	e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of ${describe_target(unary.expr)} is not implemented, and only a local or a top-level object has one this back end can take')
@@ -4524,8 +4529,9 @@ fn describe_target(expr ast.Expr) string {
 fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 	if unary.op == '&' {
 		// Taking an address is not a computation on a value: the operand is not
-		// read at all, and what is taken is where it lives.
-		return e.emit_address(unary)
+		// read at all, and what is taken is where it lives. The depth travels
+		// with it for the frame slots the computation needs.
+		return e.emit_address(unary, depth)
 	}
 	if unary.op == '*' {
 		// Reading through an address is not a computation either: the operand is

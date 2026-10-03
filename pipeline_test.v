@@ -3000,3 +3000,131 @@ fn test_a_walk_of_an_object_that_is_not_an_argument_list_is_refused() {
 	assert emitted.diagnostics[0].msg.contains('__builtin_va_arg')
 	assert emitted.diagnostics[0].msg.contains('not an argument list')
 }
+
+// An argument is parked in the frame slot of the level it is emitted at, and a
+// later argument that takes an address computes the element's or the member's
+// address through the slot of its own level.  When the address was taken at
+// level zero instead of the argument's level, `f("hello", &arr[1])` overwrote
+// the string pointer already sitting in level zero and printed an empty string
+// where gcc printed "hello".  Every callee here checks the value it was handed:
+// a dropped pointer and a dropped integer look the same in an exit status.
+fn test_an_earlier_argument_survives_a_later_one_that_takes_an_address() {
+	source := scratch('argument_address.c')
+	binary := scratch('argument_address')
+	program := 'int retint(void) { return 42; }
+int two(const char *s, int *p)
+{
+	if (*s != 104) return 1;
+	if (*p != 9) return 2;
+	return 0;
+}
+int three(const char *s, int i, int *p)
+{
+	if (*s != 98) return 1;
+	if (i != 4) return 2;
+	if (*p != 9) return 3;
+	return 0;
+}
+int pointers(int *a, int *b)
+{
+	if (*a != 7) return 1;
+	if (*b != 9) return 2;
+	return 0;
+}
+int four(const char *s, int *p, int n, int m)
+{
+	if (*s != 100) return 1;
+	if (*p != 9) return 2;
+	if (n != 5) return 3;
+	if (m != 6) return 4;
+	return 0;
+}
+int number(int n, int *p)
+{
+	if (n != 42) return 1;
+	if (*p != 9) return 2;
+	return 0;
+}
+int member(const char *s, int *p)
+{
+	if (*s != 101) return 1;
+	if (*p != 13) return 2;
+	return 0;
+}
+int loop_check(const char *s, int *p)
+{
+	if (*s != 102) return 1;
+	return *p;
+}
+struct pair { int a; int b; };
+int main(void)
+{
+	int arr[2];
+	int x;
+	int i;
+	int *p;
+	struct pair q;
+	int total;
+	arr[0] = 7;
+	arr[1] = 9;
+	x = 5;
+	i = 1;
+	p = arr;
+	q.a = 11;
+	q.b = 13;
+	if (two("hello", &arr[1]) != 0) return 1;
+	if (three("b", 4, &arr[i]) != 0) return 2;
+	if (pointers(&arr[0], &arr[1]) != 0) return 3;
+	if (four("d", &arr[1], 5, 6) != 0) return 4;
+	if (number(retint(), &arr[1]) != 0) return 5;
+	if (member("e", &q.b) != 0) return 6;
+	if (two("h", p + i) != 0) return 7;
+	total = 0;
+	for (i = 0; i < 2; ++i)
+		total += loop_check("f", &arr[i]);
+	if (total != 16) return 8;
+	if (x != 5) return 9;
+	return 0;
+}
+'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	assert exit_status == 0
+}
+
+// A call through an expression resolves the address it calls before the
+// arguments are evaluated and keeps it in a slot of its own.  The last argument
+// is emitted at the level that address used to be parked in, so an argument
+// holding a value of its own at that level - an assignment does - overwrote the
+// callee and the call jumped to the argument's value: `fp("w", (p = q))` through
+// a function pointer crashed on main's tip.
+fn test_a_resolved_callee_survives_the_arguments_it_is_called_with() {
+	source := scratch('callee_slot.c')
+	binary := scratch('callee_slot')
+	program := 'int two(const char *s, int *p)
+{
+	if (*s != 119) return 1;
+	if (*p != 7) return 2;
+	return 0;
+}
+int main(void)
+{
+	int (*fp)(const char *, int *) = two;
+	int first[2];
+	int *p;
+	int *q;
+	first[0] = 7;
+	first[1] = 9;
+	p = first;
+	q = first;
+	if (fp("w", (p = q)) != 0) return 1;
+	if (fp("w", p++) != 0) return 2;
+	return 0;
+}
+'
+	exit_status := compile_and_run([source, '-o', binary], program)
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	assert exit_status == 0
+}
