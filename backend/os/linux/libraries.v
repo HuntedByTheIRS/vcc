@@ -419,84 +419,60 @@ fn script_library_name(text string, path string) !string {
 	return os.base(target.path)
 }
 
-// library_object answers the ELF file a library path holds: the path itself when
-// it is an object, and the file a GNU ld script names when it is a script. A
-// reader that needs a library's own symbols needs the object rather than the
-// script, and `-lm` on this machine resolves to a script.
-fn library_object(path string) ?string {
-	bytes := os.read_bytes(path) or { return none }
-	if is_elf(bytes) {
-		return path
-	}
-	target := script_target(bytes.bytestr(), path) or { return none }
-	if !os.is_file(target.path) {
-		return none
-	}
-	return target.path
-}
-
-// library_symbols answers the names a shared library defines, so a caller can
-// ask whether an import has something to bind to. A path that is not a library
-// this reader can read answers none rather than an error: a -l name with no file
-// behind it is already reported by the search, and the caller decides what an
-// unreadable library means.
-pub fn library_symbols(path string) ?map[string]bool {
-	object := library_object(path) or { return none }
-	bytes := os.read_bytes(object) or { return none }
-	if !is_elf(bytes) {
-		return none
-	}
-	return defined_symbols(bytes)
-}
-
-// unresolved_imports answers which of an image's imports no library it names
-// provides. The C library is always one of them, because every image this system
-// writes runs against it whether or not a flag named it; the rest are the -l
-// names on the command line.
+// LibrarySymbols is one shared library's dynamic symbol table, opened for the
+// question the caller has: whether the library defines a name. The bytes are
+// held because naming a symbol means reading it out of the string table, and the
+// offsets are where that table and the symbols begin.
 //
-// An import none of those libraries defines is what a link refuses as an
-// undefined reference, and it is the shape this compiler used to leave in an
-// image: the compile succeeded, and the program died at load with a symbol
-// lookup error naming nothing the compiler had said. A library the reader cannot
-// read contributes nothing, and when the C library itself cannot be read the
-// check is not made at all, because the loader reads the same file and a compile
-// refused over this reader's failure would be a worse answer than the loader's.
-pub fn unresolved_imports(imports []string, names []string, dirs []string) []string {
-	if imports.len == 0 {
-		return []string{}
-	}
-	base := find_file(base_library, dirs) or { return []string{} }
-	mut provided := library_symbols(base) or { return []string{} }
-	for library in resolve_library_files(names, dirs) or { []Library{} } {
-		if symbols := library_symbols(library.path) {
-			for symbol in symbols.keys() {
-				provided[symbol] = true
-			}
-		}
-	}
-	mut out := []string{}
-	for given in imports {
-		if given !in provided {
-			out << given
-		}
-	}
-	return out
+// The hash fields are the GNU hash, when the library carries one, which glibc
+// does. They are what turns "does this library define that name" into a hash
+// probe rather than a walk of every symbol it holds: a program imports a handful
+// of names and the library defines thousands, so the walk would cost one full
+// scan per import. `hashed` is false for a library with no GNU hash, and the
+// walk is used then.
+struct LibrarySymbols {
+	bytes  []u8
+	str_at int
+	sym_at int
+	count  int
+	stride int
+	hashed bool
+	// bloom_at is where the bloom filter's words begin, bloom_size how many
+	// there are, and bloom_shift the shift the filter mixes the hash with.
+	bloom_at    int
+	bloom_size  int
+	bloom_shift u32
+	// buckets_at is where the buckets begin and nbuckets how many; chain_at is
+	// where the chains begin and symoffset the first symbol a chain names.
+	buckets_at int
+	nbuckets   int
+	chain_at   int
+	symoffset  int
 }
 
-// defined_symbols reads the name of every symbol a library defines. It walks the
-// program headers rather than the sections, for the reason the SONAME reader
-// does: a linked object is allowed to have no section header table, and the
-// loader reads the program headers. Every defined symbol is kept and not only
-// the global ones, because a name the loader can be asked to resolve is the
-// question here, and leaving one out would refuse an import that would have
-// worked.
-fn defined_symbols(bytes []u8) map[string]bool {
-	mut out := map[string]bool{}
+// open_library_symbols reads a library far enough to answer symbol questions:
+// the program headers, the dynamic table, and the hash the symbol count comes
+// from. It answers none for a file that is not an object this reader can read.
+fn open_library_symbols(path string) ?LibrarySymbols {
+	// The file is read once and a GNU ld script is followed from the same
+	// bytes, so a `-lm` costs one read of the script and one of the library
+	// rather than two of each.
+	mut bytes := os.read_bytes(path) or { return none }
+	if !is_elf(bytes) {
+		target := script_target(bytes.bytestr(), path) or { return none }
+		if !os.is_file(target.path) {
+			return none
+		}
+		bytes = os.read_bytes(target.path) or { return none }
+		if !is_elf(bytes) {
+			return none
+		}
+	}
 	if bytes.len < elf64_header_size {
-		return out
+		return none
 	}
 	if bytes[4] != elf64_class || bytes[5] != elf64_data_little_endian {
-		return out
+		return none
 	}
 	phoff := int(read_u64(bytes, elf64_phoff_at))
 	entry_size := int(read_u16(bytes, elf64_phentsize_at))
@@ -507,7 +483,7 @@ fn defined_symbols(bytes []u8) map[string]bool {
 	for i in 0 .. count {
 		at := phoff + i * entry_size
 		if at + elf64_ph_size > bytes.len {
-			return out
+			return none
 		}
 		kind := read_u32(bytes, at)
 		if kind == program_header_dynamic {
@@ -523,7 +499,7 @@ fn defined_symbols(bytes []u8) map[string]bool {
 		}
 	}
 	if !found_dynamic {
-		return out
+		return none
 	}
 	mut strtab := u64(0)
 	mut symtab := u64(0)
@@ -551,32 +527,248 @@ fn defined_symbols(bytes []u8) map[string]bool {
 		at += elf64_dynamic_size
 	}
 	if strtab == 0 || symtab == 0 {
-		return out
+		return none
 	}
 	stride := int(syment)
 	// Sixteen bytes is the smallest a symbol record can be; anything narrower
 	// means the table this reader reached is not one.
 	if stride < 16 {
-		return out
+		return none
 	}
-	str_at := file_offset(loaded, strtab) or { return out }
-	sym_at := file_offset(loaded, symtab) or { return out }
-	symbols := symbol_count(bytes, loaded, hash, gnu_hash) or { return out }
-	for i in 0 .. symbols {
-		entry := sym_at + i * stride
-		if entry + stride > bytes.len {
+	str_at := file_offset(loaded, strtab) or { return none }
+	sym_at := file_offset(loaded, symtab) or { return none }
+	symbols := symbol_count(bytes, loaded, hash, gnu_hash) or { return none }
+	mut hashed := false
+	mut bloom_at := 0
+	mut bloom_size := 0
+	mut bloom_shift := u32(0)
+	mut buckets_at := 0
+	mut nbuckets := 0
+	mut chain_at := 0
+	mut symoffset := 0
+	if gnu_hash != 0 {
+		if base := file_offset(loaded, gnu_hash) {
+			if base + 16 <= bytes.len {
+				bucket_count := int(read_u32(bytes, base))
+				first_symbol := int(read_u32(bytes, base + 4))
+				bloom_count := int(read_u32(bytes, base + 8))
+				shift := read_u32(bytes, base + 12)
+				bloom_first := base + 16
+				bucket_first := bloom_first + bloom_count * 8
+				chain_first := bucket_first + 4 * bucket_count
+				if bucket_count > 0 && bloom_count > 0 && chain_first <= bytes.len {
+					hashed = true
+					bloom_at = bloom_first
+					bloom_size = bloom_count
+					bloom_shift = shift
+					buckets_at = bucket_first
+					nbuckets = bucket_count
+					chain_at = chain_first
+					symoffset = first_symbol
+				}
+			}
+		}
+	}
+	return LibrarySymbols{
+		bytes:       bytes
+		str_at:      str_at
+		sym_at:      sym_at
+		count:       symbols
+		stride:      stride
+		hashed:      hashed
+		bloom_at:    bloom_at
+		bloom_size:  bloom_size
+		bloom_shift: bloom_shift
+		buckets_at:  buckets_at
+		nbuckets:    nbuckets
+		chain_at:    chain_at
+		symoffset:   symoffset
+	}
+}
+
+// defines says whether the library names a symbol. The comparison is over the
+// bytes of the name rather than a string built from them, because a caller asks
+// about a handful of names and building one string per symbol in the library
+// would cost far more than the comparisons save. Every defined symbol is kept
+// and not only the global ones, because a name the loader can be asked to
+// resolve is the question here and leaving one out would refuse an import that
+// would have worked.
+fn (t LibrarySymbols) defines(given string) bool {
+	wanted := given.bytes()
+	if t.hashed {
+		return t.defines_through_the_hash(wanted)
+	}
+	return t.defines_by_walking(wanted)
+}
+
+// defines_through_the_hash asks the GNU hash the way the loader does: the bloom
+// filter first, which answers "no" for most names without touching a bucket, and
+// then one bucket and its chain. It is what keeps the question from costing a
+// walk of every symbol the library defines for every name the image imports.
+fn (t LibrarySymbols) defines_through_the_hash(wanted []u8) bool {
+	hash := gnu_hash_of(wanted)
+	first_bit := int(hash % u32(64))
+	second_bit := int((hash >> t.bloom_shift) % u32(64))
+	mask := (u64(1) << first_bit) | (u64(1) << second_bit)
+	bloom_word := read_u64(t.bytes, t.bloom_at + 8 * int((hash / u32(64)) % u32(t.bloom_size)))
+	if (bloom_word & mask) != mask {
+		return false
+	}
+	bucket := int(read_u32(t.bytes, t.buckets_at + 4 * int(hash % u32(t.nbuckets))))
+	if bucket < t.symoffset || bucket >= t.count {
+		return false
+	}
+	mut index := bucket
+	for index < t.count {
+		word_at := t.chain_at + 4 * (index - t.symoffset)
+		if word_at + 4 > t.bytes.len {
 			break
 		}
-		name_at := int(read_u32(bytes, entry))
+		chain_word := read_u32(t.bytes, word_at)
+		if (chain_word | 1) == (hash | 1) {
+			entry := t.sym_at + index * t.stride
+			if entry + t.stride <= t.bytes.len {
+				name_at := int(read_u32(t.bytes, entry))
+				if name_at != 0 && bytes_are_c_string(t.bytes, t.str_at + name_at, wanted) {
+					return true
+				}
+			}
+		}
+		if (chain_word & 1) != 0 {
+			break
+		}
+		index++
+	}
+	return false
+}
+
+// defines_by_walking is the walk for a library with no GNU hash, which is an old
+// DT_HASH one. It reads every defined symbol and compares its name, so it is the
+// slow path; the hash path above exists because this one is what a program that
+// imports many names pays for.
+fn (t LibrarySymbols) defines_by_walking(wanted []u8) bool {
+	for i in 0 .. t.count {
+		entry := t.sym_at + i * t.stride
+		if entry + t.stride > t.bytes.len {
+			break
+		}
+		name_at := int(read_u32(t.bytes, entry))
 		if name_at == 0 {
 			continue
 		}
-		if read_u16(bytes, entry + 6) == symbol_section_undefined {
+		if read_u16(t.bytes, entry + 6) == symbol_section_undefined {
 			continue
 		}
-		out[read_c_string(bytes, str_at + name_at)] = true
+		if bytes_are_c_string(t.bytes, t.str_at + name_at, wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+// gnu_hash_of is the hash a GNU hash table is keyed by: the same string hash the
+// loader computes, so the bucket and chain this reader reaches are the ones the
+// loader would.
+fn gnu_hash_of(name []u8) u32 {
+	mut hash := u32(5381)
+	for ch in name {
+		hash = (hash << 5) + hash + u32(ch)
+	}
+	return hash
+}
+
+// names is every symbol the library defines, as a set. It builds one string per
+// symbol, so it is for a caller that wants the whole table rather than a few
+// names in it.
+fn (t LibrarySymbols) names() map[string]bool {
+	mut out := map[string]bool{}
+	for i in 0 .. t.count {
+		entry := t.sym_at + i * t.stride
+		if entry + t.stride > t.bytes.len {
+			break
+		}
+		name_at := int(read_u32(t.bytes, entry))
+		if name_at == 0 {
+			continue
+		}
+		if read_u16(t.bytes, entry + 6) == symbol_section_undefined {
+			continue
+		}
+		out[read_c_string(t.bytes, t.str_at + name_at)] = true
 	}
 	return out
+}
+
+// library_symbols answers the names a shared library defines, so a caller can
+// inspect the whole table. A path that is not a library this reader can read
+// answers none rather than an error: a -l name with no file behind it is already
+// reported by the search, and the caller decides what an unreadable library
+// means.
+pub fn library_symbols(path string) ?map[string]bool {
+	table := open_library_symbols(path) or { return none }
+	return table.names()
+}
+
+// unresolved_imports answers which of an image's imports no library it names
+// provides. The C library is always one of them, because every image this system
+// writes runs against it whether or not a flag named it; the rest are the -l
+// names on the command line.
+//
+// An import none of those libraries defines is what a link refuses as an
+// undefined reference, and it is the shape this compiler used to leave in an
+// image: the compile succeeded, and the program died at load with a symbol
+// lookup error naming nothing the compiler had said. A library the reader cannot
+// read contributes nothing, and when the C library itself cannot be read the
+// check is not made at all, because the loader reads the same file and a compile
+// refused over this reader's failure would be a worse answer than the loader's.
+pub fn unresolved_imports(imports []string, names []string, dirs []string) []string {
+	if imports.len == 0 {
+		return []string{}
+	}
+	base := find_file(base_library, dirs) or { return []string{} }
+	mut tables := []LibrarySymbols{}
+	if table := open_library_symbols(base) {
+		tables << table
+	} else {
+		return []string{}
+	}
+	for library in resolve_library_files(names, dirs) or { []Library{} } {
+		if table := open_library_symbols(library.path) {
+			tables << table
+		}
+	}
+	mut out := []string{}
+	for given in imports {
+		mut found := false
+		for table in tables {
+			if table.defines(given) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out << given
+		}
+	}
+	return out
+}
+
+// bytes_are_c_string says whether the bytes at an offset are the given name
+// followed by the terminator a name in a string table ends with. Comparing the
+// bytes in place is what keeps the symbol question from building a string for
+// every symbol in the library.
+fn bytes_are_c_string(bytes []u8, at int, wanted []u8) bool {
+	if at < 0 {
+		return false
+	}
+	for i, ch in wanted {
+		index := at + i
+		if index >= bytes.len || bytes[index] != ch {
+			return false
+		}
+	}
+	end := at + wanted.len
+	return end < bytes.len && bytes[end] == 0
 }
 
 // symbol_count is how many entries a library's dynamic symbol table holds. The
