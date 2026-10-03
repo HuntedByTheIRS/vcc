@@ -120,6 +120,15 @@ fn test_a_constant_literal_in_a_reevaluated_place_is_read() {
 	assert result.diagnostics.len == 0
 }
 
+// A literal in a for header's condition is read by the same path. The header's
+// clauses and the literal's brace list share the parentheses that hold them,
+// which the reader used to misread as the header's end and report as
+// `unsupported: expected ;, found ')'` at the closing parenthesis.
+fn test_a_nonconstant_literal_in_a_for_header_is_read() {
+	result := compound_parsed('int main(void) { int i = 0, n = 0; for (; (int[]){i}[0] < 3; i++) n += 1; return n; }')
+	assert result.diagnostics.len == 0
+}
+
 fn test_a_file_scope_compound_literal_is_a_static_object() {
 	result := compound_parsed('int *p = (int[]){1, 2, 3};')
 	assert result.diagnostics.len == 0

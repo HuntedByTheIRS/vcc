@@ -479,6 +479,17 @@ fn test_a_compound_literal_in_a_condition_is_one_object_for_the_scope() {
 	assert run_image(emitted.bytes) == 1
 }
 
+// A compound literal written in a for header's condition: the literal's brace
+// list sits inside the parentheses that also hold the header's clauses, which
+// the reader used to misread as the header's end and report as a missing `;`.
+// Measured on gcc 16.2.1, this program exits 33 (3 * 10 + 3).
+fn test_a_compound_literal_in_a_for_header_is_initialized_each_evaluation() {
+	emitted := emit(translation_unit('int main(void) { int i = 0; int n = 0; for (; (int[]){i}[0] < 3; i++) n += 1; return i * 10 + n; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 33
+}
+
 // A member of a table's element type that does not hold an address is refused by
 // name rather than converted, because the address of the storage is a value the
 // declaration did not write.
