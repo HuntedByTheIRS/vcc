@@ -1325,7 +1325,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 					}
 				}
 			} else {
-				init = p.parse_expression() or {
+				init = p.parse_assignment_expression() or {
 					p.skip_declaration()
 					return stmts
 				}
@@ -1794,8 +1794,9 @@ fn (mut p Parser) parse_return_statement() []ast.Stmt {
 	}
 	// A return whose expression does not parse is reported by the expression
 	// reader; the statement is skipped so the rest of the function still parses
-	// and the file reports once.
-	expr := p.parse_expression() or {
+	// and the file reports once. The value is a full expression, so an
+	// assignment stands in it: `return *p = *q = 8;` writes both.
+	expr := p.parse_assignment_expression() or {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}

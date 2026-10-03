@@ -2514,8 +2514,9 @@ fn test_an_assignment_and_a_comma_expression_as_a_value_run() {
 // Each case is a whole program that returns 1 when every object holds what the
 // source says; every one was measured against gcc 16.2.1, which accepts it and
 // answers the same. The positions are the statement, a member write through a
-// pointer, a condition, a loop's step, an operand, an argument, and beside a
-// compound assignment and a postfix increment, which keep their own meanings.
+// pointer, a condition, a loop's step, an operand, an argument, a declaration's
+// initializer and a return value, and beside a compound assignment and a
+// postfix increment, which keep their own meanings.
 fn test_a_chained_assignment_runs_in_every_position() {
 	cases := [
 		'int main(void) { int a = 0; int b = 0; int c = 0; a = b = c = 7; return a == 7 && b == 7 && c == 7; }',
@@ -2527,6 +2528,8 @@ fn test_a_chained_assignment_runs_in_every_position() {
 		'int take(int v) { return v; }\nint main(void) { int a = 0; int b = 0; return take(a = b = 4) == 4 && a == 4 && b == 4; }',
 		'int main(void) { int a = 0; int b = 0; a = b += 2; return a == 2 && b == 2; }',
 		'int main(void) { int a = 0; int b = 5; a = b++; return a == 5 && b == 6; }',
+		'int main(void) { int b = 0; int a = b = 6; return a == 6 && b == 6; }',
+		'int f(int *p, int *q) { return *p = *q = 8; }\nint main(void) { int a = 0; int b = 0; int r = f(&a, &b); return r == 8 && a == 8 && b == 8; }',
 	]
 	for source in cases {
 		emitted := emit(translation_unit(source), Options{})
