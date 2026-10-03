@@ -2901,6 +2901,18 @@ fn (mut p Parser) fill_one(typ types.Type, items []BraceElement, start int, base
 		return start + 1
 	}
 	if typ.kind in [types.Kind.array, .struct_, .union_] {
+		if item.designators.len > 0 {
+			// The element is the one a designator named for this subobject, so it
+			// is that subobject's value as a whole: 6.7.8p13 makes a single
+			// expression of the subobject's own aggregate type initialize it,
+			// which is the shape `.file = S` has for a member of a struct type.
+			// Brace elision is for the positional elements that follow, and those
+			// carry no designator, so the two shapes are told apart here. Reading
+			// the designator again one level down would resolve it against the
+			// member's type instead of the type the member belongs to.
+			p.write_brace_leaf(typ, base, item, mut writes)
+			return start + 1
+		}
 		// Brace elision: the elements that follow initialize the aggregate's own
 		// subobjects, which is the shape `struct S s = {1, 2, 3};` has for a
 		// struct whose first member is a struct.

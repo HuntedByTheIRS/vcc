@@ -2090,6 +2090,22 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 		e.store_accumulator(address, stmt.line, stmt.col)!
 		return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
 	}
+	if member.typ.kind in [types.Kind.struct_, .union_] {
+		// A member of an aggregate type takes a value of its own type the way a
+		// whole object does: the bytes are copied from the value's address to the
+		// member's address, and neither object is read as a value. The object the
+		// member lies in may be a pointer's target or a top-level object, so the
+		// member is addressed through field_address the way a scalar member is,
+		// and the copy is the one an aggregate assignment already makes.
+		width := e.representation.size_of(member.typ) or {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end has no size for it')
+			return error('unsupported member type')
+		}
+		e.field_address(member, depth + 1, stmt.line, stmt.col)!
+		address := e.value_slot(depth)
+		e.store_accumulator(address, stmt.line, stmt.col)!
+		return e.assign_object(address, width, expr, stmt.line, stmt.col, depth)
+	}
 	width := e.type_width(member.spelling) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, floats, doubles and pointers only')
 		return error('unsupported member type')
