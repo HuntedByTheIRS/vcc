@@ -124,18 +124,19 @@ fn test_a_variable_length_array_is_complete_though_its_count_is_not_written() {
 	// A bound computed at run time is still a size: the type is complete, and
 	// what tells it from `int a[]` is the flag and not the count, because both
 	// have -1 there.
-	v := vla_array_of(int_type())
+	v := vla_array_of(int_type(), 3)
 	assert v.is_array() && v.vla
 	assert v.count == -1
+	assert v.vla_id == 3
 	assert v.is_complete()
 	assert v.describe() == 'int[]'
 	// The two are not the same type: an object whose size is computed at run
 	// time cannot be a declaration something later completes.
 	assert !v.same(array_of(int_type(), -1))
-	assert v.same(vla_array_of(int_type()))
+	assert v.same(vla_array_of(int_type(), 3))
 	// A variable-length array of a complete element type is complete; one whose
 	// element type is not has no size whatever its bound says.
-	assert !vla_array_of(opaque_type('size_t')).is_complete()
+	assert !vla_array_of(opaque_type('size_t'), 3).is_complete()
 }
 
 fn test_a_function_says_what_it_returns_and_what_it_takes() {

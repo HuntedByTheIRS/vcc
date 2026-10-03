@@ -474,11 +474,6 @@ pub:
 	// none where the stride is a constant, and the emitter then sizes the
 	// element from its type as it always did.
 	vla_stride ?Expr
-	// vla_bounds are the run-time bounds remaining in this element's type,
-	// innermost dimension first, so that a further subscript of this element can
-	// compute its own stride. Empty for an element that is not a
-	// variable-length array.
-	vla_bounds []Expr
 	line       int
 	col        int
 }
@@ -590,15 +585,8 @@ pub struct Ident {
 pub:
 	name string
 	typ  types.Type
-	// vla_bounds are the run-time bounds of the array dimensions this name's
-	// type has, innermost dimension first, and empty for a name whose type is
-	// not a variable-length array. A name whose type is one carries them because
-	// the model cannot: the bound is an expression, and the model is imported by
-	// this file. `sizeof a`, a subscript of a, and the declaration that claims a
-	// all reach the bound here.
-	vla_bounds []Expr
-	line       int
-	col        int
+	line int
+	col  int
 }
 
 pub struct Unary {

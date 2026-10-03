@@ -123,11 +123,16 @@ pub mut:
 	// count is -1 for one, so vla is what tells a variable-length array from an
 	// array whose size was simply not written; indexing and sizeof both need the
 	// distinction, because each of them has to reach the bound as a value instead
-	// of reading count. It is false for every other kind. The expression that
-	// computes the bound does not live here: the model is imported by the tree and
-	// cannot hold one of its nodes, so the bound travels in the tree and this is
-	// the flag that says to look for it.
+	// of reading count. It is false for every other kind.
 	vla bool
+	// vla_id is where the bound's expression is kept. The model is imported by
+	// the tree and cannot hold one of its nodes, so the reader that made the
+	// type keeps the bound in a table of its own and writes the handle here. It
+	// is zero for a type that is not a variable-length array and for one whose
+	// bound the reader did not keep, and nothing outside the reader reads it:
+	// the tree carries the expression to the back end, and the handle is only
+	// how a later use inside the reader finds it again.
+	vla_id int
 	// members are the members of a struct or a union, in the order they were
 	// written.
 	members []Member
@@ -785,14 +790,15 @@ pub fn array_of(base Type, count int) Type {
 
 // vla_array_of is the type of an array of base whose bound is computed at run
 // time: `int a[n]`. Its count is -1 because no constant is written, and vla is
-// what tells it from an array whose brackets were empty. The bound expression
-// itself is not here; the tree that read it carries it.
-pub fn vla_array_of(base Type) Type {
+// what tells it from an array whose brackets were empty. id is the reader's
+// handle on the bound expression, which lives in a table the reader keeps.
+pub fn vla_array_of(base Type, id int) Type {
 	return Type{
-		kind:  .array
-		base:  &Type{ ...base }
-		count: -1
-		vla:   true
+		kind:   .array
+		base:   &Type{ ...base }
+		count:  -1
+		vla:    true
+		vla_id: id
 	}
 }
 
