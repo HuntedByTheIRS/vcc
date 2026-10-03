@@ -438,3 +438,122 @@ fn test_the_128_bit_types_in_the_conversions() {
 		return
 	}
 }
+
+// 6.3.2.1p2: the value a read lvalue is converted to has the unqualified version
+// of its type, so a const-qualified struct read as a value is that struct, and
+// 6.5.16.1 lets it be assigned or passed wherever the unqualified type is wanted.
+// Measured on gcc 16.2.1 with -std=c99 -pedantic-errors: every case below that
+// `reason` accepts is a program gcc compiles, and the shape this is for is V's
+// own generated C, where a call's parameter is `struct string` and the argument
+// is a `const struct string`.
+fn test_the_constraint_on_aggregate_assignment_ignores_the_read_side_qualifiers() {
+	plain := struct_type('S', [
+		Member{
+			name: 'a'
+			typ:  int_type()
+		},
+	])
+	read_only := qualified(plain, Qualifiers{
+		const_: true
+	})
+	// A const struct passed where the unqualified one is a parameter, which is
+	// the same constraint 6.5.2.2 says an argument asks.
+	assert reason(plain, read_only, false) == ''
+	// The other direction is a plain value assigned into a const object, which
+	// the conversion allows. Whether that object may be written is the target
+	// question in the test below.
+	assert reason(read_only, plain, false) == ''
+	// Both operands may be qualified.
+	assert reason(read_only, read_only, false) == ''
+	// A volatile qualifier drops the same way, because the same line of code
+	// calls `unqualified`, which drops every top-level qualifier rather than
+	// const alone. Measured, gcc accepts `volatile S vs; S t = vs;`.
+	volatile_read := qualified(plain, Qualifiers{
+		volatile_: true
+	})
+	assert reason(plain, volatile_read, false) == ''
+	// A qualifier on a member is a property of the type and not of the reading,
+	// so two otherwise equal types that differ there are still different: gcc
+	// refuses assigning a struct whose member is `const int` to one whose member
+	// is `int`.
+	const_member := struct_type('', [
+		Member{
+			name: 'a'
+			typ:  qualified(int_type(), Qualifiers{
+				const_: true
+			})
+		},
+	])
+	plain_member := struct_type('', [
+		Member{
+			name: 'a'
+			typ:  int_type()
+		},
+	])
+	assert only_reason(const_member, plain_member, false, 'not assigned to')
+	// Two aggregates of different tags are still different types.
+	assert only_reason(plain, struct_type('T', []), false, 'not assigned to')
+}
+
+// 6.3.1p1: the left operand of an assignment has to be a modifiable lvalue, and
+// an object is not one when it is const-qualified or when it is a structure or
+// union with a const-qualified member, through contained aggregates and array
+// elements included. This is the half of the rule the relaxation above must not
+// swallow: the read drops the qualifier, and the write is refused.
+//
+// Measured on gcc 16.2.1 with -std=c99 -pedantic-errors: `const S s; S t; s = t;`
+// is `assignment of read-only variable 's'`, and a struct with a const member is
+// refused with the same message, which is the refusal pinned below.
+fn test_an_object_that_may_not_be_written_is_refused_as_the_target() {
+	plain := struct_type('S', [
+		Member{
+			name: 'a'
+			typ:  int_type()
+		},
+	])
+	// An unqualified object is a modifiable lvalue.
+	assert (assignment_target_problem(plain) or { '' }) == ''
+	// A const-qualified one is not, and the refusal names the type.
+	read_only := qualified(plain, Qualifiers{
+		const_: true
+	})
+	read_only_problem := assignment_target_problem(read_only) or { '' }
+	assert read_only_problem.contains('const-qualified')
+	assert read_only_problem.contains('modifiable lvalue')
+	// A struct with a const-qualified member is not modifiable either, and the
+	// member may sit inside a member aggregate or an array element.
+	const_member := struct_type('', [
+		Member{
+			name: 'a'
+			typ:  qualified(int_type(), Qualifiers{
+				const_: true
+			})
+		},
+	])
+	member_problem := assignment_target_problem(const_member) or { '' }
+	assert member_problem.contains('const-qualified member')
+	assert member_problem.contains('modifiable lvalue')
+	nested := struct_type('', [
+		Member{
+			name: 'inner'
+			typ:  const_member
+		},
+	])
+	assert (assignment_target_problem(nested) or { '' }).contains('const-qualified member')
+	arrayed := struct_type('', [
+		Member{
+			name: 'items'
+			typ:  array_of(const_member, 2)
+		},
+	])
+	assert (assignment_target_problem(arrayed) or { '' }).contains('const-qualified member')
+	assert const_member.has_const_member()
+	assert nested.has_const_member()
+	assert arrayed.has_const_member()
+	assert !plain.has_const_member()
+	// A volatile object is still a modifiable lvalue, so only const is refused.
+	volatile_object := qualified(plain, Qualifiers{
+		volatile_: true
+	})
+	assert (assignment_target_problem(volatile_object) or { '' }) == ''
+}

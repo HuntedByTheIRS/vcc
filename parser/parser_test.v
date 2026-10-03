@@ -2401,3 +2401,43 @@ fn test_a_generic_selection_selects_a_named_arm_before_the_default() {
 	}
 	assert (expr as ast.IntLit).value == 1
 }
+
+// 6.3.2.1p2 and 6.5.16.1: a value read from a const-qualified aggregate has the
+// unqualified version of its type, so a local of the plain type, an argument to a
+// function whose parameter is the plain type, and the initializer of an object
+// all take it. Measured on gcc 16.2.1 with -std=c99 -pedantic-errors, which
+// compiles and runs each program below, and the call shape is the one V's own
+// generated C has.
+fn test_a_const_qualified_aggregate_is_read_as_its_unqualified_type() {
+	read := parsed('typedef struct { int a; } S;\nS take(S v) { return v; }\nS g;\nint main(void) { const S s = {5}; S t = s; S u = take(s); g = s; return t.a + u.a; }')
+	assert read.diagnostics.len == 0
+	// The same reading where only the source is const: a plain value assigned or
+	// passed into a const target is the conversion the standard allows, and
+	// whether that object may be written is what the next test refuses.
+	other := parsed('typedef struct { int a; } S;\nS take(const S v);\nint main(void) { S s = {1}; const S t = {2}; s = t; return s.a; }')
+	assert other.diagnostics.len == 0
+}
+
+// The other direction of the same rule: 6.3.1p1 makes an object that is
+// const-qualified, or a structure with a const-qualified member, not a modifiable
+// lvalue, so writing it is refused where it is written. Measured on gcc 16.2.1,
+// `const S s; S t; s = t;` is `assignment of read-only variable 's'`, and a struct
+// with a const member is refused the same way. The second case is the one pinned
+// as still refused.
+fn test_writing_an_object_that_is_not_modifiable_is_refused() {
+	const_target := parsed('typedef struct { int a; } S;\nint main(void) { const S s = {1}; S t = {2}; s = t; return 0; }')
+	assert const_target.diagnostics.len >= 1
+	assert const_target.diagnostics[0].msg.contains('const-qualified')
+	assert const_target.diagnostics[0].msg.contains('modifiable lvalue')
+	const_member := parsed('typedef struct { const int a; } T;\nT x; T y;\nint main(void) { x = y; return 0; }')
+	assert const_member.diagnostics.len >= 1
+	assert const_member.diagnostics[0].msg.contains('const-qualified member')
+	// A scalar declared const is refused the same way.
+	scalar := parsed('int main(void) { const int x = 1; x = 2; return x; }')
+	assert scalar.diagnostics.len >= 1
+	assert scalar.diagnostics[0].msg.contains('const-qualified')
+	// Initializing a const object, and a struct with a const member, defines the
+	// object rather than writing one, so it is accepted.
+	defined := parsed('typedef struct { int a; } S;\ntypedef struct { const int a; } T;\nS s = {1};\nint main(void) { const S c = {2}; T x = {3}; return x.a + c.a; }')
+	assert defined.diagnostics.len == 0
+}

@@ -3302,3 +3302,63 @@ fn test_a_file_scope_auto_defines_an_object_of_the_initializer_type() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// 6.3.2.1p2 and 6.5.16.1: a value read from a const-qualified aggregate is a
+// value of the unqualified type, so every position that reads it accepts it. The
+// program is compiled and run, so what is checked is the artifact and not a
+// diagnostic count: measured on gcc 16.2.1 with -std=c99, the same program exits
+// 21. The positions are the ones the rule has to keep working in: a local of the
+// plain type, an argument to a function whose parameter is the plain type, a
+// function returning a const-qualified file-scope object, the initializer of a
+// file-scope object and an assignment into one, an element of a const array, and
+// a read through a `const S *`.
+//
+// An assignment into a struct member of the aggregate type is not here because
+// this back end stores no member of an aggregate type at all, which the second
+// program measures: that shape is refused with or without const, and it is a
+// back-end limit rather than the qualifier rule this test is for.
+fn test_a_const_qualified_aggregate_reads_in_the_positions_that_take_it() {
+	source := scratch('constagg.c')
+	binary := scratch('constagg')
+	program := 'typedef struct { int a; } S;\n' +
+		'const S gc = {4};\n' +
+		'S take(S v) { return v; }\n' +
+		'S get(void) { return gc; }\n' +
+		'S g2 = gc;\n' +
+		'int main(void) {\n' +
+		'    const S s = {5};\n' +
+		'    S t = s;\n' +
+		'    S u = take(s);\n' +
+		'    g2 = s;\n' +
+		'    const S *p = &s;\n' +
+		'    const S arr[2] = {{1}, {2}};\n' +
+		'    S b = arr[0];\n' +
+		'    return t.a + u.a + g2.a + p->a + b.a; /* 5 + 5 + 5 + 5 + 1 */\n' +
+		'}\n'
+	assert compile_and_run([source, '-o', binary], program) == 21
+	os.rm(source) or {}
+	os.rm(binary) or {}
+	// The member-of-aggregate shape is the back end's limit and not the
+	// qualifier's: a plain value into the same member is refused the same way.
+	member := scratch('constagg_member.c')
+	image := compile([member, '-o', scratch('constagg_member')],
+		'typedef struct { int a; } S;\nstruct Holder { S m; };\nint main(void) { S x = {5}; struct Holder h; h.m = x; return h.m.a; }\n')
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('member h.m')
+	os.rm(member) or {}
+}
+
+// The other direction of the same rule, pinned: writing an object that is not a
+// modifiable lvalue is refused. A struct with a const-qualified member is the case
+// that must stay refused, and a const-qualified object is the other. 6.3.1p1 is
+// the rule, and the refusal is at the parser, so the parse is asked directly.
+fn test_writing_an_object_that_is_not_modifiable_is_refused() {
+	const_member := 'typedef struct { const int a; } T;\nT x;\nT y;\nint main(void) { x = y; return 0; }\n'
+	member := parser.parse(tokenize.lex(const_member).tokens)
+	assert member.diagnostics.len >= 1
+	assert member.diagnostics[0].msg.contains('const-qualified member')
+	const_object := 'typedef struct { int a; } S;\nint main(void) { const S s = {1}; S t = {2}; s = t; return 0; }\n'
+	object := parser.parse(tokenize.lex(const_object).tokens)
+	assert object.diagnostics.len >= 1
+	assert object.diagnostics[0].msg.contains('const-qualified')
+}

@@ -552,12 +552,18 @@ fn (p Parser) assignment_target_type(name string, index ?ast.Expr, field ?ast.Fi
 	return types.Type{}
 }
 
-// check_assignment asks the constraint 6.5.16.1 for a value written into an
-// object, which is what an assignment is and what an initialization is: an
-// argument is checked the same way because 6.5.2.2 says it converts as if by
-// assignment, and `types.assignment_problem` is the one place those rules live.
-// The refusal is reported at the operator that writes, which is where a reader of
-// the source looks for it.
+// check_assignment asks both halves of the constraint 6.5.16.1 for a statement
+// that writes an object: the target has to be a modifiable lvalue, which is
+// `types.assignment_target_problem`, and the value written has to convert to the
+// target, which is `types.assignment_problem`. The refusal is reported at the
+// operator that writes, which is where a reader of the source looks for it.
+//
+// This is the assignment half of the constraint and not the initialization half.
+// An initializer names a new object, so a `const` there defines the object rather
+// than writing one, and a struct with a const member may be initialized once the
+// same way; both are asked by `check_initializer`, which asks only the value half.
+// Passing an argument is asked by `checked_arguments` the same way, because
+// 6.5.2.2 says an argument converts as if by assignment into a fresh parameter.
 //
 // The compound spellings are not asked here. `x += e` is read as `x = x + e` in
 // this tree, and the sum is a node built while the compound spelling is read,
@@ -565,6 +571,10 @@ fn (p Parser) assignment_target_type(name string, index ?ast.Expr, field ?ast.Fi
 // A source whose target and value disagree that way is refused at the operators
 // it is written with, which is the next milestone's arithmetic.
 fn (mut p Parser) check_assignment(to types.Type, value ast.Expr, at tokenize.Token) {
+	if problem := types.assignment_target_problem(to) {
+		p.error_at(at, problem)
+		return
+	}
 	problem := types.assignment_problem(to, p.value_type(value), p.is_null_constant(value)) or {
 		return
 	}
