@@ -1307,12 +1307,22 @@ fn (mut p Parser) unary_type(op tokenize.Token, operand ast.Expr) types.Type {
 // of something else. A pointer to void is the one pointer whose read is a void
 // expression rather than a refusal: 6.3.2.2 says that expression has no value,
 // and the places it may appear are the places a value is thrown away.
+//
+// An operand of function type is the designator 6.3.2.1p4 converts to a pointer
+// to itself, so `*f` where f names a function is that designator again: the
+// conversion and the indirection cancel and the result is the function type, not
+// a value read out of memory. This is the shape V's generated C writes to fill a
+// table of function pointers - `.g = *f` - where f is a function returning the
+// table's element type.
 fn (mut p Parser) deref_type(op tokenize.Token, operand ast.Expr) types.Type {
 	if p.is_unresolved(operand) {
 		return types.Type{}
 	}
 	if operand.typ.is_array() {
 		return operand.typ.element() or { types.Type{} }
+	}
+	if operand.typ.is_function() {
+		return operand.typ
 	}
 	if !operand.typ.is_pointer() {
 		p.error_at(op, 'unsupported: * reads through an address, and this operand is ${operand.typ.describe()}')
