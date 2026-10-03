@@ -148,6 +148,18 @@ pub fn (r Representation) layout(t Type) ?Layout {
 	mut align := 1
 	mut pos := 0
 	for member in t.members {
+		if member.promoted {
+			// A promoted member is a view of a member of an unnamed struct or
+			// union that is itself a member of this object (6.7.2.1p13). It
+			// takes no room of its own - the unnamed member holds the bytes -
+			// so the walk does not move, and its offset is where the unnamed
+			// member sits plus the offset it was given inside it. The unnamed
+			// member precedes it, so its own offset is already known.
+			owner_layout := r.layout(t.members[member.owner].typ) or { return none }
+			offsets << offsets[member.owner] + owner_layout.offsets[member.inner_index]
+			bits << owner_layout.bits[member.inner_index]
+			continue
+		}
 		member_align := r.align_of(member.typ) or { return none }
 		member_size := r.member_size(member) or { return none }
 		if member.bitfield {
@@ -214,6 +226,18 @@ fn (r Representation) union_layout(t Type) ?Layout {
 	mut align := 1
 	mut size := 0
 	for member in t.members {
+		if member.promoted {
+			// A promoted member is a view of a member of an unnamed struct or
+			// union inside this union (6.7.2.1p13). Every member of a union
+			// starts at the beginning, so the unnamed member it came from does
+			// too, and the offset is the one it was given inside it. It adds
+			// nothing to the size or the alignment, which the unnamed member
+			// already settles.
+			owner_layout := r.layout(t.members[member.owner].typ) or { return none }
+			offsets << owner_layout.offsets[member.inner_index]
+			bits << owner_layout.bits[member.inner_index]
+			continue
+		}
 		member_align := r.align_of(member.typ) or { return none }
 		member_size := r.member_size(member) or { return none }
 		if member.bitfield && !member.typ.is_integer() {
