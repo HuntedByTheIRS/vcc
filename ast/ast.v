@@ -55,6 +55,11 @@ pub:
 	// function the link has to find elsewhere; a definition is emitted here and
 	// a call to it is a call into this image.
 	defined bool
+	// weak says the declaration asked for the weak symbol binding, with
+	// `__attribute__((weak))`. A weak definition is one a link may replace
+	// rather than one that collides with a second definition, and the object
+	// says so in the symbol table.
+	weak bool
 	// body is the statements the definition wrote. It is empty both for a
 	// prototype and for a definition written as `{}`, so defined is what tells
 	// the two apart.
@@ -129,7 +134,16 @@ pub:
 	// for every other kind, which is sized from its type the way it always was.
 	// An aggregate has no width a spelling answers, so the declaration asks the
 	// model's layout once, here, and every later stage reads the number.
-	bytes      int
+	bytes int
+	// alignment is the strictest alignment the declaration asked for with
+	// `__attribute__((aligned(N)))`, and zero when it asked for none, which
+	// leaves the object at the alignment its type gives it. It is the alignment
+	// of the object's storage in the image, and the image places the object at
+	// it.
+	alignment int
+	// weak says the declaration asked for the weak symbol binding, with
+	// `__attribute__((weak))`. The object says so in its symbol table.
+	weak       bool
 	init       ?i64
 	init_float ?f64
 	// init_long is the constant of an object of a long double type, in the

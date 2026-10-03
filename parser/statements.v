@@ -1165,6 +1165,17 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		p.skip_declaration()
 		return stmts
 	}
+	// An attribute that changes the object rather than a declaration is
+	// implemented for a declaration at file scope, where a symbol's binding and
+	// an object's address are this compiler's to decide. Inside a function the
+	// storage is the frame's and its alignment is the frame layout's, so the
+	// request is refused by name rather than dropped.
+	if spec.attributes.alignment > 0 {
+		p.error_at(spec.start, 'unsupported: an attribute that asks for the alignment of an object is implemented on a declaration at file scope, not inside a function')
+	}
+	if spec.attributes.weak {
+		p.error_at(spec.start, 'unsupported: a weak symbol binding is implemented on a declaration at file scope, not inside a function')
+	}
 	if p.at_punct(';') {
 		if spec.tag_decl {
 			// A tag with no declarator, as in `struct S { int a; };` or

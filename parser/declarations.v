@@ -112,6 +112,15 @@ fn (p Parser) starts_declaration(t tokenize.Token) bool {
 	if t.text == '_Static_assert' {
 		return true
 	}
+	// A GNU attribute can open a declaration: V's generated C writes
+	// `__attribute__((weak)) void f(void) {}` and `__attribute__((noinline))
+	// int g(void)`, with the attribute in front of the declaration specifiers.
+	// The attribute says something about the declaration and the specifiers
+	// follow it, so a declaration the reader will otherwise read correctly opens
+	// here.
+	if t.text == '__attribute__' {
+		return true
+	}
 	return is_specifier_word(t.text) || p.is_type_name(t.text)
 }
 
@@ -214,6 +223,11 @@ mut:
 	// been read, and the reader that has the initializer is the one that fills
 	// the clause. It is false for the storage class of the same spelling.
 	auto_deduced bool
+	// attributes is what any GNU `__attribute__` written among the specifiers
+	// said about the declaration. The two that change the object - a weak
+	// binding and a strict alignment - travel here to the reader that builds
+	// the declaration's node, because a declaration is what they are about.
+	attributes AttributeSet
 }
 
 fn (mut s DeclSpec) note(t tokenize.Token) {
@@ -724,9 +738,21 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		return decls
 	}
 	mut names := []string{}
+	// trailing is what a GNU attribute written after a declarator said about
+	// it, the position `int f(void) __attribute__((weak));` uses. It is merged
+	// with the attributes the specifiers carried, because both belong to the
+	// same declaration.
+	mut trailing := AttributeSet{}
 	mut data_seen := false
 	mut data_defined := false
 	mut data_name := ''
+	// data_weak and data_alignment are what the attributes on a top-level
+	// object asked for: a weak symbol binding, and a stricter alignment than the
+	// object's type gives it. They are read where the object's type is, because
+	// the declaration is known to be an object only after the declarator has
+	// been read.
+	mut data_weak := false
+	mut data_alignment := 0
 	mut data_at := spec.start
 	// What a definition of an object at the top level needs to be laid out: the
 	// type and the count as written, and the constant it starts at. They are
@@ -814,7 +840,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.skip_declaration()
 			return decls
 		}
-		p.skip_gnu_postfix() or {
+		trailing = p.skip_gnu_postfix(false) or {
 			p.skip_declaration()
 			return decls
 		}
@@ -857,6 +883,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						resolved: p.declared_type(spec.clause, d)
 						params:   d.function_params()
 						defined:  true
+						weak:     spec.attributes.weak || trailing.weak
 						body:     statements
 						line:     d.name_at.line
 						col:      d.name_at.col
@@ -879,6 +906,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					ret_type: p.return_type(spec.clause, d)
 					resolved: p.declared_type(spec.clause, d)
 					params:   d.function_params()
+					weak:     spec.attributes.weak || trailing.weak
 					body:     []ast.Stmt{}
 					line:     d.name_at.line
 					col:      d.name_at.col
@@ -926,6 +954,12 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_clause = p.declared_type(spec.clause, d)
 				data_count = d.array_count()
 				data_array = d.is_array()
+				// An attribute on the declaration belongs to the object,
+				// whether it was written in front of the specifiers or after
+				// the declarator, so the two lists are read together.
+				asked := merge_attributes(spec.attributes, trailing)
+				data_weak = asked.weak
+				data_alignment = asked.alignment
 				// A name that stands for an array type hides the brackets in
 				// the specifiers, so a file-scope object may be an array the
 				// declarator never wrote: `typedef int vec4[4]; vec4 g;` is an
@@ -1324,6 +1358,8 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				resolved:     data_resolved or { spec.clause }
 				count:        data_count
 				bytes:        bytes
+				alignment:    data_alignment
+				weak:         data_weak
 				init:         data_init
 				init_float:   data_init_float
 				address:      data_address
@@ -1413,6 +1449,8 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			typ:           data_type
 			resolved:      if completed := data_complete { completed } else { data_clause }
 			count:         data_count
+			alignment:     data_alignment
+			weak:          data_weak
 			init:          init
 			init_float:    init_float
 			init_long:     data_init_long
@@ -3671,17 +3709,26 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 		if t.kind != .identifier {
 			break
 		}
-		// A GNU attribute or assembler name can sit anywhere among the
-		// specifiers, including between a tag's closing brace and the
-		// declarator: `struct T { int a; } __attribute__((aligned(16)));` and
-		// `} __attribute__((aligned(16))) v_int128_t;` are how V's generated C
-		// writes one. They are read past and not recorded, the same way one
-		// after a declarator is (see skip_gnu_postfix): this compiler has no
-		// attribute model, and a declaration that carries one is valid C that
-		// must not be refused for it. Reading it here is what keeps the
-		// attribute from being read as the declarator's name.
+		// A GNU attribute may sit anywhere among the specifiers, including in
+		// front of them and between a tag's closing brace and the declarator:
+		// `__attribute__((weak)) void f(void) {}`, `struct T { int a; }
+		// __attribute__((aligned(16)));` and `} __attribute__((aligned(16)))
+		// v_int128_t;` are all how V's generated C writes one. The attribute is
+		// read and what it says is recorded on the declaration; the assembler
+		// name beside it is read past, since it changes nothing this compiler
+		// emits. Reading them here is also what keeps the attribute from being
+		// read as the declarator's name.
 		if t.text in gnu_postfix {
-			p.skip_gnu_postfix()!
+			// An attribute this compiler cannot keep is refused by name only in
+			// the position a declaration opens with, which is where V's
+			// generated C writes one. Among the specifiers and after the
+			// declarator a system header writes many, and refusing there would
+			// refuse the headers this compiler reads today (measured: glibc's
+			// stdio.h alone carries hundreds), so a name is refused there only
+			// when it changes the object, which `weak` and `aligned(N)` are read
+			// for wherever they stand.
+			opening := spec.words.len == 0
+			spec.attributes = merge_attributes(spec.attributes, p.skip_gnu_postfix(opening)!)
 			continue
 		}
 		if t.text in storage_classes {
@@ -4139,7 +4186,9 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 				break
 			}
 			d := p.parse_declarator(depth + 1)!
-			p.skip_gnu_postfix()!
+			p.skip_gnu_postfix(false) or {
+				return error('member attribute')
+			}
 			mut width := 0
 			mut written := false
 			if p.at_punct(':') {
@@ -5215,13 +5264,22 @@ fn (mut p Parser) skip_to_separator() ! {
 
 // skip_gnu_postfix consumes the GNU words that may follow a declarator: an
 // attribute list and an assembler name, each with its parenthesised argument.
-// They are read past rather than recorded, because neither changes the shape of
-// the declaration as far as this compiler is concerned.
-fn (mut p Parser) skip_gnu_postfix() ! {
+// What an attribute says is answered back to the caller, because two of them
+// change the object the compiler emits; an assembler name changes nothing and is
+// read past. `report` says whether an attribute this compiler does not implement
+// is refused here: it is true in the position a declaration opens with, which is
+// where V's generated C writes one, and false where a system header writes one
+// in a place this reader already knew how to step over.
+fn (mut p Parser) skip_gnu_postfix(report bool) !AttributeSet {
+	mut set := AttributeSet{}
 	for {
 		t := p.peek()
 		if t.kind != .identifier || t.text !in gnu_postfix {
-			return
+			return set
+		}
+		if t.text == '__attribute__' {
+			set = merge_attributes(set, p.parse_attribute_specifiers(report))
+			continue
 		}
 		p.next()
 		if !p.at_punct('(') {
@@ -5231,6 +5289,7 @@ fn (mut p Parser) skip_gnu_postfix() ! {
 		open := p.next()
 		p.skip_balanced(open)!
 	}
+	return set
 }
 
 // skip_balanced consumes tokens up to and including the bracket that closes the
