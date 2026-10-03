@@ -1792,29 +1792,41 @@ fn test_an_increment_refuses_every_operand_that_is_not_a_name() {
 	assert member.diagnostics[0].msg.contains('on s.a')
 }
 
-// The step is one, which is the increment of an integer name. A pointer, a
-// double and an array are named by their type rather than stepped by one byte,
-// which would be a wrong answer for every use of the value afterwards.
-fn test_an_increment_refuses_a_name_that_is_not_an_integer() {
-	pointer := parsed('int main(void) { int *p; p++; return 0; }')
-	assert pointer.diagnostics.len == 1
-	assert pointer.diagnostics[0].msg.contains('which is int *')
-	assert pointer.diagnostics[0].msg.contains('steps an int or a char name only')
-	floating := parsed('int main(void) { double d = 0.0; d--; return 0; }')
-	assert floating.diagnostics.len == 1
-	assert floating.diagnostics[0].msg.contains('which is double')
-	// A 128-bit name is an integer type and still not one the step of one fits:
-	// this back end has one int width and stores the wider type as an object, so
-	// the message names what it does step rather than calling the operand a
-	// non-integer.
-	wide := parsed('int main(void) { __int128 x = 5; x++; return 0; }')
-	assert wide.diagnostics.len == 1
-	assert wide.diagnostics[0].msg.contains('which is __int128')
-	assert wide.diagnostics[0].msg.contains('steps an int or a char name only')
+// The step is one, which is the increment of an integer of any width the back
+// end stores: a long, an unsigned long and a short are each stepped by one, and
+// the value wraps at the object's own width the way the language says.
+fn test_an_increment_steps_an_integer_of_any_width() {
+	long := parsed('int main(void) { long i = 0; i++; ++i; i--; return 0; }')
+	assert long.diagnostics.len == 0
+	unsigned_long := parsed('int main(void) { unsigned long i = 0; i++; return 0; }')
+	assert unsigned_long.diagnostics.len == 0
+	unsigned_int := parsed('int main(void) { unsigned i = 0; ++i; return 0; }')
+	assert unsigned_int.diagnostics.len == 0
+	short := parsed('int main(void) { short s = 0; s++; return 0; }')
+	assert short.diagnostics.len == 0
 	// A char is an integer the back end steps at its own byte, so it is read
 	// and not refused.
 	character := parsed('int main(void) { char c = 0; c++; return c; }')
 	assert character.diagnostics.len == 0
+}
+
+// A type this compiler does not step is refused by the type it is. A pointer is
+// stepped by the size of what it points at and not by one, so it is refused
+// until the emitter scales the step; a double is a floating value this back end
+// does not step; and a 128-bit integer is an integer with no value to step.
+fn test_an_increment_refuses_a_name_this_compiler_does_not_step() {
+	pointer := parsed('int main(void) { int *p; p++; return 0; }')
+	assert pointer.diagnostics.len == 1
+	assert pointer.diagnostics[0].msg.contains('which is int *')
+	assert pointer.diagnostics[0].msg.contains('steps an integer name only')
+	floating := parsed('int main(void) { double d = 0.0; d--; return 0; }')
+	assert floating.diagnostics.len == 1
+	assert floating.diagnostics[0].msg.contains('which is double')
+	assert floating.diagnostics[0].msg.contains('steps an integer name only')
+	wide := parsed('int main(void) { __int128 x = 5; x++; return 0; }')
+	assert wide.diagnostics.len == 1
+	assert wide.diagnostics[0].msg.contains('which is __int128')
+	assert wide.diagnostics[0].msg.contains('has no __int128 value to step')
 }
 
 // A name nothing declares gets the message about a missing declaration and not
