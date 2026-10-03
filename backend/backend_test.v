@@ -2,6 +2,7 @@ module backend
 
 import backend.arch.x86_64
 import backend.os.linux
+import os
 
 // The machine and the system are written by hand in two files that do not know
 // about each other, which is the point of the split and also its one hazard: a
@@ -72,6 +73,45 @@ fn test_a_system_that_does_not_know_a_machine_answers_nothing() {
 	// program rather than a refusal.
 	assert linux.syscalls('z80').len == 0
 	assert linux.syscall_args_regs('z80').len == 0
+}
+
+// -print-file-name= has to name a file the linker would really pick, so the
+// query and the link go through one search: the -L directories first, then the
+// target's own, which is the order `linux.search_dirs` builds. A name the search
+// does not have answers none, which is what lets the caller answer with the name
+// unchanged the way gcc does.
+fn test_the_library_file_query_is_the_linkers_search() {
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	dir := os.join_path(os.temp_dir(), 'vcc_backend_library_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	probe := os.join_path(dir, 'libprobe.so')
+	os.write_file(probe, 'probe') or { panic(err) }
+	found := target.library_file('libprobe.so', [dir]) or {
+		panic('the -L directory was not searched')
+	}
+	assert found == probe
+	if _ := target.library_file('nosuchfile.xyz', [dir]) {
+		assert false, 'a name the search does not have has to answer none'
+	}
+	dirs := target.library_dirs_for([dir])
+	assert dirs.len == target.library_dirs.len + 1
+	assert dirs[0] == dir
+	assert dirs[1..] == target.library_dirs
+	assert target.base_library() == linux.base_library
+	// The resolved form is the same search with the name read out of the file,
+	// which is what a report of what the link would do asks for.
+	system := linux.find_file('libm.so.6', target.library_dirs) or { return }
+	script := os.join_path(dir, 'libscript.so')
+	os.write_file(script, '/* GNU ld script\nOUTPUT_FORMAT(elf64-x86-64)\nGROUP ( ${system} ) */\n') or {
+		panic(err)
+	}
+	resolved := target.resolve_libraries(['script'], [dir]) or { panic(err) }
+	assert resolved.len == 1
+	assert resolved[0].path == script
+	assert resolved[0].soname == 'libm.so.6'
 }
 
 fn test_the_encoder_refuses_a_register_it_cannot_name() {

@@ -1169,3 +1169,51 @@ pub fn (t Target) set_condition(condition Condition, reg Register) ![]u8 {
 pub fn (t Target) widen_byte(reg Register) ![]u8 {
 	return x86_64.movzx_byte(t.describe(reg))
 }
+
+// Library is one -l name resolved to a file: the file the search found and the
+// name the image carries for it. The two are not the same string, which is why
+// both are kept, and it is the system's own answer rather than a shape invented
+// here.
+pub struct Library {
+pub:
+	path   string
+	soname string
+}
+
+// library_dirs_for is where a -l name is searched for: the -L directories in the
+// order they were given, then the target's own. The linker and the query flags
+// both ask this, so there is one search and not two.
+pub fn (t Target) library_dirs_for(given []string) []string {
+	return linux.search_dirs(given, t.library_dirs)
+}
+
+// library_file is the file a name resolves to in that search, or none when the
+// search does not have it. It is `linux.find_file`, the same walk a -l name and a
+// `-l:file` take, so `-print-file-name=` answers with a file the linker would
+// really pick and answers the name unchanged when there is none.
+pub fn (t Target) library_file(name string, given []string) ?string {
+	return linux.find_file(name, t.library_dirs_for(given))
+}
+
+// resolve_libraries is the linker's own resolution of the -l names: the file
+// behind each one and the name the image carries, in the order they were given
+// and without repeating one. A query that reports what the link would do asks
+// this rather than resolving again.
+pub fn (t Target) resolve_libraries(names []string, given []string) ![]Library {
+	files := linux.resolve_library_files(names, t.library_dirs_for(given))!
+	mut out := []Library{}
+	for file in files {
+		out << Library{
+			path:   file.path
+			soname: file.soname
+		}
+	}
+	return out
+}
+
+// base_library is the C library every image this system writes runs against,
+// named whether or not a -l asked for it. It is reported with the resolved
+// libraries so that a description of what the image carries is complete.
+pub fn (t Target) base_library() string {
+	return linux.base_library
+}

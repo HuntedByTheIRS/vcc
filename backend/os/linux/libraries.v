@@ -188,7 +188,12 @@ fn find_library(given string, dirs []string) ?string {
 	return find_file('lib${given}.a', dirs)
 }
 
-fn find_file(given string, dirs []string) ?string {
+// find_file looks for one file name in the search directories, in order. It is
+// the walk a -l name and a `-l:file` both go through, and it is published because
+// a query flag asks the same question of one name: `-print-file-name=` answers
+// with the file this returns, so the flag and the linker cannot disagree about
+// which file a name is.
+pub fn find_file(given string, dirs []string) ?string {
 	for dir in dirs {
 		path := os.join_path(dir, given)
 		if os.is_file(path) {

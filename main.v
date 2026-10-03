@@ -63,6 +63,24 @@ fn main() {
 		}
 		return
 	}
+	if opts.verbose {
+		verbose_print(verbose_header_lines(opts))
+	}
+	// A -print- flag asks a question and stops, so it needs no input file. That
+	// is how a build system asks a compiler where its things are before it has
+	// anything to compile: it reads the answer off the standard output and does
+	// not want a file, an object or a diagnostic beside it.
+	if opts.asks_query() {
+		target := backend.resolve(opts.target) or {
+			abort(err.msg())
+			return
+		}
+		if opts.verbose {
+			verbose_print(verbose_query_lines(opts, target))
+		}
+		println(query_answer(opts, target))
+		return
+	}
 	if opts.inputs.len == 0 {
 		eprintln('vcc: no input files')
 		eprintln('')
@@ -72,6 +90,9 @@ fn main() {
 	if opts.inputs.len > 1 {
 		abort('linking more than one input is not implemented yet')
 		return
+	}
+	if opts.verbose {
+		verbose_print(verbose_include_dir_lines(opts))
 	}
 	path := opts.inputs[0]
 	source := read_source(path) or {
@@ -108,6 +129,9 @@ fn main() {
 	phases << cli.Phase{
 		name:   'preprocess'
 		micros: time.since(started).microseconds()
+	}
+	if opts.verbose {
+		verbose_print(verbose_file_lines(processed.files))
 	}
 	// A warning is reported and the compile goes on; an error ends it, and so
 	// does a warning the command line promoted. Which is which is asked of the
@@ -229,6 +253,9 @@ fn main() {
 			abort('cannot write ${out_path}: ${err.msg()}')
 			return
 		}
+	}
+	if opts.verbose {
+		verbose_print(verbose_result_lines(opts, phases, image, out_path))
 	}
 	if opts.bench {
 		for line in cli.bench_lines(phases) {
@@ -560,4 +587,173 @@ fn standard_include_dirs() []string {
 	}
 	dirs << '/usr/include'
 	return dirs
+}
+
+// query_answer answers the -print- question the command line asked. The answers
+// are this compiler's own and come from the same description the compile uses: a
+// file resolves through the linker's search, and the target's multiarch spelling
+// is the one its own search lists are built from.
+//
+// gcc answers questions about its private tree - its install directory, its cc1
+// and its as - which this compiler does not have, because it is one binary that
+// runs no program and writes the container itself. Where that is the reason, the
+// answer is the one gcc gives for a thing it cannot find, and the comment says so.
+//
+// When more than one query is written, the first of these in this order is the
+// one answered, which is the order gcc's own answers come out in: a file query
+// first, then the variant queries, then the sysroot.
+fn query_answer(opts cli.Options, target backend.Target) string {
+	if opts.print_file_name_given {
+		// The file the linker's search finds, or the name back unchanged when it
+		// finds none. An empty name is not a file and comes back empty, which is
+		// the same rule and not gcc's special answer of its install directory.
+		return target.library_file(opts.print_file_name, opts.library_dirs) or {
+			opts.print_file_name
+		}
+	}
+	if opts.print_prog_name_given {
+		// This compiler runs no external program: it emits the container
+		// itself, so there is no name it could resolve to a path. gcc prints a
+		// program name unchanged for one it cannot find, and every name is one
+		// this compiler cannot find.
+		return opts.print_prog_name
+	}
+	if opts.print_libgcc_file_name {
+		// No libgcc is linked, so this answers what a search of the libraries
+		// finds for libgcc.a: on a machine that keeps it beside gcc the search
+		// has none and the name comes back, which is gcc's answer for a libgcc
+		// it does not have.
+		return target.library_file('libgcc.a', opts.library_dirs) or { 'libgcc.a' }
+	}
+	if opts.print_multi_directory {
+		// One compilation variant exists, and its directory is the default one.
+		return '.'
+	}
+	if opts.print_multi_lib {
+		// That one variant, named by the directory it lives in and no options.
+		return '.;'
+	}
+	if opts.print_multi_os_directory {
+		// There is no multilib tree to move through: the system's own library
+		// directories are what the search looks in, so the relative directory
+		// is the one this compiler is already in.
+		return '.'
+	}
+	if opts.print_multiarch {
+		// The target's multiarch spelling, which is the name this compiler
+		// builds both of its search lists from. gcc here prints an empty line
+		// because it is configured without multiarch.
+		return '${target.arch}-${target.os}-gnu'
+	}
+	if opts.print_sysroot {
+		// A sysroot is a tree to compile against instead of the running system,
+		// and this compiler has none: its headers and libraries are the host's,
+		// so the answer is empty and not a directory.
+		return ''
+	}
+	if opts.print_sysroot_headers_suffix {
+		// The suffix goes with the sysroot, and there is no sysroot. gcc makes
+		// this a fatal error because it has no suffix to give; an empty answer
+		// is the same fact in a form a build can use, so the run still exits 0.
+		return ''
+	}
+	return cli.search_dirs_text(install_dir(), []string{}, target.library_dirs_for(opts.library_dirs))
+}
+
+// install_dir is the directory the running compiler is in. gcc names its private
+// install tree here because that is where its own files are; this compiler is one
+// binary with no tree beside it, so the directory holding the binary is the only
+// "where the compiler is" there is.
+fn install_dir() string {
+	return os.dir(os.executable())
+}
+
+// The -verbose report. gcc's -v prints the cc1, as and collect2 command lines it
+// runs; this compiler runs none of those, so what follows is what it can honestly
+// report: which compiler and target this is, where headers and libraries are
+// looked for, what was read, and what went into the file. Every line goes to
+// stderr through verbose_print and nothing here changes what is compiled, so a
+// -E stream or a -print- answer on the standard output is left alone.
+//
+// Each stage hands back its lines rather than printing them, so the stages can be
+// read in a test and there is one place that writes them.
+
+// verbose_header_lines names the compiler, the target and the dialect, the facts
+// gcc's -v opens with.
+fn verbose_header_lines(opts cli.Options) []string {
+	mut out := []string{}
+	out << 'vcc version ${cli.version} (pure V, stub)'
+	target := backend.resolve(opts.target) or {
+		out << 'target: none (${err.msg()})'
+		return out
+	}
+	out << 'target: ${target.name}'
+	out << 'standard: ${standard_line(opts)}'
+	return out
+}
+
+// verbose_query_lines shows the search a query answer came from, which is the
+// detail gcc's -v prints beside a -print- answer.
+fn verbose_query_lines(opts cli.Options, target backend.Target) []string {
+	return ['libraries: =${target.library_dirs_for(opts.library_dirs).join(':')}']
+}
+
+// verbose_include_dir_lines is where a header is looked for, in the order it is
+// searched, which is what a person reads to see why a header resolved where it
+// did.
+fn verbose_include_dir_lines(opts cli.Options) []string {
+	mut out := []string{}
+	for dir in opts.include_dirs {
+		out << 'include: ${dir}'
+	}
+	if opts.nostdinc {
+		out << 'include: (the standard directories, which -nostdinc turns off)'
+		return out
+	}
+	for dir in standard_include_dirs() {
+		out << 'include: ${dir} (standard)'
+	}
+	return out
+}
+
+// verbose_file_lines is what the read opened: the source and every header that was
+// included, which is the list -M writes as a rule.
+fn verbose_file_lines(files []preprocess.SourceFile) []string {
+	mut out := []string{}
+	for file in files {
+		kind := if file.system { ' (system)' } else { '' }
+		out << 'read: ${file.path}${kind}'
+	}
+	return out
+}
+
+// verbose_result_lines closes the report with what this compiler did instead of
+// running a linker: it wrote the container itself, so there is no command line to
+// show. What it can show is the phases and what the image will carry - the loader,
+// the C library, the libraries a -l named, and the file - which is the part of
+// gcc's -v a build reads to see what got linked.
+fn verbose_result_lines(opts cli.Options, phases []cli.Phase, image codegen.Result, out_path string) []string {
+	mut out := []string{}
+	for phase in phases {
+		out << 'phase: ${phase.name} ${phase.micros}us'
+	}
+	target := backend.resolve(opts.target) or { return out }
+	out << 'link: no linker is run; this compiler writes the container itself'
+	out << '  interpreter: ${target.interpreter}'
+	out << '  library: ${target.base_library()} (the C library every image names)'
+	for library in target.resolve_libraries(opts.libraries, opts.library_dirs) or {
+		[]backend.Library{}
+	} {
+		out << '  library: ${library.soname} (${library.path})'
+	}
+	out << '  written: ${out_path} (${image.bytes.len} bytes)'
+	return out
+}
+
+// verbose_print is the one place -verbose reaches a stream: stderr, so that the
+// standard output stays whatever the command was asked for.
+fn verbose_print(lines []string) {
+	for line in lines {
+		eprintln(line)
+	}
 }

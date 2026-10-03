@@ -216,6 +216,95 @@ fn test_the_rule_can_be_given_a_target() {
 	assert parse(['-MD', '-MQ', 'a b.o', 'x.c'])!.deps_target == 'a b.o'
 }
 
+// The -print- family asks a question and stops. Each flag is read rather than
+// recorded, because a flag the driver never looks at would be answered as an
+// ordinary compile with no input file, which is the one thing a build tool
+// asking these questions does not have.
+fn test_every_query_flag_is_read_as_a_question() {
+	options := [
+		'-print-search-dirs',
+		'-print-libgcc-file-name',
+		'-print-file-name=libc.so',
+		'-print-prog-name=ld',
+		'-print-multiarch',
+		'-print-multi-directory',
+		'-print-multi-lib',
+		'-print-multi-os-directory',
+		'-print-sysroot',
+		'-print-sysroot-headers-suffix',
+	]
+	for flag in options {
+		opts := parse([flag])!
+		assert opts.asks_query(), '${flag} was not read as a query'
+		assert !opts.ignored.contains(flag), '${flag} was recorded as ignored'
+		assert opts.inputs.len == 0
+	}
+}
+
+fn test_a_file_name_query_keeps_its_value_and_the_empty_one() {
+	joined := parse(['-print-file-name=libc.so'])!
+	assert joined.print_file_name == 'libc.so'
+	assert joined.print_file_name_given
+	// An empty name is a question too, so "was it given" cannot be read off the
+	// value.
+	empty := parse(['-print-file-name='])!
+	assert empty.print_file_name == ''
+	assert empty.print_file_name_given
+	assert empty.asks_query()
+}
+
+fn test_a_prog_name_query_keeps_its_value() {
+	opts := parse(['-print-prog-name=ld'])!
+	assert opts.print_prog_name == 'ld'
+	assert opts.print_prog_name_given
+	assert !opts.ignored.contains('-print-prog-name=ld')
+}
+
+fn test_a_query_is_usable_with_a_standard_and_an_empty_command_line() {
+	opts := parse(['-std=gnu11', '-print-multi-directory'])!
+	assert opts.standard == 'gnu11'
+	assert opts.print_multi_directory
+	assert opts.asks_query()
+}
+
+fn test_an_ordinary_command_line_is_not_a_query() {
+	opts := parse(['-std=gnu11', 'src.c', '-o', 'out'])!
+	assert !opts.asks_query()
+}
+
+fn test_verbose_is_its_own_flag_and_the_version_stays_v() {
+	opts := parse(['-verbose', 'x.c'])!
+	assert opts.verbose
+	assert !opts.ignored.contains('-verbose')
+	// -v is the version, the tcc spelling this command line keeps, so the two
+	// do not collide.
+	printed := parse(['-v'])!
+	assert printed.show_version
+	assert !printed.verbose
+}
+
+fn test_the_search_dirs_text_has_the_shape_gcc_uses() {
+	text := search_dirs_text('/opt/vcc', []string{}, ['/usr/local/lib', '/usr/lib'])
+	lines := text.split('\n')
+	assert lines.len == 3
+	assert lines[0] == 'install: /opt/vcc'
+	assert lines[1] == 'programs: ='
+	assert lines[2] == 'libraries: =/usr/local/lib:/usr/lib'
+	// Program directories are the caller's: the same shape with some.
+	with_programs := search_dirs_text('/opt/vcc', ['/opt/vcc/bin'], ['/usr/lib']).split('\n')
+	assert with_programs[1] == 'programs: =/opt/vcc/bin'
+}
+
+fn test_the_usage_lists_the_query_flags() {
+	text := usage(false)
+	assert text.contains('-print-search-dirs')
+	assert text.contains('-print-file-name=NAME')
+	assert text.contains('-print-prog-name=NAME')
+	assert text.contains('-print-multi-lib')
+	assert text.contains('-print-sysroot-headers-suffix')
+	assert text.contains('-verbose')
+}
+
 // elf_of is the beginning of an ELF64 file of one e_type: the magic, the class
 // and data bytes, and the two bytes of the type at offset 16. Classification
 // reads no more than this, so a file this long is a file it decides.
