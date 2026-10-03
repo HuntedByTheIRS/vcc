@@ -831,6 +831,34 @@ fn test_a_bitfield_brace_initializer_skips_an_unnamed_field() {
 	assert run_image(emitted.bytes) == 2
 }
 
+// A designated list places a bitfield member's value into the field's own bits,
+// which the positional path already did. Measured on gcc 16.2.1, this file-scope
+// program reads a as 5, b as 17 and n as 4 whichever order the designators were
+// written in, and a body's `{.b = 9}` reads a as 0 and b as 9.
+fn test_a_designated_bitfield_initializer_writes_each_field_its_own_bits() {
+	file_scope := emit(translation_unit('struct S { unsigned int a : 3; unsigned int b : 5; int n; };\nstruct S s = {.a = 5, .b = 17, .n = 4};\nint main(void) { return (s.a == 5) + (s.b == 17) + (s.n == 4); }'),
+		Options{})
+	assert file_scope.diagnostics.len == 0
+	assert run_image(file_scope.bytes) == 3
+	out_of_order := emit(translation_unit('struct S { unsigned int a : 3; unsigned int b : 5; int n; };\nstruct S s = {.b = 17, .a = 5, .n = 4};\nint main(void) { return (s.a == 5) + (s.b == 17) + (s.n == 4); }'),
+		Options{})
+	assert out_of_order.diagnostics.len == 0
+	assert run_image(out_of_order.bytes) == 3
+	body := emit(translation_unit('int main(void) { struct S { unsigned int a : 3; unsigned int b : 5; }; struct S s = {.b = 9}; return (s.a == 0) + (s.b == 9); }'),
+		Options{})
+	assert body.diagnostics.len == 0
+	assert run_image(body.bytes) == 2
+}
+
+// A designated list whose member is a struct writes each bitfield inside it into
+// its own bits too. Measured on gcc 16.2.1, this reads 3, 7 and 1.
+fn test_a_designated_list_reaches_a_nested_struct_member() {
+	emitted := emit(translation_unit('struct S { unsigned int a : 3; unsigned int b : 5; };\nstruct T { struct S inner; unsigned int t : 2; };\nstruct T x = {.inner = {.a = 3, .b = 7}, .t = 1};\nint main(void) { return (x.inner.a == 3) + (x.inner.b == 7) + (x.t == 1); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 3
+}
+
 // A field wider than four bytes is refused by name rather than written with a
 // clear mask this back end cannot express. The refusal says which unit it is.
 fn test_a_store_into_a_bitfield_wider_than_four_bytes_is_refused() {

@@ -2324,6 +2324,15 @@ struct BraceWrite {
 	spelling string
 	typ      types.Type
 	element  BraceElement
+	// bitfield says the write is one bitfield member's own bits and not a whole
+	// object: the value is the bit_width bits starting at bit_offset inside the
+	// unit_width-byte storage unit at offset, which the members beside it share.
+	// A write that is not a bitfield leaves these false and zero, which is what
+	// every write that does not ask about bits gets.
+	bitfield   bool
+	bit_offset int
+	bit_width  int
+	unit_width int
 }
 
 // is_a_flat_list says the list is one level of elements with no designator and
@@ -2437,14 +2446,20 @@ fn (mut p Parser) fill_brace(typ types.Type, items []BraceElement, start int, ba
 						return items.len
 					}
 					member = found
-					i = p.fill_designated(typ.members[member].typ, item.designators[1..], items, i, base + layout.offsets[member], mut writes)
+					i = p.fill_member(typ.members[member], layout.bits[member], item.designators[1..], items, i, base + layout.offsets[member], mut writes)
 					member++
 					continue
+				}
+				// An unnamed bitfield is not a member a positional list writes
+				// (6.7.2.1p12), so the value goes to the next member that takes
+				// one, which is what the flat reader does too.
+				for member < typ.members.len && typ.members[member].name.len == 0 {
+					member++
 				}
 				if member >= typ.members.len {
 					return i
 				}
-				i = p.fill_one(typ.members[member].typ, items, i, base + layout.offsets[member], mut writes)
+				i = p.fill_member(typ.members[member], layout.bits[member], []BraceDesignator{}, items, i, base + layout.offsets[member], mut writes)
 				member++
 			}
 			return i
@@ -2468,7 +2483,7 @@ fn (mut p Parser) fill_brace(typ types.Type, items []BraceElement, start int, ba
 				}
 				rest = item.designators[1..]
 			}
-			return p.fill_designated(typ.members[member].typ, rest, items, start, base + layout.offsets[member], mut writes)
+			return p.fill_member(typ.members[member], layout.bits[member], rest, items, start, base + layout.offsets[member], mut writes)
 		}
 		else {
 			if start >= items.len {
@@ -2534,7 +2549,7 @@ fn (mut p Parser) fill_designated(typ types.Type, designators []BraceDesignator,
 				p.error_at(designator.at, 'a constraint violation: ${typ.describe()} has no member named ${named}')
 				return items.len
 			}
-			return p.fill_designated(typ.members[member].typ, rest, items, start, base + layout.offsets[member], mut writes)
+			return p.fill_member(typ.members[member], layout.bits[member], rest, items, start, base + layout.offsets[member], mut writes)
 		}
 		.union_ {
 			layout := p.representation.layout(typ) or { return start }
@@ -2546,13 +2561,62 @@ fn (mut p Parser) fill_designated(typ types.Type, designators []BraceDesignator,
 				p.error_at(designator.at, 'a constraint violation: ${typ.describe()} has no member named ${named}')
 				return items.len
 			}
-			return p.fill_designated(typ.members[member].typ, rest, items, start, base + layout.offsets[member], mut writes)
+			return p.fill_member(typ.members[member], layout.bits[member], rest, items, start, base + layout.offsets[member], mut writes)
 		}
 		else {
 			p.error_at(designator.at, 'unsupported: a designator names a subobject of an object with members, and ${typ.describe()} has none')
 			return items.len
 		}
 	}
+}
+
+// fill_member places the value the element at `start` writes for one struct or
+// union member. A bitfield member has no byte of its own: its value is written
+// into the field's own bits inside the storage unit it shares with the members
+// beside it, so the write carries the field's bit position, width and unit width
+// and the emitter masks and shifts instead of writing the whole unit. Every
+// other member is walked as before, which is what carries a nested list or the
+// designators after the member's own into the subobject they name. `rest` is
+// those designators, empty for a positional element.
+fn (mut p Parser) fill_member(member types.Member, bit_offset int, rest []BraceDesignator, items []BraceElement, start int, base int, mut writes []BraceWrite) int {
+	if member.bitfield {
+		if rest.len > 0 {
+			p.error_at(rest[0].at, 'unsupported: a designator names a subobject of the bitfield ${member.name}, and a bitfield has no subobjects')
+			return items.len
+		}
+		return p.write_bit_leaf(member, bit_offset, base, items, start, mut writes)
+	}
+	return p.fill_designated(member.typ, rest, items, start, base, mut writes)
+}
+
+// write_bit_leaf appends the one write a value for a bitfield member makes: the
+// value is the member's own bits inside the storage unit at the member's byte,
+// so the write says where those bits sit and how wide the unit is instead of
+// writing a whole storage unit of its own. A brace list around the value names
+// the same scalar subobject and is unwrapped, which is the shape `.a = {5}` has;
+// an empty list writes nothing.
+fn (mut p Parser) write_bit_leaf(member types.Member, bit_offset int, base int, items []BraceElement, start int, mut writes []BraceWrite) int {
+	item := items[start]
+	mut element := item
+	if list := item.list {
+		if list.elements.len == 0 {
+			return start + 1
+		}
+		element = list.elements[0]
+	}
+	unit_width := p.representation.size_of(member.typ) or { 0 }
+	writes << BraceWrite{
+		offset:     base
+		width:      unit_width
+		spelling:   member.typ.storage_spelling()
+		typ:        member.typ
+		element:    element
+		bitfield:   true
+		bit_offset: bit_offset
+		bit_width:  member.bits
+		unit_width: unit_width
+	}
+	return start + 1
 }
 
 // write_brace_leaf appends the one write an element makes for a scalar subobject
@@ -2663,7 +2727,10 @@ fn (mut p Parser) file_scope_general_initializer(spec DeclSpec, d Declarator, li
 // file-scope initializer carries: the byte the subobject starts at inside the
 // object, its width and its spelling, and the constant or the address written
 // into it. The class is the subobject's own type, because a value written into a
-// member is converted the way a store into the member converts it.
+// member is converted the way a store into the member converts it. A write into
+// a bitfield member carries the field's bit position, width and unit width
+// beside the byte, because the value lands in those bits and not at a byte of
+// its own.
 fn (mut p Parser) brace_writes_to_members(writes []BraceWrite) []ast.MemberInit {
 	mut members := []ast.MemberInit{cap: writes.len}
 	for write in writes {
@@ -2686,6 +2753,10 @@ fn (mut p Parser) brace_writes_to_members(writes []BraceWrite) []ast.MemberInit 
 			spelling:   write.spelling
 			init:       init
 			init_float: init_float
+			bitfield:   write.bitfield
+			bit_offset: write.bit_offset
+			bit_width:  write.bit_width
+			unit_width: write.unit_width
 		}
 	}
 	return members
