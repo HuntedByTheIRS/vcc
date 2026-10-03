@@ -192,6 +192,33 @@ pub fn (k Kind) is_complex() bool {
 	return k in [Kind.complex_float, .complex_double, .complex_long_double]
 }
 
+// complex_component is the real type of a complex type: `float` for
+// `float _Complex`, `double` for `double _Complex`, `long double` for
+// `long double _Complex`. It is what 6.3.1.8 calls the corresponding real type
+// and the type the usual arithmetic conversions apply their rules to once the
+// complex part is set aside. A kind that is not complex answers none.
+pub fn (k Kind) complex_component() ?Kind {
+	return match k {
+		.complex_float { Kind.float }
+		.complex_double { Kind.double }
+		.complex_long_double { Kind.long_double }
+		else { none }
+	}
+}
+
+// complex_of is the complex type whose component is this real type, and none for
+// a kind with no complex type. It is where the usual arithmetic conversions land
+// when one operand is complex: the result is complex, and the component is the
+// real type the two components converted to.
+pub fn (k Kind) complex_of() ?Kind {
+	return match k {
+		.float { Kind.complex_float }
+		.double { Kind.complex_double }
+		.long_double { Kind.complex_long_double }
+		else { none }
+	}
+}
+
 pub fn (k Kind) is_arithmetic() bool {
 	return k.is_integer() || k.is_floating() || k.is_complex()
 }

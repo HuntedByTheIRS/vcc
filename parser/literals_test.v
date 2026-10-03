@@ -88,3 +88,82 @@ fn reject_message(text string) string {
 	parse_floating_literal(text) or { return err.msg() }
 	return ''
 }
+
+// An imaginary constant reads to the value of its imaginary part and the width
+// its suffix names. The bits below were measured on gcc 16.2.1 by printing the
+// bytes of the constant, not the decimal gcc prints, because a decimal print
+// rounds and would hide a value one bit off. `0.1iF`, `0.1if` and `0.1Fi` are
+// the same four bytes in the same place, which is the point: the marker is
+// taken wherever it sits, and what is left is rounded once by the floating
+// reader rather than rounded here and converted again.
+struct ImagSingle {
+	text string
+	bits u32
+}
+
+struct ImagDouble {
+	text string
+	bits u64
+}
+
+fn test_an_imaginary_constant_reads_to_the_value_gcc_produces() {
+	singles := [
+		ImagSingle{'0.1iF', u32(0x3dcccccd)},
+		ImagSingle{'0.1if', u32(0x3dcccccd)},
+		ImagSingle{'0.1Fi', u32(0x3dcccccd)},
+		ImagSingle{'0.1IF', u32(0x3dcccccd)},
+		ImagSingle{'1.0iF', u32(0x3f800000)},
+		ImagSingle{'0x1p-1fI', u32(0x3f000000)},
+	]
+	for c in singles {
+		value, single := parse_imaginary_literal(c.text) or { panic(err) }
+		assert single, '${c.text} is a float _Complex and this reader did not say so'
+		assert math.f32_bits(f32(value)) == c.bits, '${c.text} read to the wrong bits'
+	}
+	doubles := [
+		ImagDouble{'0.1i', u64(0x3fb999999999999a)},
+		ImagDouble{'0.1I', u64(0x3fb999999999999a)},
+		ImagDouble{'0.1j', u64(0x3fb999999999999a)},
+		ImagDouble{'0.1J', u64(0x3fb999999999999a)},
+		ImagDouble{'1.0i', u64(0x3ff0000000000000)},
+		ImagDouble{'0x1p3i', u64(0x4020000000000000)},
+	]
+	for c in doubles {
+		value, single := parse_imaginary_literal(c.text) or { panic(err) }
+		assert !single, '${c.text} is a double _Complex and this reader did not say so'
+		assert math.f64_bits(value) == c.bits, '${c.text} read to the wrong bits'
+	}
+	// The real part is zero, which is what 6.4.4.2 leaves it as and what the
+	// node carries: neither reader above answers with a real part at all.
+	assert !is_imaginary_constant('1.0')
+	assert is_imaginary_constant('1.0if')
+	assert is_imaginary_constant('1.0Fi')
+	assert is_imaginary_constant('0x1p3i')
+	assert !is_imaginary_constant('0x1p3')
+}
+
+// An imaginary constant this compiler has no value for is refused by name, and
+// the name says which spelling asked for it. gcc 16.2.1 reads `1i` as a
+// `float _Complex`, which is what an integer coefficient is refused for: the
+// answer this compiler would give is a double one, and a type the program did
+// not write is worse than a refusal.
+fn test_a_refused_imaginary_constant_is_named() {
+	assert imaginary_reject('1.0il').contains('a long double complex')
+	assert imaginary_reject('1.0li').contains('a long double complex')
+	assert imaginary_reject('1i').contains('written on a floating constant')
+	assert imaginary_reject('1iF').contains('written on a floating constant')
+	// Two markers are not one marker: the last one comes off and what is left
+	// still carries one, so it is not a floating constant at all.
+	assert imaginary_reject('0.1ij').contains('is not part of a floating constant')
+	// `1iF` is shaped like an imaginary constant, which is why the reader is
+	// reached at all; what it is refused for is the coefficient, which is `1F`
+	// and is not a floating constant. Reading it as the double this compiler
+	// would answer would be a type the program did not write, and gcc 16.2.1
+	// refuses the same spelling.
+	assert is_imaginary_constant('1iF')
+}
+
+fn imaginary_reject(text string) string {
+	parse_imaginary_literal(text) or { return err.msg() }
+	return ''
+}

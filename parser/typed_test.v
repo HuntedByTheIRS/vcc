@@ -1066,29 +1066,35 @@ fn test_a_float_definition_is_read_and_a_long_double_one_is_refused_by_name() {
 	assert prototype.unit.decls[0].ret_type.same(types.long_double_type())
 }
 
-fn test_a_complex_type_is_refused_by_name() {
-	// The model has the complex types and the emitter has no arithmetic for
-	// them, so a definition of one is refused by name and location. The refusal
-	// says which type it was, not the first word of its spelling.
+fn test_the_two_complex_types_the_back_end_moves_are_read() {
+	// The model has the complex types and the back end now hands over the two
+	// it has a width for, so a definition, a parameter and a local of
+	// `double _Complex` or `float _Complex` are all read. Measured on gcc
+	// 16.2.1, which accepts each of these.
 	complex := parsed('double _Complex f(void) { return 0; }')
-	assert complex.diagnostics.len == 1
-	assert complex.diagnostics[0].msg == 'unsupported: double _Complex is a type this compiler does not emit yet, so a function cannot return it'
-	assert complex.diagnostics[0].line == 1
+	assert complex.diagnostics.len == 0
+	assert complex.unit.decls[0].ret_type.same(types.complex_double_type())
+	parameter := parsed('int h(double _Complex z) { return 0; }')
+	assert parameter.diagnostics.len == 0
+	assert parameter.unit.decls[0].params[0].resolved.same(types.complex_double_type())
+	local := parsed('int main(void) { double _Complex z = 0; return 0; }')
+	assert local.diagnostics.len == 0
+	float_local := parsed('int main(void) { float _Complex z = 0; return 0; }')
+	assert float_local.diagnostics.len == 0
+	// A lone `_Complex` is `double _Complex`: measured on gcc 16.2.1, the two
+	// are compatible types and both occupy sixteen bytes.
+	bare := parsed('int main(void) { _Complex z = 0; return 0; }')
+	assert bare.diagnostics.len == 0
+	// `long double _Complex` is a type the back end has no value for, and it is
+	// refused by the word that makes it complex rather than quietly read as a
+	// `double _Complex`, which is a different type of a different width.
+	long_local := parsed('int main(void) { long double _Complex z = 0; return 0; }')
+	assert long_local.diagnostics.len == 1
+	assert long_local.diagnostics[0].msg == 'unsupported type _Complex'
+	// `_Imaginary` is optional in C99 and this compiler has no model for it.
 	imaginary := parsed('_Imaginary g(void) { return 0; }')
 	assert imaginary.diagnostics.len == 1
 	assert imaginary.diagnostics[0].msg == 'unsupported type _Imaginary'
-	// The parameter list names what a parameter was declared with, which is the
-	// one place a type written as two words is spelled in full.
-	parameter := parsed('int h(double _Complex z) { return 0; }')
-	assert parameter.diagnostics.len == 1
-	assert parameter.diagnostics[0].msg == 'unsupported type double _Complex'
-	// A declaration of an object of one is refused by the word that makes it
-	// complex rather than by the `double` in front of it: `double` on its own
-	// is a type this compiler reads, so naming it would name a type that works.
-	local := parsed('int main(void) { double _Complex z = 0; return 0; }')
-	assert local.diagnostics.len == 1
-	assert local.diagnostics[0].msg == 'unsupported type _Complex'
-	assert local.diagnostics[0].line == 1
 }
 
 fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
@@ -1161,6 +1167,44 @@ fn test_a_floating_suffix_names_the_type_and_the_value_it_has() {
 		assert false
 		return
 	} as ast.FloatLit).typ.same(types.double_type())
+}
+
+fn test_an_imaginary_constant_is_the_complex_value_6_4_4_2_names() {
+	// 6.4.4.2 gives a floating constant written with `i` or `j` an imaginary
+	// part of the value it names and a real part of zero, so the node carries
+	// the coefficient and the complex type its suffix named. Measured on gcc
+	// 16.2.1: `1.0if`, `1.0iF` and `1.0Fi` are all `float _Complex`, and `1.0i`
+	// is `double _Complex`. `_Complex_I` in <complex.h> is `1.0if`, so the
+	// suffix-before-suffix order is the one the header writes.
+	single := first('int main(void) { float _Complex z = 1.0if; return 0; }')
+	single_lit := single.body[0].init or {
+		assert false
+		return
+	} as ast.ComplexLit
+	assert single_lit.typ.same(types.complex_float_type())
+	assert single_lit.value == 1.0
+	assert single_lit.text == '1.0if'
+	// The capital spelling and the other order are the same constant.
+	assert (first('int main(void) { float _Complex z = 1.0Fi; return 0; }').body[0].init or {
+		assert false
+		return
+	} as ast.ComplexLit).typ.same(types.complex_float_type())
+	// No floating suffix is a double complex, and `j` is the other spelling of
+	// the imaginary suffix.
+	wide := first('int main(void) { double _Complex z = 2.0j; return 0; }')
+	wide_lit := wide.body[0].init or {
+		assert false
+		return
+	} as ast.ComplexLit
+	assert wide_lit.typ.same(types.complex_double_type())
+	assert wide_lit.value == 2.0
+	// `l` names a `long double _Complex`, which this compiler has no value for,
+	// and it is refused by name at the constant rather than read as a double.
+	// The declaration is the accepted `float _Complex` so the constant is what
+	// is refused, and not the type it is assigned to.
+	long_imaginary := parsed('int main(void) { float _Complex z = 1.0il; return 0; }')
+	assert long_imaginary.diagnostics.len == 1
+	assert long_imaginary.diagnostics[0].msg.contains('long double complex')
 }
 
 fn test_a_float_constant_is_not_the_double_of_the_same_digits() {

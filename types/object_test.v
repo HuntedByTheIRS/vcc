@@ -355,6 +355,18 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert described_int == 4
 	assert described_int_align == 4
 	assert description.representation.size_of(unsigned_int_type()) or { -1 } == 4
+	// The complex types are carried, and the widths and alignments are the ones
+	// measured on gcc 16.2.1: `sizeof(float _Complex)` is 8 with an alignment of
+	// 4, `sizeof(double _Complex)` is 16 with an alignment of 8, and
+	// `sizeof(long double _Complex)` is 32 with an alignment of 16. The width
+	// the back end does not move is still a width the model can give out
+	// truthfully for a layout question, which is what a member of the type asks.
+	assert description.representation.size_of(complex_float_type()) or { -1 } == 8
+	assert description.representation.align_of(complex_float_type()) or { -1 } == 4
+	assert description.representation.size_of(complex_double_type()) or { -1 } == 16
+	assert description.representation.align_of(complex_double_type()) or { -1 } == 8
+	assert description.representation.size_of(complex_long_double_type()) or { -1 } == 32
+	assert description.representation.align_of(complex_long_double_type()) or { -1 } == 16
 	// Every other scalar kind is named as missing: the description carries no
 	// width for an aggregate, a `long double` or a complex type, and a question that
 	// needs one is refused rather than answered with a number that would be a machine
@@ -382,7 +394,8 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	// `sizeof(unsigned char)` are each 1 with an alignment of 1, and `sizeof(short)`
 	// and `sizeof(unsigned short)` are each 2 with an alignment of 2.
 	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .signed_char, .unsigned_char,
-		.bool_, .short, .unsigned_short, .long, .unsigned_long, .long_long, .unsigned_long_long]
+		.bool_, .short, .unsigned_short, .long, .unsigned_long, .long_long, .unsigned_long_long,
+		.complex_float, .complex_double, .complex_long_double]
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in carried {

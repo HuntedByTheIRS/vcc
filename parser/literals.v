@@ -184,6 +184,74 @@ fn parse_floating_literal(text string) !f64 {
 	return value
 }
 
+// imaginary_suffix_removed answers what is left of a numeric token once its
+// imaginary suffix is taken off, and whether there was one. 6.4.4.2 makes `i`
+// and `j` the marker of an imaginary constant, and gcc 16.2.1 accepts the marker
+// on either side of the floating suffix: measured, `1.0if`, `1.0iF` and `1.0Fi`
+// are an eight-byte `float _Complex` and `1.0i` is a sixteen-byte
+// `double _Complex`. `_Complex_I` in <complex.h> is the first of those, written
+// `1.0iF`, so the marker is taken wherever it sits rather than in one order
+// only.
+//
+// Only the marker comes off. What is left keeps its own floating suffix so that
+// it reaches the reader that rounds a constant once, at the width the suffix
+// names: `0.1if` rounded here and then converted would be a value a float never
+// holds, and a float the program did not write.
+fn imaginary_suffix_removed(text string) (string, bool) {
+	if text.len == 0 {
+		return text, false
+	}
+	last := text[text.len - 1]
+	if last == `i` || last == `j` || last == `I` || last == `J` {
+		return text[..text.len - 1], true
+	}
+	if text.len > 1 && (last == `f` || last == `F` || last == `l` || last == `L`) {
+		before := text[text.len - 2]
+		if before == `i` || before == `j` || before == `I` || before == `J` {
+			return text[..text.len - 2] + text[text.len - 1..], true
+		}
+	}
+	return text, false
+}
+
+// is_imaginary_constant says whether a numeric token names an imaginary constant
+// rather than an integer or a real one.
+fn is_imaginary_constant(text string) bool {
+	_, imaginary := imaginary_suffix_removed(text)
+	return imaginary
+}
+
+// parse_imaginary_literal reads an imaginary constant into the value of its
+// imaginary part and says whether the component type is float rather than
+// double. 6.4.4.2 leaves the real part zero, so `1.0i` is the value 1.0 in the
+// imaginary position and nothing in the real one, and the value is the one the
+// floating reader gives the coefficient.
+//
+// The suffix attaches to a floating constant, and the two refusals here are the
+// spellings that are not one. A `long double _Complex` is named and refused: the
+// type the spelling asks for is the one this compiler has no value for. An
+// integer coefficient is refused as well, because gcc 16.2.1 reads `1i` as a
+// `float _Complex` and answering a `double _Complex` for it would be a type the
+// program did not write.
+fn parse_imaginary_literal(text string) !(f64, bool) {
+	body, imaginary := imaginary_suffix_removed(text)
+	if !imaginary || body == '' {
+		return error('${text}: not an imaginary constant')
+	}
+	if body.ends_with('l') || body.ends_with('L') {
+		return error('${text}: a long double imaginary constant names a long double complex, a type this compiler does not implement')
+	}
+	if !is_floating_constant(body) {
+		return error('${text}: an imaginary constant is written on a floating constant, and ${body} is not one')
+	}
+	value := parse_floating_literal(body) or { return error(err.msg()) }
+	// The floating suffix, which the reader above has already rounded for, is
+	// what names the component type: `1.0if` is a float complex and `1.0i` is a
+	// double one.
+	single := body.ends_with('f') || body.ends_with('F')
+	return value, single
+}
+
 // parse_hex_floating_literal reads a hexadecimal floating constant, which C99
 // 6.4.4.2 spells as `0x`, hexadecimal digits with an optional point, and a
 // binary exponent introduced by `p` or `P`. The exponent is required. Without

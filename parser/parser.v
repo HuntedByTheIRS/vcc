@@ -149,7 +149,7 @@ const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long
 // name one of these.
 const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .bool_, .char_, .signed_char,
 	.unsigned_char, .short, .unsigned_short, .double, .float, .long, .unsigned_long, .long_long,
-	.unsigned_long_long]
+	.unsigned_long_long, .complex_float, .complex_double]
 
 // max_expression_depth bounds how deep one expression nests: a parenthesis, a
 // prefix operator, a cast, a `?:`, a `[` index, a call's argument list and a
@@ -507,7 +507,7 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			p.check_undeclared_expression(expr.then_expr, mut reported)
 			p.check_undeclared_expression(expr.else_expr, mut reported)
 		}
-		ast.IntLit, ast.StrLit, ast.FloatLit {}
+		ast.IntLit, ast.StrLit, ast.FloatLit, ast.ComplexLit {}
 		ast.Assign {
 			// The target is a use of what it names, and the value is an
 			// expression of its own: both sides are walked.
@@ -1118,6 +1118,13 @@ fn (p Parser) aggregate_bytes(declared types.Type) int {
 		element := declared.element() or { return 0 }
 		return p.aggregate_bytes(element)
 	}
+	if declared.kind in [types.Kind.complex_float, .complex_double] {
+		// A complex object is two components stored one after the other, and the
+		// model measured the size: sixteen bytes for a `double _Complex` and
+		// eight for a `float _Complex`. The declaration carries it so that the
+		// frame reserves the whole object rather than one value of it.
+		return p.representation.size_of(declared) or { 0 }
+	}
 	if declared.kind !in [types.Kind.struct_, .union_] || !declared.is_complete() {
 		return 0
 	}
@@ -1134,6 +1141,7 @@ fn describe_operand(expr ast.Expr) string {
 		ast.Field { '${expr.name}.${expr.member}' }
 		ast.IntLit { expr.text }
 		ast.FloatLit { expr.text }
+		ast.ComplexLit { expr.text }
 		ast.StrLit { 'a string literal' }
 		ast.Call {
 			if _ := expr.callee {
@@ -1777,9 +1785,25 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	t := p.peek()
 	if t.kind == .number {
 		p.next()
-		// The spelling decides whether this is a floating constant or an
-		// integer one, so the two readers are reached from here rather than
-		// one of them guessing at the other's input.
+		// The spelling decides whether this is an imaginary constant, a
+		// floating constant or an integer one, so the readers are reached
+		// from here rather than one of them guessing at another's input.
+		// The imaginary one is asked first because its spelling also has a
+		// point, which would otherwise send it to the floating reader and
+		// refuse the `i` as a character no floating constant holds.
+		if is_imaginary_constant(t.text) {
+			value, single := parse_imaginary_literal(t.text) or {
+				p.error_at(t, err.msg())
+				return error('bad imaginary literal')
+			}
+			return ast.Expr(ast.ComplexLit{
+				value: value
+				text:  t.text
+				typ:   if single { types.complex_float_type() } else { types.complex_double_type() }
+				line:  t.line
+				col:   t.col
+			})
+		}
 		if is_floating_constant(t.text) {
 			value := parse_floating_literal(t.text) or {
 				p.error_at(t, err.msg())

@@ -139,16 +139,21 @@ fn test_the_usual_arithmetic_conversions_of_6_3_1_8() {
 	assert sum(long_double_type(), char_type()) == 'long double'
 }
 
-fn test_a_conversion_this_milestone_has_no_arithmetic_for_is_refused() {
-	// The complex types are the back end milestone's, and a conversion that
-	// needs one is refused by name rather than approximated with the real type
-	// underneath it. Measured: gcc makes `double _Complex` of a double and a
-	// `double _Complex`, which is arithmetic this compiler does not emit.
-	complex_sum := usual_arithmetic_conversions(double_type(), complex_double_type(), measured.representation()) or {
-		assert err.msg().contains('complex')
-		return
-	}
-	assert complex_sum.kind == .unknown
+fn test_the_usual_arithmetic_conversions_with_a_complex_operand() {
+	// 6.3.1.8: an operand of a complex type makes the result complex, and the
+	// two corresponding real types follow the rules above, so a real operand
+	// takes the component's own rules and the complex part is set aside.
+	// Measured with `_Generic` on gcc 16.2.1: `1.0 + 1.0f * _Complex_I` and
+	// `1.0f + 1.0 * _Complex_I` are both `double _Complex`, `1.0f + 1.0f *
+	// _Complex_I` is `float _Complex`, and `1 + 1.0f * _Complex_I` is
+	// `float _Complex`.
+	assert sum(double_type(), complex_double_type()) == 'double _Complex'
+	assert sum(double_type(), complex_float_type()) == 'double _Complex'
+	assert sum(float_type(), complex_float_type()) == 'float _Complex'
+	assert sum(int_type(), complex_float_type()) == 'float _Complex'
+	assert sum(int_type(), complex_double_type()) == 'double _Complex'
+	assert sum(complex_float_type(), complex_double_type()) == 'double _Complex'
+	assert sum(long_double_type(), complex_double_type()) == 'long double _Complex'
 	// A pointer is not arithmetic, and neither is a name this compiler never
 	// resolved.
 	pointer_sum := usual_arithmetic_conversions(int_type(), pointer_to(int_type()), measured.representation()) or {

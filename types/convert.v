@@ -93,11 +93,23 @@ pub fn integer_promotion(t Type, rep Representation) !Type {
 // pointer rather than from a conversion, which the reader answers where it reads
 // the operator.
 //
-// The complex types are the back end milestone's, so a conversion that needs one
-// is refused by name rather than approximated with the real type underneath it.
+// The complex types follow 6.3.1.8's own first rule: an operand of a complex
+// type makes the result complex, and the two corresponding real types follow the
+// rules below. The corresponding real type of a complex operand is its
+// component, and of a real operand itself, so `double + float _Complex` takes
+// the double rules and the result is `double _Complex`. Measured with `_Generic`
+// on gcc 16.2.1: `1.0 + 1.0f * _Complex_I` is `double _Complex`,
+// `1.0f + 1.0f * _Complex_I` is `float _Complex`, and `1 + 1.0 * _Complex_I` is
+// `double _Complex`.
 pub fn usual_arithmetic_conversions(a Type, b Type, rep Representation) !Type {
 	if a.is_complex() || b.is_complex() {
-		return error('the usual arithmetic conversions of ${a.describe()} and ${b.describe()} need the complex types, which this compiler has no arithmetic for yet')
+		combined := usual_arithmetic_conversions(complex_component_type(a), complex_component_type(b), rep)!
+		component := combined.kind.complex_of() or {
+			return error('the usual arithmetic conversions of ${a.describe()} and ${b.describe()} have a complex operand whose real type ${combined.describe()} has no complex type')
+		}
+		return scalar(component) or {
+			return error('the usual arithmetic conversions of ${a.describe()} and ${b.describe()} name ${component}, which is not a type this model has')
+		}
 	}
 	if !a.is_arithmetic() || !b.is_arithmetic() {
 		return error('the usual arithmetic conversions need two arithmetic types, and ${a.describe()} and ${b.describe()} are not both arithmetic')
@@ -227,10 +239,13 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 		// Nothing is claimed about a type this compiler did not resolve.
 		return none
 	}
-	if to.is_complex() || from.is_complex() {
-		return 'the arithmetic on the complex types belongs to the back end milestone, so ${from.describe()} is not assigned to ${to.describe()} yet'
-	}
 	if to.is_arithmetic() && from.is_arithmetic() {
+		// 6.5.16.1: an arithmetic value converts to every arithmetic type. A
+		// complex target takes a real value with a zero imaginary part, and a
+		// real target takes a complex value with its imaginary part dropped,
+		// which is the conversion 6.3.1.7 defines and not a constraint
+		// violation. Measured on gcc 16.2.1: `double d = 1.0 + 2.0 * I;` is
+		// accepted and d is 1.0.
 		return none
 	}
 	if to.is_pointer() {
@@ -302,6 +317,17 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 		return 'a constraint violation: ${from.describe()} is not assigned to ${to.describe()}, and an object of an aggregate type is assigned to an object of its own type'
 	}
 	return none
+}
+
+// complex_component_type is the type the usual arithmetic conversions apply to a
+// complex operand: its corresponding real type, which is its component, and
+// itself for every other type. 6.3.1.8 sets the complex part of the result
+// aside and applies the real rules to these two.
+fn complex_component_type(t Type) Type {
+	if component := t.kind.complex_component() {
+		return scalar(component) or { return t }
+	}
+	return t
 }
 
 // unsigned_counterpart is the unsigned type of the same rank as a signed one,
