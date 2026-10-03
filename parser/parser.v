@@ -775,8 +775,7 @@ fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 // give the type the usual arithmetic conversions put them both in, two void
 // arms give void, and two pointers give the pointer both arms convert to: a
 // pointer to void takes over from a pointer to an object type, and a pointer
-// beside an integer constant of value zero is that pointer's type, which is the
-// null pointer constant rule.
+// beside a null pointer constant is that pointer's type.
 //
 // The answer is a question about the arms and not about which one runs, so it
 // is asked while the expression is read and not where the branch is emitted.
@@ -802,6 +801,20 @@ fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_e
 	if a.is_void() && b.is_void() {
 		return types.void_type()
 	}
+	// 6.5.15p6: a pointer beside a null pointer constant is that pointer, the
+	// same pairing an initializer and an assignment allow. It is asked before
+	// the two-pointer cases below, because a null pointer constant is not a
+	// pointer with a type of its own even when 6.3.2.3p3 spells it as one.
+	// `1 ? (void *)0 : p` is `p`'s type, and so is `1 ? (void *)0 : (T *)0`,
+	// which is the shape `__tgmath_real_type` is built on: without this the
+	// constant's void pointer takes over and the conditional is a void pointer,
+	// dereferencing to void.
+	if a.is_pointer() && p.is_null_pointer_constant(else_expr) {
+		return a
+	}
+	if b.is_pointer() && p.is_null_pointer_constant(then_expr) {
+		return b
+	}
 	if a.is_pointer() && b.is_pointer() {
 		if a.same(b) {
 			return a
@@ -825,14 +838,6 @@ fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_e
 		}
 		p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and they do not point to compatible types')
 		return types.Type{}
-	}
-	// 6.5.15: a pointer beside an integer constant of value zero is that
-	// pointer, the same pairing an initializer and an assignment allow.
-	if a.is_pointer() && p.is_null_constant(else_expr) {
-		return a
-	}
-	if b.is_pointer() && p.is_null_constant(then_expr) {
-		return b
 	}
 	p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and 6.5.15 pairs two arithmetic types, two void types, or two pointers')
 	return types.Type{}
@@ -1318,6 +1323,19 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 		p.next()
 		return p.parse_prefix_operand(t)!
 	}
+	// `__real__` and `__imag__` name the two parts of a value. glibc's <tgmath.h>
+	// writes them around the argument it is asking a type question about - it
+	// asks `sizeof (+__real__ (Val))` and `__builtin_classify_type (__real__
+	// (Val))` - and the names are in the reserved namespace the same way
+	// `__extension__` is, so no dialect refuses them and no features.v row gates
+	// them. Read as a call they name a function nothing declares, the operand's
+	// type stays unresolved, and the `sizeof` or `__builtin_classify_type`
+	// around them is refused, which is the whole of the tgmath unary macro.
+	if t.kind == .identifier && (t.text == '__real__' || t.text == '__imag__') {
+		p.next()
+		operand := p.parse_prefix_operand(t)!
+		return p.real_or_imaginary(t, operand)
+	}
 	// A conversion is written as a type name in parentheses, and it is read here
 	// because that is where it binds: `(char *)p + 1` adds one to the address and
 	// not to the char, and `*(int *)p` reads through the pointer rather than
@@ -1387,7 +1405,78 @@ fn (mut p Parser) parse_prefix_operand(op tokenize.Token) !ast.Expr {
 	return operand
 }
 
-// parse_nested reads an expression one level inside the expression being read,
+// real_or_imaginary reads the value `__real__ x` or `__imag__ x` is worth. The
+// two names are gcc extensions rather than anything the C standard defines, and
+// gcc 16.2.1 is the oracle for all of it, measured with programs that run:
+//
+//	double x = 3.0;  __real__ x     is 3.0      and its type is double
+//	                 __imag__ x     is 0        and its type is double
+//	                 __real__(x + 1.0)          is 4.0
+//
+// `__real__ x` is x's own object: `&__real__ x == &x`, and `__real__ x = 4.0`
+// writes x. The type of `__imag__` is the operand's own and not a promoted one:
+// char for a char operand, short for a short, long long for a long long.
+// `__imag__ x` is a value and not an object, so it cannot be assigned to.
+//
+// So `__real__` of an operand of a real arithmetic type is the operand, and
+// returning it as written gives the same object, the same address, the same
+// type, and the operand evaluated once. `__imag__` is a zero of the operand's
+// type, which is a written constant of that type.
+//
+// An operand of a complex type is the one part of this that is out of reach: the
+// complex types are a pair of floating values and their arithmetic is the back
+// end milestone's, so the part is refused by name rather than answered with a
+// value this compiler made up. An operand that is real but not arithmetic has no
+// real part, which is a constraint violation.
+//
+// One measured difference is not modelled: gcc still evaluates the operand of
+// `__imag__` - `__imag__ f()` calls f and answers 0 - and a written zero does
+// not carry that call. Preserving it would need the operand emitted for its
+// effect and the result register cleared afterwards, and the back end has no
+// instruction that clears the floating-point result register.
+fn (mut p Parser) real_or_imaginary(op tokenize.Token, operand ast.Expr) ast.Expr {
+	// An operand the reader did not resolve was refused where it was written,
+	// and a second message about the operator would only repeat the first.
+	if p.is_unresolved(operand) {
+		return p.zero_value(op, types.Type{})
+	}
+	value := p.value_type(operand)
+	if value.is_complex() {
+		p.error_at(op, 'unsupported: ${op.text} names one part of a value, and ${value.describe()} is a pair of values whose arithmetic is the back end milestone')
+		return p.zero_value(op, types.Type{})
+	}
+	if !value.is_arithmetic() {
+		p.error_at(op, 'a constraint violation: ${op.text} takes a value of an arithmetic type, and this one is ${value.describe()}')
+		return p.zero_value(op, types.Type{})
+	}
+	if op.text == '__real__' {
+		return operand
+	}
+	return p.zero_value(op, value)
+}
+
+// zero_value is the constant zero of a type, which is what `__imag__` of a real
+// operand is worth: an int literal for an integer type and a double literal for
+// a floating one, the same two nodes a written constant of that type already is.
+fn (mut p Parser) zero_value(op tokenize.Token, value types.Type) ast.Expr {
+	if value.is_floating() {
+		return ast.Expr(ast.FloatLit{
+			value: 0.0
+			text:  '0.0'
+			typ:   value
+			line:  op.line
+			col:   op.col
+		})
+	}
+	return ast.Expr(ast.IntLit{
+		value: 0
+		text:  '0'
+		typ:   value
+		line:  op.line
+		col:   op.col
+	})
+}
+
 // and charges that level to the nesting count.
 //
 // A `[` index and a call's argument list are each an expression written inside
@@ -2324,6 +2413,34 @@ fn callable_signature(callee ast.Expr) ?types.Type {
 fn (p Parser) is_null_constant(expr ast.Expr) bool {
 	value := p.constant_value(expr) or { return false }
 	return value == 0
+}
+
+// is_null_pointer_constant says whether an expression is a null pointer
+// constant, which 6.3.2.3p3 defines as the integer constant expression with the
+// value 0, or such an expression cast to void *. The second spelling is not a
+// second kind of value, it is the first one wearing a pointer's clothes, and it
+// is the spelling the tgmath macros use: `(void *) 0` and `(void *) (E)` for an
+// E that is an integer constant expression both convert to any object pointer
+// without a cast, and 6.5.15p6 gives a conditional whose arm is one of them the
+// other arm's pointer type.
+//
+// A cast to an object pointer is not a null pointer constant, however constant
+// the zero under it is. Measured, gcc 16.2.1 refuses `1 ? (double *)0 : (char
+// *)0` with `pointer type mismatch`, and accepts `1 ? (void *)0 : (char *)0`
+// with the type `char *`: the clause names void * and no other pointer.
+//
+// An assignment and a call argument ask the same question through
+// `types.assignment_problem`, which already lets a void pointer convert to any
+// object pointer, so the cast spelling needs no change there.
+fn (p Parser) is_null_pointer_constant(expr ast.Expr) bool {
+	if p.is_null_constant(expr) {
+		return true
+	}
+	if expr is ast.Cast && expr.typ.is_pointer() {
+		pointee := expr.typ.pointee() or { return false }
+		return pointee.kind == .void_ && p.is_null_constant(expr.expr)
+	}
+	return false
 }
 
 // constant_value is the value of an integer constant expression this reader

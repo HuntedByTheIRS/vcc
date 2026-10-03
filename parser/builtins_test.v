@@ -303,6 +303,36 @@ fn test_classify_type_counts_an_aggregate() {
 	assert builtin_nth_value(unionish, 1) == 13
 }
 
+// The class of a type covers every kind a header asks the builtin about, which
+// is the table `type_class` keeps. Measured one at a time against gcc 16.2.1: a
+// complex type is 9, and a character, boolean or enumerated type is 1 rather
+// than a class of its own, which is what gcc's default conversions give them.
+// A kind the table has no row for answers none, not a number this compiler made
+// up, because the number picks which function a call goes to.
+fn test_type_class_covers_every_kind_the_question_reaches() {
+	assert type_class(types.complex_double_type()) or {
+		assert false
+		return
+	} == 9
+	assert type_class(types.complex_float_type()) or {
+		assert false
+		return
+	} == 9
+	assert type_class(types.enum_type('E')) or {
+		assert false
+		return
+	} == 1
+	assert type_class(types.pointer_to(types.char_type())) or {
+		assert false
+		return
+	} == 5
+	assert type_class(types.long_double_type()) or {
+		assert false
+		return
+	} == 8
+	assert type_class(types.Type{}) == none
+}
+
 // gcc has no number for a void operand and refuses one, so this reader refuses
 // it by name too rather than answering a number nothing computed.
 fn test_classify_type_refuses_a_type_gcc_has_no_number_for() {
