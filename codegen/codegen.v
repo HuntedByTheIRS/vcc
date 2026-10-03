@@ -277,6 +277,14 @@ mut:
 	// values is the scratch area, one slot per level of expression nesting,
 	// where a half-finished value waits while the other half is computed.
 	values []Slot
+	// callees is where a call through an expression keeps the address it calls
+	// while the arguments are evaluated and loaded, one slot per level of
+	// nesting. It is a list of its own rather than a level of values because an
+	// argument is emitted into the value slot of its own depth, and the last
+	// argument's depth is the one the address would otherwise wait in: the
+	// address has to outlive every argument, and a value slot at that depth
+	// does not.
+	callees []Slot
 	// slot_base is where that area starts for the expression being emitted. It
 	// is zero for an ordinary expression, so a depth indexes the list from its
 	// beginning. A statement expression raises it for the length of its body so
@@ -1029,6 +1037,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// they are sized to.
 	e.frame_used = 0
 	e.values = []Slot{}
+	e.callees = []Slot{}
 	e.slot_base = 0
 	e.wide_left = []Slot{}
 	e.wide_right = []Slot{}
@@ -3163,6 +3172,20 @@ fn (mut e Emitter) value_slot(depth int) Slot {
 	return e.values[level]
 }
 
+// callee_slot is the frame slot a call through an expression keeps the address
+// it calls in while the arguments are evaluated and the argument registers are
+// loaded. It is keyed by depth the way a value slot is, so a call nested in the
+// argument of another call gets a slot of its own, but it is a separate list:
+// an argument is emitted into the value slot of its own depth, and the address
+// this slot holds has to survive all of them.
+fn (mut e Emitter) callee_slot(depth int) Slot {
+	level := depth + e.slot_base
+	for e.callees.len <= level {
+		e.callees << e.reserve(e.target.word_size)
+	}
+	return e.callees[level]
+}
+
 // push_scope opens a block and pop_scope closes it. Names are found in the
 // blocks being emitted, innermost first, so a declaration inside a block
 // shadows one outside it and does not outlive it.
@@ -4628,7 +4651,12 @@ fn (mut e Emitter) emit_base_address(base ast.Expr, depth int) !void {
 // already the address of its first element, which is why `&a` and `a` are worth
 // the same address here: the language tells those two types apart, and this back
 // end has no types to tell them apart with.
-fn (mut e Emitter) emit_address(unary ast.Unary) !void {
+//
+// depth is the level the address is taken at, and it travels through because
+// the address of an array element and the address of a member of a non-name
+// object are computed through the frame slot of that level. A level one too
+// shallow lands on a slot an enclosing call already parked an argument in.
+fn (mut e Emitter) emit_address(unary ast.Unary, depth int) !void {
 	register := e.accumulator(unary.line, unary.col)!
 	if unary.expr is ast.Ident {
 		name := unary.expr.name
@@ -4661,13 +4689,13 @@ fn (mut e Emitter) emit_address(unary ast.Unary) !void {
 		// The member's address is the object's address plus the byte the layout
 		// put the member at, which is the same computation a member read makes
 		// and stops short of the read.
-		e.field_address(unary.expr, 0, unary.line, unary.col)!
+		e.field_address(unary.expr, depth, unary.line, unary.col)!
 		return
 	}
 	if unary.expr is ast.Index {
 		// The element's address, which is what the subscript computes before it
 		// reads or writes through it.
-		e.emit_element_address(unary.expr, 0)!
+		e.emit_element_address(unary.expr, depth)!
 		return
 	}
 	e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of ${describe_target(unary.expr)} is not implemented, and only a local or a top-level object has one this back end can take')
@@ -4699,8 +4727,9 @@ fn describe_target(expr ast.Expr) string {
 fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 	if unary.op == '&' {
 		// Taking an address is not a computation on a value: the operand is not
-		// read at all, and what is taken is where it lives.
-		return e.emit_address(unary)
+		// read at all, and what is taken is where it lives. The depth travels
+		// with it for the frame slots the computation needs.
+		return e.emit_address(unary, depth)
 	}
 	if unary.op == '*' {
 		// Reading through an address is not a computation either: the operand is
@@ -7809,7 +7838,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	mut indirect := false
 	mut callee_slot := Slot{}
 	if expression := call.callee {
-		callee_slot = e.value_slot(depth + call.args.len)
+		callee_slot = e.callee_slot(depth)
 		e.emit_callee_value(expression, depth + call.args.len + 1)!
 		e.store_accumulator(callee_slot, call.line, call.col)!
 		indirect = true
