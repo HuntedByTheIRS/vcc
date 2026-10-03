@@ -585,9 +585,12 @@ fn (mut p Parser) parse_expression() !ast.Expr {
 // the tokens inside `( ... )` are a full expression: `(a = 1, b = 2, a + b)` is
 // one expression worth 3, and that is what this reader answers with.
 //
-// The two readers below are reached only from here. Everywhere else in this tree
-// an assignment is a statement and a comma separates, so `if (a = 1)` and the
-// commas of an argument list keep the reading they had.
+// The two readers below are reached from here and from the three other places an
+// assignment is an expression: the condition of an if, a while, a do-while and a
+// switch, the condition of a for header, and the value of another assignment,
+// which is what makes `a = b = 3` right associative. A comma still separates in
+// an argument list and a brace initializer, because those readers never descend
+// through the parenthesized-expression reader.
 fn (mut p Parser) parse_parenthesized_expression() !ast.Expr {
 	return p.parse_comma_expression()
 }
@@ -1557,6 +1560,9 @@ fn (mut p Parser) zero_value(op tokenize.Token, value types.Type) ast.Expr {
 // take signal 11. The count is left where it was found on every return, a failed
 // one included, so a diagnostic about nesting does not push the next expression
 // over the limit as well.
+//
+// Both positions take a full expression, so the assignment-expression reader is
+// what reads one: `f(a = b = 1)` and `x[i = 0]` write where they stand.
 fn (mut p Parser) parse_nested(at tokenize.Token) !ast.Expr {
 	p.depth++
 	defer {
@@ -1566,7 +1572,7 @@ fn (mut p Parser) parse_nested(at tokenize.Token) !ast.Expr {
 		p.error_at(at, 'expression is nested more than ${max_expression_depth} levels deep')
 		return error('expression nested too deeply')
 	}
-	return p.parse_expression()
+	return p.parse_assignment_expression()
 }
 
 // parse_postfix reads a primary expression and then the postfix operators that

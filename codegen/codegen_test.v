@@ -2602,6 +2602,35 @@ fn test_an_assignment_and_a_comma_expression_as_a_value_run() {
 	}
 }
 
+// Chained assignment is an expression everywhere C allows one, so it writes
+// every object in the chain and the value it is worth is the value assigned.
+// Each case is a whole program that returns 1 when every object holds what the
+// source says; every one was measured against gcc 16.2.1, which accepts it and
+// answers the same. The positions are the statement, a member write through a
+// pointer, a condition, a loop's step, an operand, an argument, a declaration's
+// initializer and a return value, and beside a compound assignment and a
+// postfix increment, which keep their own meanings.
+fn test_a_chained_assignment_runs_in_every_position() {
+	cases := [
+		'int main(void) { int a = 0; int b = 0; int c = 0; a = b = c = 7; return a == 7 && b == 7 && c == 7; }',
+		'struct S { int a; int b; };\nint main(void) { struct S s; struct S *p = &s; int n = 42; p->a = p->b = n; return p->a == 42 && p->b == 42; }',
+		'int main(void) { int p = 0; int q = 0; if ((p = q = 3) != 0) { return p == 3 && q == 3; } return 0; }',
+		'int main(void) { int x = 1; int y = 1; while (x = y = 0) { } return x == 0 && y == 0; }',
+		'int main(void) { int i; int a = 0; int b = 0; for (i = 0; i < 3; i++, a = b = i) { } return i == 3 && a == 3 && b == 3; }',
+		'int main(void) { int n = 0; int m = 0; n = (m = 3) + 1; return n == 4 && m == 3; }',
+		'int take(int v) { return v; }\nint main(void) { int a = 0; int b = 0; return take(a = b = 4) == 4 && a == 4 && b == 4; }',
+		'int main(void) { int a = 0; int b = 0; a = b += 2; return a == 2 && b == 2; }',
+		'int main(void) { int a = 0; int b = 5; a = b++; return a == 5 && b == 6; }',
+		'int main(void) { int b = 0; int a = b = 6; return a == 6 && b == 6; }',
+		'int f(int *p, int *q) { return *p = *q = 8; }\nint main(void) { int a = 0; int b = 0; int r = f(&a, &b); return r == 8 && a == 8 && b == 8; }',
+	]
+	for source in cases {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 1
+	}
+}
+
 // A GNU statement expression is `({ ... })`: a brace-enclosed compound statement
 // written where a value is wanted, worth the value of its last statement when
 // that statement is an expression. gcc's `assert` expands to one under a GNU
