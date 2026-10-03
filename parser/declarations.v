@@ -1831,23 +1831,63 @@ fn (mut p Parser) file_scope_address() ?ast.AddressInit {
 	}
 	if p.at_punct('&') {
 		amp := p.next()
+		if p.peek().kind == .string {
+			// `&"abc"[1]` is the address of a byte of a string literal: the
+			// literal's own byte in the read-only data plus the index. A member
+			// of a literal is not a part of it, so only a subscript is read
+			// after the literal.
+			token := p.next()
+			literal := parse_string_literal(token.text) or {
+				p.error_at(token, err.msg())
+				return none
+			}
+			if literal.unit == 4 {
+				p.error_at(token, 'unsupported: a wide string literal does not initialize a pointer here')
+				return none
+			}
+			mut offset := 0
+			if p.at_punct('[') {
+				offset = p.file_scope_part_index() or { return none }
+			} else if p.at_punct('.') || p.at_punct('->') {
+				p.error_at(p.peek(), 'unsupported: a member is read from a string literal, and a string literal has no members')
+				return none
+			}
+			return ast.AddressInit{
+				name:   literal.value
+				string: true
+				offset: offset
+				line:   token.line
+				col:    token.col
+			}
+		}
 		if p.peek().kind != .identifier {
-			p.error_at(amp, 'unsupported: the operand of & in a file-scope initializer has to be a name')
+			p.error_at(amp, 'unsupported: the operand of & in a file-scope initializer has to be a name or a string literal')
 			return none
 		}
 		name := p.next()
-		if p.at_punct('[') || p.at_punct('.') || p.at_punct('->') {
-			// `&name[0]`, `&name.m` and `&name->m` are the address of a part of
-			// an object, which is the object's address plus an offset: the
-			// reference carries no offset yet, so the shape is refused by name
-			// rather than written as the address of the whole object, which is
-			// not what it names.
-			p.error_at(name, 'unsupported: the address of a part of ${name.text} is not implemented, and the address of the whole object is not what it names')
+		if p.at_punct('->') {
+			// The address of a part of what a pointer points at is the
+			// pointer's value plus an offset, and the value is decided when
+			// the program runs rather than written here, so it is not a
+			// constant a static initializer may hold (6.6). The shape is
+			// refused by name rather than written as the address of the
+			// whole object, which is not what it names.
+			p.error_at(name, 'unsupported: ${name.text} is reached through a pointer, and the address of a part of what it points at is not a constant a file-scope initializer may hold')
 			return none
+		}
+		// `&name[0]` and `&name.m` are the address of a part of an object,
+		// which is the object's address plus the byte the part starts at: the
+		// offset travels with the reference, so the part is named rather than
+		// written as the address of the whole object, which is not what it
+		// names.
+		mut offset := 0
+		if p.at_punct('[') || p.at_punct('.') {
+			offset = p.file_scope_part_offset(name.text, name) or { return none }
 		}
 		return ast.AddressInit{
 			name:     name.text
 			explicit: true
+			offset:   offset
 			line:     name.line
 			col:      name.col
 		}
@@ -1865,6 +1905,133 @@ fn (mut p Parser) file_scope_address() ?ast.AddressInit {
 		}
 	}
 	return none
+}
+
+// file_scope_part_offset reads the parts written after the name of an object in a
+// file-scope initializer and answers how many bytes into the object the part they
+// name starts. `&name[0]`, `&name.m` and a chain of them name a part of an object,
+// which is the object's own address plus this offset: the offset travels with the
+// reference so the layout resolves the part rather than the whole object, which is
+// not what the source names.
+//
+// The walk is against the type the name was declared with, which this reader has
+// because the name was declared before the initializer that addresses it. An
+// element is at the index scaled by the size of one element, and a member is at
+// the byte the model's layout gives it, the same layout a `Field` and an
+// `offsetof` read. A part of what a pointer points at is not a constant (the
+// pointer's value decides where the object is), and a part of a name that is not
+// an array, a struct or a union is not a part of an object, so each is refused by
+// name rather than written as the address of the whole object.
+fn (mut p Parser) file_scope_part_offset(name string, at tokenize.Token) ?int {
+	mut current := p.resolve(name)
+	if current.kind == .unknown {
+		p.error_at(at, 'unsupported: ${name} is named where the address of a part of it is wanted, and no declaration of it is in scope')
+		return none
+	}
+	mut offset := 0
+	for p.at_punct('[') || p.at_punct('.') || p.at_punct('->') {
+		if p.at_punct('->') {
+			p.error_at(p.peek(), 'unsupported: ${name} is reached through a pointer, and the address of a part of what it points at is not a constant a file-scope initializer may hold')
+			return none
+		}
+		if p.at_punct('[') {
+			element := current.element() or {
+				p.error_at(p.peek(), 'unsupported: ${name} is of the type ${current.describe()}, and an element is read from an array')
+				return none
+			}
+			stride := p.representation.size_of(element) or {
+				p.error_at(p.peek(), 'unsupported: an element of ${current.describe()} has no size this compiler knows, so the byte a subscript names cannot be read')
+				return none
+			}
+			index := p.file_scope_part_index() or { return none }
+			offset += index * stride
+			current = element
+			continue
+		}
+		dot := p.next() // .
+		if p.peek().kind != .identifier {
+			p.error_at(p.peek(), 'unsupported: a member name is read after ${dot.text}, found ${describe(p.peek())}')
+			return none
+		}
+		member_name := p.next()
+		aggregate := p.tagged_type(current)
+		if aggregate.kind !in [types.Kind.struct_, .union_] {
+			p.error_at(member_name, 'unsupported: ${member_name.text} is read from ${current.describe()}, and a member is read from an object whose type has members')
+			return none
+		}
+		mut member_index := -1
+		for i, member in aggregate.members {
+			if member.name == member_name.text {
+				member_index = i
+				break
+			}
+		}
+		if member_index < 0 {
+			p.error_at(member_name, 'unsupported: ${aggregate.describe()} has no member called ${member_name.text}')
+			return none
+		}
+		member := aggregate.members[member_index]
+		if member.bitfield {
+			p.error_at(member_name, 'unsupported: ${member_name.text} is a bitfield, and a bitfield sits in bits inside a unit rather than at a byte offset')
+			return none
+		}
+		layout := p.representation.layout(aggregate) or {
+			p.error_at(member_name, 'unsupported: the members of ${aggregate.describe()} are not a layout this compiler knows, so the offset of ${member_name.text} cannot be read')
+			return none
+		}
+		offset += layout.offsets[member_index]
+		current = member.typ
+	}
+	return offset
+}
+
+// file_scope_part_index reads one subscript of a part of an object in a
+// file-scope initializer - the `[i]` of `&name[i]` and of `&"abc"[i]` - and
+// answers the element it names. A subscript is an integer constant expression
+// (6.6), and the folder the bound and the designator readers use is the same one,
+// so `&a[1 + 1]` names the byte `&a[2]` does. The opening bracket is consumed
+// here because every caller has just seen one, and the closing bracket is
+// consumed with it so a caller reads the part as one unit.
+fn (mut p Parser) file_scope_part_index() ?int {
+	at := p.next() // [
+	if p.at_punct(']') {
+		p.error_at(at, 'unsupported: a subscript of an address in a static initializer names no element')
+		return none
+	}
+	index := p.file_scope_subscript() or { return none }
+	if !p.expect_punct(']') {
+		return none
+	}
+	return index
+}
+
+// file_scope_subscript reads the integer constant between the brackets of a
+// subscript. It reads a written constant as such, and any other expression
+// through the folder, the same two shapes the designator reader takes.
+fn (mut p Parser) file_scope_subscript() ?int {
+	at := p.peek()
+	saved := p.pos
+	saved_diagnostics := p.diagnostics.len
+	if p.starts_a_written_constant() {
+		if constant := p.number_constant() {
+			if value := constant.number.integer {
+				return int(value)
+			}
+		}
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+	}
+	expr := p.parse_expression() or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		p.error_at(at, 'unsupported: a subscript of an address in a static initializer names an element with an integer constant, found ${describe(at)}')
+		return none
+	}
+	value := p.constant_value(expr) or {
+		p.error_at(at, 'unsupported: a subscript of an address in a static initializer names an element with an integer constant, found ${describe(at)}')
+		return none
+	}
+	return int(value)
 }
 
 // folded_file_initializer reads the initializer as an expression and answers the
@@ -1904,11 +2071,50 @@ fn (mut p Parser) folded_file_initializer() ?FileConstant {
 	value := p.constant_value(expr) or {
 		p.pos = saved_pos
 		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		// An address difference is a constant (6.6) equal to the distance
+		// between two parts of an object, but its two terms are relocations
+		// the layout settles and their difference is not a number this reader
+		// folds. The shape is refused by name rather than read as a number
+		// that would be wrong.
+		if p.is_address_difference(expr) {
+			p.error_at(p.peek(), 'unsupported: an address difference in a static initializer is not implemented, and the address of one part of an object less another is a relocation the layout settles rather than a number written here')
+		}
 		return none
 	}
 	return FileConstant{
 		integer: value
 	}
+}
+
+// is_an_address says whether an expression is one whose value is an address: the
+// operand of `&`, or the bare name of an array or a function, which decays to its
+// address. It is what tells an address difference apart from a subtraction of two
+// numbers the folder reads.
+fn (p Parser) is_an_address(expr ast.Expr) bool {
+	if expr is ast.Unary {
+		return expr.op == '&'
+	}
+	if expr is ast.Ident {
+		t := p.resolve(expr.name)
+		return t.kind == .array || t.kind == .function
+	}
+	return false
+}
+
+// is_address_difference says whether an expression is one address less or more
+// than another, which is a constant equal to the distance between them in
+// elements (6.6) but is not a number the image writes: the two terms are
+// relocations, and the difference is settled when they are, which this reader
+// does not fold.
+fn (p Parser) is_address_difference(expr ast.Expr) bool {
+	if expr !is ast.Binary {
+		return false
+	}
+	binary := expr as ast.Binary
+	if binary.op != '-' && binary.op != '+' {
+		return false
+	}
+	return p.is_an_address(binary.left) || p.is_an_address(binary.right)
 }
 
 // is_parenthesized_constant answers whether the next tokens are one pair of

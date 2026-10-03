@@ -57,6 +57,11 @@ pub:
 	offset int
 	kind   FixupKind
 	name   string
+	// addend is how many bytes past what the name is the address points: zero
+	// for the address of a whole object, and the byte a part starts at for the
+	// address of a part, which is what `&a[3]` and `&s.b` write. The layout
+	// adds it to the address it resolves the name to.
+	addend int
 }
 
 // GlobalSlot is where a top-level object lives in the image and how wide it is:
