@@ -4090,3 +4090,46 @@ fn test_a_narrow_atomic_object_takes_its_own_width() {
 	assert signed_byte.diagnostics.len == 0
 	assert run_image(signed_byte.bytes) == 11
 }
+
+// The value operand of an atomic operation is converted to the type the pointer
+// names before the instruction runs, and a signed value narrower than that type
+// has to keep its sign: `(unsigned long long)-1` is all ones and not the
+// 0xffffffff a zero-extended 32-bit read gives. The operand used to be written
+// into the value slot at the width it was read at, so the high half of the word
+// was zero and the addition was short by 2^32. Measured on gcc 16.2.1, the three
+// programs below exit 111, 11 and 11.
+fn test_a_signed_value_narrower_than_the_target_keeps_its_sign() {
+	add := emit(translation_unit('int main(void) { int d = -1; unsigned long long w = 5; unsigned long long o = __atomic_fetch_add(&w, d, 5); return (o == 5) + (w == 4) * 10 + ((w >> 32) == 0) * 100; }'),
+		Options{})
+	assert add.diagnostics.len == 0
+	assert run_image(add.bytes) == 111
+	swap := emit(translation_unit('int main(void) { int d = -1; unsigned long long w = 5; unsigned long long p = __atomic_exchange_n(&w, d, 5); return (p == 5) + ((w >> 63) == 1) * 10; }'),
+		Options{})
+	assert swap.diagnostics.len == 0
+	assert run_image(swap.bytes) == 11
+	short_delta := emit(translation_unit('int main(void) { short d = -2; unsigned long long w = 5; unsigned long long o = __atomic_fetch_add(&w, d, 5); return (o == 5) + (w == 3) * 10; }'),
+		Options{})
+	assert short_delta.diagnostics.len == 0
+	assert run_image(short_delta.bytes) == 11
+}
+
+// The value an atomic builtin is handed is converted to the type its pointer
+// names before the instruction runs, and a signed operand narrower than that
+// type keeps its sign in the conversion. Without it the operand was widened as an
+// unsigned read: all ones became 0xffffffff. Measured on gcc 16.2.1, the three
+// programs below exit 11, 11 and 11; a compiler that zero-extends them exits 1,
+// 10 and 10.
+fn test_a_signed_operand_widens_into_the_atomic_word_with_its_sign() {
+	add := emit(translation_unit('int main(void) { unsigned long long w = 10; unsigned long long o = __atomic_fetch_add(&w, -1, 5); return (o == 10) + (w == 9) * 10; }'),
+		Options{})
+	assert add.diagnostics.len == 0
+	assert run_image(add.bytes) == 11
+	literal := emit(translation_unit('int main(void) { unsigned long long w = 0; __atomic_store_n(&w, -1, 5); return (w >> 63) + ((w & 0xffffffff) == 0xffffffff) * 10; }'),
+		Options{})
+	assert literal.diagnostics.len == 0
+	assert run_image(literal.bytes) == 11
+	object := emit(translation_unit('int main(void) { int s = -1; unsigned long long w = 0; __atomic_store_n(&w, s, 5); return (w >> 63) + ((w & 0xffffffff) == 0xffffffff) * 10; }'),
+		Options{})
+	assert object.diagnostics.len == 0
+	assert run_image(object.bytes) == 11
+}
