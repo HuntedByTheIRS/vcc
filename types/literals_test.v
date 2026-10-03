@@ -111,13 +111,28 @@ fn test_a_constant_the_top_bit_set_of_which_is_a_value_of_an_unsigned_64_bit_typ
 	// `unsigned long`.
 	assert constant_type('18446744073709551615ULL', -1) == 'unsigned long long'
 	assert constant_type('0xffffffffffffffff', -1) == 'unsigned long'
-	// A decimal constant with no suffix may not take an unsigned type, so the
-	// same 64-bit pattern has no type at all when it is written that way.
-	// Measured on gcc 16.2.1: `18446744073709551615` is refused as `integer
-	// constant is so large that it is unsigned`.
-	nameless := integer_constant_type('18446744073709551615', -1, measured.representation()) or {
-		assert err.msg().contains('too large')
-		return
-	}
-	assert nameless.kind == .unknown
+	// A decimal constant with no unsigned suffix that fits no signed type is
+	// past every type 6.4.4.1 lists for it, and gcc accepts it as an extension
+	// with the warning `integer constant is so large that it is unsigned`. This
+	// model gives it the 64-bit unsigned type that holds the pattern. gcc's own
+	// type for the decimal spellings in C99 and later is signed `__int128`,
+	// which this back end carries no value of: it materializes an integer
+	// constant in eight bytes, and a value typed 128-bit comes out as its low
+	// half with no diagnostic. The suffix does not change the answer, because
+	// `l` and `ll` without a `u` still reach no signed type; measured,
+	// `9223372036854775808l` and `18446744073709551615ll` carry the same gcc
+	// warning as the unsuffixed spelling.
+	assert constant_type('18446744073709551615', -1) == 'unsigned long long'
+	assert constant_type('9223372036854775808', -9223372036854775807 - 1) == 'unsigned long long'
+	assert constant_type('9999999999999999999', -8446744073709551617) == 'unsigned long long'
+	assert constant_type('14695981039346656037', -3750763034362895579) == 'unsigned long long'
+	assert constant_type('18446744073709551615l', -1) == 'unsigned long long'
+	assert constant_type('9223372036854775808ll', -9223372036854775807 - 1) == 'unsigned long long'
+	// A constant that does fit a signed type keeps it, and a `u` suffix reaches
+	// the unsigned types 6.4.4.1's own list already carries, so neither is the
+	// extension this is about.
+	assert constant_type('9223372036854775807', 9223372036854775807) == 'long'
+	assert constant_type('4294967296', 4294967296) == 'long'
+	assert constant_type('18446744073709551615u', -1) == 'unsigned long'
+	assert constant_type('18446744073709551615ul', -1) == 'unsigned long'
 }
