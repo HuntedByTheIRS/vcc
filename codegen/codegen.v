@@ -5,6 +5,7 @@ import backend
 import backend.abi
 import backend.os.elf
 import backend.os.linux
+import diagnostics
 import image
 import math
 import tokenize
@@ -464,19 +465,24 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 			diagnostics: emitter.diagnostics
 		}
 	}
-	// A diagnostic anywhere means the translation unit was not emitted, so the
-	// image goes away with it. A stage that reports something and returns an
-	// image anyway would otherwise hand the caller a program with a hole in it
-	// and nothing that says so.
-	if emitter.diagnostics.len > 0 {
+	// A diagnostic that stops the compile means the translation unit was not
+	// emitted, so the image goes away with it. A warning does not: this back
+	// end raises one for a construct the standard does not have and the flags
+	// decide its fate, and the caller reads the same question - `report` counts
+	// the errors after the policy is applied - to decide whether to write the
+	// image. Dropping it here on any diagnostic would write nothing while the
+	// caller saw no error, which is a program that compiles and then does not
+	// exist.
+	if tokenize.errors(emitter.diagnostics).len > 0 {
 		return Result{
 			target:      target
 			diagnostics: emitter.diagnostics
 		}
 	}
 	return Result{
-		bytes:  image_bytes
-		target: target
+		bytes:       image_bytes
+		target:      target
+		diagnostics: emitter.diagnostics
 	}
 }
 
@@ -5849,6 +5855,16 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 	// under gcc 16.2.1 is an unsigned int, and the instruction is the one that
 	// conversion takes.
 	target := cast.typ.underlying_type()
+	// 6.5.16.1 does not let a pointer to void and a pointer to a function
+	// convert to one another, which gcc 16.2.1 takes in every mode and reports
+	// only under -pedantic; this tree does the same, and the question is asked
+	// here where a cast is written. Both values are an address of the machine's
+	// word, so the conversion is the operand itself and writes no instruction,
+	// and the operand is emitted as it stands.
+	if message := types.function_void_pointer_problem(cast.typ, cast.expr.typ) {
+		e.diagnostics << pedantic(cast.line, cast.col, message)
+		return e.emit_expr_at(cast.expr, depth + 1)
+	}
 	if target.kind == .long_double {
 		// A conversion to the extended type: a source of the same type is the
 		// same value, and anything else is converted into a temporary whose
@@ -9933,6 +9949,22 @@ fn problem(line int, col int, msg string) tokenize.Diagnostic {
 		line: line
 		col:  col
 		msg:  msg
+	}
+}
+
+// pedantic is a diagnostic about a construct the selected standard does not
+// have, which the flags decide the fate of: -Wpedantic reports it, -pedantic-errors
+// and -Werror=pedantic promote it to an error, and -w or -Wno-pedantic silence it.
+// It does not stop a compile on its own, which is the difference between it and
+// `problem`, so a caller uses it for a construct this back end can emit and that
+// the standard merely does not allow.
+fn pedantic(line int, col int, msg string) tokenize.Diagnostic {
+	return tokenize.Diagnostic{
+		line:    line
+		col:     col
+		msg:     msg
+		warning: true
+		class:   diagnostics.Class.pedantic
 	}
 }
 

@@ -3377,3 +3377,78 @@ fn test_a_designated_aggregate_member_of_a_compound_literal_is_copied() {
 	os.rm(source) or {}
 	os.rm(binary) or {}
 }
+
+// 6.5.16.1 lets a pointer to void convert to and from a pointer to an object or
+// incomplete type, and a function type is neither, so a conversion between a
+// function pointer and a void pointer is outside the standard. gcc 16.2.1
+// accepts it in every mode and reports it only under -pedantic, and this tree
+// does the same. What is checked is the value and not the spelling: the round
+// trip through a void pointer calls the function again, and the number that
+// comes back is the one gcc's program returns. Measured on gcc 16.2.1, this
+// program exits 42, and the two messages are `ISO C forbids conversion of
+// function pointer to object pointer type` and `ISO C forbids conversion of
+// object pointer to function pointer type`.
+fn test_a_function_pointer_and_a_void_pointer_convert_to_one_another() {
+	source := scratch('fnptrvoid.c')
+	binary := scratch('fnptrvoid')
+	program := 'typedef int (*fp)(int);\n' +
+		'static int twice(int x) { return x * 2; }\n' +
+		'int main(void) { fp f = twice; void *p = (void *)f; fp g = (fp)p; return g(21); }\n'
+	image := compile(['-std=c99', '-w', source, '-o', binary], program)
+	assert image.bytes.len > 0
+	assert image.diagnostics.len == 2
+	mut forward := false
+	mut reverse := false
+	for diagnostic in image.diagnostics {
+		assert diagnostic.warning
+		assert diagnostic.class == .pedantic
+		if diagnostic.msg == 'ISO C forbids conversion of function pointer to object pointer type' {
+			forward = true
+		}
+		if diagnostic.msg == 'ISO C forbids conversion of object pointer to function pointer type' {
+			reverse = true
+		}
+	}
+	assert forward && reverse
+	// The program runs and the value is the function's own, which is what a
+	// conversion that wrote the wrong address would not answer.
+	os.write_file_array(binary, image.bytes) or { panic(err) }
+	os.chmod(binary, 0o755) or { panic(err) }
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 42
+	// The flags decide the fate of the pedantic class, the same way they do for
+	// gcc's message: reported under -Wpedantic, promoted by -pedantic-errors,
+	// and silenced by -w whichever order the flags are written in.
+	asked := cli.parse(['-std=c99', '-Wpedantic', source, '-o', binary]) or { panic(err) }
+	promoted := cli.parse(['-std=c99', '-pedantic-errors', source, '-o', binary]) or { panic(err) }
+	silenced := cli.parse(['-std=c99', '-w', source, '-o', binary]) or { panic(err) }
+	for diagnostic in image.diagnostics {
+		assert severity_of(diagnostic, asked.warnings) == .warning
+		assert severity_of(diagnostic, promoted.warnings) == .error
+		assert severity_of(diagnostic, silenced.warnings) == .silent
+	}
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A null function pointer round trips through a void pointer as a null one,
+// which is the row a conversion that read the bytes wrongly would fail: a zero
+// that came back as anything else compares unequal to 0. Measured on gcc
+// 16.2.1, the program exits 0.
+fn test_a_null_function_pointer_is_null_after_a_void_pointer_round_trip() {
+	source := scratch('fnptrvoid_null.c')
+	binary := scratch('fnptrvoid_null')
+	program := 'typedef int (*fp)(int);\n' +
+		'int main(void) { fp none = 0; void *z = (void *)none; fp again = (fp)z; return (again == 0 && z == 0) ? 0 : 1; }\n'
+	image := compile(['-std=c99', '-w', source, '-o', binary], program)
+	assert image.bytes.len > 0
+	for diagnostic in image.diagnostics {
+		assert diagnostic.warning
+	}
+	os.write_file_array(binary, image.bytes) or { panic(err) }
+	os.chmod(binary, 0o755) or { panic(err) }
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
