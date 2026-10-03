@@ -4602,12 +4602,14 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
 				return error('128-bit value')
 			}
-			if slot.bytes > 0 {
+			if slot.bytes > 0 && slot.count == 0 {
 				// The name of an object of an aggregate type is the object, and
 				// a value of a struct type is not a value this back end moves:
 				// a member of it and its address are, so the refusal names the
 				// shape that is not implemented instead of reading the object's
-				// first bytes as an int.
+				// first bytes as an int. An array of such objects is not one of
+				// them: its name is the address of its first element, which is
+				// what the array branch below answers and what `p = t` needs.
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is an object of an aggregate type, and using it as a value is not implemented; a member of it, or its address, is')
 				return error('aggregate value')
 			}
