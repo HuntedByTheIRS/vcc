@@ -2207,17 +2207,68 @@ fn test_a_real_part_of_a_value_that_is_not_arithmetic_is_a_constraint_violation(
 	assert result.diagnostics[0].msg.contains('double *')
 }
 
-// The complex types are a pair of floating values and their arithmetic is the
-// back end milestone's, so the part of one is refused by name. This is the one
-// place the two names are answered with a message instead of a value.
-fn test_a_part_of_a_complex_value_is_refused_by_name() {
+// The part of a complex value is the component the operator names, at the
+// component's own type. gcc 16.2.1 is the oracle, measured with programs that
+// run: `__real__ (3.0 + 4.0 * I)` is 3.0 and `__imag__ (3.0 + 4.0 * I)` is 4.0,
+// and the parenthesised spelling the tgmath macros use is the same value. The
+// node carries the operand so the back end can read the component out of the
+// pair, and its own type is the component's: a double for a `double _Complex`
+// and a float for a `float _Complex`.
+fn test_a_part_of_a_complex_value_is_the_component_it_names() {
 	shapes := [
-		'int main(void) { double x = __real__ ((double _Complex) 0); return 0; }',
-		'int main(void) { float x = __imag__ ((float _Complex) 0); return 0; }',
+		'int main(void) { double _Complex z = 0; double x = __real__ (z); return 0; }',
+		'int main(void) { double _Complex z = 0; double x = __imag__ z; return 0; }',
 	]
 	for source in shapes {
 		result := parsed(source)
-		assert result.diagnostics.len == 1
-		assert result.diagnostics[0].msg.contains('is a pair of values whose arithmetic is the back end milestone')
+		assert result.diagnostics.len == 0
+		init := result.unit.decls[0].body[1].init or {
+			assert false
+			return
+		}
+		assert init is ast.Unary
+		part := init as ast.Unary
+		assert part.op == '__real__' || part.op == '__imag__'
+		assert part.typ.kind == types.Kind.double
+		assert part.expr.typ.kind == types.Kind.complex_double
+	}
+	// A float component is a float, and `sizeof` of the part is four.
+	float_result := parsed('int main(void) { float _Complex f = 0; int n = sizeof(__real__ f); return 0; }')
+	assert float_result.diagnostics.len == 0
+	literal := float_result.unit.decls[0].body[1].init or {
+		assert false
+		return
+	}
+	assert (literal as ast.IntLit).value == 4
+}
+
+// A component this compiler has no width for is refused by name rather than read
+// at the width of a double. gcc carries a `long double _Complex`; this compiler
+// does not carry a long double at all, so the part of one names the component
+// and the operator and stops there.
+fn test_a_part_of_a_long_double_complex_is_refused_by_name() {
+	result := parsed('int main(void) { double x = __real__ ((long double _Complex) 0); return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('__real__ reads one part of long double _Complex')
+	assert result.diagnostics[0].msg.contains('does not carry a long double component')
+}
+
+// `__real__ z` for a complex z names one part of a pair and not the object, so an
+// assignment through it is not a write to z. gcc writes the component - measured
+// on 16.2.1, `__real__ z = 5.0` for a `double _Complex z` leaves 5.0 in the real
+// part and the imaginary part where it was - and this compiler has no store for a
+// part, so the statement is refused by name rather than read as a write to the
+// whole object.
+fn test_an_assignment_through_a_complex_part_is_refused_by_name() {
+	shapes := [
+		'int main(void) { double _Complex z = 0; __real__ z = 5.0; return 0; }',
+		'int main(void) { double _Complex z = 0; __imag__ z = 5.0; return 0; }',
+		'int main(void) { double _Complex a[2]; __real__ a[0] = 5.0; return 0; }',
+	]
+	for source in shapes {
+		result := parsed(source)
+		assert result.diagnostics.len >= 1
+		assert result.diagnostics[0].msg.contains('names one part of a complex value')
+		assert result.diagnostics[0].msg.contains('has no store that writes a part')
 	}
 }

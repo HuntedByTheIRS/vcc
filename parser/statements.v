@@ -153,13 +153,18 @@ fn (mut p Parser) parse_simple_statement() []ast.Stmt {
 // back as an error, so the reader that knows what ending it was waiting for is
 // the one that resynchronises.
 fn (mut p Parser) parse_expression_statement() !ast.Stmt {
-	// `__real__ x` is x itself, so an assignment through it writes x. The
-	// prefix is transparent to the statement reader the way it is to the
-	// expression reader: what it names is a name the assignment reader already
-	// knows how to write, so the name is read one token in. `__imag__` is not
-	// here because it is a value and not an object, and gcc refuses to assign
-	// to it as well.
-	if p.peek().kind == .identifier && p.peek().text == '__real__' && p.starts_assignment_at(1) {
+	// `__real__ x` is x itself when x is real, so an assignment through it
+	// writes x. The prefix is transparent to the statement reader the way it is
+	// to the expression reader: what it names is a name the assignment reader
+	// already knows how to write, so the name is read one token in. It is
+	// transparent only when the object written is real: `__real__ z` for a
+	// complex z names one part of a pair and not the object, so reading past the
+	// prefix would write the whole pair, which is a value the source did not ask
+	// for. A complex target is left to the expression reader, which builds the
+	// node naming the part, and the assignment to that node is refused by name.
+	// `__imag__` is not here because it is a value and not an object, and gcc
+	// refuses to assign to it as well.
+	if p.peek().kind == .identifier && p.peek().text == '__real__' && p.starts_assignment_at(1) && p.real_part_assignment_writes_the_name() {
 		p.next()
 		return p.parse_assignment()!
 	}
@@ -233,6 +238,16 @@ fn (p Parser) assignment_operator() ?tokenize.Token {
 fn (mut p Parser) parse_deref_assignment(start tokenize.Token, target ast.Expr, op tokenize.Token) !ast.Stmt {
 	match target {
 		ast.Unary {
+			if target.op == '__real__' || target.op == '__imag__' {
+				// `__real__ z` for a complex z is the lvalue one component of
+				// the pair, and gcc writes through it: measured on 16.2.1,
+				// `__real__ z = 5.0` leaves 5.0 in the real part. This compiler
+				// has no store that writes one component, so the statement is
+				// refused by name rather than read as a write to the whole
+				// object, which is a value the source did not ask for.
+				p.error_at(op, 'unsupported: ${target.op} names one part of a complex value, and this compiler has no store that writes a part; it writes a whole object')
+				return error('assignment to a complex part')
+			}
 			if target.op != '*' {
 				p.error_at(op, 'unsupported: the target of an assignment is ${describe_operand(target)}, and this compiler writes to a name, an element, a member or a dereference')
 				return error('assignment target is not a dereference')
@@ -319,6 +334,37 @@ fn (p Parser) starts_assignment_at(at int) bool {
 		}
 	}
 	return false
+}
+
+// real_part_assignment_writes_the_name says whether `__real__ target = ...` is a
+// write to an object rather than to one part of a complex pair. It is true only
+// where the target's type is provably not complex: a bare name whose declared
+// type is real, or an element of an array or a pointer whose element type is
+// real. A member target is not decided here, because this reader has no layout
+// for the object, and a complex target is one part of a pair; both come back
+// false and are left to the expression reader, which carries a real member as the
+// member the back end writes and refuses a complex one by name.
+fn (p Parser) real_part_assignment_writes_the_name() bool {
+	if p.peek_at(1).kind != .identifier {
+		return false
+	}
+	next := p.peek_at(2)
+	if next.kind == .punct && (next.text == '.' || next.text == '->') {
+		return false
+	}
+	declared := p.resolve(p.peek_at(1).text)
+	if next.kind == .punct && next.text == '[' {
+		if declared.is_array() {
+			element := declared.element() or { return false }
+			return !element.is_complex()
+		}
+		if declared.is_pointer() {
+			element := declared.pointee() or { return false }
+			return !element.is_complex()
+		}
+		return false
+	}
+	return !declared.is_complex()
 }
 
 // assignment_after says whether the tokens from `at` on are any number of
