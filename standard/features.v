@@ -196,13 +196,22 @@ pub const features = [
 		pedantic:  'the auto type specifier'
 		status:    .unimplemented
 	},
+	// _Generic is read by `parse_generic_selection` in `parser/parser.v`: the
+	// controlling expression's type, after the lvalue conversion 6.5.17 asks for,
+	// is matched against the associations and the selection is worth the selected
+	// arm's expression and type. The controlling expression is not evaluated, so
+	// no code is emitted for it. Measured on gcc 16.2.1, the flags are the C11
+	// ones: c99 and gnu99 take the construct and warn only under -pedantic
+	// (`ISO C99 does not support '_Generic'`), c11 and c23 take it silently, and
+	// a GNU dialect before C11 does not add it. The row is a pedantic message and
+	// not `invalid`, the same shape as _Static_assert's.
 	Feature{
 		spellings: ['_Generic']
 		since:     .c11
 		gnu:       false
 		extension: 'generic'
 		pedantic:  'the _Generic selection'
-		status:    .unimplemented
+		status:    .implemented
 	},
 	// _Static_assert is read in both positions it can be written in, file scope
 	// and a body, by one reader in `parser/declarations.v`: the condition is

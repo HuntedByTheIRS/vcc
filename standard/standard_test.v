@@ -200,12 +200,26 @@ fn test_no_std_and_an_unknown_spelling_ask_nothing() {
 	assert pedantic_messages(tokens, asking(.other)).len == 0
 }
 
-fn test_a_construct_the_compiler_refuses_is_not_a_pedantic_message() {
-	// _Generic is not implemented, so a program writing it is refused by the
-	// parser; a message from this table on top of that refusal would say the
-	// same thing twice and would be the wrong thing once the parser lands.
-	tokens := [token('_Generic'), token('int')]
-	assert pedantic_messages(tokens, asking(.c99)).len == 0
+fn test_a_generic_selection_is_read_and_is_therefore_checked() {
+	// The parser reads a generic selection now (`parse_generic_selection` in
+	// parser/parser.v), so the table's row is a message and not a duplicate of a
+	// refusal. The old shape asserted the opposite because the parser did not
+	// read the construct; the assertion that moved is this one. Measured on gcc
+	// 16.2.1: c99 and gnu99 warn only under -pedantic, c11 and c23 have it, and
+	// `-fvcc-exts=generic` brings it down into c99.
+	rows := features.filter(it.spellings.contains('_Generic'))
+	assert rows.len == 1
+	assert rows[0].status == .implemented
+	assert rows[0].since == .c11
+	assert !rows[0].gnu
+	assert rows[0].pedantic == 'the _Generic selection'
+	assert pedantic_messages([token('_Generic')], asking(.c99)).len == 1
+	assert pedantic_messages([token('_Generic')], asking(.gnu99)).len == 1
+	assert pedantic_messages([token('_Generic')], asking(.c11)).len == 0
+	assert pedantic_messages([token('_Generic')], asking(.c23)).len == 0
+	mut question := asking(.c99)
+	question.extensions = ['generic']
+	assert pedantic_messages([token('_Generic')], question).len == 0
 }
 
 // typeof is read by the parser, so the table's row is a message and not a

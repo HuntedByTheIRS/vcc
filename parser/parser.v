@@ -125,6 +125,12 @@ mut:
 	// which is the same object only when everything in its list is a constant,
 	// so a list with an expression in it is refused where this is not zero.
 	compound_unstable int
+	// generic_controls is the controlling expression of every generic selection
+	// read, kept because 6.5.17 says it is not evaluated: no code is emitted for
+	// one, but the names it carries are still uses that have to be declared, and
+	// the check at the end of the unit walks this list so a selection over a name
+	// nothing declares is still reported.
+	generic_controls []ast.Expr
 }
 
 // supported_types are the ones the back end can emit today. The 8-byte integer
@@ -395,6 +401,12 @@ fn (mut p Parser) report_undeclared(unit ast.TranslationUnit) {
 	mut reported := map[string]bool{}
 	for decl in unit.decls {
 		p.check_undeclared_statements(decl.body, mut reported)
+	}
+	// A generic selection's controlling expression is not in the tree, because
+	// 6.5.17 does not evaluate it, so the names it carries are walked here. A
+	// selection over a name nothing declares is still a use of that name.
+	for control in p.generic_controls {
+		p.check_undeclared_expression(control, mut reported)
 	}
 }
 
@@ -1947,6 +1959,136 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 	})
 }
 
+// GenericAssociation is one arm of a generic selection: the type name it matches,
+// or the `default` keyword when it is the fallback, and the expression the arm is
+// worth. The spelling is kept for a diagnostic that has to name the type the way
+// the source wrote it.
+struct GenericAssociation {
+	is_default bool
+	typ        types.Type
+	spelling   string
+	expr       ast.Expr
+	at         tokenize.Token
+}
+
+// parse_generic_selection reads a C11 generic selection: `_Generic` over a
+// controlling expression and a list of `type-name : expression` associations,
+// at most one of which may be `default`. The controlling expression's type,
+// after the lvalue conversion 6.5.17 asks for, is matched against the
+// associations, and the result is the selected association's expression, whose
+// type is therefore the type of the selection.
+//
+// Two things the standard says and this reader keeps: the controlling expression
+// is not evaluated, so it is parsed for its type but no code is emitted for it
+// and its names are checked by the walk at the end of the unit instead; and the
+// association types have to be distinct, which is asked with the model's
+// compatibility relation, while a selection that matches nothing and has no
+// default is a constraint violation.
+fn (mut p Parser) parse_generic_selection(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	p.depth++
+	defer {
+		p.depth--
+	}
+	if p.depth > max_expression_depth {
+		p.error_at(at, 'expression is nested more than ${max_expression_depth} levels deep')
+		return error('expression nested too deeply')
+	}
+	controlling := p.parse_assignment_expression()!
+	// The type the associations are matched against is the controlling
+	// expression's after the lvalue conversion: an array decays to a pointer to
+	// its first element, a function to a pointer to itself, and the qualifiers
+	// come off. Measured on gcc 16.2.1, `const int x; _Generic(x, int: 11,
+	// default: 99)` is 11, so a qualified operand matches the unqualified type.
+	selector := types.unqualified(types.decay(controlling.typ))
+	p.generic_controls << controlling
+	if !p.expect_punct(',') {
+		return error('expected , after the controlling expression of a generic selection')
+	}
+	mut arms := []GenericAssociation{}
+	for !p.at_punct(')') && !p.at_eof() {
+		arms << p.parse_generic_association()!
+		if p.at_punct(',') {
+			p.next()
+			continue
+		}
+		break
+	}
+	if !p.expect_punct(')') {
+		return error('unclosed generic selection')
+	}
+	mut seen := []types.Type{}
+	mut default_arm := ?GenericAssociation(none)
+	for arm in arms {
+		if arm.is_default {
+			if default_arm != none {
+				p.error_at(arm.at, 'a constraint violation: a generic selection has one default association, and this is the second')
+			} else {
+				default_arm = arm
+			}
+			continue
+		}
+		for earlier in seen {
+			if earlier.compatible(arm.typ) {
+				p.error_at(arm.at, 'a constraint violation: a generic selection names ${earlier.describe()} twice, and the two associations are compatible')
+			}
+		}
+		seen << arm.typ
+	}
+	if selector.kind == .unknown {
+		p.error_at(at, 'unsupported: a generic selection asks for the type of ${describe_operand(controlling)}, and this compiler did not resolve it')
+		return error('no type for the controlling expression')
+	}
+	for arm in arms {
+		if !arm.is_default && selector.compatible(arm.typ) {
+			return arm.expr
+		}
+	}
+	if arm := default_arm {
+		return arm.expr
+	}
+	p.error_at(at, 'a constraint violation: a generic selection over ${selector.describe()} has no association compatible with it and no default')
+	return error('no matching association')
+}
+
+// parse_generic_association reads one arm: `default : expression`, or a type name
+// and an expression. The type name is read by the same reader a cast uses, so
+// `struct S` and a typedef name are types here the way they are anywhere else.
+fn (mut p Parser) parse_generic_association() !GenericAssociation {
+	at := p.peek()
+	if at.kind == .identifier && at.text == 'default' {
+		p.next()
+		if !p.expect_punct(':') {
+			return error('expected : after default')
+		}
+		expr := p.parse_assignment_expression()!
+		return GenericAssociation{
+			is_default: true
+			expr:       expr
+			at:         at
+		}
+	}
+	if at.kind != .identifier || !p.starts_declaration(at) {
+		p.error_at(at, 'unsupported: expected a type name or default in a generic selection, found ${describe(at)}')
+		return error('expected a type name')
+	}
+	name := p.parse_type_name(0)!
+	if name.typ.kind == .unknown {
+		p.error_at(name.at, 'unsupported: a generic selection names the type ${name.spelling}, and this compiler did not resolve it')
+		return error('no type for an association')
+	}
+	if !p.expect_punct(':') {
+		return error('expected : after an association type')
+	}
+	expr := p.parse_assignment_expression()!
+	return GenericAssociation{
+		typ:      types.unqualified(name.typ)
+		spelling: name.spelling
+		expr:     expr
+		at:       at
+	}
+}
+
 fn (mut p Parser) parse_primary() !ast.Expr {
 	t := p.peek()
 	if t.kind == .number {
@@ -2026,6 +2168,12 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 	}
 	if t.kind == .identifier {
 		p.next()
+		// A generic selection is a primary expression written with the word
+		// `_Generic` and the parenthesis that follows it, so it is read here
+		// rather than resolved as a name, which is what it would otherwise be.
+		if t.text == '_Generic' && p.at_punct('(') {
+			return p.parse_generic_selection(t)!
+		}
 		// An enumeration constant stands for a number and not for an object: a
 		// use of it is the value the enum gave it, which is what makes it an
 		// integer constant expression an array bound or a case label can be
