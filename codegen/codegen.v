@@ -4590,17 +4590,47 @@ fn (mut e Emitter) emit_statement_expression(expr ast.StmtExpr, as_value bool) !
 	e.slot_base = saved
 }
 
+// inc_dec_step is how far one `++` or `--` moves the operand. It is one for an
+// integer name, which is the increment of an integer, and the size of what is
+// pointed at for a pointer name: 6.5.2.4 gives a pointer's increment the meaning
+// of `p = p + 1`, and 6.5.6 scales that by the pointed-at type, so a `char *`
+// steps one and an `int *` four. A pointer whose pointed-at type has no size -
+// `void *`, a pointer to a function, a pointer to a struct that was declared and
+// never defined - has no step to compute, and is refused by name rather than
+// moved by one byte.
+fn (mut e Emitter) inc_dec_step(expr ast.IncDec) !i32 {
+	sign := if expr.op == '++' { i32(1) } else { i32(-1) }
+	if !expr.typ.is_pointer() {
+		return sign
+	}
+	pointee := expr.typ.pointee() or {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, which is ${expr.typ.describe()}, and a pointer with nothing pointed at has no step')
+		return error('inc-dec operand points at nothing')
+	}
+	size := e.representation.size_of(pointee) or {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, which is ${expr.typ.describe()}, and what it points at has no size to step by')
+		return error('inc-dec operand points at a type with no size')
+	}
+	if size > 0x7fffffff {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, which is ${expr.typ.describe()}, and a step that many bytes wide is not one this back end writes')
+		return error('inc-dec step is too wide')
+	}
+	return sign * i32(size)
+}
+
 // emit_inc_dec writes `++x`, `--x`, `x++` or `x--` for the name the node holds,
 // which is the one operand the parser builds it for: a local in the frame or a
-// top-level object in the image, of an integer type.
+// top-level object in the image, of an integer or a pointer type.
 //
-// The step is one, added for `++` and subtracted for `--`. What separates the two
-// spellings is the value left in the accumulator: the prefix form leaves the
-// object after the step, the postfix form what it held before, so the postfix
-// form is the prefix form with the old value parked in a frame slot while the
-// step runs and read back at the end. The slot is the one this level of nesting
-// already uses for a half-finished value, which is free while the step runs
-// because the step evaluates nothing.
+// The step is one for an integer, added for `++` and subtracted for `--`, and
+// the size of what is pointed at for a pointer, which is the step 6.5.2.4 gives
+// a pointer's increment through 6.5.6. What separates the two spellings is the
+// value left in the accumulator: the prefix form leaves the object after the
+// step, the postfix form what it held before, so the postfix form is the prefix
+// form with the old value parked in a frame slot while the step runs and read
+// back at the end. The slot is the one this level of nesting already uses for a
+// half-finished value, which is free while the step runs because the step
+// evaluates nothing.
 //
 // A char is stepped and written at its own byte: the read widens it to the int
 // the language promotes it to, the step adds an int, and the store cuts the
@@ -4608,11 +4638,11 @@ fn (mut e Emitter) emit_statement_expression(expr ast.StmtExpr, as_value bool) !
 // the width of the object, so an int wraps at four bytes rather than producing a
 // value no int holds.
 fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
-	step := if expr.op == '++' { i32(1) } else { i32(-1) }
+	step := e.inc_dec_step(expr)!
 	if slot := e.lookup(expr.name) {
 		if slot.count > 0 || slot.bytes > 0 || slot.wide || slot.floating {
-			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer name only')
-			return error('inc-dec operand is not an integer name')
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer or a pointer name only')
+			return error('inc-dec operand is not a name this compiler steps')
 		}
 		e.load_accumulator(slot, expr.line, expr.col)!
 		old := if expr.postfix { e.value_slot(depth) } else { Slot{} }
@@ -4629,8 +4659,8 @@ fn (mut e Emitter) emit_inc_dec(expr ast.IncDec, depth int) !void {
 	}
 	if object := e.global_of(expr.name) {
 		if object.count > 0 || object.object || object.floating || object.width == wide_bytes {
-			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer name only')
-			return error('inc-dec operand is not an integer name')
+			e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.op} on ${expr.name}, and this compiler steps an integer or a pointer name only')
+			return error('inc-dec operand is not a name this compiler steps')
 		}
 		// The object is storage in the image, so its address is a reference the
 		// layout fills in and is parked while the step runs: the value is read

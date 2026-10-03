@@ -1912,6 +1912,83 @@ fn test_a_char_is_stepped_at_its_own_byte() {
 	os.rm(binary) or {}
 }
 
+// An integer name of any width the back end stores is stepped by one, at the
+// object's own width, whether the step is the only thing in the statement or the
+// value is used. The programs are run, so what is checked is the bytes and not
+// the intent. Measured on gcc 16.2.1, which exits 6, 201, 128, 199 and 4.
+fn test_an_integer_name_of_any_width_steps_by_one() {
+	source := scratch('incdec_width.c')
+	binary := scratch('incdec_width')
+	long := compile_and_run([source, '-o', binary],
+		'int main(void) { long i = 5; i++; return (int)i; }\n')
+	assert long == 6
+	unsigned_long := compile_and_run([source, '-o', binary],
+		'int main(void) { unsigned long i = 200; ++i; return (int)i; }\n')
+	assert unsigned_long == 201
+	short := compile_and_run([source, '-o', binary],
+		'int main(void) { short s = 127; s++; return (int)s; }\n')
+	assert short == 128
+	unsigned_int := compile_and_run([source, '-o', binary],
+		'int main(void) { unsigned i = 200; i--; return (int)i; }\n')
+	assert unsigned_int == 199
+	plain_int := compile_and_run([source, '-o', binary],
+		'int main(void) { int i = 5; --i; return i; }\n')
+	assert plain_int == 4
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A pointer name is stepped by the size of what it points at and not by one: a
+// char pointer by one, an int pointer by four, a double pointer by eight, a
+// pointer to a two-int struct by eight, a pointer to a pointer by the word, and
+// a pointer to an array of three ints by twelve. Each program reads the element
+// the stepped pointer should name, so a stride of one reads the wrong bytes and
+// a stride too far misses the element rather than passing quietly. The int**
+// case reads the stride as an address difference, because reading through it
+// would need a second live pointer and the point is the number of bytes moved.
+// Measured on gcc 16.2.1, which exits 8, 6, 5, 7, 8 and 9.
+fn test_a_pointer_step_uses_the_size_of_what_it_points_at() {
+	source := scratch('incdec_stride.c')
+	binary := scratch('incdec_stride')
+	char_pointer := compile_and_run([source, '-o', binary],
+		'int main(void) { char s[3] = {7, 8, 9}; char *p = s; p++; return p[0]; }\n')
+	assert char_pointer == 8
+	int_pointer := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[3] = {0, 0, 6}; int *p = a; p++; p++; return *p; }\n')
+	assert int_pointer == 6
+	double_pointer := compile_and_run([source, '-o', binary],
+		'int main(void) { double d[2] = {1.0, 5.0}; double *p = d; p++; return (int)*p; }\n')
+	assert double_pointer == 5
+	struct_pointer := compile_and_run([source, '-o', binary],
+		'struct S { int x; int y; };\nint main(void) { struct S a[2]; a[1].x = 7; struct S *p = &a[0]; p++; return p->x; }\n')
+	assert struct_pointer == 7
+	pointer_pointer := compile_and_run([source, '-o', binary],
+		'int main(void) { int v = 0; int *px = &v; int **pp = &px; unsigned long b = (unsigned long)pp; pp++; return (int)((unsigned long)pp - b); }\n')
+	assert pointer_pointer == 8
+	array_pointer := compile_and_run([source, '-o', binary],
+		'int main(void) { int g[2][3]; g[1][2] = 9; int (*p)[3] = g; p++; return p[0][2]; }\n')
+	assert array_pointer == 9
+	decrement := compile_and_run([source, '-o', binary],
+		'int main(void) { int a[3] = {4, 5, 6}; int *p = a + 2; p--; return *p; }\n')
+	assert decrement == 5
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A pointer whose pointed-at type has no size has no step to compute: `void *`
+// is the standing case, and a pointer to a function and to an undefined struct
+// are the same shape. Refused by name where the operator is written.
+fn test_a_step_on_a_pointer_with_no_pointed_at_size_is_refused() {
+	source := scratch('incdec_voidptr.c')
+	binary := scratch('incdec_voidptr')
+	text := 'int main(void) { void *p; p++; return 0; }\n'
+	image := compile([source, '-o', binary], text)
+	assert image.diagnostics.len == 1
+	assert image.diagnostics[0].msg.contains('which is void *')
+	assert image.diagnostics[0].msg.contains('has no size to step by')
+	os.rm(source) or {}
+}
+
 // An element is not a name, and stepping one would have to reach the lvalue
 // through the subscript the tree has no node for. The program is refused where
 // the operator is written and nothing is written out: a silently wrong value is
