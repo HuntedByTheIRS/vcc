@@ -99,8 +99,14 @@ pub:
 	// the back end refuses it rather than writing the address of the storage the
 	// value sits in.
 	explicit bool
-	line     int
-	col      int
+	// offset is how many bytes into what the name is the address is taken:
+	// zero for the whole object, and the byte of the part `&name[i]` or
+	// `&name.m` starts at otherwise. The address of a part is the address of
+	// the whole object plus this offset, so it is the addend the reference the
+	// layout resolves carries and not a number written here.
+	offset int
+	line   int
+	col    int
 }
 
 // Global is one object defined at the top level. The type is written the way a

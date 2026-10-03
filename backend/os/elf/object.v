@@ -285,7 +285,7 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 				data_relocations << ObjectRelocation{
 					offset: fixup.offset
 					symbol: symbol_rodata_section
-					addend: i64(where)
+					addend: i64(where) + fixup.addend
 					call:   false
 				}
 			}
@@ -296,7 +296,7 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 				data_relocations << ObjectRelocation{
 					offset: fixup.offset
 					symbol: symbol
-					addend: 0
+					addend: i64(fixup.addend)
 					call:   false
 				}
 			}
@@ -322,7 +322,7 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 	put(mut output, parts.rodata, program.string_blob)
 	put(mut output, parts.data, program.globals_blob)
 	emit_object_relocations(mut output, parts, relocations, target)
-	emit_object_data_relocations(mut output, parts, data_relocations, target)
+	emit_object_data_relocations(mut output, parts, data_relocations)
 	emit_object_symbols(mut output, parts, program, functions, objects, symbol_index,
 		name_offset)
 	put(mut output, parts.strtab, strtab)
@@ -421,13 +421,15 @@ fn emit_object_relocations(mut output []u8, parts PartOffsets, relocations []Obj
 
 // emit_object_data_relocations writes the holes in the writable data the same
 // way, but against .data: the field is the eight bytes the address goes in, the
-// reference is an address rather than a distance, and the addend is the object's
-// own offset into whatever the symbol names.
-fn emit_object_data_relocations(mut output []u8, parts PartOffsets, relocations []ObjectRelocation, target backend.Target) {
+// reference is an absolute address rather than a distance, and the addend is the
+// byte a part of the object starts at. The relocation is R_X86_64_64, the psABI's
+// one for a slot that holds the symbol's value plus the addend, which is what gcc
+// 16.2.1 writes for the same initializer.
+fn emit_object_data_relocations(mut output []u8, parts PartOffsets, relocations []ObjectRelocation) {
 	for i, relocation in relocations {
 		at := parts.rela_data + i * elf_relocation_size
 		put_u64(mut output, at, u64(relocation.offset))
-		put_u64(mut output, at + 8, (u64(relocation.symbol) << 32) | u64(target.address_relocation()))
+		put_u64(mut output, at + 8, (u64(relocation.symbol) << 32) | relocation_absolute)
 		put_u64(mut output, at + 16, u64(relocation.addend))
 	}
 }

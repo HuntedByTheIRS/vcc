@@ -262,7 +262,10 @@ fn emit_relocations(mut output []u8, program image.Program, sections Sections, b
 		at := sections.rela + entry * elf_relocation_size
 		put_u64(mut output, at, base + u64(sections.globals + fixup.offset))
 		put_u64(mut output, at + 8, (u64(index + 1) << 32) | relocation_absolute)
-		// The addend is zero, so the address itself is written.
+		// The addend is the byte a part of the symbol starts at, so an address
+		// of a part of an imported object points at the part and not at the
+		// whole object.
+		put_u64(mut output, at + 16, u64(fixup.addend))
 		entry++
 	}
 }
@@ -438,13 +441,15 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 	// each, written once every address is settled. An imported symbol's address
 	// is not known until the loader runs, so its bytes are left at zero and the
 	// dynamic table fills them in (emit_relocations); every other kind is an
-	// address this image settles, and it is written here.
+	// address this image settles, and it is written here. The addend is the byte
+	// a part of the object starts at, so `&a[3]` writes the fourth element's
+	// address and not the first's.
 	for fixup in program.data_fixups {
 		if fixup.kind == .import_address {
 			continue
 		}
 		referent := referent_of(program, sections, fixup.kind, fixup.name)!
-		put_u64(mut output, sections.globals + fixup.offset, target.load_base + u64(referent))
+		put_u64(mut output, sections.globals + fixup.offset, target.load_base + u64(referent + fixup.addend))
 	}
 }
 

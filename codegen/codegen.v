@@ -9446,6 +9446,7 @@ fn (mut e Emitter) write_data_address(address ast.AddressInit, at int) {
 			offset: at
 			kind:   .take_address
 			name:   address.name
+			addend: address.offset
 		}
 		return
 	}
@@ -9454,6 +9455,7 @@ fn (mut e Emitter) write_data_address(address ast.AddressInit, at int) {
 			offset: at
 			kind:   .function_address
 			name:   address.name
+			addend: address.offset
 		}
 		return
 	}
@@ -9463,6 +9465,7 @@ fn (mut e Emitter) write_data_address(address ast.AddressInit, at int) {
 			offset: at
 			kind:   .import_address
 			name:   address.name
+			addend: address.offset
 		}
 		return
 	}
@@ -9480,6 +9483,7 @@ fn (mut e Emitter) write_data_address(address ast.AddressInit, at int) {
 			offset: at
 			kind:   .global_address
 			name:   address.name
+			addend: address.offset
 		}
 		return
 	}
