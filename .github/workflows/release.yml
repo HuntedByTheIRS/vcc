@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 env:
-  V_COMMIT: 74e5877545e6182d75fb12b72b9925e80b07a9bc
+  V_COMMIT: b99970bd438a7bdcdfbe38f74d9364db801d5439
   V_DIR: /opt/v
 
 jobs:
