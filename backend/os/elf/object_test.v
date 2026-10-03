@@ -308,7 +308,9 @@ fn test_a_pointer_to_a_function_is_a_data_relocation_against_it() {
 	// global symbol in the table.
 	info := data_relocation_info(bytes, 0)
 	assert u32(info >> 32) == first_global_symbol
-	assert u32(info & 0xffffffff) == x86_64().address_relocation()
+	// The reference is an address rather than a distance, so the relocation is
+	// the absolute R_X86_64_64 rather than the PC-relative one the code uses.
+	assert u32(info & 0xffffffff) == u32(relocation_absolute)
 	assert data_relocation_addend(bytes, 0) == 0
 }
 
