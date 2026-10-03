@@ -921,6 +921,41 @@ fn test_an_assignment_expression_is_right_associative() {
 	assert (inner.value as ast.IntLit).value == 3
 }
 
+// The same assignment written as a statement: `a = b = 5;` writes the value
+// `b = 5` into a, so the statement's value is the second assignment and not the
+// name b. Before this the second `=` was refused as a missing semicolon.
+fn test_a_chained_assignment_statement_nests_its_value() {
+	result := parsed('int main() { int a = 0; int b = 0; a = b = 5; return a; }')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[2].kind == .assign
+	assert body[2].target == 'a'
+	value := body[2].expr or {
+		assert false
+		return
+	}
+	inner := value as ast.Assign
+	assert (inner.target as ast.Ident).name == 'b'
+	assert (inner.value as ast.IntLit).value == 5
+}
+
+// An assignment is an expression in a condition, not only where a statement
+// stands: `while (x = y = 0)` writes 0 into y and then y into x, which is a
+// condition the loop reads. The condition is the outer assignment.
+fn test_an_assignment_in_a_condition_nests_its_value() {
+	result := parsed('int main() { int x = 1; int y = 1; while (x = y = 0) {} return x; }')
+	assert result.diagnostics.len == 0
+	cond := result.unit.decls[0].body[2].cond or {
+		assert false
+		return
+	}
+	outer := cond as ast.Assign
+	assert (outer.target as ast.Ident).name == 'x'
+	inner := outer.value as ast.Assign
+	assert (inner.target as ast.Ident).name == 'y'
+	assert (inner.value as ast.IntLit).value == 0
+}
+
 // A compound spelling is read as the assignment it means, the way the statement
 // reader reads it: `(a <<= 1)` is `a = a << 1`, so the value the node carries is
 // the sum and the spelling is kept beside it.
