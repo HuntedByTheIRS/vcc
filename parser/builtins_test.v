@@ -264,9 +264,11 @@ fn test_the_infinity_builtins_carry_their_width() {
 	other := builtin_float('int main(void) { double d = __builtin_inf(); return 0; }')
 	assert other.typ.same(types.double_type())
 	assert math.is_inf(other.value, 1)
-	// A long double object cannot be declared yet - the reader has no size for
-	// the type - so the width of __builtin_huge_vall is asked through __typeof,
-	// which is the question the header itself asks it.
+	// A long double object is a declaration this reader takes now, so the width
+	// of __builtin_huge_vall is checked both by assigning it to one and through
+	// __typeof, which is the question the header itself asks it.
+	declared := builtin_read('int main(void) { long double ld = __builtin_huge_vall(); return 0; }')
+	assert declared.diagnostics.len == 0
 	wide := builtin_value('int main(void) { return __builtin_types_compatible_p(__typeof(__builtin_huge_vall()), long double); }')
 	assert wide == 1
 }

@@ -353,6 +353,15 @@ pub fn from_target(target backend.Target) Description {
 	aligns[Kind.float] = 4
 	sizes[Kind.double] = 8
 	aligns[Kind.double] = 8
+	// A long double is the x87 extended format: sixteen bytes of storage with an
+	// alignment of sixteen, holding one 80-bit value in the low ten bytes.
+	// Measured on this target with gcc 16.2.1: `sizeof(long double)` is 16 and
+	// `_Alignof(long double)` is 16. The width is carried because the back end
+	// moves those sixteen bytes: an object of the type is reserved, stored and
+	// copied as an object, and the value's own read and write go through the
+	// x87 stack, which is what the conversions at the end of this file describe.
+	sizes[Kind.long_double] = 16
+	aligns[Kind.long_double] = 16
 	// A complex type is two components of its real type, one after the other:
 	// `float _Complex` is two floats and `double _Complex` is two doubles.
 	// Measured on this target with gcc 16.2.1 on a program that printed

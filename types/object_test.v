@@ -375,8 +375,8 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert description.representation.size_of(complex_long_double_type()) or { -1 } == 32
 	assert description.representation.align_of(complex_long_double_type()) or { -1 } == 16
 	// Every other scalar kind is named as missing: the description carries no
-	// width for an aggregate, a `long double` or a complex type, and a question that
-	// needs one is refused rather than answered with a number that would be a machine
+	// width for an aggregate or a complex type, and a question that needs one is
+	// refused rather than answered with a number that would be a machine
 	// fact in the wrong module.
 	//
 	// The four 64-bit integer kinds are carried, and that is what the emitter
@@ -400,9 +400,13 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	// `sizeof(_Bool)`, `sizeof(char)`, `sizeof(signed char)` and
 	// `sizeof(unsigned char)` are each 1 with an alignment of 1, and `sizeof(short)`
 	// and `sizeof(unsigned short)` are each 2 with an alignment of 2.
+	// A `long double` is carried: the model lays one out at sixteen bytes with an
+	// alignment of sixteen, measured on gcc 16.2.1, which is the storage the back
+	// end claims for it. It left this list in the commit that gave the extended
+	// type a form.
 	carried := [Kind.int_, .unsigned_int, .double, .float, .char_, .signed_char, .unsigned_char,
 		.bool_, .short, .unsigned_short, .long, .unsigned_long, .long_long, .unsigned_long_long,
-		.complex_float, .complex_double, .complex_long_double]
+		.long_double, .complex_float, .complex_double, .complex_long_double]
 	mut expected_missing := []Kind{}
 	for kind in basic_kinds() {
 		if kind !in carried {
@@ -445,7 +449,11 @@ fn test_the_description_carries_the_pointer_and_the_written_int() {
 	assert description.representation.align_of(double_type()) or { -1 } == 8
 	assert measured.representation().size_of(double_type()) or { -1 } == 8
 	assert measured.representation().align_of(double_type()) or { -1 } == 8
-	assert description.representation.size_of(long_double_type()) == none
+	// The extended type is carried too: the model lays one out at sixteen bytes
+	// with an alignment of sixteen, measured on gcc 16.2.1, so the description
+	// gives out that width rather than naming the type missing.
+	assert description.representation.size_of(long_double_type()) or { -1 } == 16
+	assert description.representation.align_of(long_double_type()) or { -1 } == 16
 	assert description.representation.size_of(float_type()) or { -1 } == 4
 	assert description.representation.align_of(float_type()) or { -1 } == 4
 	// The description and the measured table agree about every entry both of

@@ -1173,20 +1173,25 @@ fn test_a_member_of_something_without_members_is_refused() {
 
 fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type() {
 	// The name is not what is asked about, the type it names is: `Wide` is a
-	// `long double` here, and a `long double` is a type this compiler has no
-	// width for. The refusal names the type rather than `Wide`, and it happens
-	// at the declaration, which is where the object is defined and not only
-	// where something uses it.
-	wider := parsed('typedef long double Wide;\nWide x;')
+	// `long double _Complex` here, and the refusal names the first word of it
+	// rather than `Wide`. It happens at the declaration, which is where the
+	// object is defined and not only where something uses it.
+	wider := parsed('typedef long double _Complex Wide;\nWide x;')
 	assert wider.diagnostics.len == 1
 	assert wider.diagnostics[0].msg == 'unsupported type long'
 	assert wider.diagnostics[0].line == 2
 	// A parameter is the same question, asked where the call's frame is laid
 	// out, and a parameter is the one place a type of several words is spelled
 	// in full.
-	parameter := parsed('typedef long double Wide;\nint f(Wide b) { return 0; }')
+	parameter := parsed('typedef long double _Complex Wide;\nint f(Wide b) { return 0; }')
 	assert parameter.diagnostics.len == 1
-	assert parameter.diagnostics[0].msg.contains('unsupported type long double')
+	assert parameter.diagnostics[0].msg.contains('unsupported type long double _Complex')
+	// A `long double` is not that case any more: the type has a width and a form,
+	// and what a parameter of the type is refused by is the stack a value of it
+	// travels in.
+	wide_parameter := parsed('typedef long double Wide;\nint f(Wide b) { return 0; }')
+	assert wide_parameter.diagnostics.len == 1
+	assert wide_parameter.diagnostics[0].msg.contains('cannot take one as a parameter')
 }
 
 fn test_a_float_definition_is_read_and_a_long_double_one_is_refused_by_name() {
@@ -1198,7 +1203,8 @@ fn test_a_float_definition_is_read_and_a_long_double_one_is_refused_by_name() {
 	// change in what is true rather than in what is checked: the back end has
 	// instructions for both of them, so a definition that returns one is a
 	// definition and not a refusal. `long double` is still refused, by the same
-	// reader, at the same place.
+	// reader, at the same place, and the refusal names what is missing now that
+	// the type itself holds: the x87 stack's calling convention.
 	narrow := parsed('float f(void) { return 0; }')
 	assert narrow.diagnostics.len == 0
 	assert narrow.unit.decls[0].ret_type.same(types.float_type())
@@ -1207,10 +1213,12 @@ fn test_a_float_definition_is_read_and_a_long_double_one_is_refused_by_name() {
 	widened := parsed('double f(void) { return 0; }')
 	assert widened.diagnostics.len == 0
 	// `long double` is one type written as two words, so the refusal names it
-	// rather than the first word of it.
+	// rather than the first word of it, and it says what is missing: a value of
+	// the type is carried in the x87 stack, which this compiler has no calling
+	// convention for.
 	wide := parsed('long double f(void) { return 0; }')
 	assert wide.diagnostics.len == 1
-	assert wide.diagnostics[0].msg == 'unsupported: long double is a type this compiler does not emit yet, so a function cannot return it'
+	assert wide.diagnostics[0].msg == 'unsupported: long double is a type the x87 stack carries and this compiler has no calling convention for it yet, so a function cannot return it'
 	assert wide.diagnostics[0].line == 1
 	// The model answers for the type all the same, which is what makes the
 	// refusal the back end's and not the reader's.
@@ -1253,13 +1261,20 @@ fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
 	// The wording for a definition of an object: the emitter stops at the first
 	// word of the type, and that is the message the compiler has published. The
 	// narrow integer spellings, `short` among them, are not that case any more,
-	// so the type here is one that is still two words with no form: `long
-	// double` is not a width this back end has, and the message names the word
-	// in front of it.
-	wider := parsed('long double h;')
+	// and neither is `long double`, whose type this compiler now lays out: the
+	// type here is one that is still two words with no form, a `typedef` of a
+	// `long double _Complex`, where the message names the first word rather
+	// than the word that makes it complex.
+	wider := parsed('typedef long double _Complex Wide;\nWide h;')
 	assert wider.diagnostics.len == 1
 	assert wider.diagnostics[0].msg == 'unsupported type long'
-	assert wider.diagnostics[0].line == 1
+	assert wider.diagnostics[0].line == 2
+	// A `long double` object is a declaration this compiler reads, lays out and
+	// initialises, so it is not refused at all.
+	wide := parsed('long double h;')
+	assert wide.diagnostics.len == 0
+	initialised := parsed('int main(void) { long double h = 0.6L; return 0; }')
+	assert initialised.diagnostics.len == 0
 }
 
 fn test_a_floating_constant_is_typed_as_the_double_it_is() {
@@ -1380,19 +1395,42 @@ fn test_a_float_constant_is_not_the_double_of_the_same_digits() {
 	} as ast.FloatLit).value == 1.5
 }
 
-fn test_the_long_double_suffix_is_still_refused_by_name() {
-	// `l` names a type this compiler has no value for, and it is refused by
-	// name at the constant rather than read as a double. A hexadecimal
-	// constant carries the same suffix and gets the same answer, while the `f`
-	// suffix on one is a float, which is a value this compiler has.
-	long_double := parsed('double f(void) { return 1.5L; }')
-	assert long_double.diagnostics.len == 1
-	assert long_double.diagnostics[0].msg.contains('long double literal')
-	assert long_double.diagnostics[0].col == 25
-	hex_long := parsed('double f(void) { return 0x1.8p3L; }')
-	assert hex_long.diagnostics.len == 1
-	assert hex_long.diagnostics[0].msg.contains('long double literal')
-	assert hex_long.diagnostics[0].col == 25
+fn test_the_long_double_suffix_names_the_extended_type() {
+	// `l` names the extended type, which this compiler reads, stores and
+	// converts now: the constant is read as one of those and not as a double,
+	// and the value it keeps is the extended one rather than a rounded double.
+	// A hexadecimal constant carries the same suffix and gets the same reader,
+	// while the `f` suffix on one is a float, which is a different type.
+	decl := first('double f(void) { return 1.5L; }')
+	returned := decl.body[0].expr or {
+		assert false
+		return
+	}
+	wide := returned as ast.FloatLit
+	assert wide.typ.same(types.long_double_type())
+	assert wide.text == '1.5L'
+	held := wide.long_value or {
+		assert false
+		return
+	}
+	// 1.5 is 1.1 in binary, so the significand's top two bits are set and the
+	// power of two is zero.
+	assert held.mantissa == 0xc000000000000000
+	assert held.exponent() == 0
+	// 0x1.8p3 is 12.0: the same significand, three powers of two up.
+	hex := first('double f(void) { return 0x1.8p3L; }')
+	from_hex := hex.body[0].expr or {
+		assert false
+		return
+	}
+	twelve := from_hex as ast.FloatLit
+	assert twelve.typ.same(types.long_double_type())
+	hex_value := twelve.long_value or {
+		assert false
+		return
+	}
+	assert hex_value.mantissa == 0xc000000000000000
+	assert hex_value.exponent() == 3
 	hex_float := parsed('double f(void) { return 0x1.8p3f; }')
 	assert hex_float.diagnostics.len == 0
 }

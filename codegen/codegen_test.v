@@ -630,11 +630,13 @@ fn test_an_unsigned_int_converted_to_a_pointer_takes_zeros_above_it() {
 
 fn test_a_cast_with_no_conversion_behind_it_is_reported() {
 	// A conversion to a type this back end has no register for is refused by
-	// name rather than written as a value of the wrong width.
-	unsupported := emit(translation_unit('int main() { int x = 3; double d = (long double)x; return 0; }'),
+	// name rather than written as a value of the wrong width: a double does not
+	// convert to a 128-bit integer here, and the cast that asks is named rather
+	// than answered with the bits of the double.
+	unsupported := emit(translation_unit('int main() { double d = 1.5; __int128 v = (__int128)d; return 0; }'),
 		Options{})
 	assert unsupported.diagnostics.len == 1
-	assert unsupported.diagnostics[0].msg.contains('long double')
+	assert unsupported.diagnostics[0].msg.contains('128')
 	assert unsupported.bytes.len == 0
 	// A floating type and an address are not converted into one another, and
 	// that is said rather than emitted as a pointer whose bits are a double.
@@ -643,6 +645,60 @@ fn test_a_cast_with_no_conversion_behind_it_is_reported() {
 	assert wrong_class.diagnostics.len == 1
 	assert wrong_class.diagnostics[0].msg.contains('char *')
 	assert wrong_class.bytes.len == 0
+}
+
+// The paths a long double value is consumed by that the checkpoint left open.
+// A call and an argument name the x87 convention; the return is the third place
+// the same convention shows, and it is the one that was missing: an int function
+// that returns a long double answered with the address of the value's sixteen
+// bytes and no diagnostic, which gcc refuses as a conversion it does not define.
+// Measured on gcc 16.2.1 for the programs that are accepted: `(long double)5` is
+// the extended 5.0, 1.5 returned from a double function is 1.5, and a value
+// written into an element of a top-level array of long doubles reads back.
+fn test_the_extended_type_is_refused_where_it_is_not_converted_to_a_double() {
+	// An int function that returns a long double: the conversion is refused by
+	// name rather than answered with the address of the value.
+	returned := emit(translation_unit('int f(void) { long double a = 1.5L; return a; }\nint main(void) { return f(); }'),
+		Options{})
+	assert returned.diagnostics.len == 1
+	assert returned.diagnostics[0].msg.contains('long double')
+	assert returned.bytes.len == 0
+	// A double function that returns one converts it, which is the one
+	// conversion out of the extended type this back end writes.
+	converted := emit(translation_unit('double f(void) { long double a = 1.5L; return a; }\nint main(void) { return (int)f(); }'),
+		Options{})
+	assert converted.diagnostics.len == 0
+	assert run_image(converted.bytes) == 1
+	// A cast to the extended type converts the source by the machine's x87 move.
+	// The destination's address is parked before the source is evaluated, so an
+	// integer source is not replaced by that address before the conversion reads
+	// it, which is the wrong value this path answered with.
+	conversion := emit(translation_unit('int main(void) { int i = 5; long double b = (long double)i; double d = (double)b; return d == 5.0; }'),
+		Options{})
+	assert conversion.diagnostics.len == 0
+	assert run_image(conversion.bytes) == 1
+	// An element of a top-level array of long doubles is the address of its
+	// bytes, read the way a local element is: the value written at run time is
+	// read back and converted to a double.
+	element := emit(translation_unit('static long double g[2];\nint main(void) { g[0] = 1.5L; g[1] = 2.5L; double d = g[1]; return d == 2.5; }'),
+		Options{})
+	assert element.diagnostics.len == 0
+	assert run_image(element.bytes) == 1
+	// A long double used as a subscript: the value of one is the address of its
+	// bytes, so an index of the type would scale that address and read from
+	// nowhere. The conversion an index needs is refused by name.
+	subscript := emit(translation_unit('int main(void) { int a[2]; a[0] = 7; a[1] = 9; long double i = 1.0L; return a[i]; }'),
+		Options{})
+	assert subscript.diagnostics.len == 1
+	assert subscript.diagnostics[0].msg.contains('long double')
+	assert subscript.bytes.len == 0
+	// A brace initializer for a top-level array of long doubles has no field to
+	// hold its extended constants, so it is refused by name rather than written
+	// as the zeros the storage starts with. The refusal is the reader's, so the
+	// program is read without the clean-parse assert.
+	initialised := translation_unit_refused('static long double g[2] = {1.5L, 2.5L}; int main(void) { return 0; }')
+	assert initialised.diagnostics.len == 1
+	assert initialised.diagnostics[0].msg.contains('long double')
 }
 
 // The narrow integer types are values a register holds. A read widens the value to
@@ -1250,7 +1306,10 @@ fn test_a_return_type_other_than_int_is_reported() {
 }
 
 // The check is on every function the image holds, not only on the entry point:
-// a helper the entry point calls is emitted too.
+// a helper the entry point calls is emitted too. The example is a struct, which
+// the return-type check refuses by name; a `long double` return is refused
+// earlier now, where the call is made, because a value of the type travels by
+// the x87 convention this back end does not write.
 fn test_a_helper_with_another_return_type_is_reported() {
 	unit := ast.TranslationUnit{
 		decls: [
@@ -1262,7 +1321,7 @@ fn test_a_helper_with_another_return_type_is_reported() {
 			},
 			ast.FnDecl{
 				name:    'helper'
-				ret:     'long double'
+				ret:     'struct S'
 				defined: true
 				body:    [return_statement(0)]
 			},
@@ -2107,18 +2166,20 @@ fn test_the_low_word_is_refused_for_a_floating_slot() {
 	assert assigned.bytes.len == 0
 }
 
-fn test_a_local_of_a_type_with_no_instruction_is_reported() {
-	// `long double` is the type here rather than `float`, which this back end now
-	// has instructions for: what this checks is the refusal, so it names a type
-	// the emitter still has no form for.
+fn test_a_local_of_the_extended_type_is_laid_out_and_initialised() {
+	// A `long double` local was the example of a type the emitter had no form
+	// for until the extended type was implemented, and it has one now: the frame
+	// holds sixteen bytes and the int initializer is converted by the machine's
+	// x87 move, so the declaration is laid out and initialised rather than
+	// refused.
 	body := [
 		declaration('f', 'long double', int_argument(1)),
 		return_statement(0),
 	]
 	emitted := emit(program(body), Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('long double')
-	assert emitted.bytes.len == 0
+	assert emitted.diagnostics.len == 0
+	assert emitted.bytes.len > 0
+	assert run_image(emitted.bytes) == 0
 }
 
 fn test_an_operation_on_a_pointer_is_reported() {

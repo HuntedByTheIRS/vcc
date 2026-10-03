@@ -689,6 +689,10 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// object's type is not known until the declarator has been read, and which
 	// one is written into the image is a question about that type.
 	mut data_init_float := ?f64(none)
+	// data_init_long is the same initializer when it was written as a long
+	// double constant, which a host double cannot hold: the object's type and the
+	// constant's type are both needed before the bytes can be written.
+	mut data_init_long := ?types.LongDouble(none)
 	// data_inits and data_init_floats are the brace initializer of an array, the
 	// same split as the scalar pair: which list is filled is a question about the
 	// element type, which is not known until the declarator has been read.
@@ -934,6 +938,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 										} else if number := element.number {
 											data_init, data_init_float = initializer_for(first.typ.describe(), number.number.integer,
 												number.number.floating)
+											data_init_long = number.number.long_floating
 											data_union_first = true
 										}
 									}
@@ -972,6 +977,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 								} else if number := element.number {
 									data_init, data_init_float = initializer_for(data_type, number.number.integer,
 										number.number.floating)
+									data_init_long = number.number.long_floating
 								}
 							}
 						} else {
@@ -1040,6 +1046,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						constant := p.file_scope_constant()
 						data_init = constant.integer
 						data_init_float = constant.floating
+						data_init_long = constant.long_floating
 						literal_refused = p.diagnostics.len > before
 					}
 				} else if p.peek().kind == .string && d.is_array() {
@@ -1075,6 +1082,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					constant := p.file_scope_constant()
 					data_init = constant.integer
 					data_init_float = constant.floating
+					data_init_long = constant.long_floating
 					literal_refused = p.diagnostics.len > before
 				}
 				p.skip_to_separator() or {
@@ -1177,7 +1185,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			return decls
 		}
 		if data_defined && data_init == none && data_init_float == none && data_inits.len == 0
-			&& data_init_floats.len == 0 && !data_string && data_address == none
+			&& data_init_floats.len == 0 && data_init_long == none && !data_string && data_address == none
 			&& data_address_inits.len == 0 {
 			// Either way the definition is refused. When the initializer was a
 			// shape the reader reported, it has already been named at its own
@@ -1209,6 +1217,31 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		// truncated towards zero, which is the conversion an assignment makes
 		// and the reason neither of these needs a diagnostic of its own.
 		init, init_float := initializer_for(data_type, data_init, data_init_float)
+		if data_init_long != none && data_type != 'long double' {
+			p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is a long double constant')
+			return decls
+		}
+		mut starts_at_zero := true
+		if value := data_init {
+			if value != 0 {
+				starts_at_zero = false
+			}
+		}
+		if value := data_init_float {
+			if value != 0.0 {
+				starts_at_zero = false
+			}
+		}
+		if data_type == 'long double' && data_init_long == none && !starts_at_zero {
+			// An object of the extended type at the top level starts at the
+			// constant its initializer names when that constant is one of the
+			// type, and at zero when there is nothing to start it at, which is
+			// what the unsized storage in the image already holds. A constant of
+			// another type is a conversion at load time, which this reader does
+			// not write into the image.
+			p.error_at(data_at, 'unsupported: ${data_name} is a long double, and its initializer is not a long double constant: converting a constant of another type to the extended format at load time is not written into the image')
+			return decls
+		}
 		p.declare_name(data_name, data_clause, data_at, true)
 		if completed := data_complete {
 			// The name was declared with the size-less array its declarator
@@ -1225,6 +1258,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			count:         data_count
 			init:          init
 			init_float:    init_float
+			init_long:     data_init_long
 			address:       data_address
 			inits:         data_inits
 			init_floats:   data_init_floats
@@ -1242,8 +1276,9 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 // apart here is what lets the caller check the class against the object's type
 // rather than converting one into the other and losing what was written.
 struct FileConstant {
-	integer  ?i64
-	floating ?f64
+	integer       ?i64
+	floating      ?f64
+	long_floating ?types.LongDouble
 }
 
 // NumberConstant is a written number with the sign that may stand in front of it,
@@ -1291,6 +1326,18 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 	}
 	t := p.next()
 	if is_floating_constant(t.text) {
+		if is_long_double_constant(t.text) {
+			value := parse_long_double_literal(t.text) or {
+				p.error_at(t, err.msg())
+				return none
+			}
+			return NumberConstant{
+				number: FileConstant{
+					long_floating: value
+				}
+				at:     t
+			}
+		}
 		value := parse_floating_literal(t.text) or {
 			p.error_at(t, err.msg())
 			return none
@@ -2284,6 +2331,15 @@ fn (mut p Parser) constant_expr(constant NumberConstant) ast.Expr {
 			col:   constant.at.col
 		})
 	}
+	if long_value := constant.number.long_floating {
+		return ast.Expr(ast.FloatLit{
+			long_value: long_value
+			text:       constant.at.text
+			typ:        types.long_double_type()
+			line:       constant.at.line
+			col:        constant.at.col
+		})
+	}
 	value := constant.number.floating or { f64(0) }
 	return ast.Expr(ast.FloatLit{
 		value: value
@@ -2302,6 +2358,14 @@ fn (mut p Parser) constant_expr(constant NumberConstant) ast.Expr {
 // double are both conversions the language makes, so neither is reported, and a
 // float object takes a floating initializer the same way a double does.
 fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
+	if written == 'long double' {
+		// A long double object holds a value a host double cannot represent, so
+		// the conversion of a double or an integer constant into one is not made
+		// here: the constant's own extended-format value travels in its own
+		// field, and a constant without one is refused where the bytes would be
+		// written.
+		return none, none
+	}
 	mut value := integer
 	mut fraction := floating
 	if written == 'double' || written == 'float' {
@@ -2334,6 +2398,16 @@ fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
 // than read as a zero, because a zero in the storage is a value the declaration
 // did not write.
 fn (mut p Parser) initializer_list_for(written string, elements []BraceElement, name string, at tokenize.Token) ([]i64, []f64) {
+	if written == 'long double' {
+		// An array of long doubles would be a table of sixteen-byte extended
+		// constants, and the two lists this returns carry an integer or a
+		// double; a long double value fits in neither. The elements are refused
+		// by name rather than dropped, because the storage they would have gone
+		// into starts zeroed and a program reading the table would get zeros
+		// with no diagnostic.
+		p.error_at(at, 'unsupported: ${name} is an array of long doubles with a brace initializer, and the extended constants of one have no field to be written into at file scope here')
+		return []i64{}, []f64{}
+	}
 	if written == 'double' || written == 'float' {
 		mut floats := []f64{cap: elements.len}
 		for element in elements {
@@ -2461,14 +2535,17 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	// form to, so it is asked only of a return type that is not a pointer, and a
 	// pointer to one takes the same answer a pointer object takes. A complex
 	// type is a value the emitter does have a form for now: it travels as its
-	// two components through the aggregate path, so only `long double` and
-	// `long double _Complex` are refused here.
+	// two components through the aggregate path, so `double _Complex` and
+	// `float _Complex` are not refused here, and `long double _Complex` is
+	// refused by its `_Complex` word below because no form for its component
+	// exists.
 	if d.pointer_count() == 0 && spec.clause.kind == .long_double {
-		// A type the model knows and the emitter has no form for is a different
-		// answer from a type whose first word is not one the emitter reads:
-		// `long double` is one type, and the refusal names it rather than
-		// naming half of it.
-		p.error_at(spec.start, 'unsupported: ${spec.clause.describe()} is a type this compiler does not emit yet, so a function cannot return it')
+		// The type itself holds now - it has a size, a form and constants - but a
+		// value of it is carried in the x87 stack, whose calling convention this
+		// compiler does not emit yet, so a value passed back would be read from
+		// the wrong place. The refusal names the stack rather than claiming the
+		// type does not exist.
+		p.error_at(spec.start, 'unsupported: long double is a type the x87 stack carries and this compiler has no calling convention for it yet, so a function cannot return it')
 		return
 	}
 	if offender := p.unsupported_type_word(spec, d.pointer_count()) {
@@ -3572,6 +3649,13 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
 			} else if d.is_array() && d.pointer_count() == 0 && spec.clause.kind == .void_ {
 				params.note_problem('a constraint violation: ${d.name} is declared as an array of void, and 6.7.5.2p1 makes the element type of an array an object type', spec.start)
+			} else if d.pointer_count() == 0 && spec.clause.kind == .long_double {
+				// The type holds now, but a value of it is carried in the x87
+				// stack, whose calling convention this compiler does not emit
+				// yet, so an argument would be handed over in the wrong place.
+				// An array of them adjusts to a pointer and is not asked this:
+				// an address is what the call passes.
+				params.note_problem('unsupported: long double is a type the x87 stack carries and this compiler has no calling convention for it yet, so a function cannot take one as a parameter', spec.start)
 			} else if !p.parameter_type_is_known(spec, d.pointer_count()) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.

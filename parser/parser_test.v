@@ -635,9 +635,9 @@ fn test_a_declaration_may_name_several_objects() {
 // has no form for is reported where the declaration is written, and what comes
 // after the declaration still parses.
 fn test_a_local_declaration_with_an_unsupported_type_is_reported() {
-	result := parsed('int main() { long double n = 0; return 0; }')
+	result := parsed('int main() { long double _Complex n = 0; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('unsupported type long')
+	assert result.diagnostics[0].msg.contains('unsupported type _Complex')
 	assert result.unit.decls[0].body.len == 1
 	assert result.unit.decls[0].body[0].kind == .return_stmt
 }
@@ -1678,14 +1678,14 @@ fn test_a_name_nothing_declares_is_refused_with_the_name_and_its_location() {
 // now, and the type the case is measured with is one this compiler still has no
 // form for.
 fn test_a_name_a_refused_declaration_declares_is_not_reported_again() {
-	result := parsed('int main(void) { long double u = 0; u = 1; return 0; }')
+	result := parsed('int main(void) { long double _Complex u = 0; u = 1; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('unsupported type long')
+	assert result.diagnostics[0].msg.contains('unsupported type _Complex')
 	// The same at the top level, where the declarator was read before the type was
 	// refused and the name was recorded as a matter of course.
-	global := parsed('long double g = 1;\nint main(void) { return g; }')
+	global := parsed('long double _Complex g = 1;\nint main(void) { return g; }')
 	assert global.diagnostics.len == 1
-	assert global.diagnostics[0].msg.contains('unsupported type long')
+	assert global.diagnostics[0].msg.contains('unsupported type _Complex')
 }
 
 // One diagnostic per name, however many times it is read: three uses of a name

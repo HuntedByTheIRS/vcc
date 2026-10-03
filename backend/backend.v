@@ -798,6 +798,44 @@ pub fn (t Target) store_float_indirect(address Register, src Register) ![]u8 {
 	return x86_64.store_float_indirect(t.describe(address), t.describe(src))
 }
 
+// The x87 moves are the conversions a long double needs. A long double is not a
+// value in a register file, so there is no register to describe: each of these
+// names an address the way the scalar indirect moves do, and the instruction
+// itself carries the operation. `load_extended`/`store_extended` move the
+// extended format, the double and integer pairs move a value of that type
+// through the extended stack so the machine does the conversion.
+pub fn (t Target) load_extended(address Register) ![]u8 {
+	return x86_64.load_extended(t.describe(address))
+}
+
+pub fn (t Target) store_extended(address Register) ![]u8 {
+	return x86_64.store_extended(t.describe(address))
+}
+
+pub fn (t Target) load_double_extended(address Register) ![]u8 {
+	return x86_64.load_double_extended(t.describe(address))
+}
+
+pub fn (t Target) store_double_extended(address Register) ![]u8 {
+	return x86_64.store_double_extended(t.describe(address))
+}
+
+pub fn (t Target) load_int_extended(address Register) ![]u8 {
+	return x86_64.load_int_extended(t.describe(address))
+}
+
+pub fn (t Target) load_word_extended(address Register) ![]u8 {
+	return x86_64.load_word_extended(t.describe(address))
+}
+
+pub fn (t Target) store_int_extended(address Register) ![]u8 {
+	return x86_64.store_int_extended(t.describe(address))
+}
+
+pub fn (t Target) store_word_extended(address Register) ![]u8 {
+	return x86_64.store_word_extended(t.describe(address))
+}
+
 pub fn (t Target) move_double(dst Register, src Register) ![]u8 {
 	return x86_64.move_double(t.describe(dst), t.describe(src))
 }
