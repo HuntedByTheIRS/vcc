@@ -103,9 +103,16 @@ const gnu_postfix = ['__attribute__', '__asm__', '__asm']
 const max_declaration_depth = 200
 
 // starts_declaration says whether a token can open a declaration: one of the
-// specifier words, or a name this file has already declared as a type.
+// specifier words, a name this file has already declared as a type, or the
+// `_Static_assert` spelling, which opens a declaration that produces no object.
 fn (p Parser) starts_declaration(t tokenize.Token) bool {
-	return t.kind == .identifier && (is_specifier_word(t.text) || p.is_type_name(t.text))
+	if t.kind != .identifier {
+		return false
+	}
+	if t.text == '_Static_assert' {
+		return true
+	}
+	return is_specifier_word(t.text) || p.is_type_name(t.text)
 }
 
 // starts_type_name says whether a token can open a type name written as a cast.
@@ -648,6 +655,12 @@ fn (p Parser) end_of_block(open int) int {
 // next one starts in the right place.
 fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut decls := []ast.FnDecl{}
+	// A static assertion is a declaration that declares no object, so it has no
+	// place in the declaration list and is read before the specifiers are.
+	if p.peek().kind == .identifier && p.peek().text == '_Static_assert' {
+		p.parse_static_assertion()
+		return decls
+	}
 	if p.skip_uncalled_static() {
 		return decls
 	}
@@ -1268,6 +1281,185 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 		}
 	}
 	return decls
+}
+
+// parse_static_assertion reads a static assertion, the declaration C11 spells
+// `_Static_assert ( constant-expression , string-literal ) ;` and C23 spells with
+// the message left out. It declares no object and produces no code: the condition
+// is tested where the declaration is read, and a condition that is false ends the
+// compilation with the message the source wrote.
+//
+// The reader is shared by the two positions the declaration may be written in,
+// file scope and a body, because the construct is one declaration and both
+// positions answer the same way. Both used to answer wrong, and differently: at
+// file scope the words were refused as `expected a declaration`, and in a body
+// the statement reader took them for an expression, so `_Static_assert(1, "x");`
+// became a call to a symbol nothing defined.
+//
+// A condition this compiler cannot reduce to an integer constant is refused by
+// name rather than assumed true. A static assertion whose test cannot be
+// evaluated is not one this reader has read, and treating it as passing would
+// make the check decorate the source instead of checking it.
+fn (mut p Parser) parse_static_assertion() {
+	at := p.next() // _Static_assert
+	if !p.expect_punct('(') {
+		p.skip_statement()
+		return
+	}
+	condition := p.parse_expression() or {
+		p.skip_statement()
+		return
+	}
+	mut message := ''
+	if p.at_punct(',') {
+		p.next()
+		if p.peek().kind == .string {
+			literal := parse_string_literal(p.next().text) or {
+				p.error_at(at, err.msg())
+				p.skip_statement()
+				return
+			}
+			message = literal.value
+		} else {
+			p.error_at(p.peek(), 'unsupported: expected the message of a static assertion, found ${describe(p.peek())}')
+			p.skip_statement()
+			return
+		}
+	}
+	if !p.expect_punct(')') {
+		p.skip_statement()
+		return
+	}
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return
+	}
+	value := p.static_assert_condition(condition) or {
+		p.error_at(at, 'unsupported: the condition of this static assertion is not an integer constant expression this compiler reduces')
+		return
+	}
+	if value == 0 {
+		// The message is quoted the way gcc 16.2.1 quotes it, so a build log
+		// reads the same whichever compiler refused the assertion.
+		p.error_at(at, 'static assertion failed: "${message}"')
+	}
+}
+
+// static_assert_condition reduces the condition of a static assertion to the
+// integer constant expression 6.7.10 asks for, and answers none when the
+// expression is not one this reader folds.
+//
+// The shapes are the arithmetic, bitwise, shift, comparison and logical
+// operators over written integer constants and the two unary operators that
+// keep a value integral, which is what a static assertion of a type's size or a
+// field's width is written with. `sizeof` is folded to an integer constant by
+// its own reader, so a condition built from it reaches here already a number.
+// A division or a remainder by zero answers none rather than a value, and a
+// shift wider than the type is refused the same way instead of folding.
+fn (mut p Parser) static_assert_condition(expr ast.Expr) ?i64 {
+	match expr {
+		ast.IntLit {
+			return expr.value
+		}
+		ast.Unary {
+			value := p.static_assert_condition(expr.expr)?
+			match expr.op {
+				'+' {
+					return value
+				}
+				'-' {
+					return -value
+				}
+				'~' {
+					return ~value
+				}
+				'!' {
+					return if value == 0 { i64(1) } else { i64(0) }
+				}
+				else {
+					return none
+				}
+			}
+		}
+		ast.Binary {
+			a := p.static_assert_condition(expr.left)?
+			b := p.static_assert_condition(expr.right)?
+			match expr.op {
+				'+' {
+					return a + b
+				}
+				'-' {
+					return a - b
+				}
+				'*' {
+					return a * b
+				}
+				'/' {
+					if b == 0 {
+						return none
+					}
+					return a / b
+				}
+				'%' {
+					if b == 0 {
+						return none
+					}
+					return a % b
+				}
+				'&' {
+					return a & b
+				}
+				'|' {
+					return a | b
+				}
+				'^' {
+					return a ^ b
+				}
+				'<<' {
+					if b < 0 || b > 63 {
+						return none
+					}
+					return a << u64(b)
+				}
+				'>>' {
+					if b < 0 || b > 63 {
+						return none
+					}
+					return a >> u64(b)
+				}
+				'==' {
+					return if a == b { i64(1) } else { i64(0) }
+				}
+				'!=' {
+					return if a != b { i64(1) } else { i64(0) }
+				}
+				'<' {
+					return if a < b { i64(1) } else { i64(0) }
+				}
+				'>' {
+					return if a > b { i64(1) } else { i64(0) }
+				}
+				'<=' {
+					return if a <= b { i64(1) } else { i64(0) }
+				}
+				'>=' {
+					return if a >= b { i64(1) } else { i64(0) }
+				}
+				'&&' {
+					return if a != 0 && b != 0 { i64(1) } else { i64(0) }
+				}
+				'||' {
+					return if a != 0 || b != 0 { i64(1) } else { i64(0) }
+				}
+				else {
+					return none
+				}
+			}
+		}
+		else {
+			return none
+		}
+	}
 }
 
 // FileConstant is the number a file-scope definition was initialized with. One of

@@ -1374,3 +1374,59 @@ fn test_a_declaration_in_a_body_may_write_a_tag_and_no_object() {
 	tagged := declarations_of('int main(void) { enum colour { RED = 1, GREEN }; return GREEN; }')
 	assert tagged.diagnostics.len == 0
 }
+
+// A static assertion declares no object and produces no code: the check runs
+// where the declaration is read. Measured on gcc 16.2.1, the two positions it
+// may be written in answer the same way, so both are tested here. Before this
+// reader the two positions answered wrong and differently: at file scope the
+// words were refused as `expected a declaration`, and in a body the statement
+// reader took them for an expression.
+fn test_a_passing_static_assertion_is_read_in_both_positions() {
+	file_scope := declarations_of('_Static_assert(1, "ok");\nint main(void) { return 0; }')
+	assert file_scope.diagnostics.len == 0
+	assert file_scope.unit.decls.len == 1
+	in_body := declarations_of('int main(void) { _Static_assert(1, "ok"); return 0; }')
+	assert in_body.diagnostics.len == 0
+	assert in_body.unit.decls[0].body.len == 1
+}
+
+// A false condition is a diagnostic carrying the message the source wrote, the
+// way gcc 16.2.1 writes it: `static assertion failed: "must fail"`.
+fn test_a_failing_static_assertion_names_its_message() {
+	file_scope := declarations_of('_Static_assert(0, "must fail");\nint main(void) { return 0; }')
+	assert file_scope.diagnostics.len == 1
+	assert file_scope.diagnostics[0].msg == 'static assertion failed: "must fail"'
+	assert file_scope.diagnostics[0].line == 1
+	assert file_scope.diagnostics[0].col == 1
+	in_body := declarations_of('int main(void) { _Static_assert(0, "body fail"); return 0; }')
+	assert in_body.diagnostics.len == 1
+	assert in_body.diagnostics[0].msg == 'static assertion failed: "body fail"'
+	assert in_body.diagnostics[0].col == 18
+}
+
+// C23 made the message optional, and the condition is tested either way. The
+// shape under test folds through `sizeof`, which its own reader turns into an
+// integer constant before this reader sees it.
+fn test_a_static_assertion_without_a_message_still_tests_its_condition() {
+	ok := declarations_of('_Static_assert(sizeof(int) == 4);\nint main(void) { return 0; }')
+	assert ok.diagnostics.len == 0
+	failed := declarations_of('_Static_assert(sizeof(int) == 8);\nint main(void) { return 0; }')
+	assert failed.diagnostics.len == 1
+	assert failed.diagnostics[0].msg == 'static assertion failed: ""'
+}
+
+// A condition this reader cannot reduce to an integer constant is refused by
+// name rather than assumed true.
+fn test_a_condition_that_is_not_an_integer_constant_is_refused() {
+	result := declarations_of('int n = 1;\n_Static_assert(n, "not constant");\nint main(void) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('is not an integer constant expression')
+}
+
+// The message has to be a string literal, and a shape that is not one is named
+// where it was written.
+fn test_a_static_assertion_message_that_is_not_a_string_is_refused() {
+	result := declarations_of('_Static_assert(1, 2);\nint main(void) { return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('expected the message of a static assertion')
+}

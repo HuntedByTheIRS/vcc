@@ -1154,6 +1154,13 @@ fn (mut p Parser) parse_for_statement() ![]ast.Stmt {
 // declaration is skipped so the statements after it still parse.
 fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 	mut stmts := []ast.Stmt{}
+	// A static assertion written in a body is the same declaration the file
+	// scope reads, and it produces no statement: the check it makes is the
+	// whole of it.
+	if p.peek().kind == .identifier && p.peek().text == '_Static_assert' {
+		p.parse_static_assertion()
+		return stmts
+	}
 	spec := p.parse_decl_specifiers(0) or {
 		p.skip_declaration()
 		return stmts

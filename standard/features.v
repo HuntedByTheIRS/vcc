@@ -204,24 +204,25 @@ pub const features = [
 		pedantic:  'the _Generic selection'
 		status:    .unimplemented
 	},
-	// _Static_assert stays unimplemented because the tree does not read a
-	// static assertion, and measured, the two positions it can be written in
-	// are not one answer. At file scope the parser refuses it and names it
-	// (`unsupported: expected a declaration, found '_Static_assert'`), which is
-	// the unimplemented rule. Inside a function body the statement path reads
-	// the token as the start of an expression, so `_Static_assert(1, "x");`
-	// compiles and becomes a call to a symbol that was never defined, which is
-	// the parser's defect — recorded for the milestone that owns statement
-	// parsing — and is not a reading this row may claim. The day the parser
-	// reads a static assertion, this row changes status and starts being
-	// checked; the phrase below is already what that message needs.
+	// _Static_assert is read in both positions it can be written in, file scope
+	// and a body, by one reader in `parser/declarations.v`: the condition is
+	// folded there and a false one is a diagnostic carrying the message. Measured
+	// before the reader, the two positions answered wrong and differently: at file
+	// scope the words were refused as `unsupported: expected a declaration, found
+	// '_Static_assert'`, and in a body the statement reader took them for an
+	// expression, so a static assertion read as a statement became a call to a
+	// symbol nothing defined, which is the parser defect this reader removes. The
+	// flags are measured on gcc 16.2.1: c99 and gnu99 take the construct and warn
+	// only under -pedantic, c11 and c23 take it silently, and a GNU dialect does
+	// not add it to a mode before C11, so the phrase below is a pedantic message
+	// and the row is not `invalid`.
 	Feature{
 		spellings: ['_Static_assert']
 		since:     .c11
 		gnu:       false
 		extension: 'static-assert'
 		pedantic:  'the _Static_assert declaration'
-		status:    .unimplemented
+		status:    .implemented
 	},
 	// The C99 types the type model resolves and the back end has no form for.
 	// The tree reads each of them, so a prototype naming one is read and kept;

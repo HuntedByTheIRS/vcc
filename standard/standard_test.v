@@ -422,19 +422,27 @@ fn test_a_row_that_is_not_implemented_yet_is_read_by_nothing() {
 	assert uses([token('_Generic')], table, asking(.c99)).len == 0
 }
 
-fn test_a_static_assertion_is_not_read_and_is_therefore_not_checked() {
-	// The row is unimplemented and unchecked because the tree does not read a
-	// static assertion: at file scope the parser refuses it, and inside a
-	// function body the statement path reads the token as a call, which is the
-	// parser's defect and not a reading the table may claim. Promoting the row
-	// would report the construct in front of that refusal, which is the noise
-	// the status rule keeps out; the day the parser reads one, the status
-	// changes and the message below is what the check will print.
+fn test_a_static_assertion_is_read_and_is_therefore_checked() {
+	// The row moved to implemented when the parser gained the reader in
+	// `parser/declarations.v`, and the check it had been kept out of now runs:
+	// a mode before C11 reports the construct, c11 and c23 take it, and
+	// `-fvcc-exts=static-assert` brings it down into c99. The old shape asserted
+	// the opposite because the parser did not read the construct; the assertion
+	// that moved is this one, which is the behaviour that was meant to move.
 	rows := features.filter(it.spellings.contains('_Static_assert'))
 	assert rows.len == 1
-	assert rows[0].status == .unimplemented
+	assert rows[0].status == .implemented
 	assert rows[0].since == .c11
 	assert !rows[0].gnu
 	assert rows[0].pedantic == 'the _Static_assert declaration'
-	assert pedantic_messages([token('_Static_assert')], asking(.c99)).len == 0
+	assert pedantic_messages([token('_Static_assert')], asking(.c99)).len == 1
+	assert pedantic_messages([token('_Static_assert')], asking(.gnu99)).len == 1
+	// C11 made it standard, so c11 and c23 have it, and a GNU dialect before
+	// C11 does not add it.
+	assert pedantic_messages([token('_Static_assert')], asking(.c11)).len == 0
+	assert pedantic_messages([token('_Static_assert')], asking(.c23)).len == 0
+	// The extension brings it down to c99, which is the flag doing what it says.
+	mut question := asking(.c99)
+	question.extensions = ['static-assert']
+	assert pedantic_messages([token('_Static_assert')], question).len == 0
 }
