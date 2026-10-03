@@ -4281,6 +4281,7 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 		}
 		if t.kind == .punct && t.text == '}' {
 			p.next()
+			p.check_member_names(members, keyword)
 			return members
 		}
 		if t.kind == .punct && t.text == ';' {
@@ -4376,6 +4377,7 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 			return error('member list')
 		}
 	}
+	p.check_member_names(members, keyword)
 	return members
 }
 
@@ -4399,6 +4401,45 @@ fn (p Parser) record_anonymous_member(spec DeclSpec, mut members []types.Member)
 		typ:  spec.clause
 		line: spec.start.line
 		col:  spec.start.col
+	}
+}
+
+// check_member_names applies the distinctness 6.7.2.1p13 states beside the
+// promotion. Because the members of an anonymous struct or union are members of
+// the aggregate that contains it, their names have to be distinct from the names
+// of the aggregate's own members; two members behind one name could not be told
+// apart, and the type layer would have to answer a lookup with one of them.
+//
+// gcc 16.2.1 refuses `struct D { int x; union { int x; }; };` and
+// `struct E { int x; int x; };` alike as `duplicate member 'x'`, so both are
+// refused here, at the second declaration, rather than left for a lookup to
+// discover. The names an anonymous member contributes are the names in its own
+// member table, which already holds the members a nested anonymous member
+// contributed, so this sees the same names the promotion copies.
+fn (mut p Parser) check_member_names(members []types.Member, keyword tokenize.Token) {
+	mut seen := map[string]bool{}
+	for member in members {
+		if member.name != '' {
+			if seen[member.name] {
+				p.error_span(member.line, member.col, 'a constraint violation: duplicate member ${member.name} in ${keyword.text}')
+				return
+			}
+			seen[member.name] = true
+			continue
+		}
+		if member.typ.kind !in [types.Kind.struct_, .union_] || !member.typ.is_complete() {
+			continue
+		}
+		for inner in member.typ.members {
+			if inner.name == '' {
+				continue
+			}
+			if seen[inner.name] {
+				p.error_span(inner.line, inner.col, 'a constraint violation: duplicate member ${inner.name} in ${keyword.text}')
+				return
+			}
+			seen[inner.name] = true
+		}
 	}
 }
 
