@@ -1971,6 +1971,39 @@ fn test_a_body_brace_initializer_writes_the_values_into_the_frame() {
 	os.rm(binary) or {}
 }
 
+// An array whose brackets wrote no size takes its count from its initializer, and
+// a later `sizeof` is a question about that count rather than about the brackets
+// that wrote none. 6.7.8 fills the bound in only for an array declarator with no
+// size at all, and only when the initializer is a list or a string. The programs
+// are run, so what is checked is the bytes and not the intent. Measured on gcc
+// 16.2.1, these exit 1, 1, 3, 2 and 4.
+fn test_a_deduced_array_takes_its_size_from_its_initializer() {
+	source := scratch('deduced_array.c')
+	binary := scratch('deduced_array')
+	flat := compile_and_run([source, '-o', binary],
+		'int main(void) { int d[] = {2, 3, 5, 7, 11}; return sizeof d == 5 * sizeof(int) && d[4] == 11; }\n')
+	assert flat == 1
+	// The same at file scope, where the count is a fact the image carries.
+	file := compile_and_run([source, '-o', binary],
+		'int d[] = {2, 3, 5, 7, 11};\nint main(void) { return sizeof d == 5 * sizeof(int) && d[4] == 11; }\n')
+	assert file == 1
+	// A nested list sizes an array with empty brackets by the subobjects it
+	// reaches, at either scope.
+	two_d := compile_and_run([source, '-o', binary],
+		'int main(void) { int m[][2] = {{1, 2}, {3, 4}, {5, 6}}; return sizeof(m) / sizeof(m[0]); }\n')
+	assert two_d == 3
+	aggregate := compile_and_run([source, '-o', binary],
+		'struct S { int a; int b; };\nint main(void) { struct S p[] = {{1, 2}, {3, 4}}; return sizeof(p) / sizeof(p[0]); }\n')
+	assert aggregate == 2
+	// A string literal sizes a char array at the characters it writes and the
+	// terminator it does not, so `sizeof` includes it: `abc` is four bytes.
+	literal := compile_and_run([source, '-o', binary],
+		'int main(void) { char s[] = "abc"; return sizeof(s); }\n')
+	assert literal == 4
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // A char is stepped at its own byte: the value 127 plus one is the byte 128,
 // which as a char is -128 and as the int the exit status is read at is 128. The
 // increment of a char is therefore a wrap at one byte, not an int that grew.

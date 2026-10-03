@@ -1651,6 +1651,17 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			element := declared.element() or { spec.clause }
 			p.scopes.complete_type(d.name, types.array_of(element, count))
 		}
+		if brace && list_ok && array_object && !array_sized && general_list == none
+			&& struct_brace == none && union_first == none && count > 0 {
+			// An array whose brackets wrote no size takes its size from the flat
+			// list of numbers that followed: `int a[] = {1, 2, 3};` is an int[3],
+			// and a later `sizeof` of the name is a question about that count
+			// rather than about the brackets that wrote none. The string
+			// initializer and the nested or designated list complete the same way
+			// above; this is the flat list they leave out.
+			element := declared.element() or { spec.clause }
+			p.scopes.complete_type(d.name, types.array_of(element, count))
+		}
 		if list := general_list {
 			// The same answer for a list that named the size: the highest
 			// subobject it reaches is the array the name turned out to be.
