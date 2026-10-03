@@ -18,6 +18,24 @@ pub const name = 'linux'
 // reads this library for the same reason, and both name it from here.
 pub const base_library = 'libc.so.6'
 
+// base_library_flag is the -l spelling of the C library above. A linker is asked
+// for the library by name rather than by file so that its own search resolves
+// the name to the script or the file the system keeps, which is how a -l name is
+// resolved for every other library; naming the file directly would run around
+// that search and, on a machine where the unversioned name is a script that adds
+// libc_nonshared.a, would drop the extra file the script brings in.
+pub const base_library_flag = 'c'
+
+// start_files_before are the C runtime's start files a link puts before the
+// program's own objects, and start_files_after is the one it puts after the
+// libraries. crt1.o holds the entry point the kernel lands on, crti.o opens the
+// initialisation and finalisation sections, and crtn.o closes them. They are
+// names to be resolved in the library directories below and not paths, because
+// which directory a system keeps them in is this system's layout and lives with
+// the rest of it.
+pub const start_files_before = ['crt1.o', 'crti.o']
+pub const start_files_after = ['crtn.o']
+
 // Syscall is a kernel entry point: what a compiler can call it, the number the
 // kernel expects in the number register, and the registers its arguments arrive
 // in, in order.

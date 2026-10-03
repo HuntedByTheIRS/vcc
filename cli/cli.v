@@ -50,10 +50,18 @@ pub mut:
 	// emulation is -femulation: the compiler whose own identity macros this
 	// compiler defines in place of its own, so that a program branching on
 	// __GNUC__, __clang__ or __TINYC__ sees the compiler the flag names.
-	emulation    preprocess.Emulation
-	input_type   string
-	compile_only bool
-	preprocess   bool
+	emulation preprocess.Emulation
+	// external_linker is -external-linker: a program on PATH that performs the
+	// final link in place of this compiler's own emitter path, so that the
+	// inputs it cannot consume yet — a relocatable object, an archive — can be
+	// linked before an in-house linker exists. An empty name is the flag unset,
+	// which is every behaviour exactly as it was. The name is a command-line
+	// fact; whether it may be used at all is policy, and it is refused where the
+	// flag is read.
+	external_linker string
+	input_type      string
+	compile_only    bool
+	preprocess      bool
 	// print_ast stops after the tree is built: nothing is emitted and nothing is
 	// written, which is what `-print-ast` is for.
 	print_ast     bool
@@ -339,6 +347,15 @@ pub fn parse(args []string) !Options {
 			opts.emulation = preprocess.emulation_from_spelling(cursor.value_of('')!)!
 		} else if arg.starts_with('-femulation=') {
 			opts.emulation = preprocess.emulation_from_spelling(arg[12..])!
+		} else if arg == '-external-linker' {
+			// The value is a program name and not this compiler's own feature,
+			// so the flag is not spelled -f: the -f spelling is the feature
+			// family (-fno-builtin, -fvcc-exts), and linking is not a feature
+			// of the C the program is in. It is read and never recorded, so a
+			// build cannot pass it and be told later that nothing happened.
+			opts.external_linker = cursor.value_of('')!
+		} else if arg.starts_with('-external-linker=') {
+			opts.external_linker = arg['-external-linker='.len..]
 		} else if arg == '-x' {
 			opts.input_type = cursor.value_of('')!
 		} else if arg == '-B' {
@@ -468,6 +485,13 @@ pub fn usage(all bool) string {
 	out << '  -fno-vcc-exts=all         or all of them'
 	out << '  -femulation=NAME  define the identity macros of NAME (gcc, clang or'
 	out << '                    tcc) in place of the ones this compiler invented'
+	out << '  -external-linker=NAME  hand the final link to NAME, a linker found on'
+	out << '                    PATH. This compiler compiles each .c input with its'
+	out << '                    own -c machinery, then NAME links those objects and'
+	out << '                    the inputs it cannot read: a relocatable object, an'
+	out << '                    archive. NAME must not be a C compiler (cc, gcc,'
+	out << '                    clang, c++, tcc); name ld or lld instead. With the'
+	out << '                    flag unset every input is refused exactly as before'
 	out << ''
 	out << 'Query options, which answer a question and stop without compiling (gcc'
 	out << 'spells these the same way; each needs no input file and exits 0):'
@@ -529,7 +553,9 @@ pub fn usage(all bool) string {
 		out << 'The V toolchain also hands the compiler its own GC library,'
 		out << 'thirdparty/tcc/lib/libgc.a, as an ordinary input. An object or an'
 		out << 'archive is named as such and refused; linking one is not implemented'
-		out << 'yet, and neither is reading one as source.'
+		out << 'yet, and neither is reading one as source. -external-linker=NAME is'
+		out << 'the one answer to that: it hands the link, objects and archives'
+		out << 'included, to a linker the system already has.'
 	}
 	return out.join('\n')
 }

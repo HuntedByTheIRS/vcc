@@ -1663,3 +1663,21 @@ fn test_the_dynamic_stride_multiply_is_the_bytes_that_scale_an_index() {
 		0xdc,
 	]
 }
+
+// The external link's command line reaches the driver as the target's own, so
+// the loader, the start files and the library directories cannot be one set in
+// the in-house image and another in the external link. The system description is
+// the source both read: this is that seam, and the linux module's own test is
+// where the argument list itself is held to its shape.
+fn test_the_external_link_arguments_come_from_the_target() {
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	args := target.external_link_arguments(['x.o'], ['/opt/lib'], ['m'], 'out') or {
+		panic(err)
+	}
+	assert args[0] == '-dynamic-linker'
+	assert args[1] == target.interpreter
+	assert '-L/opt/lib' in args
+	assert '-lm' in args
+	assert '-lc' in args
+	assert 'out' in args
+}
