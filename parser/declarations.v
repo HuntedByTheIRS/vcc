@@ -1010,6 +1010,16 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 							data_problem = true
 							literal_refused = true
 						}
+					} else if p.looks_like_compound_literal() {
+						// An unnamed object with static storage duration, defined
+						// in the image like any other top-level object, whose
+						// address initializes this pointer.
+						if address := p.file_scope_compound_literal() {
+							data_address = address
+						} else {
+							data_problem = true
+							literal_refused = true
+						}
 					} else if address := p.file_scope_address() {
 						data_address = address
 					} else {
@@ -3207,6 +3217,21 @@ struct TypeName {
 // share, which is why it is here beside the declarator rather than in the
 // expression reader: it is the declaration grammar with the name left out.
 fn (mut p Parser) parse_type_name(depth int) !TypeName {
+	spec, d, start := p.parse_type_name_parts(depth)!
+	return TypeName{
+		typ:      p.declared_type(spec.clause, d)
+		spelling: p.spelling_of(spec, d.pointer_count())
+		at:       start
+	}
+}
+
+// parse_type_name_parts reads a type name and answers the three pieces it was
+// built from: the specifiers, the abstract declarator, and the token the name
+// started at. A compound literal is read from the declarator as well as the
+// type - its array count and its pointer stars are the shapes the object and
+// the stores are built from - so the parts are kept here rather than folded
+// into the one TypeName a cast or a sizeof needs.
+fn (mut p Parser) parse_type_name_parts(depth int) !(DeclSpec, Declarator, tokenize.Token) {
 	start := p.peek()
 	spec := p.parse_decl_specifiers(depth)!
 	d := p.parse_declarator(depth)!
@@ -3216,11 +3241,7 @@ fn (mut p Parser) parse_type_name(depth int) !TypeName {
 		p.error_at(d.name_at, 'unsupported: a type name is read here, and ${d.name} names an object')
 		return error('a name in a type name')
 	}
-	return TypeName{
-		typ:      p.declared_type(spec.clause, d)
-		spelling: p.spelling_of(spec, d.pointer_count())
-		at:       start
-	}
+	return spec, d, start
 }
 
 // apply_step is one constructor of a declarator applied to a type: a pointer to
