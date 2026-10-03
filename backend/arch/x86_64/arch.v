@@ -1351,6 +1351,35 @@ fn indirect_move(address Register, operand Register, width int, store bool, sign
 	return out
 }
 
+// bit_scan_forward encodes `bsf`: the index of the lowest set bit of the source
+// into the destination. Measured on gcc 16.2.1 at -O2 on this machine,
+// `unsigned ctz32(unsigned x) { return __builtin_ctz(x); }` is
+// `xorl %eax,%eax; rep bsfl %edi,%eax` and the 64-bit `__builtin_ctzll` ends in
+// a bsfq, so the instruction is the whole of the answer at both widths. The
+// source and the destination may be the same register; a zero source leaves the
+// destination undefined, and a program that asks for the trailing zeros of zero
+// has asked a question with no answer.
+pub fn bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {
+	mut out := []u8{cap: 4}
+	mut rex := u8(0x40)
+	if wide {
+		rex |= 0x08
+	}
+	if dst.code >= 8 {
+		rex |= 0x04
+	}
+	if src.code >= 8 {
+		rex |= 0x01
+	}
+	if rex != 0x40 {
+		out << rex
+	}
+	out << u8(0x0f)
+	out << u8(0xbc)
+	out << u8(0xc0 | ((dst.code & 0x07) << 3) | (src.code & 0x07)) // mod 11: the source is a register
+	return out
+}
+
 // frame_reserve opens the space a function's locals live in. The size is an
 // immediate because it is not known while the body is written: the emitter
 // reserves the space with a zero and fills the number in once the body has been
@@ -2203,6 +2232,7 @@ pub:
 	align_stack                     fn () []u8                                        = unsafe { nil }
 	and_immediate                   fn (Register, i32) ![]u8                          = unsafe { nil }
 	and_reg64                       fn (Register, Register) ![]u8                     = unsafe { nil }
+	bit_scan_forward                fn (Register, Register, bool) ![]u8               = unsafe { nil }
 	call_register                   fn (Register) ![]u8                               = unsafe { nil }
 	call_rel32                      fn (i32) []u8                                     = unsafe { nil }
 	call_rip_slot                   fn (i32) []u8                                     = unsafe { nil }
@@ -2333,6 +2363,7 @@ pub fn encoders() Encoders {
 		align_stack:                     &align_stack
 		and_immediate:                   &and_immediate
 		and_reg64:                       &and_reg64
+		bit_scan_forward:                &bit_scan_forward
 		call_register:                   &call_register
 		call_rel32:                      &call_rel32
 		call_rip_slot:                   &call_rip_slot

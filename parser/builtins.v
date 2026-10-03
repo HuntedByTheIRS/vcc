@@ -7,22 +7,26 @@ import types
 
 // The GCC builtins this reader answers while it reads, which are the ones a
 // C library's headers reach for rather than the ones a program writes by hand.
-// They are in the reserved namespace, so no dialect refuses them and no row in
-// `standard/features.v` gates them: a name with two leading underscores carries
-// nothing for the dialect check to report.
+// The last two are the machine's own: the trailing-zero counts, which V's
+// generated C writes into an inline shim rather than into a library call. They
+// are a GNU extension this tree declares in `standard/features.v`, so a strict
+// mode reports them; the folded builtins above them are in the reserved
+// namespace and no row gates them.
 //
-// Each one is folded where it is written, the way `sizeof` is: the question it
-// asks is one the reader can answer from the declaration it was handed, and the
-// value it is worth is an integer constant expression with no run-time part. A
-// builtin whose answer would be a guess is refused by name here rather than
-// filled in with a value this compiler has not computed.
+// Most of the list is folded where it is written, the way `sizeof` is: the
+// question it asks is one the reader can answer from the declaration it was
+// handed, and the value it is worth is an integer constant expression with no
+// run-time part. A builtin whose answer would be a guess is refused by name here
+// rather than filled in with a value this compiler has not computed. The two
+// machine builtins are not folded: their answer is an instruction sequence, and
+// the back end emits it.
 const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_choose_expr',
 	'__builtin_offsetof', '__builtin_va_arg', '__builtin_va_start', '__builtin_va_end',
 	'__builtin_va_copy', '__builtin_huge_val', '__builtin_huge_valf', '__builtin_huge_vall',
 	'__builtin_inf', '__builtin_inff', '__builtin_infl', '__builtin_nan', '__builtin_nanf',
 	'__builtin_nanl', '__builtin_nans', '__builtin_nansf', '__builtin_nansl', '__builtin_classify_type',
 	'__builtin_isinf_sign', '__builtin_signbit', '__builtin_signbitf', '__builtin_signbitl',
-	'__builtin_signbitf128']
+	'__builtin_signbitf128', '__builtin_ctz', '__builtin_ctzll']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -82,6 +86,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_classify_type' {
 			return p.parse_classify_type(at)
+		}
+		'__builtin_ctz', '__builtin_ctzll' {
+			return p.parse_count_trailing(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -281,11 +288,6 @@ fn (mut p Parser) parse_member_offset(declared types.Type) !int {
 // names is read for its tokens and thrown away, because where the walk starts is
 // a property of the enclosing declaration and not of that expression.
 
-// argument_list_names are the four spellings, kept in one place so the check for
-// a name nothing declares skips exactly the calls this reader builds.
-const argument_list_names = ['__builtin_va_start', '__builtin_va_arg', '__builtin_va_end',
-	'__builtin_va_copy']
-
 // list_argument reads the argument list one of the four is given. It has to be
 // a name: it is written by `va_start` and `va_copy`, and a list the reader
 // cannot find again has nowhere to put either.
@@ -379,6 +381,33 @@ fn (mut p Parser) parse_va_copy(at tokenize.Token) !ast.Expr {
 		name: '__builtin_va_copy'
 		args: [destination, source]
 		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_count_trailing reads `__builtin_ctz` and `__builtin_ctzll`, the index of
+// the lowest set bit of an integer. gcc gives both the type int, so the answer is
+// an int at either width. An operand that is not an integer is refused by name:
+// these count the trailing zeros of an integer, and gcc does not convert a float
+// or a pointer into one here.
+fn (mut p Parser) parse_count_trailing(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 1 {
+		p.error_at(at, 'unsupported: ${at.text} takes one value')
+		return error('the argument of ${at.text}')
+	}
+	if !p.is_unresolved(args[0]) {
+		operand := p.value_type(args[0])
+		if operand.kind != .unknown && !operand.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} counts the trailing zeros of an integer, and ${describe_operand(args[0])} is ${operand.describe()}')
+			return error('the operand of ${at.text}')
+		}
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: args
+		typ:  types.int_type()
 		line: at.line
 		col:  at.col
 	})

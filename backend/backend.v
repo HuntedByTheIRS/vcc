@@ -615,6 +615,12 @@ pub fn (t &Target) store_indirect(address Register, src Register, width int) ![]
 	return t.encoders.store_indirect(t.describe(address), t.describe(src), width)
 }
 
+// bit_scan_forward is the index of the lowest set bit, which is what the two
+// count-trailing builtins are worth. `wide` asks for the eight-byte form.
+pub fn (t &Target) bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {
+	return t.encoders.bit_scan_forward(t.describe(dst), t.describe(src), wide)
+}
+
 // The two widenings a conversion between the value classes needs. A byte is
 // widened with its sign kept, which is what converting a value to a char is; a
 // word is widened into the whole register, which is what converting an int to a

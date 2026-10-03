@@ -8477,6 +8477,16 @@ fn (mut e Emitter) emit_va_end(call ast.Call) !void {
 	}
 }
 
+// emit_count_trailing answers `__builtin_ctz` and `__builtin_ctzll` with the
+// index of the lowest set bit, which is one bsf at either width. gcc answers an
+// int for both, and a program that asks this of zero has asked a question with no
+// answer; the value the machine then leaves is undefined, as it is for gcc.
+fn (mut e Emitter) emit_count_trailing(call ast.Call) !void {
+	e.emit_expr_at(call.args[0], 1)!
+	accumulator := e.accumulator(call.line, call.col)!
+	e.append(e.target.bit_scan_forward(accumulator, accumulator, call.name == '__builtin_ctzll')!)
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -8495,9 +8505,9 @@ fn (mut e Emitter) emit_va_end(call ast.Call) !void {
 // function in the same translation unit binds to that definition; every other
 // name is a symbol the loader resolves before the program starts.
 fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
-	// The four argument-list operations are answered before anything else: they
-	// reach the emitter as calls, and the path below would write a call to a
-	// name no image holds.
+	// The argument-list operations and the machine builtins are answered before
+	// anything else: they reach the emitter as calls, and the path below would
+	// write a call to a name no image holds.
 	match call.name {
 		'__builtin_va_start' {
 			return e.emit_va_start(call)
@@ -8510,6 +8520,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		'__builtin_va_end' {
 			return e.emit_va_end(call)
+		}
+		'__builtin_ctz', '__builtin_ctzll' {
+			return e.emit_count_trailing(call)
 		}
 		else {}
 	}

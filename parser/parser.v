@@ -473,11 +473,13 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 				// are inside the expression the call is written to.
 				p.check_undeclared_expression(callee, mut reported)
 			} else {
-				// A call to one of the argument-list operations is not a name the
-				// unit has to declare: the reader built the call itself, from a
-				// spelling in the compiler's own namespace, and there is no
-				// declaration any program could write for it.
-				if expr.name !in argument_list_names {
+				// A call to one of the argument-list operations, or to one of the
+				// machine builtins the back end answers with an instruction, is not
+				// a name the unit has to declare: the reader built the call itself,
+				// from a spelling in the compiler's own namespace, and there is no
+				// declaration any program could write for it. The builtin list in
+				// `builtins.v` is the one place those spellings are named.
+				if expr.name !in builtin_expression_names {
 					p.check_undeclared_name(expr.name, expr.line, expr.col, mut reported)
 				}
 			}
