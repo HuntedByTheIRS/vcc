@@ -780,18 +780,28 @@ fn test_a_body_list_of_addresses_becomes_the_stores_of_the_elements() {
 	assert assigns == 4
 }
 
-// An address of a *part* of an object is refused by name rather than stored.
-// Measured on the binary built from this tree's base commit, `int *p[1]; p[0] =
-// &a[1];` reads back the address of `a` rather than of `a[1]`, because the store
-// an element of an array takes does not place the byte the part starts at. gcc
-// 16.2.1 accepts the program, and a wrong address is worse than a refusal, so the
-// shape is one the refusal names along with the object it is a part of.
-fn test_a_body_list_that_addresses_a_part_of_an_object_is_refused() {
-	result := declarations_of('static int a[2] = {1, 2};\nint main(void) { int *p[2] = {&a[0], &a[1]}; return 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].line == 2
-	assert result.diagnostics[0].col == 32
-	assert result.diagnostics[0].msg.contains('the address of a part of a is not implemented')
+// An address of a part of an object is a value a body's brace list stores like
+// any other. gcc 16.2.1 accepts `int a[2]; int *p[2] = {&a[0], &a[1]};`, and the
+// store an element of an array takes evaluates the address where the declaration
+// runs, so the byte the part starts at is placed: the two address expressions
+// reach the back end as the stores of `p`, one per element.
+fn test_a_body_list_that_addresses_a_part_of_an_object_is_stored() {
+	result := declarations_of('int main(void) { int a[2] = {1, 2}; int *p[2] = {&a[0], &a[1]}; return 0; }')
+	assert result.diagnostics.len == 0
+	mut addresses := 0
+	for stmt in result.unit.decls[0].body {
+		if stmt.kind != .assign {
+			continue
+		}
+		if expr := stmt.expr {
+			if expr is ast.Unary {
+				if expr.op == '&' && expr.expr is ast.Index {
+					addresses++
+				}
+			}
+		}
+	}
+	assert addresses == 2
 }
 
 // An element that begins with a written constant and is longer than one is the

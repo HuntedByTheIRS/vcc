@@ -1989,6 +1989,14 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 			e.append(e.target.imul_immediate(register, stride))
 			e.append(e.target.add_reg64(register, base))
 		}
+		if through_pointer {
+			// The element the index names is a pointer, and `->` reads the
+			// member from the object its value names: the register holds the
+			// element's own storage, so the pointer is read out of it before the
+			// member's byte is added. Reading the member from the storage itself
+			// would answer from the pointer's bytes.
+			e.load_indirect_value(register, register, false, e.target.word_size)!
+		}
 		if offset != 0 {
 			e.append(e.target.add_immediate(register, offset))
 		}
