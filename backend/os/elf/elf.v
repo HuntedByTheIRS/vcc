@@ -1,6 +1,7 @@
 module elf
 
 import backend
+import backend.os.linux
 import image
 
 // The ELF64 container, in the shape Linux starts and its dynamic loader
@@ -88,12 +89,6 @@ pub const elf_symbol_size = 24
 pub const elf_relocation_size = 24
 pub const elf_dynamic_entry_size = 16
 
-// The library every image here runs against, whether or not it was asked for:
-// a program written in C has the C library, and a -lc among the -l flags is
-// this same name and adds nothing. Any other library the image runs against was
-// named on the command line and resolved from there.
-const base_library = 'libc.so.6'
-
 // Sections is where each part of the image landed, as a file offset from the
 // start of the file. The image is one segment that starts at file offset zero,
 // so a file offset and a virtual address differ by the load base and nothing
@@ -126,7 +121,7 @@ pub fn executable(program image.Program, target backend.Target) ![]u8 {
 	// library that is not named here is a library the loader does not map,
 	// which is what an undefined symbol at load comes from.
 	mut libraries := []string{cap: program.libraries.len + 1}
-	libraries << base_library
+	libraries << linux.base_library
 	for name in program.libraries {
 		if name !in libraries {
 			libraries << name

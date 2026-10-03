@@ -12,6 +12,12 @@ module linux
 
 pub const name = 'linux'
 
+// base_library is the C library every image this system writes runs against,
+// whether or not a -l named it: a program written in C has the C library, and
+// the container adds it to the image. The reader that checks an image's imports
+// reads this library for the same reason, and both name it from here.
+pub const base_library = 'libc.so.6'
+
 // Syscall is a kernel entry point: what a compiler can call it, the number the
 // kernel expects in the number register, and the registers its arguments arrive
 // in, in order.

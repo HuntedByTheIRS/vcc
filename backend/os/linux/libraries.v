@@ -43,6 +43,16 @@ const program_header_load = u32(1)
 const program_header_dynamic = u32(2)
 const dynamic_soname = u64(14)
 const dynamic_strtab = u64(5)
+// The rest of the walk to a library's own symbols: the tags that name the
+// symbol table, the hash the loader and this reader count it through, and the
+// size of one symbol record. A reader that answers whether a library defines a
+// name needs these where the SONAME reader above needed only the string table.
+const dynamic_hash = u64(4)
+const dynamic_symtab = u64(6)
+const dynamic_syment = u64(11)
+const dynamic_gnu_hash = u64(0x6ffffef5)
+const elf_symbol_size = 24
+const symbol_section_undefined = u16(0)
 
 // Segment is one loadable program header of a library, in the terms the string
 // table's address is turned into a file offset with: a virtual address is what
@@ -53,14 +63,45 @@ struct LibrarySegment {
 	size   u64
 }
 
+// Library is what a -l name comes to: the file the search found and the name the
+// image carries for it. The two are not the same string, which is the reason
+// both are kept: `-lm` is `/usr/lib/libm.so` on this machine and `libm.so.6` in
+// the image, and a caller that has to read the library needs the file.
+pub struct Library {
+pub:
+	path   string
+	soname string
+}
+
 // resolve_libraries turns the `-l` names the command line gave into the names
 // the image carries, in the order they were written and without repeating one.
 pub fn resolve_libraries(names []string, dirs []string) ![]string {
 	mut out := []string{}
+	for library in resolve_library_files(names, dirs)! {
+		if library.soname !in out {
+			out << library.soname
+		}
+	}
+	return out
+}
+
+// resolve_library_files is the same search with the files kept. A caller that
+// only needs the name the image carries asks resolve_libraries; one that has to
+// read the library asks this, and the two answer the same libraries in the same
+// order.
+pub fn resolve_library_files(names []string, dirs []string) ![]Library {
+	mut out := []Library{}
 	for given in names {
-		soname := resolve_library(given, dirs)!
-		if soname !in out {
-			out << soname
+		library := resolve_library(given, dirs)!
+		mut seen := false
+		for existing in out {
+			if existing.soname == library.soname {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out << library
 		}
 	}
 	return out
@@ -75,14 +116,14 @@ pub fn search_dirs(given []string, system []string) []string {
 	return out
 }
 
-// resolve_library finds the file one `-l` name stands for and answers the name
-// it should be recorded under.
+// resolve_library finds the file one `-l` name stands for and the name it should
+// be recorded under.
 //
 // The parameter is `given` rather than `name` because this module declares a
 // const `name` for the system it describes, and V will not let a function in the
 // module have a local of the same name. The name a caller passed is the one the
 // flag wrote; the name that comes back is the library's own.
-fn resolve_library(given string, dirs []string) !string {
+fn resolve_library(given string, dirs []string) !Library {
 	if given == '' {
 		return error('-l with no library name')
 	}
@@ -93,7 +134,10 @@ fn resolve_library(given string, dirs []string) !string {
 		path := find_file(wanted, dirs) or {
 			return error('cannot find ${wanted}: searched ${describe_dirs(dirs)}')
 		}
-		return library_name_of(path)!
+		return Library{
+			path:   path
+			soname: library_name_of(path)!
+		}
 	}
 	path := find_library(given, dirs) or {
 		return error('cannot find -l${given}: searched ${describe_dirs(dirs)}')
@@ -101,7 +145,10 @@ fn resolve_library(given string, dirs []string) !string {
 	if path.ends_with('.a') {
 		return error('-l${given} is ${path}, an archive, and linking an archive is not implemented yet')
 	}
-	return library_name_of(path)!
+	return Library{
+		path:   path
+		soname: library_name_of(path)!
+	}
 }
 
 fn describe_dirs(dirs []string) string {
@@ -279,27 +326,43 @@ fn soname_in(bytes []u8) string {
 	// the file: the loadable segment the address falls in is what connects the
 	// two, which is the one piece of arithmetic that makes this a reader rather
 	// than a parser.
-	wanted := strtab + soname_at
-	for segment in loaded {
-		if wanted < segment.vaddr || wanted >= segment.vaddr + segment.size {
-			continue
-		}
-		start := int(segment.offset + (wanted - segment.vaddr))
-		return read_c_string(bytes, start)
-	}
-	return ''
+	start := file_offset(loaded, strtab + soname_at) or { return '' }
+	return read_c_string(bytes, start)
 }
 
-// script_library_name reads the library out of a GNU ld script. `libm.so` on
-// this machine is one, and it reads:
+// file_offset turns an address a dynamic table holds into an offset in the file
+// the table was read from. The loadable segment the address falls in is what
+// connects the two, and both readers here need it: the SONAME is an address in
+// the string table and the symbols are named out of the same table.
+fn file_offset(loaded []LibrarySegment, address u64) ?int {
+	for segment in loaded {
+		if address < segment.vaddr || address >= segment.vaddr + segment.size {
+			continue
+		}
+		return int(segment.offset + (address - segment.vaddr))
+	}
+	return none
+}
+
+// ScriptTarget is the file a GNU ld script names: the word as the script wrote
+// it, and the path it resolves to beside the script. Both are kept, because a
+// reader that cannot open the file has to say which word named it.
+struct ScriptTarget {
+	word string
+	path string
+}
+
+// script_target reads the first file a GNU ld script names. `libm.so` on this
+// machine is a script that reads:
 //
 //	/* GNU ld script
 //	OUTPUT_FORMAT(elf64-x86-64)
 //	GROUP ( /usr/lib/libm.so.6  AS_NEEDED ( /usr/lib/libmvec.so.1 ) ) */
 //
-// The first word inside the group is the library the script stands for, so the
-// answer is that file's own name read the way any other library's is.
-fn script_library_name(text string, path string) !string {
+// The first word inside the group is the library the script stands for. A
+// script names its library either absolutely or as a file beside itself; both
+// are paths a directory of the script resolves.
+fn script_target(text string, path string) ?ScriptTarget {
 	for marker in ['GROUP', 'INPUT'] {
 		open := text.index('${marker} (') or { continue }
 		if open < 0 {
@@ -321,29 +384,255 @@ fn script_library_name(text string, path string) !string {
 		if word == '' {
 			continue
 		}
-		// A script names its library either absolutely or as a file beside
-		// itself; both are paths a directory of the script resolves.
 		target := if word.starts_with('/') {
 			word
 		} else {
 			os.join_path(os.dir(path), word)
 		}
-		if !os.is_file(target) {
-			return error('${path} names ${word}, which is not a file')
+		return ScriptTarget{
+			word: word
+			path: target
 		}
-		bytes := os.read_file(target) or {
-			return error('cannot read ${target}: ${err.msg()}')
-		}
-		if !is_elf(bytes.bytes()) {
-			return error('${path} names ${word}, which is not an object file')
-		}
-		soname := soname_in(bytes.bytes())
-		if soname != '' {
-			return soname
-		}
-		return os.base(target)
 	}
-	return error('${path} is neither an object file nor a library script this compiler reads')
+	return none
+}
+
+// script_library_name reads the library out of a GNU ld script: the first file
+// the script names, read the way any other library's name is.
+fn script_library_name(text string, path string) !string {
+	target := script_target(text, path) or {
+		return error('${path} is neither an object file nor a library script this compiler reads')
+	}
+	if !os.is_file(target.path) {
+		return error('${path} names ${target.word}, which is not a file')
+	}
+	bytes := os.read_file(target.path) or {
+		return error('cannot read ${target.path}: ${err.msg()}')
+	}
+	if !is_elf(bytes.bytes()) {
+		return error('${path} names ${target.word}, which is not an object file')
+	}
+	soname := soname_in(bytes.bytes())
+	if soname != '' {
+		return soname
+	}
+	return os.base(target.path)
+}
+
+// library_object answers the ELF file a library path holds: the path itself when
+// it is an object, and the file a GNU ld script names when it is a script. A
+// reader that needs a library's own symbols needs the object rather than the
+// script, and `-lm` on this machine resolves to a script.
+fn library_object(path string) ?string {
+	bytes := os.read_bytes(path) or { return none }
+	if is_elf(bytes) {
+		return path
+	}
+	target := script_target(bytes.bytestr(), path) or { return none }
+	if !os.is_file(target.path) {
+		return none
+	}
+	return target.path
+}
+
+// library_symbols answers the names a shared library defines, so a caller can
+// ask whether an import has something to bind to. A path that is not a library
+// this reader can read answers none rather than an error: a -l name with no file
+// behind it is already reported by the search, and the caller decides what an
+// unreadable library means.
+pub fn library_symbols(path string) ?map[string]bool {
+	object := library_object(path) or { return none }
+	bytes := os.read_bytes(object) or { return none }
+	if !is_elf(bytes) {
+		return none
+	}
+	return defined_symbols(bytes)
+}
+
+// unresolved_imports answers which of an image's imports no library it names
+// provides. The C library is always one of them, because every image this system
+// writes runs against it whether or not a flag named it; the rest are the -l
+// names on the command line.
+//
+// An import none of those libraries defines is what a link refuses as an
+// undefined reference, and it is the shape this compiler used to leave in an
+// image: the compile succeeded, and the program died at load with a symbol
+// lookup error naming nothing the compiler had said. A library the reader cannot
+// read contributes nothing, and when the C library itself cannot be read the
+// check is not made at all, because the loader reads the same file and a compile
+// refused over this reader's failure would be a worse answer than the loader's.
+pub fn unresolved_imports(imports []string, names []string, dirs []string) []string {
+	if imports.len == 0 {
+		return []string{}
+	}
+	base := find_file(base_library, dirs) or { return []string{} }
+	mut provided := library_symbols(base) or { return []string{} }
+	for library in resolve_library_files(names, dirs) or { []Library{} } {
+		if symbols := library_symbols(library.path) {
+			for symbol in symbols.keys() {
+				provided[symbol] = true
+			}
+		}
+	}
+	mut out := []string{}
+	for given in imports {
+		if given !in provided {
+			out << given
+		}
+	}
+	return out
+}
+
+// defined_symbols reads the name of every symbol a library defines. It walks the
+// program headers rather than the sections, for the reason the SONAME reader
+// does: a linked object is allowed to have no section header table, and the
+// loader reads the program headers. Every defined symbol is kept and not only
+// the global ones, because a name the loader can be asked to resolve is the
+// question here, and leaving one out would refuse an import that would have
+// worked.
+fn defined_symbols(bytes []u8) map[string]bool {
+	mut out := map[string]bool{}
+	if bytes.len < elf64_header_size {
+		return out
+	}
+	if bytes[4] != elf64_class || bytes[5] != elf64_data_little_endian {
+		return out
+	}
+	phoff := int(read_u64(bytes, elf64_phoff_at))
+	entry_size := int(read_u16(bytes, elf64_phentsize_at))
+	count := int(read_u16(bytes, elf64_phnum_at))
+	mut dynamic_offset := u64(0)
+	mut found_dynamic := false
+	mut loaded := []LibrarySegment{}
+	for i in 0 .. count {
+		at := phoff + i * entry_size
+		if at + elf64_ph_size > bytes.len {
+			return out
+		}
+		kind := read_u32(bytes, at)
+		if kind == program_header_dynamic {
+			dynamic_offset = read_u64(bytes, at + elf64_ph_offset_at)
+			found_dynamic = true
+		}
+		if kind == program_header_load {
+			loaded << LibrarySegment{
+				offset: read_u64(bytes, at + elf64_ph_offset_at)
+				vaddr:  read_u64(bytes, at + elf64_ph_vaddr_at)
+				size:   read_u64(bytes, at + elf64_ph_filesz_at)
+			}
+		}
+	}
+	if !found_dynamic {
+		return out
+	}
+	mut strtab := u64(0)
+	mut symtab := u64(0)
+	mut hash := u64(0)
+	mut gnu_hash := u64(0)
+	mut syment := u64(elf_symbol_size)
+	mut at := int(dynamic_offset)
+	for at + elf64_dynamic_size <= bytes.len {
+		tag := read_u64(bytes, at)
+		value := read_u64(bytes, at + 8)
+		if tag == 0 {
+			break
+		}
+		if tag == dynamic_strtab {
+			strtab = value
+		} else if tag == dynamic_symtab {
+			symtab = value
+		} else if tag == dynamic_syment {
+			syment = value
+		} else if tag == dynamic_hash {
+			hash = value
+		} else if tag == dynamic_gnu_hash {
+			gnu_hash = value
+		}
+		at += elf64_dynamic_size
+	}
+	if strtab == 0 || symtab == 0 {
+		return out
+	}
+	stride := int(syment)
+	// Sixteen bytes is the smallest a symbol record can be; anything narrower
+	// means the table this reader reached is not one.
+	if stride < 16 {
+		return out
+	}
+	str_at := file_offset(loaded, strtab) or { return out }
+	sym_at := file_offset(loaded, symtab) or { return out }
+	symbols := symbol_count(bytes, loaded, hash, gnu_hash) or { return out }
+	for i in 0 .. symbols {
+		entry := sym_at + i * stride
+		if entry + stride > bytes.len {
+			break
+		}
+		name_at := int(read_u32(bytes, entry))
+		if name_at == 0 {
+			continue
+		}
+		if read_u16(bytes, entry + 6) == symbol_section_undefined {
+			continue
+		}
+		out[read_c_string(bytes, str_at + name_at)] = true
+	}
+	return out
+}
+
+// symbol_count is how many entries a library's dynamic symbol table holds. The
+// count is not stored beside the table: it is derived from the hash the loader
+// walks, and glibc 2.44's `libc.so.6` carries a GNU hash and no DT_HASH, so the
+// GNU hash is the one that has to be read here. Its buckets hold the highest
+// symbol index of each chain, and a chain ends at the first word whose low bit
+// is set, so the last index plus one is the count.
+fn symbol_count(bytes []u8, loaded []LibrarySegment, hash u64, gnu_hash u64) ?int {
+	if gnu_hash != 0 {
+		base := file_offset(loaded, gnu_hash) or { return none }
+		if base + 16 > bytes.len {
+			return none
+		}
+		nbuckets := int(read_u32(bytes, base))
+		symoffset := int(read_u32(bytes, base + 4))
+		bloom_size := int(read_u32(bytes, base + 8))
+		// A bloom word is the machine's word, eight bytes on this target.
+		buckets_at := base + 16 + bloom_size * 8
+		if buckets_at + 4 * nbuckets > bytes.len {
+			return none
+		}
+		mut last := 0
+		for i in 0 .. nbuckets {
+			bucket := int(read_u32(bytes, buckets_at + 4 * i))
+			if bucket > last {
+				last = bucket
+			}
+		}
+		if last == 0 {
+			return symoffset
+		}
+		chain_at := buckets_at + 4 * nbuckets
+		mut index := last
+		for {
+			word_at := chain_at + 4 * (index - symoffset)
+			if word_at + 4 > bytes.len {
+				return none
+			}
+			if read_u32(bytes, word_at) & 1 != 0 {
+				break
+			}
+			index++
+		}
+		return index + 1
+	}
+	if hash != 0 {
+		base := file_offset(loaded, hash) or { return none }
+		if base + 8 > bytes.len {
+			return none
+		}
+		// The second word of a DT_HASH table is the chain count, which is the
+		// symbol count.
+		return int(read_u32(bytes, base + 4))
+	}
+	return none
 }
 
 // is_script_space says whether a byte separates two words of a linker script.
