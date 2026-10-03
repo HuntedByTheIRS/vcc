@@ -77,6 +77,17 @@ fn main() {
 		abort('cannot read ${path}: ${err.msg()}')
 		return
 	}
+	// What the input is decides whether it is read as source at all. An object
+	// or an archive is an input to a link, which this compiler does not have
+	// yet, and reading one as source answers a wrong input kind with a parse
+	// error raised from inside a binary file. The bytes are classified rather
+	// than the path so that standard input, which cannot be read twice, is
+	// decided by the same rule.
+	kind := cli.classify_input(source, path, opts.input_type)
+	if kind != .source {
+		abort(cli.input_refusal(path, kind))
+		return
+	}
 	mut phases := []cli.Phase{}
 	mut started := time.now()
 	// Lexing happens inside the preprocessor, which is the stage that knows
