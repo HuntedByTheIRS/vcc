@@ -1342,6 +1342,44 @@ fn test_a_pointer_defined_at_the_top_level_is_storage() {
 	assert (object.init or { i64(-1) }) == 0
 }
 
+// 6.6p9 makes a cast of an address constant to a pointer or an integer type an
+// address constant, and a cast of an integer constant expression to a pointer
+// type the same: `((void *)0)` is the null pointer constant `g_main_argv` is
+// initialized with in V's generated C (vcc-self.c:5749), `(char *)&x` is the
+// address of x, and `(long)&x` is that address in an eight-byte integer object.
+// Measured on gcc 16.2.1, all of them are accepted.
+fn test_a_cast_in_a_file_scope_initializer_is_an_address_constant() {
+	null := declarations_of('void *g = ((void *)0);')
+	assert null.diagnostics.len == 0
+	assert null.unit.globals.len == 1
+	assert (null.unit.globals[0].init or { i64(1) }) == 0
+	assert null.unit.globals[0].address == none
+	// A cast of an address is the address, dropped to the type it was cast to:
+	// the layout writes the reference and not a number.
+	pointer := declarations_of('int x = 5;\nchar *p = (char *)&x;')
+	assert pointer.diagnostics.len == 0
+	address := pointer.unit.globals[1].address or {
+		assert false
+		return
+	}
+	assert address.name == 'x'
+	integer := declarations_of('int x = 5;\nlong l = (long)&x;')
+	assert integer.diagnostics.len == 0
+	cast := integer.unit.globals[1].address or {
+		assert false
+		return
+	}
+	assert cast.name == 'x'
+	// An object narrower than an address cannot hold one, which is what gcc
+	// refuses as `initializer element is not computable at load time`; a bare
+	// address with no cast is refused for an integer object too.
+	narrow := declarations_of('int x = 5;\nint i = (long)&x;')
+	assert narrow.diagnostics.len >= 1
+	assert narrow.diagnostics[0].msg.contains('narrower than an address')
+	bare := declarations_of('int x = 5;\nlong l = &x;')
+	assert bare.diagnostics.len == 1
+}
+
 fn test_a_definition_keeps_its_parameters() {
 	result := declarations_of('int add(int a, int b) { return a + b; }')
 	assert result.diagnostics.len == 0

@@ -3345,6 +3345,29 @@ fn test_a_top_level_double_holds_its_initializer_in_the_image() {
 	assert run_image(whole.bytes) == 6
 }
 
+// 6.6p9 makes a cast of an address constant to a pointer or an integer type an
+// address constant, and a cast of an integer constant expression to a pointer
+// type the same. Measured on gcc 16.2.1, the three programs below exit 3:
+// `g_main_argv` in V's generated C is initialized with `NULL`, which arrives from
+// a header as `((void *)0)`, and a pointer-typed global cannot hold it before
+// this.
+fn test_a_file_scope_cast_initializer_is_an_address_constant() {
+	null := emit(translation_unit('void *g = ((void *)0);\nint main(void) { return g == 0 ? 3 : 4; }'),
+		Options{})
+	assert null.diagnostics.len == 0
+	assert run_image(null.bytes) == 3
+	address := emit(translation_unit('int x = 5;\nchar *p = (char *)&x;\nint main(void) { return p == (char *)&x ? 3 : 4; }'),
+		Options{})
+	assert address.diagnostics.len == 0
+	assert run_image(address.bytes) == 3
+	// The same address in an eight-byte integer object is the value the pointer
+	// holds, which is what casting it to an integer type means.
+	integer := emit(translation_unit('int x = 5;\nlong l = (long)&x;\nint main(void) { int *p = &x; return l == (long)p ? 3 : 4; }'),
+		Options{})
+	assert integer.diagnostics.len == 0
+	assert run_image(integer.bytes) == 3
+}
+
 fn test_a_double_and_an_int_convert_both_ways() {
 	emitted := emit(translation_unit('int main() { int n = 7; double d = n; d = d / 2.0; int r = d * 2; return r; }'),
 		Options{})
