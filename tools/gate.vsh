@@ -114,11 +114,36 @@ fn check_tests(root string) []string {
 	if result.exit_code == 0 {
 		return []
 	}
-	// The failing lines and the summary are what someone needs without scrolling
-	// through the whole run.
+	// Which file failed is not the whole of what someone needs: V prints the failing
+	// function and the assertion under the FAIL line, up to a rule of dashes, and
+	// keeping only the FAIL lines made a CI failure say which file failed and never
+	// why. Measured on V 0.5.2, the shape is
+	//
+	//   FAIL    10.405 ms /path/x_test.v
+	//   /path/x_test.v:4: fn test_name
+	//      > assert 1 == 2
+	//        Left value (len: 1): `1`
+	//   --------------------------------------------------------------------------
+	//
+	// and the reason is the lines between the first and the third.
 	mut problems := []string{}
+	mut under_failure := false
 	for line in result.output.split_into_lines() {
-		if line.starts_with('FAIL') || line.contains('Summary for all V') {
+		if line.starts_with('FAIL') {
+			under_failure = true
+			problems << line.trim_space()
+			continue
+		}
+		if under_failure && line.starts_with('---') {
+			under_failure = false
+			continue
+		}
+		if line.contains('Summary for all V') {
+			under_failure = false
+			problems << line.trim_space()
+			continue
+		}
+		if under_failure {
 			problems << line.trim_space()
 		}
 	}
