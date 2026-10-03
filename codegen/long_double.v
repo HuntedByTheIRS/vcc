@@ -265,6 +265,13 @@ fn (mut e Emitter) extended_to_double(expr ast.Expr, line int, col int) !void {
 // already one is the same value, so its address is left as it stands; anything
 // else is converted into a frame temporary and the address of that is what the
 // conversion is worth.
+//
+// The temporary's address is parked before the source is evaluated, because
+// converting it reads the source out of the accumulator - an integer source is
+// there, a floating one is in the floating register beside it - and working out
+// the address writes the accumulator too. Parking it first is what keeps an
+// integer source from being replaced by the address of the destination before
+// the conversion sees it.
 fn (mut e Emitter) emit_extended_cast(cast ast.Cast, depth int) !void {
 	if e.long_double_of(cast.expr) {
 		return e.emit_expr_at(cast.expr, depth)
@@ -274,12 +281,12 @@ fn (mut e Emitter) emit_extended_cast(cast ast.Cast, depth int) !void {
 		return error('pointer to a long double')
 	}
 	temporary := e.reserve(long_double_bytes)
-	e.emit_expr_at(cast.expr, depth + 1)!
 	base := e.frame_pointer(cast.line, cast.col)!
-	address := e.value_slot(depth + 1)
+	address := e.value_slot(depth)
 	register := e.accumulator(cast.line, cast.col)!
 	e.append(e.target.address_of_slot(base, temporary.offset, register))
 	e.store_accumulator(address, cast.line, cast.col)!
+	e.emit_expr_at(cast.expr, depth + 1)!
 	e.convert_value_to_extended(address, cast.expr, cast.line, cast.col)!
 	return e.leave_address(temporary, cast.line, cast.col)
 }
