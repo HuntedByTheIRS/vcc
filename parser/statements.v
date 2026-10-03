@@ -1594,43 +1594,64 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// A struct's brace initializer is one store per member the list wrote,
 		// at the offset the layout gave that member: `struct S s = {1, 2};`
 		// stores 1 into the first member and 2 into the second, which is the
-		// assignment `s.first = 1;` makes and then `s.second = 2;`. The members
+		// assignment `s.first = 1;` makes and then `s.second = 2;`. A named
+		// bitfield takes its value into the field's own bits; an unnamed field
+		// is skipped, because it is not a member the list writes. The members
 		// the list did not reach are the zeros C says the rest of the object
 		// holds (6.7.8p21), and the frame slot starts as whatever was there, so
 		// they have to be written.
 		if layout := struct_brace {
+			targets := members_taking_values(spec.clause)
 			for i in 0 .. struct_values.len {
-				member := spec.clause.members[i]
+				at := targets[i]
+				member := spec.clause.members[at]
 				stmts << ast.Stmt{
 					kind:   .assign
 					target: d.name
 					field:  ast.Field{
-						name:     d.name
-						member:   member.name
-						offset:   layout.offsets[i]
-						spelling: member.typ.storage_spelling()
-						typ:      member.typ
-						line:     d.name_at.line
-						col:      d.name_at.col
+						name:       d.name
+						member:     member.name
+						offset:     layout.offsets[at]
+						spelling:   member.typ.storage_spelling()
+						typ:        member.typ
+						bitfield:   member.bitfield
+						bit_offset: if member.bitfield { layout.bits[at] } else { 0 }
+						bit_width:  member.bits
+						unit_width: if member.bitfield {
+							p.representation.size_of(member.typ) or { 0 }
+						} else {
+							0
+						}
+						line:       d.name_at.line
+						col:        d.name_at.col
 					}
 					expr:   p.constant_expr(struct_values[i].number or { NumberConstant{} })
 					line:   d.name_at.line
 					col:    d.name_at.col
 				}
 			}
-			for i in struct_values.len .. spec.clause.members.len {
-				member := spec.clause.members[i]
+			for i in struct_values.len .. targets.len {
+				at := targets[i]
+				member := spec.clause.members[at]
 				stmts << ast.Stmt{
 					kind:   .assign
 					target: d.name
 					field:  ast.Field{
-						name:     d.name
-						member:   member.name
-						offset:   layout.offsets[i]
-						spelling: member.typ.storage_spelling()
-						typ:      member.typ
-						line:     d.name_at.line
-						col:      d.name_at.col
+						name:       d.name
+						member:     member.name
+						offset:     layout.offsets[at]
+						spelling:   member.typ.storage_spelling()
+						typ:        member.typ
+						bitfield:   member.bitfield
+						bit_offset: if member.bitfield { layout.bits[at] } else { 0 }
+						bit_width:  member.bits
+						unit_width: if member.bitfield {
+							p.representation.size_of(member.typ) or { 0 }
+						} else {
+							0
+						}
+						line:       d.name_at.line
+						col:        d.name_at.col
 					}
 					expr:   ast.Expr(ast.IntLit{
 						value: 0

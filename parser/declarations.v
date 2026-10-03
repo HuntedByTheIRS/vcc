@@ -2827,26 +2827,25 @@ fn (mut p Parser) initializer_list_for(written string, elements []BraceElement, 
 // values to the members in the order the members were written, and the members
 // after the last value are zero (6.7.8p21).
 //
-// A struct is read here only when every member is a complete scalar. A bitfield
-// member takes a value written into a field of a storage unit and a member that
-// is itself an aggregate takes a value written into a sub-object, neither of
-// which is a store this tree places; each is refused by name rather than written
-// at a guessed offset, because a wrong value is worse than a refusal. A list
-// longer than the members is the constraint gcc 16.2.1 reports as `excess
-// elements in struct initializer`.
+// A struct is read here only when every member that takes a value is a complete
+// scalar. A member that is itself an aggregate takes a value written into a
+// sub-object, which is not a store this tree places, and it is refused by name
+// rather than written at a guessed offset, because a wrong value is worse than a
+// refusal. A bitfield member is a complete scalar: its value is written into the
+// field's own bits, which the emitter does. A list longer than the members that
+// take values is the constraint gcc 16.2.1 reports as `excess elements in struct
+// initializer`.
 fn (mut p Parser) struct_brace_members(aggregate types.Type, list BraceList, name string) ?types.Layout {
-	for member in aggregate.members {
-		if member.bitfield {
-			p.error_at(list.at, 'unsupported: ${name} has a bitfield member ${member.name}, and a value is not written into a bitfield here')
-			return none
-		}
+	targets := members_taking_values(aggregate)
+	for at in targets {
+		member := aggregate.members[at]
 		if member.typ.kind in [types.Kind.struct_, .union_, .array] || member.typ.kind == .unknown {
 			p.error_at(list.at, 'unsupported: ${name} has a member ${member.name} of the type ${member.typ.describe()}, and a value is not written into an object of that type here')
 			return none
 		}
 	}
-	if list.elements.len > aggregate.members.len {
-		p.error_at(list.at, 'a constraint violation: ${name} has ${aggregate.members.len} members and its initializer writes ${list.elements.len}')
+	if list.elements.len > targets.len {
+		p.error_at(list.at, 'a constraint violation: ${name} has ${targets.len} members and its initializer writes ${list.elements.len}')
 		return none
 	}
 	// An element has to be the class its member holds: an address for a member of
@@ -2856,14 +2855,15 @@ fn (mut p Parser) struct_brace_members(aggregate types.Type, list BraceList, nam
 	// one is a wrong value, not a conversion.
 	for i in 0 .. list.elements.len {
 		element := list.elements[i]
-		pointer := aggregate.members[i].typ.kind == .pointer
+		member := aggregate.members[targets[i]]
+		pointer := member.typ.kind == .pointer
 		if element.address != none && !pointer {
-			p.error_at(list.at, 'unsupported: ${name} has a member ${aggregate.members[i].name} of the type ${aggregate.members[i].typ.describe()}, and its initializer writes an address')
+			p.error_at(list.at, 'unsupported: ${name} has a member ${member.name} of the type ${member.typ.describe()}, and its initializer writes an address')
 			return none
 		}
 		if number := element.number {
 			if pointer && (number.number.integer or { i64(0) }) != 0 {
-				p.error_at(list.at, 'unsupported: ${name} has a member ${aggregate.members[i].name} of the type ${aggregate.members[i].typ.describe()}, and its initializer writes the number ${number.number.integer or { i64(0) }}')
+				p.error_at(list.at, 'unsupported: ${name} has a member ${member.name} of the type ${member.typ.describe()}, and its initializer writes the number ${number.number.integer or { i64(0) }}')
 				return none
 			}
 		}
@@ -2875,18 +2875,39 @@ fn (mut p Parser) struct_brace_members(aggregate types.Type, list BraceList, nam
 	return layout
 }
 
+// members_taking_values is the index in an aggregate's members of each member a
+// positional brace initializer can write, in the order the members were written.
+// An unnamed bitfield is not a member: 6.7.2.1p12 says a positional list skips
+// it, and a zero-width one only asks the next member to start at a unit
+// boundary, so neither takes a value out of the list. A named bitfield does take
+// one, into its own bits.
+fn members_taking_values(aggregate types.Type) []int {
+	mut indices := []int{}
+	for i, member in aggregate.members {
+		if member.name.len == 0 {
+			continue
+		}
+		indices << i
+	}
+	return indices
+}
+
 // struct_member_inits makes each element a struct's brace initializer wrote the
 // value the image holds for that member: the conversion the member's own type
 // makes, at the offset and width the layout gave the member, or an address the
-// layout resolves when the member is a pointer.
+// layout resolves when the member is a pointer. A bitfield member carries the
+// field's own bit position and width beside the unit it lies in, because a value
+// for it is written into those bits and not at a byte of its own.
 fn (mut p Parser) struct_member_inits(aggregate types.Type, list BraceList, layout types.Layout) []ast.MemberInit {
+	targets := members_taking_values(aggregate)
 	mut members := []ast.MemberInit{cap: list.elements.len}
 	for i in 0 .. list.elements.len {
 		element := list.elements[i]
-		member := aggregate.members[i]
+		at := targets[i]
+		member := aggregate.members[at]
 		if address := element.address {
 			members << ast.MemberInit{
-				offset:   layout.offsets[i]
+				offset:   layout.offsets[at]
 				width:    p.representation.size_of(member.typ) or { 0 }
 				spelling: member.typ.storage_spelling()
 				address:  address
@@ -2897,11 +2918,19 @@ fn (mut p Parser) struct_member_inits(aggregate types.Type, list BraceList, layo
 		init, init_float := initializer_for(member.typ.describe(), number.number.integer,
 			number.number.floating)
 		members << ast.MemberInit{
-			offset:     layout.offsets[i]
+			offset:     layout.offsets[at]
 			width:      p.representation.size_of(member.typ) or { 0 }
 			spelling:   member.typ.storage_spelling()
 			init:       init
 			init_float: init_float
+			bitfield:   member.bitfield
+			bit_offset: if member.bitfield { layout.bits[at] } else { 0 }
+			bit_width:  member.bits
+			unit_width: if member.bitfield {
+				p.representation.size_of(member.typ) or { 0 }
+			} else {
+				0
+			}
 		}
 	}
 	return members
@@ -3596,9 +3625,22 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 			continue
 		}
 		spec := p.parse_decl_specifiers(depth + 1)!
-		// An unnamed bitfield, `int : 3;`, has a width and no declarator.
+		// An unnamed bitfield, `int : 3;`, has a width and no declarator. A width
+		// of zero is allowed and only asks the next member of the unit's type to
+		// start where this one is; a negative width is not a number of bits, and
+		// gcc refuses it as `negative width in bit-field '<anonymous>'`.
 		if p.at_punct(':') {
-			bits := p.parse_bitfield_width()!
+			bits := p.parse_bitfield_width(spec.start)!
+			if bits < 0 {
+				p.error_at(spec.start, 'unsupported: an unnamed bitfield is declared with a negative width ${bits}')
+				return error('bitfield width')
+			}
+			if unit := p.representation.size_of(spec.clause) {
+				if bits > unit * 8 {
+					p.error_at(spec.start, 'unsupported: the width of an unnamed bitfield exceeds the width of its type')
+					return error('bitfield width')
+				}
+			}
 			members << types.Member{
 				typ:      spec.clause
 				bitfield: true
@@ -3620,12 +3662,35 @@ fn (mut p Parser) parse_member_list(keyword tokenize.Token, open tokenize.Token,
 			}
 			d := p.parse_declarator(depth + 1)!
 			p.skip_gnu_postfix()!
-			bits := if p.at_punct(':') { p.parse_bitfield_width()! } else { 0 }
+			mut width := 0
+			mut written := false
+			if p.at_punct(':') {
+				written = true
+				width = p.parse_bitfield_width(spec.start)!
+			}
+			typ := p.declared_type(spec.clause, d)
+			if written {
+				// A named bitfield's width is a positive number of bits: gcc
+				// refuses `int a : 0;` as `zero width for bit-field 'a'` and a
+				// negative one as `negative width in bit-field 'a'`. The width
+				// may not exceed the width of the type it is declared with,
+				// which gcc refuses as `width of 'a' exceeds its type`.
+				if width <= 0 {
+					p.error_at(spec.start, "unsupported: the bitfield member ${d.name} is declared with a width of ${width}, and a named bitfield's width is a positive number of bits")
+					return error('bitfield width')
+				}
+				if unit := p.representation.size_of(typ) {
+					if width > unit * 8 {
+						p.error_at(spec.start, 'unsupported: the width ${width} of the bitfield member ${d.name} exceeds its type')
+						return error('bitfield width')
+					}
+				}
+			}
 			members << types.Member{
 				name:     d.name
-				typ:      p.declared_type(spec.clause, d)
-				bitfield: bits > 0
-				bits:     bits
+				typ:      typ
+				bitfield: written
+				bits:     width
 				line:     if d.name.len > 0 { d.name_at.line } else { spec.start.line }
 				col:      if d.name.len > 0 { d.name_at.col } else { spec.start.col }
 			}
@@ -3676,19 +3741,20 @@ fn (mut p Parser) parse_bitint_width(at tokenize.Token) !int {
 	return int(value)
 }
 
-// parse_bitfield_width reads `: N`, the width of a bitfield. A width this reader
-// can read is a number, which is what a source file writes; anything else - an
-// expression a header computed - is scanned to its separator and the member is
-// recorded without a width, which is what the reader that asked decides about.
-fn (mut p Parser) parse_bitfield_width() !int {
+// parse_bitfield_width reads `: N`, the width of a bitfield. 6.7.2.1 makes the
+// width an integer constant expression, so it is read as one and folded: a width
+// written as a macro or an enum name is the number it names. An expression the
+// folder cannot compute is refused by name rather than read as a zero, because a
+// width read as zero would move the member to a unit boundary the program did
+// not ask for and the object would be laid out at the wrong size.
+fn (mut p Parser) parse_bitfield_width(at tokenize.Token) !int {
 	p.next() // :
-	if p.peek().kind == .number {
-		t := p.next()
-		value := parse_integer_literal(t.text) or { return 0 }
-		return int(value)
+	expression := p.parse_expression()!
+	value := p.constant_value(expression) or {
+		p.error_at(at, 'unsupported: the width of a bitfield is not an integer constant expression this compiler can compute')
+		return error('bitfield width')
 	}
-	p.skip_to_separator()!
-	return 0
+	return int(value)
 }
 
 // parse_declarator reads one declarator: pointer stars, a name, and the array

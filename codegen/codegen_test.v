@@ -792,6 +792,45 @@ fn test_a_bitfield_group_with_a_bool_and_a_zero_width_field() {
 	assert run_image(emitted.bytes) == 4
 }
 
+// A bitfield brace initializer writes each field its own bits, whether the
+// object is in a body or at file scope. Measured on gcc 16.2.1, the body one
+// returns 4 and the file-scope one returns 2.
+fn test_a_bitfield_brace_initializer_writes_each_field_its_own_bits() {
+	emitted := emit(translation_unit('struct B { unsigned int a : 3; signed int b : 5; _Bool c : 1; unsigned int : 0; unsigned int d : 2; };\nint main(void) { struct B bf = {5u, -3, 1, 1u}; return (bf.a == 5u) + (bf.b == -3) + (bf.c == 1u) + (bf.d == 1u); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
+	file_scope := emit(translation_unit('struct B { unsigned int a : 3; unsigned int b : 5; };\nstruct B g = {5, 17};\nint main(void) { return (g.a == 5) + (g.b == 17); }'),
+		Options{})
+	assert file_scope.diagnostics.len == 0
+	assert run_image(file_scope.bytes) == 2
+}
+
+// A signed field's initializer keeps its sign on the way back out: gcc 16.2.1
+// reads `struct S g = {-3};` back as -3, and this does too. A value wider than
+// the field is cut to the field's width, which is what a store into it does:
+// `unsigned int a : 3` written 9 reads back 1.
+fn test_a_bitfield_brace_initializer_sign_extends_and_truncates() {
+	signed := emit(translation_unit('struct S { signed int b : 5; };\nstruct S g = {-3};\nint main(void) { return g.b == -3; }'),
+		Options{})
+	assert signed.diagnostics.len == 0
+	assert run_image(signed.bytes) == 1
+	truncated := emit(translation_unit('struct S { unsigned int a : 3; };\nint main(void) { struct S s = {9}; return s.a; }'),
+		Options{})
+	assert truncated.diagnostics.len == 0
+	assert run_image(truncated.bytes) == 1
+}
+
+// A positional list skips an unnamed field, zero-width or not: the value after
+// it goes to the member after it. gcc 16.2.1 returns 2 here, because a is 5 and
+// d is 3.
+fn test_a_bitfield_brace_initializer_skips_an_unnamed_field() {
+	emitted := emit(translation_unit('struct T { unsigned int a : 3; unsigned int : 0; unsigned int d : 2; };\nint main(void) { struct T t = {5, 3}; return (t.a == 5) + (t.d == 3); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 2
+}
+
 // A field wider than four bytes is refused by name rather than written with a
 // clear mask this back end cannot express. The refusal says which unit it is.
 fn test_a_store_into_a_bitfield_wider_than_four_bytes_is_refused() {

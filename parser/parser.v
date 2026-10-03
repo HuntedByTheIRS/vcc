@@ -2476,7 +2476,16 @@ fn (mut p Parser) parse_arguments() ![]ast.Expr {
 // guess a width for. Measured, `return 4294967295 > 2147483647;` was compiled
 // with the constant read as an int and returned 0 where ISO C and gcc return 1.
 fn (mut p Parser) constant_type(at tokenize.Token, value i64) types.Type {
-	return types.integer_constant_type(at.text, value, p.representation) or {
+	// A constant written with a leading minus reaches here with the sign folded
+	// into the value while the token holds the unsigned literal: the brace-list
+	// reader reads `-3` as the value -3 and keeps the token `3`. 6.5.3.3 gives
+	// `-3` the type of its promoted operand, so the type is the type of the
+	// token's own value, not of the signed one. Asking the type of -3 directly
+	// reads the minus as the top bit of a 64-bit pattern and refuses the
+	// constant as too large, which is what happened to every struct brace list
+	// with a negative member.
+	operand := if value < 0 { parse_integer_literal(at.text) or { value } } else { value }
+	return types.integer_constant_type(at.text, operand, p.representation) or {
 		p.error_at(at, err.msg())
 		return types.Type{}
 	}
