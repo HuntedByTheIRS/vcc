@@ -1652,6 +1652,32 @@ fn test_a_redeclaration_with_a_different_type_is_refused() {
 	assert declarations_of('int f(int a);\nint f(char b);\nint main(void) { return 0; }').diagnostics.len == 1
 }
 
+// 6.7.6.3p15: a parameter declared with a qualified type is taken as having the
+// unqualified version of its declared type, so a qualifier on the parameter's
+// own type does not make a second declaration of the name a different type.
+// Measured, gcc 16.2.1 under `-std=c99` accepts the two declarations of memcpy
+// below; glibc's string.h declares memcpy with `__restrict` on both pointers,
+// where the declaration this tree already holds for memcpy spells neither, so
+// the pair is a stop on the path to including <string.h>. The qualifier of what
+// the parameter points at is not the parameter's own and stays: measured,
+// gcc 16.2.1 refuses `void f(void *); void f(const void *);` with
+// `conflicting types for f`, and that pair is still refused here.
+fn test_a_parameter_qualified_only_on_its_own_type_is_not_a_redeclaration() {
+	accepted := declarations_of('void *memcpy(void *d, const void *s, unsigned long n);\nvoid *memcpy(void *restrict d, const void *restrict s, unsigned long n);\nint main(void) { return 0; }')
+	assert accepted.diagnostics.len == 0
+	// `const` and `volatile` on the parameter's own pointer type are dropped the
+	// same way `restrict` is.
+	assert declarations_of('void f(int *p);\nvoid f(int *const p);\nint main(void) { return 0; }').diagnostics.len == 0
+	assert declarations_of('void f(int *p);\nvoid f(int *volatile p);\nint main(void) { return 0; }').diagnostics.len == 0
+	// The qualifier of what the parameter points at is kept, so the two
+	// declarations describe two types and the second is the constraint
+	// violation gcc reports as `conflicting types for f`.
+	pointed_at := declarations_of('void f(void *d);\nvoid f(const void *d);\nint main(void) { return 0; }')
+	assert pointed_at.diagnostics.len == 1
+	assert pointed_at.diagnostics[0].msg.contains('f is declared as void (void *)')
+	assert pointed_at.diagnostics[0].line == 2
+}
+
 // A word the language reserves for itself cannot name a declaration (6.4.1).
 // Measured, `int if = 1;` and `int main(void) { int sizeof = 1; return 0; }`
 // compiled where gcc 16.2.1 refuses both at the name with `expected identifier or
