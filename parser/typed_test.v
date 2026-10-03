@@ -444,6 +444,52 @@ fn subscript_of(source string) ast.Index {
 	return returned as ast.Index
 }
 
+// The difference of two pointers is a `ptrdiff_t`, and 6.5.6p9 makes that a
+// signed integer type rather than a pointer. This target's choice is written out
+// by the reader: measured with `_Generic` on gcc 16.2.1, `(q - p)` for two `int *`
+// selects `long` and selects neither `long long` nor `int`, and sizeof is 8. The
+// difference composes like any other `long`, so comparing it with zero is the
+// signed comparison and not an unsigned one.
+fn test_the_difference_of_two_pointers_is_a_long() {
+	result := checked('int main() { int a[6]; int *p = a; int *q = a + 4; return q - p; }')
+	body := result.unit.decls[0].body
+	returned := body[3].expr or {
+		assert false
+		return
+	}
+	difference := returned as ast.Binary
+	assert difference.op == '-'
+	assert difference.typ.same(types.long_type())
+	// `q - p < 0` is a comparison of a long and the whole expression is an int.
+	compared := parsed('int main() { int a[6]; int *p = a; int *q = a + 4; return q - p < 0; }')
+	assert compared.diagnostics.len == 0
+	outer := compared.unit.decls[0].body[3].expr or {
+		assert false
+		return
+	}
+	less := outer as ast.Binary
+	assert less.op == '<'
+	assert less.typ.same(types.int_type())
+	assert (less.left as ast.Binary).typ.same(types.long_type())
+}
+
+// Two pointers whose pointed-at types are not compatible have no shared element
+// to count in, and their difference is refused where it is written. A qualified
+// and an unqualified version of one type are compatible (6.5.6p8), and two
+// `void *` are the pair the GNU dialects accept, so neither of those is refused.
+fn test_the_difference_of_incompatible_pointers_is_refused() {
+	refused := parsed('int main() { int *p = 0; char *q = 0; return q - p; }')
+	assert refused.diagnostics.len == 1
+	message := refused.diagnostics[0].msg
+	assert message.contains('point at incompatible types')
+	assert message.contains('int *')
+	assert message.contains('char *')
+	qualified := parsed('int main() { const char *p = 0; char *q = 0; return p - q; }')
+	assert qualified.diagnostics.len == 0
+	voids := parsed('int main() { void *p = 0; void *q = 0; return p - q; }')
+	assert voids.diagnostics.len == 0
+}
+
 fn test_the_arguments_of_a_call_are_read_against_its_declaration() {
 	// `int *p` and a char * argument: the two point at different types, which is
 	// the constraint 6.5.16.1 names for an assignment and 6.5.2.2 for an
