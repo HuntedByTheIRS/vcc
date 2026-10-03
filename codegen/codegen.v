@@ -8490,6 +8490,14 @@ fn (mut e Emitter) emit_va_end(call ast.Call) !void {
 // compare-exchange each take their locked instruction at every order; and a
 // sequentially consistent fence is a full barrier while an acquire or a release
 // fence emits nothing. This reads that number and does not guess at it.
+//
+// Each argument is evaluated at the depth of the call plus its own place in the
+// argument list, the way the call path evaluates an ordinary call's arguments,
+// because a value slot is keyed by that depth. Evaluating at a fixed depth
+// instead lets an argument's temporary land on the slot an earlier argument's
+// value is waiting in, and the earlier argument is then read back as the
+// temporary: `pair(__builtin_ctz(1), __builtin_ctzll(1ULL << 40))` answered with
+// the 64-bit count's own operand.
 
 // atomic_target_width is the width of the object an atomic builtin operates on,
 // which is what its pointer argument names. A width this back end has no atomic
@@ -8548,12 +8556,12 @@ fn (mut e Emitter) widen_machine_value(typ types.Type, destination backend.Regis
 // emit_atomic_load reads the value a pointer names. The read is the ordinary read
 // at every order -- this machine does not reorder a load of an aligned object --
 // and it widens a char or a short the way a plain read of that type does.
-fn (mut e Emitter) emit_atomic_load(call ast.Call) !void {
+fn (mut e Emitter) emit_atomic_load(call ast.Call, depth int) !void {
 	width := e.atomic_target_width(call, '__atomic_load_n') or {
 		return error('the width of __atomic_load_n')
 	}
 	unsigned := call.typ.is_unsigned_type()
-	e.emit_expr_at(call.args[0], 1)!
+	e.emit_expr_at(call.args[0], depth + 1)!
 	address := e.scratch(call.line, call.col)!
 	accumulator := e.accumulator(call.line, call.col)!
 	e.append(e.target.move_register64(address, accumulator)!)
@@ -8564,17 +8572,17 @@ fn (mut e Emitter) emit_atomic_load(call ast.Call) !void {
 // the store is an xchg, whose implicit lock is the barrier the order asks for; at
 // relaxed and release it is the plain store, which this machine does not reorder
 // past the instructions around it.
-fn (mut e Emitter) emit_atomic_store(call ast.Call) !void {
+fn (mut e Emitter) emit_atomic_store(call ast.Call, depth int) !void {
 	width := e.atomic_target_width(call, '__atomic_store_n') or {
 		return error('the width of __atomic_store_n')
 	}
 	order := atomic_order_value(call.args[2])
 	base := e.frame_pointer(call.line, call.col)!
 	address_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[0], 1)!
+	e.emit_expr_at(call.args[0], depth + 1)!
 	e.store_accumulator(address_slot, call.line, call.col)!
 	value_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[1], 1)!
+	e.emit_expr_at(call.args[1], depth + 2)!
 	e.store_accumulator(value_slot, call.line, call.col)!
 	address := e.scratch(call.line, call.col)!
 	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
@@ -8590,16 +8598,16 @@ fn (mut e Emitter) emit_atomic_store(call ast.Call) !void {
 // emit_atomic_exchange swaps a value with the one a pointer names and answers the
 // value memory held before: gcc's `exchange` returns the previous value, and the
 // machine's xchg leaves exactly that in the register.
-fn (mut e Emitter) emit_atomic_exchange(call ast.Call) !void {
+fn (mut e Emitter) emit_atomic_exchange(call ast.Call, depth int) !void {
 	width := e.atomic_target_width(call, '__atomic_exchange_n') or {
 		return error('the width of __atomic_exchange_n')
 	}
 	base := e.frame_pointer(call.line, call.col)!
 	address_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[0], 1)!
+	e.emit_expr_at(call.args[0], depth + 1)!
 	e.store_accumulator(address_slot, call.line, call.col)!
 	value_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[1], 1)!
+	e.emit_expr_at(call.args[1], depth + 2)!
 	e.store_accumulator(value_slot, call.line, call.col)!
 	address := e.scratch(call.line, call.col)!
 	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
@@ -8613,17 +8621,17 @@ fn (mut e Emitter) emit_atomic_exchange(call ast.Call) !void {
 // value that was there before, which is what the machine's xadd leaves in the
 // register. A subtraction is the same instruction over a negated register, since
 // the reader has already told the two apart by name.
-fn (mut e Emitter) emit_atomic_fetch(call ast.Call, subtract bool) !void {
+fn (mut e Emitter) emit_atomic_fetch(call ast.Call, subtract bool, depth int) !void {
 	spelling := if subtract { '__atomic_fetch_sub' } else { '__atomic_fetch_add' }
 	width := e.atomic_target_width(call, spelling) or {
 		return error('the width of ${spelling}')
 	}
 	base := e.frame_pointer(call.line, call.col)!
 	address_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[0], 1)!
+	e.emit_expr_at(call.args[0], depth + 1)!
 	e.store_accumulator(address_slot, call.line, call.col)!
 	value_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[1], 1)!
+	e.emit_expr_at(call.args[1], depth + 2)!
 	e.store_accumulator(value_slot, call.line, call.col)!
 	address := e.scratch(call.line, call.col)!
 	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
@@ -8646,19 +8654,19 @@ fn (mut e Emitter) emit_atomic_fetch(call ast.Call, subtract bool) !void {
 // 0. The value to compare against travels in the accumulator because the machine's
 // cmpxchg compares the accumulator implicitly, and the zero flag carries the
 // answer until it is turned into the int the standard gives the question.
-fn (mut e Emitter) emit_atomic_compare_exchange(call ast.Call) !void {
+fn (mut e Emitter) emit_atomic_compare_exchange(call ast.Call, depth int) !void {
 	width := e.atomic_target_width(call, '__atomic_compare_exchange_n') or {
 		return error('the width of __atomic_compare_exchange_n')
 	}
 	base := e.frame_pointer(call.line, call.col)!
 	address_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[0], 1)!
+	e.emit_expr_at(call.args[0], depth + 1)!
 	e.store_accumulator(address_slot, call.line, call.col)!
 	expected_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[1], 1)!
+	e.emit_expr_at(call.args[1], depth + 2)!
 	e.store_accumulator(expected_slot, call.line, call.col)!
 	desired_slot := e.reserve(e.target.word_size)
-	e.emit_expr_at(call.args[2], 1)!
+	e.emit_expr_at(call.args[2], depth + 3)!
 	e.store_accumulator(desired_slot, call.line, call.col)!
 	address := e.scratch(call.line, call.col)!
 	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
@@ -8696,8 +8704,8 @@ fn (mut e Emitter) emit_atomic_thread_fence(call ast.Call) !void {
 // index of the lowest set bit, which is one bsf at either width. gcc answers an
 // int for both, and a program that asks this of zero has asked a question with no
 // answer; the value the machine then leaves is undefined, as it is for gcc.
-fn (mut e Emitter) emit_count_trailing(call ast.Call) !void {
-	e.emit_expr_at(call.args[0], 1)!
+fn (mut e Emitter) emit_count_trailing(call ast.Call, depth int) !void {
+	e.emit_expr_at(call.args[0], depth + 1)!
 	accumulator := e.accumulator(call.line, call.col)!
 	e.append(e.target.bit_scan_forward(accumulator, accumulator, call.name == '__builtin_ctzll')!)
 }
@@ -8737,28 +8745,28 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			return e.emit_va_end(call)
 		}
 		'__atomic_load_n' {
-			return e.emit_atomic_load(call)
+			return e.emit_atomic_load(call, depth)
 		}
 		'__atomic_store_n' {
-			return e.emit_atomic_store(call)
+			return e.emit_atomic_store(call, depth)
 		}
 		'__atomic_exchange_n' {
-			return e.emit_atomic_exchange(call)
+			return e.emit_atomic_exchange(call, depth)
 		}
 		'__atomic_compare_exchange_n' {
-			return e.emit_atomic_compare_exchange(call)
+			return e.emit_atomic_compare_exchange(call, depth)
 		}
 		'__atomic_fetch_add' {
-			return e.emit_atomic_fetch(call, false)
+			return e.emit_atomic_fetch(call, false, depth)
 		}
 		'__atomic_fetch_sub' {
-			return e.emit_atomic_fetch(call, true)
+			return e.emit_atomic_fetch(call, true, depth)
 		}
 		'__atomic_thread_fence' {
 			return e.emit_atomic_thread_fence(call)
 		}
 		'__builtin_ctz', '__builtin_ctzll' {
-			return e.emit_count_trailing(call)
+			return e.emit_count_trailing(call, depth)
 		}
 		else {}
 	}
