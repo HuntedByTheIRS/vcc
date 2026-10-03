@@ -269,6 +269,44 @@ fn test_a_read_through_an_address_is_typed_as_what_it_points_at() {
 	assert read_void.typ.is_void()
 }
 
+// 6.5.3.2p4: `*` on an operand that points at a function is the function
+// designator again, and 6.3.2.1p4 makes a function name such a pointer, so `*f`
+// where f names a function is `f`. The node keeps the function type rather than
+// picking a type to read out of memory, which is what makes `.g = *f` - the
+// shape V's generated C writes to fill a table of function pointers - a value
+// where a value is wanted instead of a refusal.
+fn test_a_read_through_a_function_designator_is_the_designator() {
+	result := checked('static int f(void) { return 7; } int main(void) { int (*p)(void) = *f; return p(); }')
+	initializer := result.unit.decls[1].body[0].init or {
+		assert false
+		return
+	}
+	read := initializer as ast.Unary
+	assert read.op == '*'
+	assert read.typ.is_function()
+	assert read.typ.describe() == 'int (void)'
+	// The operand is the designator itself and stays the function type: the
+	// decay to a pointer happens where the value is wanted, not here.
+	designator := read.expr as ast.Ident
+	assert designator.name == 'f'
+	assert designator.typ.is_function()
+	// The array case is unchanged: `*a` for an array is the element, and the
+	// address of an object is the ordinary read the clause has always covered.
+	elements := checked('int main(void) { int a[4]; return *a; }')
+	element := elements.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	element_read := element as ast.Unary
+	assert element_read.op == '*'
+	assert element_read.typ.same(types.int_type())
+	// `*` is not made lax by this: an operand that is neither an array, a
+	// function nor a pointer still has no value at it and is refused by name.
+	refused := parsed('int main() { int x = 3; return *x; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('reads through an address')
+}
+
 fn test_a_cast_is_read_as_a_conversion_to_the_type_it_names() {
 	// `(char *)0` is a conversion and not a parenthesized expression: the clause
 	// on the node is the type that was named and the spelling is what was

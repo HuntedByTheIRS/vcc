@@ -640,6 +640,44 @@ fn test_a_read_through_something_that_is_not_an_address_is_reported() {
 	assert parsed.diagnostics[0].msg.contains('reads through an address')
 }
 
+// 6.5.3.2p4: `*` on an operand that points at a function is the function
+// designator again. 6.3.2.1p4 makes a function name a pointer to itself, so `*f`
+// where f names a function is `f`: the value is the address of the function's
+// code and there is nothing in memory for the read to load. The first program is
+// the shape V's generated C writes to fill a table of function pointers.
+//
+// Each program is run and the exit status is what gcc 16.2.1 gives the same
+// program, so the test checks the artifact and not only that the read was
+// accepted. The last case is the guard: `*` is not made lax, and an operand with
+// no value at it is still refused with no image written.
+fn test_a_read_through_a_function_designator_is_the_function() {
+	table := emit(translation_unit('typedef struct { int (*g)(void); } S; static int f(void) { return 7; } int main(void) { S s = (S){ .g = *f }; return s.g(); }'),
+		Options{})
+	assert table.diagnostics.len == 0
+	assert run_image(table.bytes) == 7
+	through_pointer := emit(translation_unit('static int f(void) { return 7; } int main(void) { int (*p)(void) = *f; return p(); }'),
+		Options{})
+	assert through_pointer.diagnostics.len == 0
+	assert run_image(through_pointer.bytes) == 7
+	// The call written on the dereference itself is the call through the
+	// operand, which the callee path already read as the pointer's value.
+	direct := emit(translation_unit('static int f(void) { return 7; } int main(void) { return (*f)(); }'),
+		Options{})
+	assert direct.diagnostics.len == 0
+	assert run_image(direct.bytes) == 7
+	// The two cases that already worked are unchanged: `*a` for an array is
+	// element zero, and a read through an object pointer reads the object.
+	element := emit(translation_unit('int a[4] = {11, 22, 33, 44}; int main(void) { return *a; }'), Options{})
+	assert element.diagnostics.len == 0
+	assert run_image(element.bytes) == 11
+	object := emit(translation_unit('int main(void) { int x = 5; int *p = &x; return *p; }'), Options{})
+	assert object.diagnostics.len == 0
+	assert run_image(object.bytes) == 5
+	refused := translation_unit_refused('int main() { int x = 3; return *x; }')
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('reads through an address')
+}
+
 fn test_a_cast_converts_between_the_classes_the_back_end_carries() {
 	// Measured with gcc 16.2.1 on the same program: `(char)300` is 44 and
 	// `(int)(char *)0` is 0, so the three conversions in one program add up to

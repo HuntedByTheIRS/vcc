@@ -6278,7 +6278,16 @@ fn (e Emitter) comparison_is_unsigned(step ast.Binary) bool {
 // promotes it to, and a double is loaded by the instruction that moves one rather
 // than by an integer load of the same width. A pointed-at type with no load here
 // is refused by name.
+//
+// An operand that points at a function is the one case with nothing in memory to
+// read: 6.5.3.2p4 makes `*` on it the function designator, and a function value
+// is the address of its code, which is what the operand is already worth. A
+// function name is worth that address through 6.3.2.1p4 and a pointer to a
+// function holds it, so the operand is emitted and no load follows.
 fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
+	if unary.typ.is_function() {
+		return e.emit_expr_at(unary.expr, depth)
+	}
 	e.emit_expr_at(unary.expr, depth + 1)!
 	address := e.accumulator(unary.line, unary.col)!
 	if unary.typ.is_array() {
@@ -7966,6 +7975,14 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 				// A read through an address has the width of the class the value
 				// at it belongs to: a char arrives as the int it is promoted to,
 				// an int as itself, and a pointer as the machine's word.
+				if expr.typ.is_function() {
+					// A read through an operand that points at a function is the
+					// function designator again (6.5.3.2p4), and a designator used
+					// where a value is wanted is the pointer to the function
+					// (6.3.2.1p4): the value is the machine's word, and there is
+					// nothing at an address to read.
+					return e.target.word_size
+				}
 				e.converted_width(expr.typ)
 			} else if expr.op == '__real__' || expr.op == '__imag__' {
 				// One component of a complex value, at the component's own
