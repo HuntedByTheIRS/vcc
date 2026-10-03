@@ -8510,6 +8510,12 @@ fn (mut e Emitter) emit_va_end(call ast.Call) !void {
 // value is waiting in, and the earlier argument is then read back as the
 // temporary: `pair(__builtin_ctz(1), __builtin_ctzll(1ULL << 40))` answered with
 // the 64-bit count's own operand.
+//
+// An atomic operation reads and writes the type its pointer names, and its
+// value operand is converted to that type before the instruction runs: a signed
+// value narrower than the type keeps its sign when it is widened into the word
+// the instruction reads, so `(unsigned long long)-1` adds all ones and not the
+// 0xffffffff a zero-extended 32-bit read would give.
 
 // atomic_target_width is the width of the object an atomic builtin operates on,
 // which is what its pointer argument names. A width this back end has no atomic
@@ -8595,6 +8601,7 @@ fn (mut e Emitter) emit_atomic_store(call ast.Call, depth int) !void {
 	e.store_accumulator(address_slot, call.line, call.col)!
 	value_slot := e.reserve(e.target.word_size)
 	e.emit_expr_at(call.args[1], depth + 2)!
+	e.extend_operand_to_word(call.args[1], call.line, call.col)!
 	e.store_accumulator(value_slot, call.line, call.col)!
 	address := e.scratch(call.line, call.col)!
 	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
@@ -8620,6 +8627,7 @@ fn (mut e Emitter) emit_atomic_exchange(call ast.Call, depth int) !void {
 	e.store_accumulator(address_slot, call.line, call.col)!
 	value_slot := e.reserve(e.target.word_size)
 	e.emit_expr_at(call.args[1], depth + 2)!
+	e.extend_operand_to_word(call.args[1], call.line, call.col)!
 	e.store_accumulator(value_slot, call.line, call.col)!
 	address := e.scratch(call.line, call.col)!
 	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
@@ -8644,6 +8652,7 @@ fn (mut e Emitter) emit_atomic_fetch(call ast.Call, subtract bool, depth int) !v
 	e.store_accumulator(address_slot, call.line, call.col)!
 	value_slot := e.reserve(e.target.word_size)
 	e.emit_expr_at(call.args[1], depth + 2)!
+	e.extend_operand_to_word(call.args[1], call.line, call.col)!
 	e.store_accumulator(value_slot, call.line, call.col)!
 	address := e.scratch(call.line, call.col)!
 	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
@@ -8679,6 +8688,7 @@ fn (mut e Emitter) emit_atomic_compare_exchange(call ast.Call, depth int) !void 
 	e.store_accumulator(expected_slot, call.line, call.col)!
 	desired_slot := e.reserve(e.target.word_size)
 	e.emit_expr_at(call.args[2], depth + 3)!
+	e.extend_operand_to_word(call.args[2], call.line, call.col)!
 	e.store_accumulator(desired_slot, call.line, call.col)!
 	address := e.scratch(call.line, call.col)!
 	e.append(e.target.load_slot(base, address_slot.offset, address, e.target.word_size)!)
