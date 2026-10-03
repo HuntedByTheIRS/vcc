@@ -1986,6 +1986,101 @@ fn test_a_conditional_carries_the_type_its_two_arms_share() {
 	assert (size as ast.IntLit).value == 8
 }
 
+// 6.5.15p3 pairs two arms of the same structure or union type and gives the
+// conditional that type, which is the shape V's generated C has: `string` is a
+// struct, and `return cond ? a : b;` with both arms one struct is a value of it.
+// Measured on gcc 16.2.1, which accepts the program and runs it. A typedef and a
+// tag that resolve to one struct are one type here, so arms written through two
+// names for it still pair.
+fn test_a_conditional_of_two_same_structure_arms_has_that_type() {
+	structured := parsed('typedef struct { int a; int b; } S;\nS x;\nS y;\nint c;\nS f(void) { return c ? x : y; }')
+	assert structured.diagnostics.len == 0
+	declaration := structured.unit.decls[structured.unit.decls.len - 1]
+	expr := declaration.body[0].expr or {
+		assert false
+		return
+	}
+	assert (expr as ast.Conditional).typ.kind == types.Kind.struct_
+	// `sizeof` reads the same answer, which is the eight bytes of the two ints.
+	sized := parsed('typedef struct { int a; int b; } S;\nS x;\nS y;\nint c;\nint main(void) { return sizeof(c ? x : y); }')
+	assert sized.diagnostics.len == 0
+	size_decl := sized.unit.decls[sized.unit.decls.len - 1]
+	size_expr := size_decl.body[0].expr or {
+		assert false
+		return
+	}
+	assert (size_expr as ast.IntLit).value == 8
+	// Two names for one struct are one type: `T` and `U` are both `S`.
+	aliased := parsed('typedef struct { int a; int b; } S;\ntypedef S T;\ntypedef S U;\nT x;\nU y;\nint c;\nS f(void) { return c ? x : y; }')
+	assert aliased.diagnostics.len == 0
+	alias_decl := aliased.unit.decls[aliased.unit.decls.len - 1]
+	alias_expr := alias_decl.body[0].expr or {
+		assert false
+		return
+	}
+	assert (alias_expr as ast.Conditional).typ.kind == types.Kind.struct_
+}
+
+// The two arms have to be that one type. Measured on gcc 16.2.1, two different
+// structures are `error: type mismatch in conditional expression`; the compiler
+// keeps the refusal and names both types.
+fn test_a_conditional_of_two_different_structure_arms_is_still_refused() {
+	result := parsed('struct A { int a; };\nstruct B { int b; };\nstruct A x;\nstruct B y;\nint f(void) { return 1 ? x : y; }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('struct A')
+	assert result.diagnostics[0].msg.contains('struct B')
+	assert result.diagnostics[0].msg.contains('same structure or union type')
+}
+
+// A structure beside an arithmetic type or a pointer is not a pair 6.5.15 makes
+// either, and gcc refuses both as the same type mismatch. The refusal stays and
+// names the two types.
+fn test_a_conditional_of_a_structure_beside_a_non_structure_is_still_refused() {
+	arithmetic := parsed('struct A { int a; };\nstruct A x;\nint f(void) { return 1 ? x : 3; }')
+	assert arithmetic.diagnostics.len >= 1
+	assert arithmetic.diagnostics[0].msg.contains('struct A')
+	assert arithmetic.diagnostics[0].msg.contains('int')
+	pointer := parsed('struct A { int a; };\nstruct A x;\nint *p;\nint f(void) { return 1 ? x : p; }')
+	assert pointer.diagnostics.len >= 1
+	assert pointer.diagnostics[0].msg.contains('struct A')
+	assert pointer.diagnostics[0].msg.contains('int *')
+}
+
+// The pairs the clause already answered with still resolve, because a new case
+// in this reader is how a neighbouring one gets dropped: two void arms, two
+// pointers, a pointer beside a null pointer constant, and a void pointer beside
+// an object pointer. Each of these is read and given a type.
+fn test_the_other_pairs_a_conditional_accepts_still_resolve() {
+	void_arms := parsed('void f(void) { 1 ? (void)0 : (void)0; }')
+	assert void_arms.diagnostics.len == 0
+	void_expr := void_arms.unit.decls[void_arms.unit.decls.len - 1].body[0].expr or {
+		assert false
+		return
+	}
+	assert (void_expr as ast.Conditional).typ.kind == types.Kind.void_
+	two_pointers := parsed('int *p;\nint *q;\nint *g(void) { return 1 ? p : q; }')
+	assert two_pointers.diagnostics.len == 0
+	pointer_expr := two_pointers.unit.decls[two_pointers.unit.decls.len - 1].body[0].expr or {
+		assert false
+		return
+	}
+	assert (pointer_expr as ast.Conditional).typ.kind == types.Kind.pointer
+	constant_arm := parsed('int *p;\nint *g(void) { return 1 ? p : 0; }')
+	assert constant_arm.diagnostics.len == 0
+	constant_expr := constant_arm.unit.decls[constant_arm.unit.decls.len - 1].body[0].expr or {
+		assert false
+		return
+	}
+	assert (constant_expr as ast.Conditional).typ.kind == types.Kind.pointer
+	void_pointer := parsed('int *g(void) { return 1 ? (void*)0 : (int*)0; }')
+	assert void_pointer.diagnostics.len == 0
+	void_pointer_expr := void_pointer.unit.decls[void_pointer.unit.decls.len - 1].body[0].expr or {
+		assert false
+		return
+	}
+	assert (void_pointer_expr as ast.Conditional).typ.kind == types.Kind.pointer
+}
+
 // The middle operand is the whole expression before the `:` and the third is a
 // conditional expression, which is what makes the operator right-associative:
 // `a ? b : c ? d : e` is `a ? b : (c ? d : e)` and not `(a ? b : c) ? d : e`.

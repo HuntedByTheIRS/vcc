@@ -831,6 +831,20 @@ fn (mut p Parser) conditional_type(op tokenize.Token, then_expr ast.Expr, else_e
 			return types.Type{}
 		}
 	}
+	// 6.5.15p3: two arms of the same structure or union type give that type,
+	// and the result is a value of it. The arm that is not chosen is copied
+	// into wherever the conditional is used rather than addressed there, so
+	// `(c ? x : y).a` reads the member of the copy and writing through the
+	// copy leaves `x` and `y` alone. The two arms have to be that one type:
+	// two different aggregates are still a constraint violation, and the
+	// message names both.
+	if a.kind in [.struct_, .union_] && b.kind in [.struct_, .union_] {
+		if types.unqualified(a).same(types.unqualified(b)) {
+			return types.unqualified(a)
+		}
+		p.error_at(op, 'a constraint violation: the two arms of a conditional are ${a.describe()} and ${b.describe()}, and 6.5.15 pairs two arms of the same structure or union type')
+		return types.Type{}
+	}
 	if a.is_void() && b.is_void() {
 		return types.void_type()
 	}
