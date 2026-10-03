@@ -257,10 +257,20 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 		if from.is_pointer() {
 			source := from.pointee() or { return none }
 			if target.is_void() && source.is_function() {
-				return 'a constraint violation: a pointer to void converts only to and from a pointer to an object type, and ${from.describe()} points to a function'
+				// 6.5.16.1 converts a pointer to void to and from a pointer to
+				// an object or incomplete type, and a function type is neither,
+				// so this conversion is outside the standard. Measured, gcc
+				// 16.2.1 accepts it in every mode and reports it only under
+				// -pedantic, so it is a question the flags decide and not an
+				// error: the conversion is allowed here, and the caller raises
+				// the pedantic diagnostic with `function_void_pointer_problem`.
+				return none
 			}
 			if source.is_void() && target.is_function() {
-				return 'a constraint violation: a pointer to void converts only to and from a pointer to an object type, and ${to.describe()} points to a function'
+				// The direction the paragraph above names is the one from the
+				// function pointer, and this is the one to it; both are the
+				// same extension and both are allowed for the same reason.
+				return none
 			}
 			if (target.is_void() && source.is_object()) || (source.is_void() && target.is_object()) {
 				if !target.quals.contains(source.quals) {
@@ -329,6 +339,32 @@ pub fn assignment_problem(to Type, from Type, constant_zero bool) ?string {
 			return none
 		}
 		return 'a constraint violation: ${from.describe()} is not assigned to ${to.describe()}, and an object of an aggregate type is assigned to an object of its own type'
+	}
+	return none
+}
+
+// function_void_pointer_problem names the standard's objection to a conversion
+// between a pointer to a function and a pointer to void, which 6.5.16.1 does
+// not allow: a pointer to void converts to and from a pointer to an object or
+// incomplete type, and a function type is neither. Measured, gcc 16.2.1 accepts
+// the conversion in every mode and reports it only under -pedantic, so it is a
+// question the flags decide rather than an error, and `assignment_problem`
+// allows it. This is what a caller asks to raise that diagnostic, and the
+// direction is named the way gcc names it.
+//
+// Either side may arrive as the function type itself or as a pointer to one: a
+// function designator has not decayed everywhere the question is asked, and the
+// answer is the same either way. A pointer to void is only ever a pointer.
+pub fn function_void_pointer_problem(to Type, from Type) ?string {
+	target_function := to.is_function() || (to.is_pointer() && (to.pointee() or { return none }).is_function())
+	source_function := from.is_function() || (from.is_pointer() && (from.pointee() or { return none }).is_function())
+	target_void := to.is_pointer() && (to.pointee() or { return none }).is_void()
+	source_void := from.is_pointer() && (from.pointee() or { return none }).is_void()
+	if target_void && source_function {
+		return 'ISO C forbids conversion of function pointer to object pointer type'
+	}
+	if source_void && target_function {
+		return 'ISO C forbids conversion of object pointer to function pointer type'
 	}
 	return none
 }

@@ -233,12 +233,35 @@ fn test_the_constraint_on_assignment_between_pointer_types() {
 	// 'int *' from 'int' makes pointer from integer without a cast`.
 	assert reason(pointer_to(int_type()), int_type(), true) == ''
 	assert only_reason(pointer_to(int_type()), int_type(), false, 'integer constant')
-	// j_function_pointer_from_void and k_void_from_function_pointer: `ISO C
-	// forbids initialization between function pointer and 'void *'`, and a
-	// pointer to void converts only to and from a pointer to an object type.
+	// j_function_pointer_from_void and k_void_from_function_pointer: gcc 16.2.1
+	// accepts both in every mode and reports them only under -pedantic, so the
+	// standard's rule is a pedantic question rather than a constraint the
+	// assignment fails. The conversion is allowed, and the objection is named
+	// by `function_void_pointer_problem`, which the stage that reports it asks.
 	function_pointer := pointer_to(function_type(void_type(), [], false, true))
-	assert only_reason(pointer_to(void_type()), function_pointer, false, 'object')
-	assert only_reason(function_pointer, pointer_to(void_type()), false, 'object')
+	assert reason(pointer_to(void_type()), function_pointer, false) == ''
+	assert reason(function_pointer, pointer_to(void_type()), false) == ''
+	assert (function_void_pointer_problem(pointer_to(void_type()), function_pointer) or {
+		''
+	}) == 'ISO C forbids conversion of function pointer to object pointer type'
+	assert (function_void_pointer_problem(function_pointer, pointer_to(void_type())) or {
+		''
+	}) == 'ISO C forbids conversion of object pointer to function pointer type'
+	// A function type that has not decayed answers the same as a pointer to
+	// one, because a cast hands it over that way; there is one question and not
+	// one per spelling of the operand.
+	assert (function_void_pointer_problem(pointer_to(void_type()), function_type(void_type(), [],
+		false, true)) or { '' }) == 'ISO C forbids conversion of function pointer to object pointer type'
+	// A conversion between two pointers neither of which is a function pointer
+	// or a pointer to void is not this question, and an object pointer converts
+	// to a void pointer by the ordinary rule.
+	assert (function_void_pointer_problem(pointer_to(int_type()), pointer_to(int_type())) or {
+		''
+	}) == ''
+	assert (function_void_pointer_problem(pointer_to(void_type()), pointer_to(char_type())) or {
+		''
+	}) == ''
+	assert (function_void_pointer_problem(pointer_to(int_type()), int_type()) or { '' }) == ''
 	// Two pointers to the same function type are compatible.
 	int_function := pointer_to(function_type(int_type(), [], false, true))
 	assert reason(int_function, pointer_to(function_type(int_type(), [], false, true)), false) == ''
