@@ -3685,3 +3685,41 @@ fn test_a_variable_length_array_through_a_typedef_and_a_bound_of_one() {
 	assert twice.diagnostics.len == 0
 	assert run_image(twice.bytes) == 220
 }
+
+// A typedef of a fixed-size array type names an array the declarator never
+// spelled, and an object declared through it is storage the same way a written
+// array is: the count is the type's, so the frame reserves the whole object and
+// an index, `sizeof` and a brace or string initializer all answer for it. The
+// object may be in a body or at file scope, and the element may be scalar, a
+// struct or a row of a two-dimensional type. Measured on gcc 16.2.1, the
+// programs below exit 9, 7, 8, 6, 32, 30 and 99.
+fn test_a_typedef_of_a_fixed_size_array_declares_an_object() {
+	body := emit(translation_unit('int main(void) { typedef int t[4]; t x; x[3] = 9; return x[3]; }'),
+		Options{})
+	assert body.diagnostics.len == 0
+	assert run_image(body.bytes) == 9
+	global := emit(translation_unit('typedef int vec4[4]; vec4 g; int main(void) { g[2] = 7; return g[2]; }'),
+		Options{})
+	assert global.diagnostics.len == 0
+	assert run_image(global.bytes) == 7
+	aggregate := emit(translation_unit('struct S { int a, b; }; typedef struct S pair[2]; pair p; int main(void) { p[1].b = 8; return p[1].b; }'),
+		Options{})
+	assert aggregate.diagnostics.len == 0
+	assert run_image(aggregate.bytes) == 8
+	grid := emit(translation_unit('typedef int m2[2][3]; m2 m; int main(void) { m[1][2] = 6; return m[1][2]; }'),
+		Options{})
+	assert grid.diagnostics.len == 0
+	assert run_image(grid.bytes) == 6
+	sized := emit(translation_unit('typedef int t[4]; int main(void) { t x; return sizeof(t) + sizeof(x); }'),
+		Options{})
+	assert sized.diagnostics.len == 0
+	assert run_image(sized.bytes) == 32
+	listed := emit(translation_unit('typedef int t[3]; t a = {10, 20, 30}; int main(void) { return a[2]; }'),
+		Options{})
+	assert listed.diagnostics.len == 0
+	assert run_image(listed.bytes) == 30
+	text := emit(translation_unit('typedef char c4[4]; c4 s = "abc"; int main(void) { return s[2]; }'),
+		Options{})
+	assert text.diagnostics.len == 0
+	assert run_image(text.bytes) == 99
+}

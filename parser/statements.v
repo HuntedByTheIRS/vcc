@@ -1247,6 +1247,20 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			return stmts
 		}
 		mut declared := p.declared_type(spec.clause, d)
+		// An object declared through a name that stands for an array type is
+		// an array the declarator never spelled: `typedef int t[4]; t x;`
+		// declares an object of four elements, and the count is the type's
+		// and not a bracket's. The two sources are merged once here, so the
+		// initializer paths below ask the object rather than the declarator.
+		// A variable-length array is left to the paths that compute its size
+		// at run time: its count is a value and not a number.
+		array_object := declared.is_array()
+		mut array_count := d.array_count()
+		mut array_sized := d.array_sized()
+		if array_count == 0 && array_object && !declared.has_vla() && declared.count > 0 {
+			array_count = declared.count
+			array_sized = true
+		}
 		// A typedef of a variable-length array type names a type and declares
 		// no object: there is no storage to claim and no statement to make. The
 		// name is already recorded where the declarator was read, so the rest
@@ -1320,7 +1334,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						// offset is worse than a refusal.
 						struct_values = list.elements.clone()
 						struct_brace = p.struct_brace_members(spec.clause, list, d.name)
-					} else if !d.is_array() {
+					} else if !array_object {
 						// One scalar in braces. A list of more values has no
 						// room in one object (6.7.8p2, measured on gcc
 						// 16.2.1: `int x = {1, 2};` is `excess elements in
@@ -1351,8 +1365,8 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						// A written size smaller than the list is the same
 						// violation (measured, `int a[2] = {1, 2, 3};` is
 						// `excess elements in array initializer`).
-						if d.array_count() > 0 && list.elements.len > d.array_count() {
-							p.error_at(list.at, 'a constraint violation: ${d.name} holds ${d.array_count()} elements and its initializer writes ${list.elements.len}')
+						if array_count > 0 && list.elements.len > array_count {
+							p.error_at(list.at, 'a constraint violation: ${d.name} holds ${array_count} elements and its initializer writes ${list.elements.len}')
 						}
 						for element in list.elements {
 							number := element.number or { continue }
@@ -1360,14 +1374,14 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 						}
 					}
 				}
-			} else if p.peek().kind == .string && d.is_array() {
+			} else if p.peek().kind == .string && array_object {
 				// 6.7.8p14: a string literal initializes an array of
 				// character type, and a wide literal one of this target's
 				// wchar_t. A literal whose element type is not the array's is
 				// not this initializer, and the missing size is reported
 				// below.
 				if literal := p.read_array_string_literal() {
-					if array_takes_string(d, declared, literal) {
+					if array_takes_string(declared, literal) {
 						init = ast.Expr(literal)
 					}
 				}
@@ -1426,14 +1440,14 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		mut from_string := false
 		if initializer := init {
 			if initializer is ast.StrLit {
-				if array_takes_string(d, declared, initializer) {
+				if array_takes_string(declared, initializer) {
 					from_string = true
 					elements = string_elements_at(initializer, d.name_at)
 					characters := elements.len - 1
-					if d.array_sized() && d.array_count() < characters {
+					if array_sized && array_count < characters {
 						// `char c[2] = "abc"` holds two and writes four, and
 						// `char c[0] = "abc"` is the same refusal into none.
-						p.error_span(initializer.line, initializer.col, 'a constraint violation: ${d.name} holds ${d.array_count()} elements and its initializer writes ${elements.len} characters')
+						p.error_span(initializer.line, initializer.col, 'a constraint violation: ${d.name} holds ${array_count} elements and its initializer writes ${elements.len} characters')
 						p.skip_declaration()
 						return stmts
 					}
@@ -1457,7 +1471,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// 2, 3};` declares a of three. A list the reader refused has already
 		// been named and the size is not reported a second time. An array whose
 		// bound is a value has its size, so this refusal is not about it.
-		if d.is_array() && d.array_count() <= 0 && !brace && !from_string && !declared.has_vla() {
+		if array_object && array_count <= 0 && !brace && !from_string && !declared.has_vla() {
 			p.error_at(d.array_at(), 'unsupported: an array declaration in a body needs a size that is a number and more than zero')
 			p.skip_declaration()
 			return stmts
@@ -1465,9 +1479,9 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// A size that was written is used as it was written, including a written
 		// zero; only a pair of empty brackets takes its size from the literal,
 		// which is the elements the literal writes.
-		mut count := if d.array_count() > 0 { d.array_count() } else { elements.len }
-		if from_string && d.array_sized() {
-			count = d.array_count()
+		mut count := if array_count > 0 { array_count } else { elements.len }
+		if from_string && array_sized {
+			count = array_count
 		}
 		if list := general_list {
 			// A nested list, a designator or an expression: the size of an array
@@ -1477,7 +1491,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			// holds, which is the excess gcc 16.2.1 reports as `excess elements
 			// in array initializer`.
 			general_target = declared
-			if d.is_array() && d.array_count() <= 0 {
+			if array_object && array_count <= 0 {
 				named := brace_array_count(list.elements)
 				if named > 0 {
 					count = named
@@ -1630,7 +1644,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				}
 			}
 		}
-		if from_string && !d.array_sized() {
+		if from_string && !array_sized {
 			// The size came from the literal, so the name records the array it
 			// turned out to be: a later `sizeof` of it is a question about that
 			// count rather than about the brackets that wrote none.
@@ -1640,7 +1654,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		if list := general_list {
 			// The same answer for a list that named the size: the highest
 			// subobject it reaches is the array the name turned out to be.
-			if d.is_array() && !d.array_sized() && count > 0 {
+			if array_object && !array_sized && count > 0 {
 				element := declared.element() or { spec.clause }
 				p.scopes.complete_type(d.name, types.array_of(element, count))
 			}
@@ -1695,7 +1709,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// is the zeros C says it holds. The frame slot starts as whatever was
 		// there, so the unwritten elements have to be written. A string literal
 		// writes its own elements the same way.
-		if ((brace && list_ok) || from_string) && d.is_array() && general_list == none {
+		if ((brace && list_ok) || from_string) && array_object && general_list == none {
 			for i in 0 .. count {
 				value := if i < elements.len {
 					elements[i]
