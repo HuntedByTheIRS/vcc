@@ -81,8 +81,8 @@ fn spelled(text string) string {
 // `int main(void) { return 0 ??!??! 0; }`:
 //
 //   -std=c89, -std=c99, -std=c11, -std=c17   rc 0, and the line is `0 || 0`
-//   -std=gnu89 … -std=gnu23, -std=c23, and   rc 1, with `trigraph '??!' ignored,
-//   no -std at all                           use '-trigraphs' to enable`: the
+//   -std=gnu89 … -std=gnu23, -std=c23,       rc 1, with `trigraph '??!' ignored,
+//   -std=c2y, -std=gnu2y, and no -std        use '-trigraphs' to enable`: the
 //                                            bytes are the program's
 //
 // So it is a dialect answer, and it is written down once, in
