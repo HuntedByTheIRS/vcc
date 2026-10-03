@@ -103,9 +103,45 @@ const gnu_postfix = ['__attribute__', '__asm__', '__asm']
 const max_declaration_depth = 200
 
 // starts_declaration says whether a token can open a declaration: one of the
-// specifier words, or a name this file has already declared as a type.
+// specifier words, a name this file has already declared as a type, or the
+// `_Static_assert` spelling, which opens a declaration that produces no object.
 fn (p Parser) starts_declaration(t tokenize.Token) bool {
-	return t.kind == .identifier && (is_specifier_word(t.text) || p.is_type_name(t.text))
+	if t.kind != .identifier {
+		return false
+	}
+	if t.text == '_Static_assert' {
+		return true
+	}
+	return is_specifier_word(t.text) || p.is_type_name(t.text)
+}
+
+// auto_is_a_type_specifier says whether the `auto` at the cursor is C23's type
+// specifier rather than the C89 storage class of the same spelling. The
+// declaration says which and the token after the word is what says it: the
+// deduced form is written with the name right after the word, so the token after
+// the name ends the declaration (`=`, `;` or `,`), while the storage-class form
+// has a type between the word and the name (`auto int x`, `auto T x`). The
+// question is asked of the two tokens and not of a table of type words, because
+// a name this file typedef'd is a type and this reader cannot tell one from a
+// declarator name by its spelling alone.
+fn (p Parser) auto_is_a_type_specifier() bool {
+	if p.peek().text != 'auto' {
+		return false
+	}
+	after := p.peek_at(1)
+	if after.kind == .punct {
+		// The storage class cannot stand without a type in front of the
+		// declarator, so a declarator starting right after the word is the
+		// deduced form written with a declarator the standard does not allow:
+		// `auto *p = 0;` is refused by name below rather than read as a
+		// storage class that declares an int.
+		return after.text in ['*', '(', '[']
+	}
+	if after.kind != .identifier {
+		return false
+	}
+	ended := p.peek_at(2)
+	return ended.kind == .punct && ended.text in ['=', ';', ',', '[']
 }
 
 // starts_type_name says whether a token can open a type name written as a cast.
@@ -173,6 +209,11 @@ mut:
 	clause     types.Type
 	qualifiers types.Qualifiers
 	storage    types.Storage
+	// auto_deduced says the specifiers named C23's auto type specifier rather
+	// than a written type: the declaration has no type until its initializer has
+	// been read, and the reader that has the initializer is the one that fills
+	// the clause. It is false for the storage class of the same spelling.
+	auto_deduced bool
 }
 
 fn (mut s DeclSpec) note(t tokenize.Token) {
@@ -660,10 +701,16 @@ fn (p Parser) end_of_block(open int) int {
 // next one starts in the right place.
 fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	mut decls := []ast.FnDecl{}
+	// A static assertion is a declaration that declares no object, so it has no
+	// place in the declaration list and is read before the specifiers are.
+	if p.peek().kind == .identifier && p.peek().text == '_Static_assert' {
+		p.parse_static_assertion()
+		return decls
+	}
 	if p.skip_uncalled_static() {
 		return decls
 	}
-	spec := p.parse_decl_specifiers(0) or {
+	mut spec := p.parse_decl_specifiers(0) or {
 		p.skip_declaration()
 		return decls
 	}
@@ -880,7 +927,42 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				data_array = d.is_array()
 				data_clause = p.declared_type(spec.clause, d)
 			}
-			if p.at_punct('=') {
+			if spec.auto_deduced {
+				// C23's auto takes its type from the initializer, and measured
+				// on gcc 16.2.1 it takes it at file scope too: `auto x = 2.5;`
+				// defines a double. It is one declarator and a plain identifier,
+				// and the initializer has to be a constant because the object is
+				// storage the image lays out. The clause the specifiers left
+				// unresolved is filled here, once the type is a fact.
+				if d.pointer_count() > 0 || d.is_array() {
+					p.error_at(data_at, 'unsupported: the C23 auto type specifier needs a plain identifier, and ${data_name} is written with a pointer or an array')
+					p.skip_declaration()
+					return decls
+				}
+				if !p.at_punct('=') {
+					p.error_at(data_at, 'unsupported: auto needs an initializer to take a type from, and ${data_name} has none')
+					p.skip_declaration()
+					return decls
+				}
+				p.next()
+				data_defined = true
+				written := p.auto_file_initializer() or {
+					p.error_at(data_at, 'unsupported: auto takes the type of ${data_name} from its initializer, and this compiler read no type and no constant in it')
+					p.skip_declaration()
+					return decls
+				}
+				spec.type_words = [written.typ.describe()]
+				spec.clause = written.typ
+				data_type = written.typ.describe()
+				data_clause = written.typ
+				data_init = written.constant.integer
+				data_init_float = written.constant.floating
+				data_init_long = written.constant.long_floating
+				p.skip_to_separator() or {
+					p.skip_declaration()
+					return decls
+				}
+			} else if p.at_punct('=') {
 				// An initializer makes it a definition even when the
 				// declaration says extern: the object has to live somewhere.
 				data_defined = true
@@ -1105,6 +1187,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			}
 		}
 		if p.at_punct(',') {
+			if spec.auto_deduced {
+				// The deduced type belongs to one declarator; a second has its
+				// own initializer and its own type, which is not what the
+				// declaration says. Measured on gcc 16.2.1, `auto x = 1, y = 2;`
+				// is `'auto' may only be used with a single declarator`.
+				p.error_at(p.peek(), 'a constraint violation: auto may be used with only one declarator')
+				p.skip_declaration()
+				return decls
+			}
 			p.next()
 			continue
 		}
@@ -1181,7 +1272,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			// travels beside it, which is what the image reserves and what an index
 			// scales by. A union's one value is the constant its first member
 			// holds, written at the beginning of the storage.
-			p.declare_name(data_name, data_clause, data_at, true)
+			if spec.auto_deduced {
+				// The name was recorded by the declarator's reader with the
+				// word auto for a type. The type the initializer gives it is
+				// that same declaration's, so it completes the record rather
+				// than declaring the name a second time.
+				p.scopes.complete_type(data_name, data_clause)
+			} else {
+				p.declare_name(data_name, data_clause, data_at, true)
+			}
 			p.globals << ast.Global{
 				name:         data_name
 				typ:          data_type
@@ -1255,7 +1354,15 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			p.error_at(data_at, 'unsupported: ${data_name} is a long double, and its initializer is not a long double constant: converting a constant of another type to the extended format at load time is not written into the image')
 			return decls
 		}
-		p.declare_name(data_name, data_clause, data_at, true)
+		if spec.auto_deduced {
+			// The declarator's reader recorded the name with the word auto for
+			// a type. The type the initializer gives it is that same
+			// declaration's, so it completes the record rather than declaring
+			// the name a second time.
+			p.scopes.complete_type(data_name, data_clause)
+		} else {
+			p.declare_name(data_name, data_clause, data_at, true)
+		}
 		if completed := data_complete {
 			// The name was declared with the size-less array its declarator
 			// wrote, and the string literal that followed is what gives it a
@@ -1283,6 +1390,185 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	return decls
 }
 
+// parse_static_assertion reads a static assertion, the declaration C11 spells
+// `_Static_assert ( constant-expression , string-literal ) ;` and C23 spells with
+// the message left out. It declares no object and produces no code: the condition
+// is tested where the declaration is read, and a condition that is false ends the
+// compilation with the message the source wrote.
+//
+// The reader is shared by the two positions the declaration may be written in,
+// file scope and a body, because the construct is one declaration and both
+// positions answer the same way. Both used to answer wrong, and differently: at
+// file scope the words were refused as `expected a declaration`, and in a body
+// the statement reader took them for an expression, so `_Static_assert(1, "x");`
+// became a call to a symbol nothing defined.
+//
+// A condition this compiler cannot reduce to an integer constant is refused by
+// name rather than assumed true. A static assertion whose test cannot be
+// evaluated is not one this reader has read, and treating it as passing would
+// make the check decorate the source instead of checking it.
+fn (mut p Parser) parse_static_assertion() {
+	at := p.next() // _Static_assert
+	if !p.expect_punct('(') {
+		p.skip_statement()
+		return
+	}
+	condition := p.parse_expression() or {
+		p.skip_statement()
+		return
+	}
+	mut message := ''
+	if p.at_punct(',') {
+		p.next()
+		if p.peek().kind == .string {
+			literal := parse_string_literal(p.next().text) or {
+				p.error_at(at, err.msg())
+				p.skip_statement()
+				return
+			}
+			message = literal.value
+		} else {
+			p.error_at(p.peek(), 'unsupported: expected the message of a static assertion, found ${describe(p.peek())}')
+			p.skip_statement()
+			return
+		}
+	}
+	if !p.expect_punct(')') {
+		p.skip_statement()
+		return
+	}
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return
+	}
+	value := p.static_assert_condition(condition) or {
+		p.error_at(at, 'unsupported: the condition of this static assertion is not an integer constant expression this compiler reduces')
+		return
+	}
+	if value == 0 {
+		// The message is quoted the way gcc 16.2.1 quotes it, so a build log
+		// reads the same whichever compiler refused the assertion.
+		p.error_at(at, 'static assertion failed: "${message}"')
+	}
+}
+
+// static_assert_condition reduces the condition of a static assertion to the
+// integer constant expression 6.7.10 asks for, and answers none when the
+// expression is not one this reader folds.
+//
+// The shapes are the arithmetic, bitwise, shift, comparison and logical
+// operators over written integer constants and the two unary operators that
+// keep a value integral, which is what a static assertion of a type's size or a
+// field's width is written with. `sizeof` is folded to an integer constant by
+// its own reader, so a condition built from it reaches here already a number.
+// A division or a remainder by zero answers none rather than a value, and a
+// shift wider than the type is refused the same way instead of folding.
+fn (mut p Parser) static_assert_condition(expr ast.Expr) ?i64 {
+	match expr {
+		ast.IntLit {
+			return expr.value
+		}
+		ast.Unary {
+			value := p.static_assert_condition(expr.expr)?
+			match expr.op {
+				'+' {
+					return value
+				}
+				'-' {
+					return -value
+				}
+				'~' {
+					return ~value
+				}
+				'!' {
+					return if value == 0 { i64(1) } else { i64(0) }
+				}
+				else {
+					return none
+				}
+			}
+		}
+		ast.Binary {
+			a := p.static_assert_condition(expr.left)?
+			b := p.static_assert_condition(expr.right)?
+			match expr.op {
+				'+' {
+					return a + b
+				}
+				'-' {
+					return a - b
+				}
+				'*' {
+					return a * b
+				}
+				'/' {
+					if b == 0 {
+						return none
+					}
+					return a / b
+				}
+				'%' {
+					if b == 0 {
+						return none
+					}
+					return a % b
+				}
+				'&' {
+					return a & b
+				}
+				'|' {
+					return a | b
+				}
+				'^' {
+					return a ^ b
+				}
+				'<<' {
+					if b < 0 || b > 63 {
+						return none
+					}
+					return a << u64(b)
+				}
+				'>>' {
+					if b < 0 || b > 63 {
+						return none
+					}
+					return a >> u64(b)
+				}
+				'==' {
+					return if a == b { i64(1) } else { i64(0) }
+				}
+				'!=' {
+					return if a != b { i64(1) } else { i64(0) }
+				}
+				'<' {
+					return if a < b { i64(1) } else { i64(0) }
+				}
+				'>' {
+					return if a > b { i64(1) } else { i64(0) }
+				}
+				'<=' {
+					return if a <= b { i64(1) } else { i64(0) }
+				}
+				'>=' {
+					return if a >= b { i64(1) } else { i64(0) }
+				}
+				'&&' {
+					return if a != 0 && b != 0 { i64(1) } else { i64(0) }
+				}
+				'||' {
+					return if a != 0 || b != 0 { i64(1) } else { i64(0) }
+				}
+				else {
+					return none
+				}
+			}
+		}
+		else {
+			return none
+		}
+	}
+}
+
 // FileConstant is the number a file-scope definition was initialized with. One of
 // the two fields is set: `integer` for an integer constant, `floating` for a
 // floating one, and neither for a shape this reader does not take. Keeping them
@@ -1292,6 +1578,58 @@ struct FileConstant {
 	integer       ?i64
 	floating      ?f64
 	long_floating ?types.LongDouble
+}
+
+// AutoFileInitializer is the type a file-scope auto declaration takes and the
+// constant its initializer is worth.
+struct AutoFileInitializer {
+	typ      types.Type
+	constant FileConstant
+}
+
+// auto_file_initializer reads the initializer of a file-scope auto declaration
+// twice: once as the expression whose type is the declared object's type, and
+// then through the same constant reader every other top-level definition uses, so
+// the value is folded and laid out the way a written definition's is. The type
+// cannot be read off the folded number because the number does not carry it:
+// measured on gcc 16.2.1, `auto x = 1u;` is an unsigned int and `auto x = 1;` an
+// int. A shape whose type this compiler cannot resolve, or whose value is not a
+// constant, is answered none and refused by name at the definition.
+fn (mut p Parser) auto_file_initializer() ?AutoFileInitializer {
+	saved_pos := p.pos
+	saved_diagnostics := p.diagnostics.len
+	saved_depth := p.depth
+	saved_base := p.pending_base
+	saved_storage := p.pending_storage
+	expr := p.parse_expression() or {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	p.depth = saved_depth
+	p.pending_base = saved_base
+	p.pending_storage = saved_storage
+	if !p.at_punct(',') && !p.at_punct(';') {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	typ := auto_deduced_type(expr)
+	if typ.kind == .unknown {
+		p.pos = saved_pos
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	p.pos = saved_pos
+	constant := p.file_scope_constant()
+	if constant.integer == none && constant.floating == none && constant.long_floating == none {
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	return AutoFileInitializer{
+		typ:      typ
+		constant: constant
+	}
 }
 
 // NumberConstant is a written number with the sign that may stand in front of it,
@@ -2770,6 +3108,20 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			continue
 		}
 		if t.text in storage_classes {
+			// `auto` is two constructs with one spelling: the C89 storage class
+			// and C23's type specifier for a type taken from the initializer.
+			// The declaration says which, and the tokens after the word are
+			// what say it; see auto_is_a_type_specifier. The deduced form's
+			// clause is filled where the initializer is read, so it is left
+			// unresolved here and the flag carries that to the reader.
+			if t.text == 'auto' && p.auto_is_a_type_specifier() {
+				p.next()
+				spec.note(t)
+				spec.type_words << 'auto'
+				spec.auto_deduced = true
+				spec.has_type = true
+				continue
+			}
 			p.next()
 			spec.note(t)
 			if t.text == 'typedef' {
@@ -3586,6 +3938,15 @@ fn (p Parser) size_as_unsigned(expr ast.Expr, at tokenize.Token) ast.Expr {
 		line:     at.line
 		col:      at.col
 	})
+}
+
+// auto_deduced_type is the type C23's auto type specifier takes from its
+// initializer: the initializer's own type after the lvalue conversion of 6.3.2.1,
+// which is the conversion an assignment makes. Measured on gcc 16.2.1, `auto x =
+// 1` is an int, `auto d = 2.5` a double, `auto s = "hi"` a char *, and with
+// `int a[3];` the declaration `auto p = a;` is an int *.
+fn auto_deduced_type(initializer ast.Expr) types.Type {
+	return types.unqualified(types.decay(initializer.typ))
 }
 
 // parameter_spelling is the type a parameter was declared with, written the way

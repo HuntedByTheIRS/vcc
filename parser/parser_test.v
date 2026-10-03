@@ -2333,3 +2333,71 @@ fn test_an_assignment_through_a_complex_part_is_refused_by_name() {
 		assert result.diagnostics[0].msg.contains('has no store that writes a part')
 	}
 }
+
+// A generic selection that matches nothing and has no default is a constraint
+// violation. Measured on gcc 16.2.1: `_Generic(0, double: 1)` is `'_Generic'
+// selector of type 'int' is not compatible with any association`.
+fn test_a_generic_selection_that_matches_nothing_is_refused() {
+	result := parsed('int main(void) { return _Generic(0, double: 1); }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('has no association compatible with it and no default')
+}
+
+// Two associations naming compatible types are refused, which gcc 16.2.1 reports
+// as `'_Generic' specifies two compatible types`.
+fn test_a_generic_selection_with_two_compatible_associations_is_refused() {
+	result := parsed('int main(void) { return _Generic(0, int: 1, int: 2, default: 0); }')
+	assert result.diagnostics.len >= 1
+	assert result.diagnostics[0].msg.contains('names int twice')
+}
+
+// The association's type name resolves through a typedef the way a cast's does.
+fn test_a_generic_selection_resolves_an_association_through_a_typedef() {
+	result := parsed('typedef int T; int main(void) { return _Generic(1, T: 7, default: 0); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (expr as ast.IntLit).value == 7
+}
+
+// The controlling expression is matched after the lvalue conversion 6.5.17 asks
+// for, so a qualified object matches the unqualified type. Measured on gcc
+// 16.2.1, `const int x; _Generic(x, int: 11, default: 99)` is 11.
+fn test_a_generic_selection_matches_an_unqualified_type_against_a_qualified_operand() {
+	result := parsed('int main(void) { const int x = 3; return _Generic(x, int: 11, default: 99); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert (expr as ast.IntLit).value == 11
+}
+
+// A controlling expression is not part of the tree, because 6.5.17 does not
+// evaluate it, but a name it carries is still a use of that name: the walk at the
+// end of the unit is given the expression for exactly this reason.
+fn test_a_generic_selection_reports_an_undeclared_controlling_name() {
+	result := parsed('int main(void) { return _Generic(missing, int: 1, default: 0); }')
+	assert result.diagnostics.len >= 1
+	mut named := false
+	for diagnostic in result.diagnostics {
+		if diagnostic.msg.contains('missing is used here and nothing in this file declares it') {
+			named = true
+		}
+	}
+	assert named
+}
+
+// The association list may put default anywhere, and the selected arm is the one
+// whose type matches whether or not a default was written.
+fn test_a_generic_selection_selects_a_named_arm_before_the_default() {
+	result := parsed('int main(void) { return _Generic(0, int: 1, default: 2, double: 3); }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (expr as ast.IntLit).value == 1
+}

@@ -111,13 +111,29 @@ pub const features = [
 		pedantic:  'an asm statement or an assembler name on a declarator'
 		status:    .implemented
 	},
+	// A GNU statement expression, `({ ... })`, is marked by two tokens with nothing
+	// between them and not by a word, so its spelling here is the pair and the
+	// check joins two tokens to find it. The tree reads the construct, so the row
+	// is implemented: `parser/parser.v` reads the group, `ast.StmtExpr` carries it
+	// and `codegen/codegen.v` writes it, and a group used as a value whose last
+	// statement is not an expression statement is refused by name where it is
+	// written. Measured on gcc 16.2.1, it is a GNU extension: c89, c99, c11 and
+	// c23 exit 0 silently and report it only under -pedantic (`ISO C forbids
+	// braced-groups within expressions`, an error under -pedantic-errors), and a
+	// GNU dialect takes it as its own. `gnu: true` is what says that and is the
+	// whole of the row's answer. The one place the answer is coarser than gcc is
+	// `-std=gnu99 -pedantic`, where gcc reports the construct anyway because
+	// -pedantic asks for the ISO standard's answer while this row is allowed in a
+	// GNU mode and the check produces nothing there; the `__int128` row is coarse
+	// the same way, measured the same way, so that is the `gnu` field's limit and
+	// not this row's.
 	Feature{
-		spellings: []
+		spellings: ['({']
 		since:     .none
 		gnu:       true
 		extension: ''
 		pedantic:  'braced-groups within expressions'
-		status:    .unimplemented
+		status:    .implemented
 	},
 	// typeof is C23's specifier, and the bare spelling is a keyword only where
 	// that standard or a GNU dialect is in effect. Measured on gcc 16.2.1,
@@ -188,40 +204,71 @@ pub const features = [
 		pedantic:  ''
 		status:    .implemented
 	},
+	// The C23 auto type specifier takes a type from its initializer: `auto x = 1;`
+	// is an int. It is read by `parse_local_declaration` in `parser/statements.v`,
+	// which completes the declaration with the initializer's type after the lvalue
+	// conversion once the initializer has been read, and refuses a declaration
+	// with no initializer by name because C23 requires one. The word is also the
+	// C89 storage class, so the spelling alone does not mark the construct and
+	// this row brings its own detection: only `auto x` (which the token after the
+	// name ends) is the type specifier, while `auto int x` and `auto T x` have a
+	// type between the word and the name and are the storage class; see
+	// `auto_is_a_type_specifier` below. Measured on gcc 16.2.1, the flags are the
+	// C23 ones and the refusal is one the command line does not take back:
+	// `auto x = 1;` is refused under -std=c99 and -std=gnu99 even with -w written
+	// on the command line (`type defaults to 'int' ... [-Wimplicit-int]`), and
+	// taken under -std=c23, under -std=gnu23 because gnu23 includes C23, and with
+	// no -std at all. `-Wno-implicit-int` is the one flag that takes the refusal
+	// back, and it is a flag this compiler does not have, so within its surface
+	// the row refuses like the typeof row above it and is `invalid` rather than a
+	// pedantic message. The qualified form `auto const x = 1;` is not read: the
+	// reader meets the qualifier between the word and the name and reads the
+	// storage class, so the declaration is refused rather than deduced.
 	Feature{
-		spellings: []
+		spellings: ['auto']
 		since:     .c23
 		gnu:       false
 		extension: 'auto'
+		invalid:   true
 		pedantic:  'the auto type specifier'
-		status:    .unimplemented
+		status:    .implemented
 	},
+	// _Generic is read by `parse_generic_selection` in `parser/parser.v`: the
+	// controlling expression's type, after the lvalue conversion 6.5.17 asks for,
+	// is matched against the associations and the selection is worth the selected
+	// arm's expression and type. The controlling expression is not evaluated, so
+	// no code is emitted for it. Measured on gcc 16.2.1, the flags are the C11
+	// ones: c99 and gnu99 take the construct and warn only under -pedantic
+	// (`ISO C99 does not support '_Generic'`), c11 and c23 take it silently, and
+	// a GNU dialect before C11 does not add it. The row is a pedantic message and
+	// not `invalid`, the same shape as _Static_assert's.
 	Feature{
 		spellings: ['_Generic']
 		since:     .c11
 		gnu:       false
 		extension: 'generic'
 		pedantic:  'the _Generic selection'
-		status:    .unimplemented
+		status:    .implemented
 	},
-	// _Static_assert stays unimplemented because the tree does not read a
-	// static assertion, and measured, the two positions it can be written in
-	// are not one answer. At file scope the parser refuses it and names it
-	// (`unsupported: expected a declaration, found '_Static_assert'`), which is
-	// the unimplemented rule. Inside a function body the statement path reads
-	// the token as the start of an expression, so `_Static_assert(1, "x");`
-	// compiles and becomes a call to a symbol that was never defined, which is
-	// the parser's defect — recorded for the milestone that owns statement
-	// parsing — and is not a reading this row may claim. The day the parser
-	// reads a static assertion, this row changes status and starts being
-	// checked; the phrase below is already what that message needs.
+	// _Static_assert is read in both positions it can be written in, file scope
+	// and a body, by one reader in `parser/declarations.v`: the condition is
+	// folded there and a false one is a diagnostic carrying the message. Measured
+	// before the reader, the two positions answered wrong and differently: at file
+	// scope the words were refused as `unsupported: expected a declaration, found
+	// '_Static_assert'`, and in a body the statement reader took them for an
+	// expression, so a static assertion read as a statement became a call to a
+	// symbol nothing defined, which is the parser defect this reader removes. The
+	// flags are measured on gcc 16.2.1: c99 and gnu99 take the construct and warn
+	// only under -pedantic, c11 and c23 take it silently, and a GNU dialect does
+	// not add it to a mode before C11, so the phrase below is a pedantic message
+	// and the row is not `invalid`.
 	Feature{
 		spellings: ['_Static_assert']
 		since:     .c11
 		gnu:       false
 		extension: 'static-assert'
 		pedantic:  'the _Static_assert declaration'
-		status:    .unimplemented
+		status:    .implemented
 	},
 	// The C99 types the type model resolves and the back end has no form for.
 	// The tree reads each of them, so a prototype naming one is read and kept;
@@ -337,20 +384,23 @@ pub const features = [
 		pedantic:  'the _Imaginary type'
 		status:    .unimplemented
 	},
-	// sizeof is an operator, and the tree does not read it: the spelling in a
-	// program was read as a call to a function of that name, so
-	// `int main(void) { int a[4]; return sizeof(a); }` compiled into a binary
-	// that died at load with `undefined symbol: sizeof`. The parser refuses the
-	// spelling by name and location now, which is the refusal the unimplemented
-	// rule asks for, and the row records that the operator is C89 and is not
-	// read yet. Implementing it is the milestone that owns the operator.
+	// sizeof is C89's operator and the tree reads it: `parser/parser.v` answers it
+	// where it is written, its operand is not evaluated, and `pipeline_test.v`
+	// asserts both (`sizeof(double) + sizeof(char)` is 9, and `sizeof(bump())`
+	// calls bump no times). Measured on gcc 16.2.1, the operator is C89's, so every
+	// mode has it and none reports it. The comment on this row used to say the
+	// tree did not read the spelling and refused it by name, which was true before
+	// the reader landed and stopped being true after; the reader is what the row
+	// now records. A sizeof whose operand is an array with no size this compiler
+	// knows, which is a variable-length array, is refused by name at its own
+	// location, and that is the shape's answer rather than this operator's.
 	Feature{
 		spellings: ['sizeof']
 		since:     .c89
 		gnu:       false
 		extension: ''
 		pedantic:  'the sizeof operator'
-		status:    .unimplemented
+		status:    .implemented
 	},
 ]
 
@@ -475,17 +525,64 @@ pub fn pedantic_messages(tokens []tokenize.Token, question Question) []tokenize.
 	return uses(tokens, features, question)
 }
 
+// auto_is_a_type_specifier says whether the `auto` token at `at` is C23's type
+// specifier rather than the C89 storage class of the same spelling, which is
+// what decides whether the auto row's construct is written. The declaration says
+// which and the tokens after the word are what say it: the deduced form is
+// written with the name right after the word, so the token after the name ends
+// the declaration (`=`, `;` or `,`), while the storage-class form has a type
+// between the word and the name (`auto int x`, `auto T x`). The question is
+// asked of two following tokens rather than of a table of type words because a
+// name the file typedef'd is a type and this check knows no scopes. The reader
+// in `parser/declarations.v` asks the same question of the same two tokens.
+fn auto_is_a_type_specifier(tokens []tokenize.Token, at int) bool {
+	if at + 1 >= tokens.len {
+		return false
+	}
+	after := tokens[at + 1]
+	if after.kind == .punct {
+		// The storage class cannot stand without a type in front of the
+		// declarator, so a declarator starting right after the word is the
+		// deduced form written with a declarator the standard does not allow.
+		return after.text in ['*', '(', '[']
+	}
+	if after.kind != .identifier || at + 2 >= tokens.len {
+		return false
+	}
+	ended := tokens[at + 2]
+	return ended.kind == .punct && ended.text in ['=', ';', ',', '[']
+}
+
+// two_token_spelling is the two tokens at `at` written with nothing between them,
+// which is how a construct whose spelling is more than one token is found: `({`
+// opens a braced group and neither token alone is its name. It answers the empty
+// string at the end of the stream, which is no row's spelling.
+fn two_token_spelling(tokens []tokenize.Token, at int) string {
+	if at + 1 >= tokens.len {
+		return ''
+	}
+	return tokens[at].text + tokens[at + 1].text
+}
+
 // uses is the walk itself, over a table the caller hands in rather than over the
 // table above, which is how the rule an extension follows is checked before
 // there is an extension to check it with: the tests bring a table of their own.
 fn uses(tokens []tokenize.Token, table []Feature, question Question) []tokenize.Diagnostic {
 	mut out := []tokenize.Diagnostic{}
-	for token in tokens {
+	// A construct no single spelling marks brings its own detection, because the
+	// spelling is shared with something else: `auto` is C23's type specifier and
+	// the C89 storage class, and only the tokens after the word say which. See
+	// auto_is_a_type_specifier.
+	for i, token in tokens {
 		for feature in table {
 			if feature.status == .unimplemented {
 				continue
 			}
-			if !feature.spellings.contains(token.text) {
+			if !feature.spellings.contains(token.text)
+				&& !feature.spellings.contains(two_token_spelling(tokens, i)) {
+				continue
+			}
+			if feature.extension == 'auto' && !auto_is_a_type_specifier(tokens, i) {
 				continue
 			}
 			if allowed(feature, question) {

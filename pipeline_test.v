@@ -3159,3 +3159,81 @@ int main(void)
 	os.rm(binary) or {}
 	assert exit_status == 0
 }
+
+// _Generic is the C11 selection: the controlling expression's type, after the
+// lvalue conversion 6.5.17 asks for, picks the association, and the selection is
+// worth that association's expression and type. Each program below is the value
+// gcc 16.2.1 computes for the same source.
+fn test_a_generic_selection_is_the_arm_its_controlling_type_names() {
+	source := scratch('generic_named.c')
+	binary := scratch('generic_named')
+	program := 'int main(void) { int n = 0; int r = _Generic(n, int: 3, long: 4, default: 0); return r; }\n'
+	assert compile_and_run(['-std=c23', source, '-o', binary], program) == 3
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// 6.5.17 does not evaluate the controlling expression: the increment is read for
+// its type and the value of n is unchanged, so the program returns 5 * 10 + 0.
+fn test_a_generic_selection_does_not_evaluate_its_controlling_expression() {
+	source := scratch('generic_noeval.c')
+	binary := scratch('generic_noeval')
+	program := 'int main(void) { int n = 0; int r = _Generic(++n, int: 5, default: 0); return r * 10 + n; }\n'
+	assert compile_and_run(['-std=c23', source, '-o', binary], program) == 50
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The selection has the type of the arm it selected, here a double, which is what
+// makes the arithmetic below a double multiply rather than an integer one.
+fn test_a_generic_selection_has_the_type_of_its_selected_arm() {
+	source := scratch('generic_type.c')
+	binary := scratch('generic_type')
+	program := 'int main(void) { double d = _Generic(1.0, int: 1.0, double: 2.5, default: 0.0); return (int)(d * 10); }\n'
+	assert compile_and_run(['-std=c23', source, '-o', binary], program) == 25
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// The extension brings the construct down to c99, so the same program compiles
+// and runs under `-std=c99 -fvcc-exts=generic`.
+fn test_the_generic_extension_brings_the_selection_down_to_c99() {
+	source := scratch('generic_c99.c')
+	binary := scratch('generic_c99')
+	program := 'int main(void) { return _Generic(1, int: 21, default: 0) * 2; }\n'
+	assert compile_and_run(['-std=c99', '-fvcc-exts=generic', source, '-o', binary], program) == 42
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// C23's auto takes the type of its initializer, and the value the program returns
+// says which type it took: each arm is worth a different number and the last term
+// is the value itself. Measured on gcc 16.2.1 the same program with the deduced
+// types written in returns 18, so 18 is the answer a deduction that picked int,
+// unsigned int, double and long has to give. It is compiled in the mode that made
+// the construct standard and in c99 with the extension that brings it down, which
+// is what naming the name on the command line is for.
+fn test_auto_is_the_initializer_type_in_both_modes_that_have_it() {
+	source := scratch('auto_local.c')
+	binary := scratch('auto_local')
+	program := 'int main(void) {\n    auto x = 1;\n    auto u = 2u;\n    auto d = 3.5;\n    auto l = 4L;\n    return _Generic(x, int: 1, default: 0) + _Generic(u, unsigned int: 2, default: 0) + _Generic(d, double: 4, default: 0) + _Generic(l, long: 8, default: 0) + (int)d;\n}\n'
+	assert compile_and_run(['-std=c23', source, '-o', binary], program) == 18
+	assert compile_and_run(['-std=c99', '-fvcc-exts=auto', source, '-o', binary], program) == 18
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A file-scope auto is a definition of the initializer's type, and the type is
+// read from the expression rather than from the folded number, which is why a
+// suffix that decides the type decides the object: measured on gcc 16.2.1,
+// `auto g = 2.5;` defines a double and the two reads below are 42 and 10.
+fn test_a_file_scope_auto_defines_an_object_of_the_initializer_type() {
+	source := scratch('auto_file.c')
+	binary := scratch('auto_file')
+	whole := 'auto g = 42;\nint main(void) { return g; }\n'
+	floating := 'auto h = 2.5;\nint main(void) { return (int)(h * 4); }\n'
+	assert compile_and_run(['-std=c23', source, '-o', binary], whole) == 42
+	assert compile_and_run(['-std=c99', '-fvcc-exts=auto', source, '-o', binary], floating) == 10
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}

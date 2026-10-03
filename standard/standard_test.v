@@ -200,12 +200,26 @@ fn test_no_std_and_an_unknown_spelling_ask_nothing() {
 	assert pedantic_messages(tokens, asking(.other)).len == 0
 }
 
-fn test_a_construct_the_compiler_refuses_is_not_a_pedantic_message() {
-	// _Generic is not implemented, so a program writing it is refused by the
-	// parser; a message from this table on top of that refusal would say the
-	// same thing twice and would be the wrong thing once the parser lands.
-	tokens := [token('_Generic'), token('int')]
-	assert pedantic_messages(tokens, asking(.c99)).len == 0
+fn test_a_generic_selection_is_read_and_is_therefore_checked() {
+	// The parser reads a generic selection now (`parse_generic_selection` in
+	// parser/parser.v), so the table's row is a message and not a duplicate of a
+	// refusal. The old shape asserted the opposite because the parser did not
+	// read the construct; the assertion that moved is this one. Measured on gcc
+	// 16.2.1: c99 and gnu99 warn only under -pedantic, c11 and c23 have it, and
+	// `-fvcc-exts=generic` brings it down into c99.
+	rows := features.filter(it.spellings.contains('_Generic'))
+	assert rows.len == 1
+	assert rows[0].status == .implemented
+	assert rows[0].since == .c11
+	assert !rows[0].gnu
+	assert rows[0].pedantic == 'the _Generic selection'
+	assert pedantic_messages([token('_Generic')], asking(.c99)).len == 1
+	assert pedantic_messages([token('_Generic')], asking(.gnu99)).len == 1
+	assert pedantic_messages([token('_Generic')], asking(.c11)).len == 0
+	assert pedantic_messages([token('_Generic')], asking(.c23)).len == 0
+	mut question := asking(.c99)
+	question.extensions = ['generic']
+	assert pedantic_messages([token('_Generic')], question).len == 0
 }
 
 // typeof is read by the parser, so the table's row is a message and not a
@@ -422,19 +436,121 @@ fn test_a_row_that_is_not_implemented_yet_is_read_by_nothing() {
 	assert uses([token('_Generic')], table, asking(.c99)).len == 0
 }
 
-fn test_a_static_assertion_is_not_read_and_is_therefore_not_checked() {
-	// The row is unimplemented and unchecked because the tree does not read a
-	// static assertion: at file scope the parser refuses it, and inside a
-	// function body the statement path reads the token as a call, which is the
-	// parser's defect and not a reading the table may claim. Promoting the row
-	// would report the construct in front of that refusal, which is the noise
-	// the status rule keeps out; the day the parser reads one, the status
-	// changes and the message below is what the check will print.
+fn test_a_static_assertion_is_read_and_is_therefore_checked() {
+	// The row moved to implemented when the parser gained the reader in
+	// `parser/declarations.v`, and the check it had been kept out of now runs:
+	// a mode before C11 reports the construct, c11 and c23 take it, and
+	// `-fvcc-exts=static-assert` brings it down into c99. The old shape asserted
+	// the opposite because the parser did not read the construct; the assertion
+	// that moved is this one, which is the behaviour that was meant to move.
 	rows := features.filter(it.spellings.contains('_Static_assert'))
 	assert rows.len == 1
-	assert rows[0].status == .unimplemented
+	assert rows[0].status == .implemented
 	assert rows[0].since == .c11
 	assert !rows[0].gnu
 	assert rows[0].pedantic == 'the _Static_assert declaration'
-	assert pedantic_messages([token('_Static_assert')], asking(.c99)).len == 0
+	assert pedantic_messages([token('_Static_assert')], asking(.c99)).len == 1
+	assert pedantic_messages([token('_Static_assert')], asking(.gnu99)).len == 1
+	// C11 made it standard, so c11 and c23 have it, and a GNU dialect before
+	// C11 does not add it.
+	assert pedantic_messages([token('_Static_assert')], asking(.c11)).len == 0
+	assert pedantic_messages([token('_Static_assert')], asking(.c23)).len == 0
+	// The extension brings it down to c99, which is the flag doing what it says.
+	mut question := asking(.c99)
+	question.extensions = ['static-assert']
+	assert pedantic_messages([token('_Static_assert')], question).len == 0
+}
+
+// The auto row's construct is a word that is also the C89 storage class, so the
+// check asks what follows the word and counts only the deduced form. `auto x = 1`
+// is C23's type specifier; `auto int x` has a type between the word and the name
+// and is the storage class, which the row must not report.
+fn test_the_auto_row_marks_the_type_specifier_and_not_the_storage_class() {
+	rows := features.filter(it.extension == 'auto')
+	assert rows.len == 1
+	assert rows[0].status == .implemented
+	assert rows[0].since == .c23
+	assert !rows[0].gnu
+	assert rows[0].invalid
+	deduced := [
+		token('auto'),
+		token('x'),
+		punct('='),
+		token('1'),
+		punct(';'),
+	]
+	storage := [token('auto'), token('int'), token('x'), punct(';')]
+	// c99 does not have the construct, and the row refuses it there; gnu99 is
+	// the same standard and does not add it, because gnu23 is what includes C23.
+	assert uses(deduced, features, asking(.c99)).len == 1
+	assert uses(deduced, features, asking(.gnu99)).len == 1
+	// The storage class is none of the check's business in any mode.
+	assert uses(storage, features, asking(.c99)).len == 0
+	assert uses(storage, features, asking(.c23)).len == 0
+	// c23 made it standard, and the extension brings it down to c99.
+	assert uses(deduced, features, asking(.c23)).len == 0
+	mut question := asking(.c99)
+	question.extensions = ['auto']
+	assert uses(deduced, features, question).len == 0
+	assert uses(storage, features, question).len == 0
+}
+
+fn punct(text string) tokenize.Token {
+	return tokenize.Token{
+		kind: .punct
+		text: text
+		line: 1
+		col:  1
+		file: 'f.c'
+	}
+}
+
+// A GNU statement expression is marked by two tokens with nothing between them
+// and not by a word, so the row carries the pair and the check joins two tokens
+// to find it. Measured on gcc 16.2.1, it is a GNU extension: c89, c99, c11 and
+// c23 take it silently and report it only under -pedantic, and a GNU dialect
+// takes it as its own. The report is the pedantic class, so -Wpedantic is what
+// shows it and -pedantic-errors is what makes it an error.
+fn test_the_braced_group_row_finds_the_pair_and_a_gnu_dialect_takes_it() {
+	rows := features.filter(it.pedantic == 'braced-groups within expressions')
+	assert rows.len == 1
+	assert rows[0].status == .implemented
+	assert rows[0].spellings == ['({']
+	assert rows[0].gnu
+	assert rows[0].extension == ''
+	group := [
+		punct('('),
+		punct('{'),
+		token('1'),
+		punct(';'),
+		punct('}'),
+		punct(')'),
+	]
+	// A parenthesis that opens no brace is not the construct: the row is found
+	// by the pair and not by the punctuation alone.
+	assert uses([punct('('), token('x'), punct(')')], features, asking(.c99)).len == 0
+	assert uses(group, features, asking(.c89)).len == 1
+	assert uses(group, features, asking(.c99)).len == 1
+	assert uses(group, features, asking(.c23)).len == 1
+	// A GNU dialect is where the construct is at home, so nothing is reported
+	// there: the mode that lacks it is the strict one.
+	assert uses(group, features, asking(.gnu99)).len == 0
+	assert uses(group, features, asking(.gnu23)).len == 0
+	report := uses(group, features, asking(.c99))[0]
+	assert report.msg == 'ISO C99 forbids braced-groups within expressions'
+	assert report.warning
+}
+
+// sizeof is C89's operator and the tree reads it, so the row is implemented: its
+// comment had said the parser refused the spelling, which outlived the reader
+// that landed. Every mode has the operator, so no mode reports it and the row's
+// answer is silent everywhere.
+fn test_the_sizeof_row_is_read_and_no_mode_reports_it() {
+	rows := features.filter(it.spellings.contains('sizeof'))
+	assert rows.len == 1
+	assert rows[0].status == .implemented
+	assert rows[0].since == .c89
+	for mode in [Mode.c89, Mode.c99, Mode.c11, Mode.c23, Mode.gnu89, Mode.gnu99, Mode.gnu23] {
+		assert uses([token('sizeof'), punct('('), token('x'), punct(')')], features, asking(mode)).len == 0
+	}
 }
