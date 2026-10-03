@@ -83,6 +83,9 @@ pub const relocation_absolute = u64(1)
 // type. The symbols are undefined, which is to say the value comes from
 // somewhere else.
 pub const symbol_global_function = u8(0x12)
+// The same byte with the weak binding (2) rather than global (1), which is what
+// `__attribute__((weak))` on a definition asks the object to say about it.
+pub const symbol_weak_function = u8(0x22)
 
 // Symbols and relocations are fixed-size records in this container.
 pub const elf_symbol_size = 24
@@ -176,6 +179,13 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	offset = align(offset + dynstr_len, 8)
 	strings := offset
 	offset = align(offset + program.string_blob.len, 8)
+	// The storage of the top-level objects starts at the strictest alignment any
+	// object asked for with `aligned(N)`. An object's address is the load base
+	// plus its offset in the image, and the load base is page aligned, so
+	// aligning the offset here is what makes an address the object's declaration
+	// asked for land where it was asked to.
+	gl := if program.globals_alignment > 8 { program.globals_alignment } else { 8 }
+	offset = align(offset, gl)
 	globals := offset
 	offset = align(offset + program.globals_blob.len, 8)
 	dynsym := offset

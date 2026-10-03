@@ -386,3 +386,21 @@ fn test_a_data_reference_this_object_cannot_carry_is_refused() {
 		assert false, 'an object was written for a data reference that is not an address'
 	}
 }
+
+// A definition whose declaration asked for the weak binding carries it into the
+// object's symbol table: st_info says WEAK where a plain definition says GLOBAL.
+// It is what `__attribute__((weak))` asks for, and what a linker reads when it
+// decides which of two definitions of a name to take.
+fn test_a_weak_definition_is_weak_in_the_symbol_table() {
+	mut program := one_call()
+	program.weak['callee'] = true
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	callee := symbol_entry_at(bytes, first_global_symbol)
+	assert bytes[callee + 4] == symbol_weak_function
+	// The rest of the entry is the same: the same name, the same section, the
+	// same value. Only the binding changed.
+	assert u16_at(bytes, callee + 6) == section_text
+	assert u64_at(bytes, callee + 8) == 5
+}

@@ -556,6 +556,14 @@ fn (mut e Emitter) build() ![]u8 {
 		}
 		if decl.defined {
 			e.program.defined[decl.name] = true
+			// A weak definition is one the object's symbol table marks WEAK
+			// rather than GLOBAL, which is what `__attribute__((weak))` asked
+			// for. Only a definition has a binding here: a weak prototype of a
+			// function this file does not define is an import, and what its
+			// binding is is the linker's business.
+			if decl.weak {
+				e.program.weak[decl.name] = true
+			}
 		}
 		// A definition and a prototype are both a parameter list this back end
 		// can read, so both fill the same tables. Only a body written here makes
@@ -9272,6 +9280,23 @@ fn put_double(mut blob []u8, at int, value f64, width int) {
 	}
 }
 
+// place_global is where the next top-level object's storage begins. The object
+// starts at the alignment its declaration asked for with `aligned(N)`, or at the
+// word size when it asked for none, which is the alignment the objects already
+// had. The strictest alignment any object asked for is kept on the image, because
+// every offset is measured from the start of the blob and an object can only land
+// at its alignment if the blob itself starts there.
+fn (mut e Emitter) place_global(asked int) int {
+	to := if asked > e.target.word_size { asked } else { e.target.word_size }
+	if to > e.program.globals_alignment {
+		e.program.globals_alignment = to
+	}
+	for e.program.globals_blob.len % to != 0 {
+		e.program.globals_blob << u8(0)
+	}
+	return e.program.globals_blob.len
+}
+
 // global_of is the storage a top-level object has in the image, laid out the
 // first time the name is used: the bytes of its constant initializer, or zeros,
 // at the width of one element, with every object starting at a word boundary so
@@ -9301,10 +9326,7 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		// One object of an aggregate type is the layout's size, and an array of
 		// them is that many per element: `width` is the size of one element,
 		// which is the stride an index scales by, and `count` is how many.
-		for e.program.globals_blob.len % e.target.word_size != 0 {
-			e.program.globals_blob << u8(0)
-		}
-		offset := e.program.globals_blob.len
+		offset := e.place_global(object.alignment)
 		space := if object.count > 0 { object.count * object.bytes } else { object.bytes }
 		e.program.globals_blob << []u8{len: space, init: u8(0)}
 		// The slot is registered before its initializer is written, because an
@@ -9374,10 +9396,7 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		return slot
 	}
 	count := if shape.count > 0 { shape.count } else { 1 }
-	for e.program.globals_blob.len % e.target.word_size != 0 {
-		e.program.globals_blob << u8(0)
-	}
-	offset := e.program.globals_blob.len
+	offset := e.place_global(object.alignment)
 	e.program.globals_blob << []u8{len: count * element, init: u8(0)}
 	// The slot is registered before its initializer is written, because an
 	// initializer that is an address may name the object itself (`int *p =
