@@ -647,6 +647,15 @@ fn (mut e Emitter) build() ![]u8 {
 		}
 		e.emit_function(decl)!
 	}
+	// Every object the file defines is storage the unit holds, whether or not a
+	// function in the file names it. What a translation unit provides is what it
+	// defines (6.9p5), and an object's storage is laid out only when global_of is
+	// asked for it, so a definition a function never reached was left out of the
+	// image and out of the symbol table with it. The objects a function already
+	// referenced were placed as they were reached; this asks for every remaining
+	// definition in the order it was written, which is what keeps the storage at
+	// the same offsets and the object at the same bytes every run.
+	e.place_defined_objects()
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -9709,6 +9718,21 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 		e.write_data_address(address, offset)
 	}
 	return slot
+}
+
+// place_defined_objects lays out the storage of every object the file defines,
+// so that an object no function in this file names is still part of the unit.
+// It walks the definitions in the order they were written and asks global_of
+// for each name, which places the one definition and the objects its
+// initializer names along with it; a definition a function already reached is
+// already placed and is returned as it is. The order is the source's and never
+// a map's, because the offsets global_of writes come from the position in the
+// blob and the image is required to be the same bytes for the same input.
+fn (mut e Emitter) place_defined_objects() {
+	for global in e.unit.globals {
+		if _ := e.global_of(global.name) {
+		}
+	}
 }
 
 // write_data_address records the eight bytes of a top-level object that hold the
