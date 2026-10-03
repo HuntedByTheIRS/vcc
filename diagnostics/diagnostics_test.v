@@ -15,6 +15,38 @@ fn test_the_class_a_name_names() {
 	}
 }
 
+fn test_a_discarded_qualifier_is_a_warning_gcc_names() {
+	// gcc's -Wdiscarded-qualifiers is a class with a spelling, unlike the
+	// class it otherwise matches: measured on gcc 16.2.1, `const int *p;
+	// int *q = p;` is a warning under -std=c99, silenced by
+	// -Wno-discarded-qualifiers, and promoted by -pedantic-errors.
+	mut policy := Policy{}
+	assert policy.severity(.discarded_qualifiers) == .warning
+	// It is a class of its own and not the required one: naming it silences
+	// this diagnostic and leaves a required one reported, which is what gcc
+	// does with -Wno-discarded-qualifiers.
+	assert policy.accept('-Wno-discarded-qualifiers')
+	assert policy.severity(.discarded_qualifiers) == .silent
+	assert policy.severity(.required) == .warning
+
+	mut named := Policy{}
+	assert named.accept('-Wdiscarded-qualifiers')
+	assert named.severity(.discarded_qualifiers) == .warning
+
+	mut promoted := Policy{}
+	assert promoted.accept('-pedantic-errors')
+	assert promoted.severity(.discarded_qualifiers) == .error
+
+	mut suppressed := Policy{}
+	assert suppressed.accept('-w')
+	assert suppressed.severity(.discarded_qualifiers) == .silent
+
+	mut named_off := Policy{}
+	assert named_off.accept('-Wdiscarded-qualifiers')
+	assert named_off.accept('-Wno-discarded-qualifiers')
+	assert named_off.severity(.discarded_qualifiers) == .silent
+}
+
 fn test_pedantic_is_silent_until_it_is_asked_for() {
 	mut policy := Policy{}
 	assert policy.severity(.pedantic) == .silent
