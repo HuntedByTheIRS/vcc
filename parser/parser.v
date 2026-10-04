@@ -3015,6 +3015,15 @@ fn (p Parser) constant_value(expr ast.Expr) ?i64 {
 // name rather than written as a value the fold did not make.
 fn (p Parser) floating_constant_value(expr ast.Expr) ?f64 {
 	if expr is ast.FloatLit {
+		if expr.long_value != none {
+			// A long double constant keeps its value in the extended field and
+			// its double field is zero (ast.FloatLit), so folding one here
+			// answered 0.0 for every spelling. This folder produces a double
+			// and cannot hold the extended value, so it answers none and the
+			// file-scope constant reader takes the literal through the reader
+			// of the extended type instead, which is where its bytes come from.
+			return none
+		}
 		return expr.value
 	}
 	if expr is ast.Unary {

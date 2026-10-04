@@ -1852,9 +1852,22 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 				p.error_at(t, err.msg())
 				return none
 			}
+			// The sign written in front of the constant is part of its value.
+			// The extended format keeps it in the top bit of the sign and
+			// exponent word, so flipping that bit is what `-12.0L` and `-0.0L`
+			// mean; without it every signed long double constant at file scope
+			// carried the positive value.
+			signed := if sign < 0 {
+				types.LongDouble{
+					mantissa: value.mantissa
+					sign_exp: value.sign_exp ^ 0x8000
+				}
+			} else {
+				value
+			}
 			return NumberConstant{
 				number: FileConstant{
-					long_floating: value
+					long_floating: signed
 				}
 				at:     t
 			}
