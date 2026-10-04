@@ -1244,7 +1244,15 @@ fn (mut e Emitter) emit_asm(stmt ast.Stmt) !void {
 // `return 1.5;` in one returning an int returns 1.
 fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 	expr := stmt.expr or {
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: return without a value in a function that returns ${e.returning}')
+		if e.returning == 'void' {
+			// A return without a value is the form C allows in a function whose
+			// return type is void (6.8.6.4p1), and it leaves the way a return with
+			// a value does once the value is written: the frame is closed and
+			// control goes back to the caller.
+			e.append(e.target.frame_epilogue())
+			return
+		}
+		e.diagnostics << problem(stmt.line, stmt.col, 'a constraint violation: return without a value in a function that returns ${e.returning}')
 		return error('return without a value')
 	}
 	if e.returning == 'void' {

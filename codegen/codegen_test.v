@@ -1030,6 +1030,27 @@ fn test_a_return_inside_a_nested_block_is_emitted() {
 	assert run_image(emitted.bytes) == 5
 }
 
+// A return without a value is the form C allows in a function whose return type
+// is void (6.8.6.4p1), and it leaves the way a return with a value does once the
+// value is written. V's generated C writes it wherever a function ends early, so
+// the emitter reads it rather than refusing it.
+fn test_a_valueless_return_in_a_void_function_is_emitted() {
+	emitted := emit(translation_unit('void nothing() { return; }\nint main() { nothing(); return 3; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 3
+}
+
+// The other way round stays refusing. A return without a value in a function that
+// returns a value is the program's error, not a construct this compiler has yet to
+// learn, so the message says which function and where.
+fn test_a_valueless_return_in_a_function_that_returns_a_value_is_reported() {
+	emitted := emit(translation_unit('int nothing() { return; }\nint main() { return nothing(); }'), Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('a constraint violation')
+	assert emitted.diagnostics[0].msg.contains('returns int')
+	assert emitted.bytes.len == 0
+}
+
 // A program whose body runs to the end without returning still has a status:
 // zero, which is what C says the entry function does.
 fn test_a_body_that_never_returns_finishes_with_zero() {
