@@ -163,6 +163,16 @@ pub mut:
 	// for every type that is not an enum.
 	underlying Kind
 	quals      Qualifiers
+	// layout is the object layout of a completed aggregate, worked out once
+	// when the aggregate is read and kept here. The size of an object of the
+	// type, the boundary it starts on and the offset of each member are all
+	// pure functions of the member list, and the reader asks those questions
+	// over and over: without this, each question walks the whole member list
+	// again, and a struct holding a struct walks the inner one for every outer
+	// question. It stays nil for a type that is not an aggregate, and for one
+	// whose layout no description could answer, so an unanswerable question
+	// still refuses exactly as it did before.
+	layout &Layout = unsafe { nil }
 }
 
 // Member is one member of a struct or a union. bitfield says the member was

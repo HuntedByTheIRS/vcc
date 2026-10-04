@@ -4442,10 +4442,23 @@ fn (mut p Parser) parse_tag_specifier(keyword tokenize.Token, depth int) !TagTyp
 		}
 	}
 	members := p.parse_member_list(keyword, open, depth)!
-	clause := if keyword.text == 'union' {
+	mut clause := if keyword.text == 'union' {
 		types.union_type(tag, members)
 	} else {
 		types.struct_type(tag, members)
+	}
+	// The layout is worked out once, here, while the member list is final, and
+	// kept on the type. Every later question about it (the size of an object of
+	// the type, the boundary it starts on, the offset of a member) then reads
+	// the answer rather than walking the members again.
+	if lay := p.representation.layout(clause) {
+		clause.layout = &types.Layout{
+			size:    lay.size
+			align:   lay.align
+			offsets: lay.offsets
+			bits:    lay.bits
+			padding: lay.padding
+		}
 	}
 	p.scopes.declare_tag(spelling, clause)
 	return TagType{

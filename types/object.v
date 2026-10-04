@@ -69,6 +69,11 @@ pub:
 // the answer is not known: a description that does not carry the kind, an
 // incomplete type, a function or a type this compiler never resolved.
 pub fn (r Representation) size_of(t Type) ?int {
+	if t.layout != unsafe { nil } {
+		// A completed aggregate carries the layout it was given when it was
+		// read, so the members it was built from are not walked again.
+		return t.layout.size
+	}
 	if t.kind == .array {
 		if t.count < 0 || t.base == unsafe { nil } {
 			return none
@@ -94,6 +99,9 @@ pub fn (r Representation) size_of(t Type) ?int {
 // align_of is the boundary a value of this type has to start on, and none when
 // the description does not carry it.
 pub fn (r Representation) align_of(t Type) ?int {
+	if t.layout != unsafe { nil } {
+		return t.layout.align
+	}
 	if t.kind == .array {
 		if t.base == unsafe { nil } {
 			return none
@@ -121,6 +129,9 @@ pub fn (r Representation) align_of(t Type) ?int {
 // unit at the current position. The object's alignment is the largest alignment
 // of its members, and its size is rounded up to that.
 pub fn (r Representation) layout(t Type) ?Layout {
+	if t.layout != unsafe { nil } {
+		return *t.layout
+	}
 	if t.kind != .struct_ && t.kind != .union_ {
 		size := r.size_of(t) or { return none }
 		align := r.align_of(t) or { return none }
