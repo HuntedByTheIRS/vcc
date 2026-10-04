@@ -222,15 +222,16 @@ close the speed gap. `ROADMAP.md` lays out the milestones and what verifies
 each one.
 
 Speed is the number to watch, and it is not close yet. Measured with
-`v run tools/bench.vsh` against the tcc this machine has:
+`v run tools/bench.vsh` against the tcc V vendors:
 
 | terms | vcc wall | tcc wall | ratio | vcc peak | tcc peak | ratio |
 |---|---|---|---|---|---|---|
-| 2 000 | 27.6 ms | 5.7 ms | 4.9x | 15.2 MB | 3.4 MB | 4.5x |
-| 20 000 | 192.7 ms | 7.4 ms | 25.9x | 54.6 MB | 3.4 MB | 16.2x |
+| 2 000 | 30.2 ms | 5.1 ms | 6.0x | 14.4 MB | 3.4 MB | 4.2x |
+| 20 000 | 196.2 ms | 7.2 ms | 27.1x | 55.4 MB | 3.4 MB | 16.4x |
 
-The ratio grows with input because the pipeline allocates per token and per AST
-node, which is a design problem and the M6 problem, not a constant factor to
+The ratio grows with the input because tcc's own time barely moves, 5.1 ms to
+7.2 ms across these two counts, while vcc's tracks the tokens and nodes it
+allocates. That is a design problem and the M6 problem, not a constant factor to
 trim.
 
 ## Extras
