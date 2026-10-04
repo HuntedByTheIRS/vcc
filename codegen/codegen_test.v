@@ -1247,6 +1247,42 @@ fn test_a_variadic_library_call_prints_its_formatted_argument() {
 	assert result.output.contains('value: 42')
 }
 
+// glibc does not export atexit from libc.so.6; it keeps the definition in the
+// static libc_nonshared.a, so a call to it resolves against no library the
+// image names. glibc's atexit is a wrapper around __cxa_atexit, which libc.so.6
+// does export, and this image emits that wrapper. The handler runs after main
+// returns, which the exit status alone cannot show, so the handler prints a
+// marker the test reads. Measured with gcc 16.2.1, the same program prints the
+// marker once and exits 0.
+fn test_atexit_is_written_as_the_wrapper_the_c_library_keeps_in_its_static_half() {
+	source := 'int printf(const char *, ...);\nint atexit(void (*)(void));\nstatic void handler(void) { printf("ran\\n"); }\nint main(void) { return atexit(handler); }\n'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+	assert result.output.trim_space() == 'ran'
+}
+
+// The handlers run in reverse order of registration, once, after main returns,
+// which is what gcc prints for the same source.
+fn test_atexit_handlers_run_in_reverse_order_after_main() {
+	source := 'int printf(const char *, ...);\nint atexit(void (*)(void));\nstatic void a(void) { printf("a"); }\nstatic void b(void) { printf("b"); }\nint main(void) { atexit(a); atexit(b); return 0; }\n'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	result := run_capturing(emitted.bytes)
+	assert result.exit_code == 0
+	assert result.output.trim_space() == 'ba'
+}
+
+// A unit that defines its own atexit keeps that definition: a call to the name
+// binds to the function in the image and is not rewritten into the wrapper.
+fn test_a_unit_that_defines_its_own_atexit_keeps_it() {
+	emitted := emit(translation_unit('static void h(void) {}\nint atexit(void (*)(void));\nint atexit(void (*f)(void)) { (void)f; return 7; }\nint main(void) { return atexit(h); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
+}
+
 // A call to a name the file defines is a call into the image, wherever in the
 // file the definition is written. Treating it as a library symbol would fail at
 // load time with the name of a function the file supplies itself.
