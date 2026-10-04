@@ -170,6 +170,85 @@ pub fn double_operator(op string, dst Register, src Register) ![]u8 {
 	return double_arithmetic(opcode, dst, src)
 }
 
+// The fused multiply-add opcodes, as the 213 group: the destination names the
+// first multiplicand. `vfmadd213sd dst, src2, src3` computes
+// `dst = src2 * dst + src3`, and the subtract and the two negated forms are the
+// same instruction with another opcode. They are how gcc 16.2.1's own complex
+// division is compiled: measured, its __divdc3 contracts the products and sums,
+// and the same arithmetic without the contraction answers differently.
+const fused_add = u8(0xa9)
+const fused_subtract = u8(0xab)
+const fused_negated_add = u8(0xad)
+const fused_negated_subtract = u8(0xaf)
+
+// fused_slot is one fused multiply-add whose third operand is read from the
+// frame. FMA is an AVX instruction, so the encoding is the three-byte VEX header
+// rather than the two-byte prefix the rest of this file writes: C4, a byte that
+// says the map is 0F38 and that no register extension is written, a byte that
+// carries the W bit choosing the width and the complemented second source
+// register, the opcode, and a ModRM with mod 10, rm 101, an eight-byte
+// displacement from the frame pointer.
+fn fused_slot(opcode u8, double bool, dst Register, src2 Register, base Register, disp i32) ![]u8 {
+	if dst.width != 16 || src2.width != 16 {
+		return error('${name}: a fused multiply-add names two floating registers, and ${dst.name} or ${src2.name} is not one')
+	}
+	if base.width != 4 {
+		return error('${name}: a fused multiply-add reads its third operand from the frame, and ${base.name} is not a register')
+	}
+	if dst.code >= 8 || src2.code >= 8 || base.code >= 8 {
+		return error('${name}: a fused multiply-add names ${dst.name}, ${src2.name} and ${base.name}, and none may be above the seventh register')
+	}
+	mut out := []u8{cap: 10}
+	out << u8(0xc4) // three-byte VEX
+	out << u8(0xe2) // R, X and B are all clear; mmmmm = 00010, the 0F38 map
+	mut width_and_source := u8(0)
+	if double {
+		width_and_source |= 0x80 // W: the operands are doubles rather than floats
+	}
+	width_and_source |= u8((~src2.code & 0x0f) << 3) // vvvv: the second source, complemented
+	width_and_source |= 0x01 // pp = 01, the 66 prefix the whole family carries
+	out << width_and_source
+	out << opcode
+	out << u8(0x80 | ((dst.code & 0x07) << 3) | 0x05) // mod 10, rm 101: [base + disp32]
+	value := u32(disp)
+	out << u8(value & 0xff)
+	out << u8((value >> 8) & 0xff)
+	out << u8((value >> 16) & 0xff)
+	out << u8((value >> 24) & 0xff)
+	return out
+}
+
+// fused_double and fused_single name the operation the language's operator set
+// does not: a product added to a third value with one rounding instead of two.
+// The operator picks which of the four forms: `+` and `-` add or subtract the
+// third operand, and `neg+` and `neg-` negate the product first, which is the
+// `b - a*ratio` shape the complex division needs.
+pub fn fused_double(op string, dst Register, src2 Register, base Register, disp i32) ![]u8 {
+	opcode := match op {
+		'+' { fused_add }
+		'-' { fused_subtract }
+		'neg+' { fused_negated_add }
+		'neg-' { fused_negated_subtract }
+		else {
+			return error('${name}: ${op} is not a fused multiply-add this machine computes with')
+		}
+	}
+	return fused_slot(opcode, true, dst, src2, base, disp)
+}
+
+pub fn fused_single(op string, dst Register, src2 Register, base Register, disp i32) ![]u8 {
+	opcode := match op {
+		'+' { fused_add }
+		'-' { fused_subtract }
+		'neg+' { fused_negated_add }
+		'neg-' { fused_negated_subtract }
+		else {
+			return error('${name}: ${op} is not a fused multiply-add this machine computes with')
+		}
+	}
+	return fused_slot(opcode, false, dst, src2, base, disp)
+}
+
 // compare_double orders two doubles and sets the flags a comparison reads. The
 // instruction is Comisd: the four orders are read off ZF, CF and PF, and the
 // caller writes one of them into a register because there is no instruction that
@@ -579,6 +658,47 @@ pub fn negate_single(reg Register, gp Register) ![]u8 {
 	out << u8(0x0f)
 	out << u8(0xba)
 	out << u8(0xf8 | (gp.code & 0x07))
+	out << u8(31)
+	out << movq_modrm(movq_to_float, reg, gp)
+	return out
+}
+
+// absolute_double clears the sign bit of a double, which is the magnitude the
+// scaled complex division compares. It is negate_double with the bit test and
+// reset in place of the bit test and complement: the two moves carry the eight
+// bytes out and back, and `btr rax, 63` leaves every bit of the value but the
+// sign. It is exact for every input, including a NaN, whose sign is the only
+// part of it this changes.
+pub fn absolute_double(reg Register, gp Register) ![]u8 {
+	if reg.width != 16 || gp.width != 4 {
+		return error('${name}: the magnitude of a double names a sixteen-byte register and a four-byte one, and ${reg.name} or ${gp.name} is neither')
+	}
+	mut out := movq_modrm(movq_from_float, reg, gp)
+	// btr rax, 63: bit test and reset, with the bit in the immediate. REX.W is
+	// what makes it reach bit 63 rather than read the bit number modulo 32.
+	out << u8(0x48)
+	out << u8(0x0f)
+	out << u8(0xba)
+	out << u8(0xf0 | (gp.code & 0x07))
+	out << u8(63)
+	out << movq_modrm(movq_to_float, reg, gp)
+	return out
+}
+
+// absolute_single is the same clearing of the sign bit at four bytes, which is
+// bit 31 of the register the float sits in rather than bit 63.
+pub fn absolute_single(reg Register, gp Register) ![]u8 {
+	if reg.width != 16 || gp.width != 4 {
+		return error('${name}: the magnitude of a float names a sixteen-byte register and a four-byte one, and ${reg.name} or ${gp.name} is neither')
+	}
+	if reg.code >= 8 || gp.code >= 8 {
+		return error('${name}: the magnitude of a float names ${reg.name} and ${gp.name}, and only the first eight have the encoding written here')
+	}
+	mut out := movq_modrm(movq_from_float, reg, gp)
+	// btr eax, 31: the bit test and reset without REX.W, so the bit is 31.
+	out << u8(0x0f)
+	out << u8(0xba)
+	out << u8(0xf0 | (gp.code & 0x07))
 	out << u8(31)
 	out << movq_modrm(movq_to_float, reg, gp)
 	return out
@@ -2483,6 +2603,8 @@ fn one_operand64(reg Register, group u8) ![]u8 {
 // machine deserves.
 pub struct Encoders {
 pub:
+	absolute_double                 fn (Register, Register) ![]u8                     = unsafe { nil }
+	absolute_single                 fn (Register, Register) ![]u8                     = unsafe { nil }
 	adc_immediate                   fn (Register, i32) ![]u8                          = unsafe { nil }
 	adc_reg64                       fn (Register, Register) ![]u8                     = unsafe { nil }
 	add_immediate                   fn (Register, i32) []u8                           = unsafe { nil }
@@ -2523,9 +2645,11 @@ pub:
 	float_arithmetic                fn (string, Register, Register) ![]u8 = unsafe { nil }
 	float_to_double                 fn (Register, Register) ![]u8         = unsafe { nil }
 	float_to_int                    fn (Register, Register) ![]u8         = unsafe { nil }
-	frame_epilogue                  fn () []u8                              = unsafe { nil }
-	frame_prologue                  fn () []u8                              = unsafe { nil }
-	frame_reserve                   fn (u32) []u8                           = unsafe { nil }
+	frame_epilogue                  fn () []u8    = unsafe { nil }
+	frame_prologue                  fn () []u8    = unsafe { nil }
+	frame_reserve                   fn (u32) []u8 = unsafe { nil }
+	fused_double                    fn (string, Register, Register, Register, i32) ![]u8 = unsafe { nil }
+	fused_single                    fn (string, Register, Register, Register, i32) ![]u8 = unsafe { nil }
 	halt                            fn () []u8                              = unsafe { nil }
 	idiv_reg32                      fn (Register) ![]u8                     = unsafe { nil }
 	idiv_reg64                      fn (Register) ![]u8                     = unsafe { nil }
@@ -2624,6 +2748,8 @@ pub:
 // method rather than to the encoder.
 pub fn encoders() Encoders {
 	return Encoders{
+		absolute_double:                 &absolute_double
+		absolute_single:                 &absolute_single
 		adc_immediate:                   &adc_immediate
 		adc_reg64:                       &adc_reg64
 		add_immediate:                   &add_immediate
@@ -2667,6 +2793,8 @@ pub fn encoders() Encoders {
 		frame_epilogue:                  &frame_epilogue
 		frame_prologue:                  &frame_prologue
 		frame_reserve:                   &frame_reserve
+		fused_double:                    &fused_double
+		fused_single:                    &fused_single
 		halt:                            &halt
 		idiv_reg32:                      &idiv_reg32
 		idiv_reg64:                      &idiv_reg64
