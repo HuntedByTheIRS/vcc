@@ -845,6 +845,31 @@ int main(void) { return pick(1, 2, 3, 4, 5, 6, 7, 8.125L) == 8.125L ? 0 : 1; }')
 	assert run_image(odd.bytes) == 0
 }
 
+// Two long double calls in one argument list are two values, and the second is
+// not lost to the first. A call's stack arguments are staged in the pass that
+// pushes them, and an argument that is itself a call runs in the middle of that
+// pass, so the inner call's own stack release must not take the words the
+// enclosing call already pushed. Measured on gcc 16.2.1 at -O0 -fno-builtin,
+// which exits 0 on both programs; this compiler exited 1 on both before the
+// release was made per call.
+fn test_two_long_double_calls_in_one_argument_list_are_both_read() {
+	call := emit(translation_unit('long double one(void) { return 1.0L; }
+long double two(void) { return 2.0L; }
+long double addl(long double a, long double b) { return a + b; }
+int main(void) { return addl(one(), two()) == 3.0L ? 0 : 1; }'), Options{})
+	assert call.diagnostics.len == 0
+	assert run_image(call.bytes) == 0
+	// The arguments are themselves two-long-double calls, so the release has to
+	// be per call at two depths and not only one.
+	nested := emit(translation_unit('long double one(void) { return 1.0L; }
+long double two(void) { return 2.0L; }
+long double addl(long double a, long double b) { return a + b; }
+int main(void) { return addl(addl(one(), one()), addl(one(), two())) == 5.0L ? 0 : 1; }'),
+		Options{})
+	assert nested.diagnostics.len == 0
+	assert run_image(nested.bytes) == 0
+}
+
 fn test_a_long_double_conditional_and_arithmetic_are_computed_on_the_stack() {
 	// The conditional picks one arm's value, and the subtraction and
 	// multiplication are the x87 instructions the type needs rather than the
