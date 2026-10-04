@@ -4203,4 +4203,20 @@ fn test_the_flag_decides_the_form_of_a_reference_to_a_top_level_object() {
 	assert hidden_plain.diagnostics.len == 0
 	assert hidden_pic.diagnostics.len == 0
 	assert hidden_plain.bytes == hidden_pic.bytes
+	// A string constant is already an address in the read-only section, and the
+	// pointer to it here has internal linkage, so both references keep the form
+	// they have: the pair is the same object. A non-static pointer to the same
+	// string would differ, because the pointer itself is an object another
+	// object may define and that is the reference the flag changes.
+	text := 'static const char *message = "abc";\nint first(void) { return message[0]; }\n'
+	text_plain := emit(translation_unit(text), Options{
+		compile_only: true
+	})
+	text_pic := emit(translation_unit(text), Options{
+		compile_only: true
+		pic:          true
+	})
+	assert text_plain.diagnostics.len == 0
+	assert text_pic.diagnostics.len == 0
+	assert text_plain.bytes == text_pic.bytes
 }
