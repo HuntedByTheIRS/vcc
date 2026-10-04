@@ -2109,11 +2109,14 @@ fn (mut e Emitter) aggregate_object(expr ast.Expr, depth int) !Slot {
 }
 
 // emit_aggregate_into writes the value of an expression of an aggregate type
-// into an object the caller has reserved. A conditional is the shape this
-// exists for: the condition picks an arm, and that arm's bytes are copied into
-// the destination so neither arm is aliased. Every other shape reaching here is
-// an object with no path in this back end yet, and it is refused with the same
-// words a name, an element or a member are not needed for.
+// into an object the caller has reserved. A conditional is one shape: the
+// condition picks an arm, and that arm's bytes are written into the destination
+// so neither arm is aliased. A call is the other: what it hands back arrives in
+// the registers the class names, or in the storage the call lent the callee when
+// the object is more than two eightbytes, and that is a value this back end
+// already knows how to write. Every other shape reaching here is an object with
+// no path in this back end yet, and it is refused with the same words a name, an
+// element or a member are not needed for.
 fn (mut e Emitter) emit_aggregate_into(destination Slot, expr ast.Expr, depth int) !void {
 	if expr is ast.Comma {
 		// A compound literal written where its statement does not describe a
@@ -2127,24 +2130,35 @@ fn (mut e Emitter) emit_aggregate_into(destination Slot, expr ast.Expr, depth in
 		else_label := e.label()
 		end_label := e.label()
 		e.branch(.branch_zero, else_label, expr.line, expr.col)!
-		e.copy_aggregate_arm(destination, expr.then_expr, depth)!
+		e.write_aggregate_value(destination, expr.then_expr, depth)!
 		e.jump(end_label)!
 		e.place(else_label)
-		e.copy_aggregate_arm(destination, expr.else_expr, depth)!
+		e.write_aggregate_value(destination, expr.else_expr, depth)!
 		e.place(end_label)
 		return
+	}
+	if expr is ast.Call {
+		// A call of an aggregate type has a path: assign_object writes the
+		// bytes the call hands back, and the destination's address is parked
+		// for it the way the conditional's arms park it. A call with no return
+		// class names no object this back end hands over, so it falls through
+		// to the refusal below rather than to a copy of nothing.
+		if e.call_return_class(expr) != none {
+			return e.write_aggregate_value(destination, expr, depth)
+		}
 	}
 	e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: an object handed over by value has to be a name, an element or a member, and this expression is not one')
 	return error('not an object')
 }
 
-// copy_aggregate_arm copies one arm of a conditional into storage this level
-// reserved. The destination's address is parked in a value slot and the arm is
-// written through assign_object, which is the copy an assignment between two
-// objects makes: a call's result arrives in the registers its class names and
-// is stored, and anything else is an object of the same type whose bytes are
-// read from its own address.
-fn (mut e Emitter) copy_aggregate_arm(destination Slot, arm ast.Expr, depth int) !void {
+// write_aggregate_value writes one value of an aggregate type into storage this
+// level reserved. The destination's address is parked in a value slot and the
+// value is written through assign_object, which is the copy an assignment
+// between two objects makes: a call's result arrives in the registers its class
+// names and is stored, and anything else is an object of the same type whose
+// bytes are read from its own address. One arm of a conditional and a call's
+// result are the two values this is asked to write.
+fn (mut e Emitter) write_aggregate_value(destination Slot, arm ast.Expr, depth int) !void {
 	line := expr_line(arm)
 	col := expr_col(arm)
 	frame := e.frame_pointer(line, col)!
