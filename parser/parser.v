@@ -1130,7 +1130,7 @@ fn (mut p Parser) pointer_difference_type(op tokenize.Token, left ast.Expr, righ
 // goes in and `b.a.x` comes back as one Field naming `b` at the byte `x` sits at.
 // It is what both a value read and an assignment to a member go through, because
 // the two ask the same question of the same path.
-fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through_pointer bool, index ?ast.Expr) !ast.Field {
+fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through_pointer bool, index ?ast.Expr) !&ast.Field {
 	mut aggregate := p.scopes.lookup(base) or {
 		p.error_at(base_at, 'unsupported: ${base} is read as an object with a member, and no declaration of that name is in scope')
 		return error('unknown object')
@@ -1176,7 +1176,7 @@ fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through
 // can compute its address. The dots that follow the first access add up into the
 // same Field the way they do for a name, because a member of a member is inside
 // the same object.
-fn (mut p Parser) parse_general_member_path(object ast.Expr, through_pointer bool, at tokenize.Token) !ast.Field {
+fn (mut p Parser) parse_general_member_path(object ast.Expr, through_pointer bool, at tokenize.Token) !&ast.Field {
 	object_desc := describe_operand(object)
 	mut aggregate := object.typ
 	if through_pointer {
@@ -1215,7 +1215,7 @@ fn (mut p Parser) parse_general_member_path(object ast.Expr, through_pointer boo
 // diagnostic names the whole path. A member of a member is one object read further
 // in, because a member of an object is inside the object, and a name written at the
 // end of a path is one Field and not a chain of reads.
-fn (mut p Parser) parse_member(base string, object ?ast.Expr, aggregate types.Type, into int, path string, through_pointer bool, index ?ast.Expr) !ast.Field {
+fn (mut p Parser) parse_member(base string, object ?ast.Expr, aggregate types.Type, into int, path string, through_pointer bool, index ?ast.Expr) !&ast.Field {
 	dot := p.next() // .
 	if p.peek().kind != .identifier {
 		p.error_at(p.peek(), 'unsupported: expected a member name after ., found ${describe(p.peek())}')
@@ -1248,7 +1248,7 @@ fn (mut p Parser) parse_member(base string, object ?ast.Expr, aggregate types.Ty
 		return error('no layout')
 	}
 	member := tagged.members[at]
-	return ast.Field{
+	return &ast.Field{
 		name:            base
 		base:            object
 		index:           index
@@ -1802,7 +1802,8 @@ fn (mut p Parser) parse_member_on(object ast.Expr, through_pointer bool, at toke
 			line: named.line
 			col:  named.col
 		}
-		return ast.Expr(p.parse_member_path(named.name, named_at, through_pointer, ?ast.Expr(none))!)
+		member := p.parse_member_path(named.name, named_at, through_pointer, ?ast.Expr(none))!
+		return ast.Expr(*member)
 	}
 	if object is ast.Index {
 		// A member of an element: `s[i].a` reads the member from the element
@@ -1822,11 +1823,12 @@ fn (mut p Parser) parse_member_on(object ast.Expr, through_pointer bool, at toke
 					line: base.line
 					col:  base.col
 				}
-				return ast.Expr(p.parse_member_path(base.name, base_at, through_pointer, element.index)!)
+				return ast.Expr(*p.parse_member_path(base.name, base_at, through_pointer, element.index)!)
 			}
 		}
 	}
-	return ast.Expr(p.parse_general_member_path(object, through_pointer, at)!)
+	member := p.parse_general_member_path(object, through_pointer, at)!
+	return ast.Expr(*member)
 }
 
 // parse_member_chain reads the member accesses that follow an object, left to
@@ -2419,7 +2421,8 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 		}
 
 		if p.at_punct('.') || p.at_punct('->') {
-			return ast.Expr(p.parse_member_path(t.text, t, p.at_punct('->'), ?ast.Expr(none))!)
+			member := p.parse_member_path(t.text, t, p.at_punct('->'), ?ast.Expr(none))!
+			return ast.Expr(*member)
 		}
 		typ := p.resolve(t.text)
 		return ast.Expr(ast.Ident{
@@ -2575,7 +2578,7 @@ fn (p Parser) assignment_target(stmt ast.Stmt) ?ast.Expr {
 		return deref
 	}
 	if member := stmt.field {
-		return ast.Expr(member)
+		return ast.Expr(*member)
 	}
 	if index := stmt.index {
 		base := p.resolve(stmt.target)

@@ -1726,7 +1726,7 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		return e.assign_deref(stmt, deref, expr, depth)
 	}
 	if member := stmt.field {
-		return e.assign_member(stmt, member, expr, depth)
+		return e.assign_member(stmt, *member, expr, depth)
 	}
 	if subscript := stmt.subscript {
 		return e.assign_subscript(stmt, subscript, expr, depth)
@@ -5826,7 +5826,7 @@ fn (mut e Emitter) emit_assign_expression(assign ast.Assign, depth int) !void {
 fn assignment_statement(assign ast.Assign) ?ast.Stmt {
 	mut target := ''
 	mut subscript := ?ast.Expr(none)
-	mut member := ?ast.Field(none)
+	mut member := ?&ast.Field(none)
 	mut deref := ?ast.Expr(none)
 	match assign.target {
 		ast.Ident {
@@ -5836,7 +5836,7 @@ fn assignment_statement(assign ast.Assign) ?ast.Stmt {
 			subscript = ast.Expr(assign.target)
 		}
 		ast.Field {
-			member = assign.target
+			member = assign.target.boxed()
 		}
 		ast.Unary {
 			if assign.target.op != '*' {

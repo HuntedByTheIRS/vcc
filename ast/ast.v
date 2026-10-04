@@ -327,9 +327,16 @@ pub:
 	// has none. field is the member of an aggregate the assignment writes to,
 	// `x.a = v`, which is an offset into the object rather than a name of its
 	// own.
+	//
+	// field is held by pointer because an Option holds its value inline and a
+	// Field is 376 bytes: written as `?Field` it made every statement in the
+	// tree 1224 bytes, a third of the node spent on the member of an
+	// assignment that is a member almost never. The pointer costs eight bytes
+	// and the value lives in the heap, which is where it was going to end up
+	// anyway the moment it was read.
 	target string
 	index  ?Expr
-	field  ?Field
+	field  ?&Field
 	// deref is the dereference an assignment writes through when the target
 	// is not a name: `*p = v` writes the value at the address the pointer
 	// holds, so what the store needs is that address and the tree keeps the
@@ -617,6 +624,21 @@ pub:
 	through_pointer bool
 	line            int
 	col             int
+}
+
+// boxed is a member in the heap, where a statement keeps one. A statement holds
+// the member it writes through by pointer, because an Option holds its value
+// inline and a Field is the size of the type clause inside it: written as a
+// value it made every statement 1224 bytes. The address of a parameter or a
+// local is the frame it was read in, so a value that has to outlive the reader
+// is written into the heap here rather than pointed at where it lies.
+@[inline]
+pub fn (field Field) boxed() &Field {
+	mut box := &Field{}
+	unsafe {
+		*box = field
+	}
+	return box
 }
 
 pub struct IntLit {

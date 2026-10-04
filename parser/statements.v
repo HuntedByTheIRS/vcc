@@ -594,7 +594,7 @@ fn (p Parser) assignment_after(at int) bool {
 fn (mut p Parser) parse_assignment() !ast.Stmt {
 	t := p.next() // the name
 	mut index := ?ast.Expr(none)
-	mut field := ?ast.Field(none)
+	mut field := ?&ast.Field(none)
 	mut arrow := false
 	if p.at_punct('[') {
 		p.next()
@@ -623,7 +623,7 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 	// assignment writes.
 	if member := field {
 		if p.at_punct('.') || p.at_punct('->') {
-			chain := p.parse_member_chain(ast.Expr(member))!
+			chain := p.parse_member_chain(ast.Expr(*member))!
 			return p.parse_member_assignment(chain as ast.Field)!
 		}
 	}
@@ -687,10 +687,10 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 // use. The member is one selector deeper than an element and the logic is the
 // same, which is why it goes through the compound assignment the element reader
 // already builds rather than a second path.
-fn (mut p Parser) parse_member_compound_assignment(op tokenize.Token, member ast.Field) !ast.Stmt {
+fn (mut p Parser) parse_member_compound_assignment(op tokenize.Token, member &ast.Field) !ast.Stmt {
 	arithmetic := p.compound_operator(op)!
 	right := p.parse_assignment_expression()!
-	left := ast.Expr(member)
+	left := ast.Expr(*member)
 	return ast.Stmt{
 		kind:     .assign
 		field:    member
@@ -774,7 +774,7 @@ fn (mut p Parser) parse_member_assignment(member ast.Field) !ast.Stmt {
 		left := ast.Expr(member)
 		return ast.Stmt{
 			kind:     .assign
-			field:    member
+			field:    member.boxed()
 			expr:     p.compound_expansion(op, arithmetic, left, right)
 			compound: arithmetic
 			line:     member.line
@@ -785,7 +785,7 @@ fn (mut p Parser) parse_member_assignment(member ast.Field) !ast.Stmt {
 	p.check_assignment(member.typ, value, op)
 	return ast.Stmt{
 		kind:  .assign
-		field: member
+		field: member.boxed()
 		expr:  value
 		line:  member.line
 		col:   member.col
@@ -797,7 +797,7 @@ fn (mut p Parser) parse_member_assignment(member ast.Field) !ast.Stmt {
 // written with a subscript. A name no declaration describes answers with the zero
 // type, and the constraint below takes no position on that: the name is what the
 // check at the end of the unit is for.
-fn (p Parser) assignment_target_type(name string, index ?ast.Expr, field ?ast.Field) types.Type {
+fn (p Parser) assignment_target_type(name string, index ?ast.Expr, field ?&ast.Field) types.Type {
 	// A member is written at an offset into an object, and what the value written
 	// there converts to is the type of the member, which the reader worked out
 	// when it read the member.
@@ -1873,7 +1873,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				stmts << ast.Stmt{
 					kind:   .assign
 					target: d.name
-					field:  ast.Field{
+					field:  &ast.Field{
 						name:       d.name
 						member:     first.name
 						offset:     0
@@ -1913,7 +1913,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				stmts << ast.Stmt{
 					kind:   .assign
 					target: d.name
-					field:  ast.Field{
+					field:  &ast.Field{
 						name:       d.name
 						member:     member.name
 						offset:     layout.offsets[at]
@@ -1941,7 +1941,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				stmts << ast.Stmt{
 					kind:   .assign
 					target: d.name
-					field:  ast.Field{
+					field:  &ast.Field{
 						name:       d.name
 						member:     member.name
 						offset:     layout.offsets[at]
@@ -2239,7 +2239,7 @@ fn store_a_brace_write(name string, at tokenize.Token, write BraceWrite, value a
 	return ast.Stmt{
 		kind:   .assign
 		target: name
-		field:  ast.Field{
+		field:  &ast.Field{
 			name:       name
 			member:     write.spelling
 			offset:     write.offset
