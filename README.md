@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="vcc.png" alt="vcc logo: a green V" width="180">
+  <img src="vcc.png" alt="vcc logo: a green V" width="180" style="border-radius: 15px;">
 </p>
 
 <h1 align="center">vcc</h1>
