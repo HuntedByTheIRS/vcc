@@ -273,6 +273,34 @@ fn test_the_infinity_builtins_carry_their_width() {
 	assert wide == 1
 }
 
+// A builtin of the extended type carries the extended value the emitter writes
+// and not only the double it was computed as. The bytes are gcc 16.2.1's: an
+// infinity is the exponent field all ones with the integer bit, and a NaN adds
+// the quiet bit. Without the extended value the emitter is handed a long double
+// literal with nothing of the extended type, which is the internal diagnostic
+// the corpus reached at `isinf(HUGE_VALL)`.
+fn test_an_extended_builtin_carries_an_extended_value() {
+	infinity := builtin_float('int main(void) { long double ld = __builtin_huge_vall(); return 0; }')
+	assert infinity.typ.same(types.long_double_type())
+	extended_infinity := infinity.long_value or {
+		assert false
+		return
+	}
+	assert extended_infinity.mantissa == u64(0x8000000000000000)
+	assert extended_infinity.sign_exp == 0x7fff
+	nan := builtin_float('int main(void) { long double ld = __builtin_nanl(""); return 0; }')
+	extended_nan := nan.long_value or {
+		assert false
+		return
+	}
+	assert extended_nan.sign_exp == 0x7fff
+	assert extended_nan.mantissa & u64(0xc000000000000000) == u64(0xc000000000000000)
+	// A builtin of the double type keeps its double and carries no extended
+	// value, so the conversion is asked only of the extended spellings.
+	double_infinity := builtin_float('int main(void) { double d = __builtin_huge_val(); return 0; }')
+	assert double_infinity.long_value == none
+}
+
 // A NaN is not equal to itself, which is the one property that tells it from
 // every other value; the payload the call is written with does not change that.
 fn test_the_nan_builtins_answer_a_nan_of_their_width() {

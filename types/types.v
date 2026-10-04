@@ -1,5 +1,7 @@
 module types
 
+import math
+
 // The types of the language, and the questions the standard asks about them.
 //
 // A type here is a value: a kind, the shapes it is derived from, the qualifiers
@@ -1140,6 +1142,59 @@ pub fn long_double_from_bytes(object [16]u8) LongDouble {
 	return LongDouble{
 		mantissa: mantissa
 		sign_exp: u16(object[8]) | (u16(object[9]) << 8)
+	}
+}
+
+// long_double_from_double converts a value of the double type into the extended
+// format, bit for bit. Every double is exactly a long double, so nothing is
+// rounded: the significand is shifted under the extended format's explicit
+// integer bit, the exponent is rebased from the double's bias of 1023 to the
+// extended format's of 16383, and an infinity, a NaN and a zero are copied into
+// the fields they name. A double subnormal becomes an extended normal, because
+// the extended exponent range reaches far below the double's. It is how a value
+// a header's builtin computed as a double - the infinity `__builtin_huge_vall`
+// and the NaN `__builtin_nanl` build - becomes a long double the emitter can
+// write, and the bytes are gcc 16.2.1's for the same double.
+pub fn long_double_from_double(value f64) LongDouble {
+	bits := math.f64_bits(value)
+	sign := u16((bits >> u64(63)) & u64(1)) << 15
+	field := int((bits >> u64(52)) & u64(0x7ff))
+	fraction := bits & u64(0x000fffffffffffff)
+	if field == 0x7ff {
+		// An infinity or a NaN: the extended exponent field is all ones, the
+		// significand carries the integer bit, and a NaN keeps its quiet bit
+		// and payload above it.
+		return LongDouble{
+			mantissa: u64(0x8000000000000000) | (fraction << u64(11))
+			sign_exp: sign | u16(0x7fff)
+		}
+	}
+	if field == 0 && fraction == 0 {
+		// A zero of either sign.
+		return LongDouble{
+			mantissa: 0
+			sign_exp: sign
+		}
+	}
+	if field == 0 {
+		// A double subnormal is an extended normal: its leading bit is above
+		// the place the double's implicit one would sit.
+		mut leading := 0
+		for i := 0; i < 52; i++ {
+			if (fraction >> u64(i)) & u64(1) == 1 {
+				leading = i
+			}
+		}
+		return LongDouble{
+			mantissa: fraction << u64(63 - leading)
+			sign_exp: sign | u16(leading + 15309)
+		}
+	}
+	// A normal number: the implicit leading bit becomes the extended format's
+	// explicit integer bit.
+	return LongDouble{
+		mantissa: u64(0x8000000000000000) | (fraction << u64(11))
+		sign_exp: sign | u16(field + 15360)
 	}
 }
 
