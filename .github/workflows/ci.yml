@@ -53,6 +53,14 @@ jobs:
           v version
           v run tools/gate.vsh
 
+      # The one check that measures this compiler against a C library rather
+      # than against its own tests: the corpus under compliance/ asserts a few
+      # hundred C99 answers and prints how many held. It needs the same V build
+      # and the same tree as the gate, so it runs in the same job; the script
+      # builds the compiler itself.
+      - name: compliance corpus
+        run: v run tools/compliance.vsh
+
       # The numbers are recorded, not gated. A shared runner's wall time is not
       # a budget anyone can hold a pull request to, and the workload that will
       # decide this project is the V self-build, which no milestone reaches yet
