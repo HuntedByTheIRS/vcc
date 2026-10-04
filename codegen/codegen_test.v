@@ -928,6 +928,20 @@ fn test_a_store_into_a_bool_makes_the_value_zero_or_one() {
 	assert run_image(emitted.bytes) == 5
 }
 
+// A `_Bool` store converts the value to 0 or 1 whatever its width, so a value
+// eight bytes wide whose low half is zero, a fraction, and a non-null address all
+// leave 1 (6.3.1.2). The comparison is made at the value's own width and in its
+// own domain, which is what makes `_Bool b = 1ULL << 40` 1 where the low word is
+// zero, `_Bool b = 0.5` 1 where the truncation to an integer is zero, and a
+// conversion of a floating value to `_Bool` 1. Measured on gcc 16.2.1, this
+// program exits 9.
+fn test_a_bool_store_converts_a_value_of_any_width() {
+	emitted := emit(translation_unit('int main(void) { unsigned long long wide = 1ULL << 40; int t = 1; int *p = &t; int *n = 0; _Bool bw = wide; _Bool bp = p; _Bool bn = n; _Bool bf = 0.5; _Bool bz = 0.0; return (bw == 1) + (bp == 1) + (bn == 0) + (bf == 1) + (bz == 0) + ((_Bool)-0.5 == 1) + ((_Bool)0.0 == 0) + ((_Bool)256 == 1) + ((_Bool)wide == 1); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 9
+}
+
 // A store into a bitfield writes only that member's bits. Two bitfields in one
 // storage unit used to clobber each other, because the member store wrote the
 // whole unit: the second store overwrote the first. Measured on gcc 16.2.1, this
