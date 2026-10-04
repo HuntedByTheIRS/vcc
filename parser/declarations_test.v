@@ -130,6 +130,31 @@ fn test_an_extern_object_is_read_and_dropped() {
 	assert result.unit.decls.len == 0
 }
 
+// A block-scope `extern` declaration of a file-scope object gives the name no
+// storage in the frame: the object lives at file scope and the name reaches it
+// there. Before this the declaration was emitted as a local like any other and
+// a read of the name read that uninitialized slot. Measured on gcc 16.2.1 and
+// this compiler, `static int obj = 100;` with `{ extern int obj; got = obj; }`
+// in main exits 100, and this compiler read address-shaped garbage. The name is
+// still declared, so a use of it is not refused, but no local statement is
+// built for it.
+fn test_a_block_scope_extern_object_emits_no_local() {
+	result := declarations_of('static int obj = 100;\nint main(void) { int got = 0; { extern int obj; got = obj; } return got; }')
+	assert result.diagnostics.len == 0
+	main_fn := result.unit.decls[0]
+	assert main_fn.name == 'main'
+	// The body is the local `got`, the nested block, and the return.
+	assert main_fn.body.len == 3
+	assert main_fn.body[0].kind == .var_decl
+	assert main_fn.body[0].decl_name == 'got'
+	assert main_fn.body[1].kind == .block
+	// The block holds the assignment alone: the extern declaration left no
+	// statement of its own.
+	assert main_fn.body[1].body.len == 1
+	assert main_fn.body[1].body[0].kind == .assign
+	assert main_fn.body[2].kind == .return_stmt
+}
+
 // A file-scope `static` gives a name internal linkage (6.2.2p3), and the
 // declaration has to carry it: the object writer writes such a definition with
 // the local binding, so two translation units may each define one of the same

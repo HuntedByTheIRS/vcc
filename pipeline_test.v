@@ -107,6 +107,23 @@ fn test_a_source_file_becomes_a_runnable_binary() {
 	os.rm(binary) or {}
 }
 
+// A block-scope `extern` declaration of a file-scope object names that object
+// and gives the name no storage in the frame. Before this the declaration was
+// emitted as a local like any other, and a read of the name read the
+// uninitialized slot: measured on gcc 16.2.1 with -std=gnu99 the same program
+// exits 100, and this compiler read address-shaped garbage. The local `got`
+// makes the wrong answer a value of its own rather than zero, so a read of the
+// slot is told apart from a read of the object.
+fn test_a_block_scope_extern_reads_the_file_scope_object() {
+	source := scratch('block_extern.c')
+	binary := scratch('block_extern')
+	program := 'static int obj = 100;\nint main(void) {\n    int got = -1;\n    { extern int obj; got = obj; }\n    return got;\n}\n'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 100
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // A variable-length array declared in a loop body claims its storage on the
 // stack when the declaration runs, and the storage is given back where the block
 // ends. Before that release, each time round subtracted again and the stack grew
