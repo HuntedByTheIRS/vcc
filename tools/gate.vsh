@@ -69,11 +69,18 @@ fn check_formatting(root string) []string {
 
 // check_pure_v enforces the first constraint by looking for what breaks it: C
 // sources in the tree, and C interop in the compiler's own sources. The scripts
-// under tools/ are skipped, because they name these patterns on purpose.
+// under tools/ are skipped, because they name these patterns on purpose, and the
+// compliance corpus is skipped, because it is C the compiler is handed rather
+// than C the compiler is built from. That is one directory and one file; a C
+// source anywhere else is still a failure.
 fn check_pure_v(root string) []string {
 	mut problems := []string{}
+	corpus := '${root}/compliance/'
 	for extension in c_source_extensions {
 		for file in os.walk_ext(root, extension) {
+			if file.starts_with(corpus) {
+				continue
+			}
 			problems << '${file.replace('${root}/', '')}: C source in a tree that is V only'
 		}
 	}

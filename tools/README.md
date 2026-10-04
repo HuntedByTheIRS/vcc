@@ -16,8 +16,8 @@ v run tools/gate.vsh
 Six steps, each reporting on its own line, exit status zero only when all pass:
 
 - **formatting** — `v fmt -verify .`
-- **pure V** — no C sources in the tree, and no `#include`, `#flag`, or `C.`
-  interop in the compiler's own sources
+- **pure V** — no C sources in the tree, apart from the compliance corpus, and
+  no `#include`, `#flag`, or `C.` interop in the compiler's own sources
 - **build** — `v -o <temp> .`
 - **tests** — `v test .`
 - **documents** — every relative link between the markdown files resolves

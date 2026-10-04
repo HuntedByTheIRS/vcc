@@ -6,3 +6,8 @@
 *.vsh linguist-language=V
 v.mod linguist-language=V
 .vdocignore linguist-language=ignore
+
+# The compliance corpus is C on purpose, and it is the only C here. Counting it
+# as one of this repository's languages would say the tree is written in C when
+# what it holds is one file the compiler is handed.
+compliance/** linguist-language=ignore
