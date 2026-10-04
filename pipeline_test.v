@@ -3501,6 +3501,60 @@ fn test_a_null_function_pointer_is_null_after_a_void_pointer_round_trip() {
 	os.rm(binary) or {}
 }
 
+// 6.5.15 evaluates only the arm the condition selects. A condition the reader
+// folded to a literal selects the same arm on every run, so the arm it does not
+// select is never written into the image and a construct the back end refuses
+// only for that arm cannot refuse the program. `(long)(1.0L)` is such a
+// construct - refused alone with `a conversion from long double to long is not
+// one this back end makes` - and each of these rows is refused on main before
+// the untaken arm stops being emitted. Measured on gcc 16.2.1 and run here: 0
+// and 5.
+fn test_a_constant_conditional_emits_only_the_taken_arm() {
+	then_source := scratch('const_cond_then.c')
+	then_binary := scratch('const_cond_then')
+	then_status := compile_and_run(['-std=gnu99', then_source, '-o', then_binary],
+		'int main(void) { return 1 ? 0 : (long)(1.0L); }')
+	assert then_status == 0
+	else_source := scratch('const_cond_else.c')
+	else_binary := scratch('const_cond_else')
+	else_status := compile_and_run(['-std=gnu99', else_source, '-o', else_binary],
+		'int main(void) { return 0 ? (long)(1.0L) : 5; }')
+	assert else_status == 5
+}
+
+// A condition that is not known until run time keeps both arms, and the arm the
+// value selects is the one whose side effect runs. The counters come back through
+// the exit status, so the two kinds are numbers: the two constant ternaries run
+// one arm each and the volatile ternary runs the arm its value selects.
+fn test_a_runtime_conditional_keeps_both_arms() {
+	source := scratch('runtime_cond.c')
+	binary := scratch('runtime_cond')
+	program := 'int then_runs = 0; int else_runs = 0; int bump_then(int v) { then_runs++; return v; } int bump_else(int v) { else_runs++; return v; } int main(void) { volatile int c = 0; int a = 1 ? bump_then(3) : bump_else(5); int b = 0 ? bump_then(3) : bump_else(5); int d = c ? bump_then(4) : bump_else(6); if (a != 3) { return 10; } if (b != 5) { return 11; } if (d != 6) { return 12; } if (then_runs != 1) { return 13; } if (else_runs != 2) { return 14; } return 0; }'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 0
+}
+
+// A constant condition need not be one literal: 6.6 leaves the operators in an
+// integer constant expression, so the reader folds `2 > 1` and `1 + 1` as well.
+fn test_a_constant_condition_that_is_not_a_literal_selects_the_arm() {
+	source := scratch('const_cond_expr.c')
+	binary := scratch('const_cond_expr')
+	program := 'int main(void) { int a = 2 > 1 ? 7 : 9; int b = (1 + 1) ? 8 : 9; if (a != 7) { return 1; } if (b != 8) { return 2; } return 0; }'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 0
+}
+
+// A conditional whose arms have the extended type is carried as the address of
+// the selected arm's bytes, and a constant condition selects that arm with no
+// branch. Both rows run the selected arm: `1 ? a : b` is a and `0 ? a : b` is b.
+fn test_a_constant_conditional_of_the_extended_type_selects_the_arm() {
+	source := scratch('const_cond_extended.c')
+	binary := scratch('const_cond_extended')
+	program := 'int main(void) { long double a = 1.25L; long double b = 2.5L; long double c = 1 ? a : b; long double d = 0 ? a : b; if (c != 1.25L) { return 1; } if (d != 2.5L) { return 2; } return 0; }'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 0
+}
+
 // 6.5.3.4p2 for a compound literal's operand, where the statements are the point:
 // a literal writes its object as statements appended to the statement it was
 // written in, and the operand of a sizeof is not a place that was taken into

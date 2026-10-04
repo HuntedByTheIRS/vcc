@@ -8025,6 +8025,22 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 // be read by whatever the conditional is an operand of, so both are converted
 // to the type the conditional is worth before they meet.
 fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !void {
+	// 6.5.15 evaluates only the arm the condition selects, and a condition the
+	// reader folded to a literal selects the same arm on every run. Writing the
+	// other arm would hand the back end a construct that never executes, so a
+	// construct it cannot emit for the untaken arm would refuse a program it
+	// should accept. `isinf` on a long double is that shape: the type dispatch
+	// its false test carries names a call for a type the machine does not have,
+	// and only the arm the constant does not select is left to be emitted.
+	if conditional.cond is ast.IntLit {
+		value := (conditional.cond as ast.IntLit).value
+		arm := if value != 0 { conditional.then_expr } else { conditional.else_expr }
+		if conditional.typ.kind == .long_double {
+			temp := e.extended_temp(arm, depth + 1)!
+			return e.leave_address(temp, conditional.line, conditional.col)
+		}
+		return e.emit_conditional_arm(arm, conditional.typ, depth)
+	}
 	if conditional.typ.kind == .long_double {
 		// The two arms are values of the extended type, and a value of that type
 		// is the address of its sixteen bytes, so the branch carries the address
