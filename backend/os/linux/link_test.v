@@ -44,6 +44,20 @@ fn test_the_link_arguments_name_the_loader_the_start_files_and_the_directories()
 	crtn := start_file_in(dirs, 'crtn.o')
 	assert crtn in args
 	assert args.index(before[0]) < args.index(before[1])
+	// The compiler's own pair is part of a program's link too, and it sits
+	// inside the C library's: crtbegin.o before -lc, crtend.o after it. Its
+	// absence is not a missing name but an undefined __dso_handle, which
+	// libc_nonshared.a's atexit reaches for.
+	crtbegin := start_file_in(dirs, 'crtbegin.o')
+	crtend := start_file_in(dirs, 'crtend.o')
+	assert crtbegin in args
+	assert crtend in args
+	assert args.index(crtbegin) < args.index('-lc')
+	assert args.index(crtend) > args.index('-lc')
+	// The other two pairs belong to the other two links: a program takes the
+	// bare pair, a shared object the S pair, a static program the T pair.
+	assert start_file_in(dirs, 'crtbeginS.o') !in args
+	assert start_file_in(dirs, 'crtbeginT.o') !in args
 	// The directories a -l name is looked for in are the linker's own -L flags.
 	for dir in dirs {
 		assert '-L${dir}' in args

@@ -60,9 +60,17 @@ pub:
 pub fn start_files(kind LinkKind) StartFiles {
 	return match kind {
 		.program {
+			// The compiler's own pair goes inside the C library's: crtbegin.o
+			// defines __dso_handle, which libc_nonshared.a's atexit reaches
+			// for, and crtend.o closes what it opened. A program built
+			// without them links with an undefined __dso_handle and stops,
+			// which is what gcc's own -no-pie line avoids by naming both. The
+			// bare pair is the one a program takes: crtbeginS.o/crtendS.o are
+			// the shared link's and crtbeginT.o is the static one's, and a
+			// link takes one pair or the other.
 			StartFiles{
-				before: ['crt1.o', 'crti.o']
-				after:  ['crtn.o']
+				before: ['crt1.o', 'crti.o', 'crtbegin.o']
+				after:  ['crtend.o', 'crtn.o']
 			}
 		}
 		.static_program {
