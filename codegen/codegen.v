@@ -262,6 +262,16 @@ mut:
 	// parameters those are and the width cannot answer it: a long double is
 	// sixteen bytes and is not handed over in any register.
 	extended_params map[string][]bool
+	// complex_long_double_params says, for the same functions, which parameters
+	// are the extended complex type. Such a parameter is a thirty-two byte object
+	// handed over in memory and returned on the x87 stack, so a call has to know
+	// which parameters those are; neither the width nor the scalar extended
+	// question answers it.
+	complex_long_double_params map[string][]bool
+	// complex_long_double_returns says, for the same functions, which of them
+	// hand an extended complex value back. The value comes back on the x87 stack
+	// rather than in a register, which no return class can describe.
+	complex_long_double_returns map[string]bool
 	// return_classes says, for the same functions, which of them hand an object
 	// of an aggregate type back, and how many bytes of one. The value comes back
 	// in the register its class names rather than converted.
@@ -269,6 +279,12 @@ mut:
 	// returning is the return type of the function being emitted, as it was
 	// written, which is what a return statement's value is converted to.
 	returning string
+	// returning_complex_long_double says the function being emitted hands a
+	// `long double _Complex` back. The value comes back on the x87 stack as two
+	// extended components rather than in a register or an object class, which
+	// neither the spelling nor the return class names, so a return statement
+	// asks this instead.
+	returning_complex_long_double bool
 	// return_class is how the function being emitted hands its value back, and
 	// zero for a function that returns a value of its own width or nothing.
 	return_class abi.Class
@@ -583,6 +599,9 @@ fn (mut e Emitter) build() ![]u8 {
 	// emission is where that is reported.
 	for decl in e.unit.decls {
 		e.returns[decl.name] = decl.ret
+		if decl.ret_type.kind == .complex_long_double {
+			e.complex_long_double_returns[decl.name] = true
+		}
 		ret_class := e.class_of(decl.ret_type)
 		if ret_class.bytes > 0 {
 			e.return_classes[decl.name] = ret_class
@@ -624,6 +643,7 @@ fn (mut e Emitter) build() ![]u8 {
 			mut aggregates := []abi.Class{}
 			mut wides := []bool{}
 			mut extendeds := []bool{}
+			mut complexes := []bool{}
 			mut sized := true
 			for param in decl.params {
 				// Which parameters are 128-bit values is read here rather than
@@ -635,6 +655,10 @@ fn (mut e Emitter) build() ![]u8 {
 				// register, so which parameters are one is a question the width
 				// cannot answer and a call has to be told.
 				extendeds << abi.travels_on_the_x87_stack(param.resolved)
+				// A `long double _Complex` parameter is a thirty-two byte object
+				// handed over in memory, which neither the width nor the scalar
+				// extended question names.
+				complexes << (param.resolved.kind == .complex_long_double)
 				// A parameter that is an object of an aggregate type is handed
 				// over as its bytes in one register: how many bytes it is and
 				// which file the register belongs to are the two facts the call
@@ -672,6 +696,7 @@ fn (mut e Emitter) build() ![]u8 {
 			}
 			e.wide_params[decl.name] = wides
 			e.extended_params[decl.name] = extendeds
+			e.complex_long_double_params[decl.name] = complexes
 			if sized {
 				e.signatures[decl.name] = widths
 				e.float_params[decl.name] = classes
@@ -878,6 +903,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// word above it in rdx, and which clears rdx when the returned
 		// expression is narrower than the type.
 	} else if !abi.travels_on_the_x87_stack(decl.ret_type)
+		&& decl.ret_type.kind != .complex_long_double
 		&& decl.ret_type.kind != .pointer && decl.ret != 'int' && decl.ret != 'unsigned int'
 		&& decl.ret != 'void'
 		&& decl.ret != 'double' && decl.ret != 'float'
@@ -887,6 +913,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		return error('unsupported return type')
 	}
 	e.returning = decl.ret
+	e.returning_complex_long_double = decl.ret_type.kind == .complex_long_double
 	e.return_class = ret_class
 	if e.hidden_bytes > 0 {
 		e.hidden = e.reserve(e.hidden_bytes)
@@ -966,6 +993,23 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	mut doubles := 0
 	mut stacked := 0
 	for _, param in decl.params {
+		if param.resolved.kind == .complex_long_double {
+			// A `long double _Complex` parameter arrives in memory as
+			// thirty-two bytes, the real part at the lower address, and the
+			// caller pushed the four words. An odd number of eight-byte words
+			// before it is a padding word the caller wrote, so the same rule a
+			// long double follows applies and the value still starts at a
+			// multiple of sixteen. Measured on gcc 16.2.1: the callee reads
+			// its first with `fldt 16(%rbp)` and `fldt 32(%rbp)`.
+			if stacked % 2 == 1 {
+				stacked++
+			}
+			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col)!
+			at := 2 * e.target.word_size + stacked * e.target.word_size
+			e.copy_stack_object(object, at, param.line, param.col)!
+			stacked += 4
+			continue
+		}
 		if abi.travels_on_the_x87_stack(param.resolved) {
 			// A long double parameter arrives in memory: sixteen bytes at the
 			// alignment the type has, which is sixteen. An odd number of
@@ -1148,6 +1192,13 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			// of a float and in the eight of a double.
 			register := e.float_accumulator(decl.line, decl.col)!
 			e.append(e.target.zero_double(register)!)
+		} else if e.returning_complex_long_double {
+			// The value comes back as two extended components on the x87
+			// stack, so the zero is two of them: the imaginary part is pushed
+			// first so the real part is st(0), which is the order a caller
+			// pops them in.
+			e.append(e.target.extended_zero())
+			e.append(e.target.extended_zero())
 		} else if e.writes_a_long_double(decl.ret) {
 			// A long double comes back on the x87 stack, so the zero a function
 			// that falls off its end leaves is pushed there: an int zero in the
@@ -1371,6 +1422,12 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 			stmt.line, stmt.col)!
 		e.append(e.target.frame_epilogue())
 		return
+	}
+	if e.returning_complex_long_double {
+		// The value comes back as two extended components on the x87 stack,
+		// which is neither the object-class path above nor the single extended
+		// value below.
+		return e.emit_complex_long_double_return(expr, stmt.line, stmt.col)
 	}
 	if e.writes_a_long_double(e.returning) {
 		// A long double comes back on the x87 stack and not in a register, so
@@ -3569,11 +3626,13 @@ fn (mut e Emitter) load_vla_base(slot Slot, register backend.Register, line int,
 // writes_a_complex says whether a spelling names an object of a complex type.
 // The spelling is what a declaration carries and not the resolved type, so the
 // words are read the same way the reader read them: `double _Complex` and
-// `_Complex` are both a `double _Complex`, and `float _Complex` is the other.
-// A `long double _Complex` is refused where it is read and never reaches here.
+// `_Complex` are both a `double _Complex`, `float _Complex` is the other, and
+// `long double _Complex` is the extended one, whose components are sixteen bytes
+// each.
 fn (e Emitter) writes_a_complex(written string) bool {
 	typ := types.from_words(written.split(' ')) or { return false }
-	return typ.kind in [types.Kind.complex_float, types.Kind.complex_double]
+	return typ.kind in [types.Kind.complex_float, types.Kind.complex_double,
+		types.Kind.complex_long_double]
 }
 
 // type_width is the width of a value of a type as the source wrote it. An int is
@@ -3589,6 +3648,16 @@ fn (e Emitter) writes_a_complex(written string) bool {
 fn (e Emitter) type_width(written string) ?int {
 	if written == 'int' || written == 'unsigned' || written == 'unsigned int' || written == 'signed' {
 		return 4
+	}
+	// The extended complex type is the one complex spelling whose width is not
+	// read off a component the machine moves in one instruction: it is two
+	// sixteen-byte components. The questions above answer the smaller complex
+	// types through the class the aggregate path gives them, but their slot is
+	// still sized here, and this is the width of the largest of the three.
+	if typ := types.from_words(written.split(' ')) {
+		if typ.kind == .complex_long_double {
+			return complex_long_double_bytes
+		}
 	}
 	if written == 'char' {
 		return 1
@@ -9009,6 +9078,28 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			stacked += 2
 			continue
 		}
+		if e.complex_long_double_argument(call, i, arg) {
+			// A `long double _Complex` is handed over in memory as thirty-two
+			// bytes, at the alignment the type has, which is sixteen. An odd
+			// number of eight-byte words already on the stack therefore takes a
+			// padding word first, the same rule a long double argument follows.
+			// The value is pushed in the stack pass, where its four words are
+			// written straight from the object's bytes.
+			pad := stacked % 2 == 1
+			if pad {
+				stacked++
+			}
+			places << ArgPlace{
+				stack:               true
+				position:            stacked
+				extended:            true
+				complex_long_double: true
+				pad:                 pad
+				words:               4
+			}
+			stacked += 4
+			continue
+		}
 		// The two sequences run out separately: a call with six ints and nine
 		// doubles has three doubles on the stack and every int in a register.
 		// The ones a sequence ran out for go on the stack in the order they
@@ -9254,8 +9345,15 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				// When an odd number of eight-byte words was already on the
 				// stack, the padding word is reserved after the two, so it lands
 				// below them and the value still starts at a multiple of
-				// sixteen.
-				e.emit_expr_at(arg, depth + i + 1)!
+				// sixteen. A `long double _Complex` argument is the same shape
+				// at four words: the address of its thirty-two bytes, which the
+				// argument path builds where a real argument has to become a
+				// complex value first.
+				if place.complex_long_double {
+					e.complex_long_double_argument_address(arg, depth + i + 1)!
+				} else {
+					e.emit_expr_at(arg, depth + i + 1)!
+				}
 				source := e.value_slot(depth + i)
 				e.store_accumulator(source, line, col)!
 				mut k := place.words - 1
@@ -9503,6 +9601,10 @@ struct ArgPlace {
 	// sixteen bytes rather than in any register. It is written in the stack pass
 	// like an object, pushing its two words straight from the value's bytes.
 	extended bool
+	// complex_long_double says the argument is a `long double _Complex`, which
+	// travels in memory as thirty-two bytes and comes back on the x87 stack. It
+	// is written in the stack pass like a long double, pushing four words.
+	complex_long_double bool
 	// pad says the sixteen-byte-aligned extended argument this place is one of
 	// needed a padding word before it, because an odd number of eight-byte words
 	// was already on the stack. The word is reserved below the two the value
@@ -10709,8 +10811,12 @@ fn (e Emitter) complex_bytes(t types.Type) ?int {
 }
 
 // complex_component_width is the width of one component: eight bytes for a
-// `double _Complex` and four for a `float _Complex`.
+// `double _Complex`, four for a `float _Complex`, and sixteen for the extended
+// complex type, whose components are the extended format.
 fn complex_component_width(t types.Type) int {
+	if t.kind == .complex_long_double {
+		return long_double_bytes
+	}
 	return if t.kind == .complex_float { 4 } else { 8 }
 }
 
@@ -10733,6 +10839,9 @@ fn complex_component_single(t types.Type) bool {
 fn complex_type_of(kind types.Kind) types.Type {
 	if kind == .complex_float {
 		return types.complex_float_type()
+	}
+	if kind == .complex_long_double {
+		return types.complex_long_double_type()
 	}
 	return types.complex_double_type()
 }
@@ -10790,8 +10899,17 @@ fn (mut e Emitter) emit_complex_part(unary ast.Unary, depth int) !void {
 		return error('not a complex operand')
 	}
 	if value.kind == .complex_long_double {
-		e.diagnostics << problem(line, col, 'unsupported: ${unary.op} reads one part of ${value.describe()}, and this back end does not move a long double component')
-		return error('long double complex part')
+		// The parts of the extended complex type are the extended format's
+		// sixteen bytes each, and the real part is the lower of the two. A
+		// value of the extended type is the address of those bytes, so the
+		// part is the address of the component inside the object.
+		object := e.complex_object_as(unary.expr, value, depth + 1)!
+		which := if unary.op == '__imag__' { 1 } else { 0 }
+		component := Slot{
+			offset: object.offset + which * complex_long_double_component
+			width:  long_double_bytes
+		}
+		return e.leave_address(component, line, col)
 	}
 	object := e.complex_object_as(unary.expr, value, depth + 1)!
 	which := if unary.op == '__imag__' { 1 } else { 0 }
@@ -10839,6 +10957,11 @@ fn (mut e Emitter) complex_object_as(expr ast.Expr, destination types.Type, dept
 fn (mut e Emitter) emit_complex_into_type(dest Slot, destination types.Type, expr ast.Expr, depth int) !void {
 	line := expr_line(expr)
 	col := expr_col(expr)
+	if destination.kind == .complex_long_double {
+		// The extended complex type travels and computes differently from the
+		// two register-sized ones, so it takes a path of its own.
+		return e.emit_long_double_complex_into(dest, expr, depth)
+	}
 	// A real value is the case a hand-over needs, and the imaginary part is
 	// written as zero rather than left: the object may be storage that held
 	// something else, and a program reading the imaginary part would read it.
@@ -11308,6 +11431,22 @@ fn (mut e Emitter) emit_complex_condition(cond ast.Expr, line int, col int) !voi
 // address of the destination is loaded after the call, into the general register,
 // because the returned value is in the floating-point ones.
 fn (mut e Emitter) emit_complex_call(dest Slot, call ast.Call, depth int) !void {
+	if e.returns_a_complex_long_double(call) {
+		// The value comes back on the x87 stack, st(0) the real part and st(1)
+		// the imaginary one. The call machinery puts the pair into a temporary
+		// of its own and leaves the address of that in the accumulator, so the
+		// thirty-two bytes are copied into this destination.
+		e.emit_call(call, depth + 1)!
+		source := e.value_slot(depth + 1)
+		e.store_accumulator(source, call.line, call.col)!
+		frame := e.frame_pointer(call.line, call.col)!
+		base := e.accumulator(call.line, call.col)!
+		e.append(e.target.address_of_slot(frame, i32(dest.offset), base))
+		destination := e.value_slot(depth + 2)
+		e.store_accumulator(destination, call.line, call.col)!
+		return e.copy_address_object(source, destination, complex_long_double_bytes, call.line,
+			call.col)
+	}
 	class := e.call_return_class(call) or {
 		e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} is used as a complex value, and its type is not one this back end hands over as an object')
 		return error('not an object return')

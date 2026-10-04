@@ -3393,6 +3393,38 @@ fn test_a_component_read_from_a_call_result_is_the_value_the_call_wrote() {
 	assert run_image(emitted.bytes) == 0
 }
 
+// A `long double _Complex` is the extended format twice over: two sixteen-byte
+// components, the real part at the lower address, thirty-two bytes in all.
+// `__real__` and `__imag__` name the two parts at that width, `sizeof` is
+// thirty-two, and a definition hands one over in memory as thirty-two bytes and
+// back on the x87 stack, st(0) the real part and st(1) the imaginary one. A
+// real value converted to it has a zero imaginary part; a call result read for
+// a part is the value the call wrote. Measured on gcc 16.2.1, this program
+// exits 0.
+fn test_the_extended_complex_type_is_two_extended_components() {
+	source := 'long double _Complex mk(long double a, long double b) { return a + b * 1.0i; }' +
+		' int main(void) {' +
+		' long double _Complex z = mk(3.0L, 4.0L);' +
+		' if (sizeof z != 32) { return 1; }' +
+		' if (sizeof(long double _Complex) != 32) { return 2; }' +
+		' if (__real__ z != 3.0L) { return 3; }' +
+		' if (__imag__ z != 4.0L) { return 4; }' +
+		' long double _Complex s = z + z;' +
+		' if (__real__ s != 6.0L || __imag__ s != 8.0L) { return 5; }' +
+		' long double _Complex d = z - z;' +
+		' if (__real__ d != 0.0L || __imag__ d != 0.0L) { return 6; }' +
+		' long double _Complex p = z * mk(1.0L, 0.0L);' +
+		' if (__real__ p != 3.0L || __imag__ p != 4.0L) { return 7; }' +
+		' long double _Complex r = 7.5L;' +
+		' if (__real__ r != 7.5L || __imag__ r != 0.0L) { return 8; }' +
+		' long double re = __real__ mk(1.0L, 2.0L);' +
+		' if (re != 1.0L) { return 9; }' +
+		' return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_a_double_comparison_answers_the_int_a_branch_reads() {
 	// A comparison of two doubles reads the flags the floating compare leaves,
 	// which are not the integer ones: the sign of a double lives in the top bit of
