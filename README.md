@@ -1,31 +1,36 @@
 # vcc
 
-vcc is a C compiler written in V. It has one job: replace the TCC binary that V
-vendors in `thirdparty/tcc`, on the same command line, doing the same work.
+vcc is a C compiler written in V. Its job is to replace the tcc binary V vendors
+in `thirdparty/tcc`: the same command line, doing the same work, so that the C
+compiler in V's build is a program V can build, read and patch in V.
 
-Two constraints come before everything else.
+Two rules come before everything else here.
 
-**Pure V.** No C source in the compiler, no corner of the pipeline delegated to a
-C compiler, no vendored C library. If a piece cannot be written in V yet, it
-stays unimplemented rather than getting a C shortcut.
+**Pure V.** No C source in the compiler, no corner of the pipeline delegated to
+a C compiler, no vendored C library. If a piece cannot be written in V yet, it
+stays unimplemented rather than getting a C shortcut. There is one exception,
+named and off by default: `-external-linker=NAME` hands the final link to a
+linker already on the system, for the inputs this compiler cannot consume yet.
+It refuses `cc`, `gcc`, `clang`, `c++` and `tcc` by name, because a C compiler
+finishing C compilation is the one thing the rule exists to prevent.
 
-**Fast.** Near TCC's speed or better, which is not open to compromise.
-Compiling the C that V generates for itself is the benchmark that matters: a
-few megabytes of C per build, and vcc has to get through it in the time the
-bundled tcc does, at comparable peak memory. A compiler that is correct but
-slower is not a replacement, and it will not be merged in that state.
+**Fast.** Near tcc's speed, which is not open to compromise. The benchmark that
+matters is V's self-build: a few megabytes of generated C per run, and vcc has
+to get through it in the time the bundled tcc does, at comparable peak memory. A
+compiler that is correct but slower is not a replacement. Speed claims here are
+measurements, and the commands that produce them are printed beside the numbers.
 
-The default pipeline builds an AST, because that is what an optimizer, a type
-checker and a second target are built on. A second path that skips the tree
-entirely (`-no-ast`, planned) is where beating tcc outright is expected to come
-from, and `ROADMAP.md` M6a carries the rule that keeps it honest: the same input
+## What it is and what it's for
+
+The default pipeline builds an AST, because an optimizer, a type checker and a
+second target are all built on one. A second path that skips the tree entirely
+(`-no-ast`, planned) is where beating tcc outright is expected to come from.
+`ROADMAP.md` M6a carries the rule that keeps the two honest: the same input
 produces the same bytes whichever path compiles it.
 
-## The bootstrap chain
-
-The end this project works toward is a compiler that builds the language it is
-written in, and that V can use in place of the tcc it vendors. Four builds, each
-one a check on the step before it:
+The end this works toward is a compiler that builds the language it is written
+in, and that V can use in place of the tcc it vendors. Four builds, each one a
+check on the step before it:
 
 ```sh
 v -cc tcc -o v-tcc cmd/v              # 1. V, built with the vendored tcc
@@ -36,290 +41,273 @@ v-tcc -cc ./vcc-v1 -o v-v2 cmd/v      # 3. V, built by vcc instead of tcc
 
 Step 3 decides everything. vcc has to compile every megabyte of C that V emits
 for itself, link it, and produce a V that passes V's own test suite. Step 4 then
-has to produce a vcc that behaves like the one it was built from. When both hold,
-the loop is closed and no C compiler other than vcc is in it. `ROADMAP.md` has
-the milestones between here and that.
+has to produce a vcc that behaves like the one it came from. When both hold, the
+loop is closed and no C compiler other than vcc is in it.
 
+## The case for one C compiler in V's build
 
-## Status
+V does not treat a C compiler as an opaque binary. It classifies it (by the real
+path of the binary, then by `--version`), picks codegen and flags from the
+answer, and caches build artifacts keyed on that identity. To do that across
+GCC, Clang, MSVC and tcc, V has to carry a branch for each one: which flags to
+pass, which C to emit, which quirks to route around. Every branch is a way a
+build can go wrong, and none of them makes V's own generator smaller.
 
-Early, and honest about it. The tree holds a compiler that reads real C (the
-preprocessor walks the glibc headers on this machine with no diagnostics) and
-writes a working Linux x86-64 executable that calls into libc.
+vcc is the bet that V needs one compiler instead of four, and that the one
+should be a program V can read.
 
-```sh
-v -o vcc .
-printf '#include <stdio.h>\nint main(void) { puts("Hello, world!"); return 0; }\n' > hello.c
-./vcc hello.c -o hello
-./hello
-```
+- The command line is already V's. vcc accepts the flags V passes to a C
+  compiler (`-std=gnu11`, `-std=c99`, `-fwrapv`, `-fPIC`, `-g`, `-w`,
+  `-Werror=implicit-function-declaration`, `-bt25`, `-B<dir>`, `-I<dir>`,
+  `-L<dir>`, `-l<name>`, `-Wl,` passthroughs, `-D` defines), plus the
+  preprocessor's own flags and `--version`. A flag it does not implement is
+  recorded and never refused, because a compiler that errors on `-bt25` fails a
+  build it was supposed to serve. `./vcc -hh` prints the annotated surface.
+- It is written in V, so it builds with V, is read in V, and a bug in it is
+  debugged with the same tools as a bug in V. There is no thirdparty C program
+  to trust or carry as an opaque binary.
+- The extensions V's generated C actually uses are read on purpose: `typeof`,
+  `__int128`, the atomic builtins, statement expressions, `__attribute__`. They
+  are in the table because V emits them, not because they were easy.
+- Only a compiler written in V can close the bootstrap loop above. GCC and Clang
+  can build V; they cannot be built by the V that they built.
+- BSD 3-Clause, and no dependency in `v.mod`.
 
-That prints `Hello, world!`. `./vcc -run hello.c` does the same without leaving
-an image behind, and the compiler leaves with the program's exit status.
+It does not yet argue speed. vcc is behind tcc today, and the numbers are in
+"What vcc does today". The claim is that the gap is measured and the design can
+close it, not that it is closed.
 
-Anything outside the subset below exits non-zero with a diagnostic that names the
-construct and its source location, instead of writing an output file that would
-fail later.
+## Benefits and downsides
 
-It accepts the flags V passes to a C compiler (`-std=`, `-w`, `-fwrapv`, `-g`,
-`-B`, `-I`, `-L`, `-l`, `-Wl,` passthroughs, `-bt25`, `-x`, `@listfile`, `-`),
-plus `--version`, `-v`, `-h`, `-hh`, `-run`, `-E`, `-c`, `-o`, `-bench`,
-`-print-ast`, the `-O` and `-f(no-)builtin` flags below, and the preprocessor's
-own: `-D`, `-U`, `-nostdinc`, `-undef`, `-include`, `-imacros`, `-M`, `-MM`,
-`-MD`, `-MMD`, `-MF`, `-MT` and `-dM`. See `vcc -hh` for the annotated list.
+**What standardizing on vcc would buy.** V supports one C compiler instead of
+four, so its generator drops per-compiler branches and its release stops
+depending on a thirdparty binary whose bugs live outside the tree. The compiler
+itself becomes V code: a miscompile is diagnosed in the same language and the
+same repository as the tool that hit it, and the bootstrap chain ends with no
+foreign compiler in the loop at all. The extensions V's own generated C needs
+are supported by design rather than by accident of which compiler was installed.
 
-`-std=` selects the dialect rather than only being recorded: `-std=c99` and
-`-std=gnu99` are the two modes the compiler has, and every other spelling,
-including the `-std=gnu11` V passes when it writes none, is recorded and never
-refused. The two modes differ in one macro, defined before the first line of the
-program is read: `-std=c99` defines `__STRICT_ANSI__ 1` and `-std=gnu99` does
-not, which is what gcc 16.2.1 defines with the same flags. The standard headers
-read that macro, and it decides which declarations they expose: as c99 the C
-library shows the program the declarations C99 has and hides the POSIX ones
-beside them, and as gnu99 it shows both. `-std=c99` is therefore the strict path,
-and it is the one place where the two modes differ in what they accept: a
-`<stdlib.h>` program that stops in the header as gnu99 compiles as c99, which is
-what gcc does with the same file under the same flag.
+**What it would cost.** vcc is young and incomplete. It reads a large
+subset of C and refuses the rest with a diagnostic naming the construct and its
+location, which is the right failure but still a failure: a program outside the
+subset does not compile, and the subset is smaller than GCC's. It is not
+self-hosting yet and cannot compile V's generated C. Linking more than one
+translation unit, `-shared` and `-static` currently need
+`-external-linker=NAME`, because the in-house linker is not written. It targets
+Linux x86-64 only; arm64, macOS and Windows are back ends that do not exist yet.
+It is slower than tcc, by a margin that grows with input size. And a compiler in
+the bootstrap chain is high-stakes: if vcc miscompiles a subtle thing, the V it
+builds is wrong in a way that is hard to attribute, which is why the chain is
+verified by V's own test suite and not by the build exiting zero.
 
-`preprocess/` is a C preprocessor and not a macro pass bolted onto the parser:
+## What vcc does today
+
+Roughly, a usable C compiler for a large slice of Linux x86-64 C: it reads real
+headers, generates code, and writes a working executable that calls into libc.
+It is past the stub. The detail below is what has been verified by running the
+resulting binaries, not by reading the source.
+
+### Compatibility with C and with V
+
+The preprocessor is a real one, not a macro pass bolted onto the parser:
 `#include` with C's search order and `#include_next`, object-like and
 function-like macros with `#`, `##` and variadic arguments, conditionals with the
-full `#if` expression grammar, `#pragma once`, `#line`, `#error`, `#warning` (a
-warning, so the compile goes on without it), `_Pragma`, the location and clock
-macros, and `__has_include` beside the `__has_attribute`-shaped family, answered
-the way a compiler that honors none of it should answer.
+full `#if` expression grammar, `#pragma once`, `#line`, `#error`, `#warning`
+(a warning, so the compile continues), `_Pragma`, the location and clock macros,
+and `__has_include`. Its fidelity is checked against `tcc -E` on the same file,
+token by token.
 
-Its fidelity is checked against `tcc -E` on the same file, token by token, and
-the differences that remain are tcc's own: it says it is `__TINYC__`, so glibc
-keeps `__asm__`-shaped redirections for it, while this compiler says it is
-nothing else and gets them erased. `-E` prints the stream as a table of
-`file:line:col`, token kind and text, which is what that comparison reads.
+The front end reads what a preprocessed header is made of (typedefs, prototypes,
+structs, unions, enums, bitfields) and the function definitions after them, with
+the operators, control flow (`if`/`else`, `while`, `for`, `do`, `switch`,
+`goto`), `sizeof` and casts, designated initializers, compound literals,
+variadic functions, function pointers, and objects of `struct`/`union` type
+passed and returned by value. An object of a struct or union is a block of
+storage read and written at the offsets the layout gives it. A typedef and a
+`typeof` specifier are followed to the type they name.
 
-The parser reads what a preprocessed header is made of (typedefs, prototypes,
-structs) and the function definitions after them: parameters, local variables,
-assignments, arithmetic, calls, string literals, `double` values, `if`/`else`,
-`while`, and `for` with `break` and `continue`. A conversion is a type name in
-parentheses and converts between the four classes the back end carries, `sizeof`
-answers the size of a type name or an expression as a constant, `*` reads the
-value at an address and `&` takes one, and two addresses are compared at the
-width of a word. A typedef is a name for the type
-it was declared as and is followed wherever a type can be written, so a
-declaration written through one is the declaration of the type behind it; a name
-standing for a type the back end has no form for is refused as that type and not
-as the name, so `typedef long Big; Big x;` says `unsupported type long`. A
-definition of a `static` function that nothing else in the file names is stepped
-over before its specifiers are read, because a header's helpers are often written
-in types this reader has no form for, and a program that never calls one should
-not be refused over it. Anything outside the subset is diagnosed rather than
-miscompiled.
+The back end emits one executable `PT_LOAD` at `0x400000` with a `PT_INTERP`, its
+own `_start`, `DT_NEEDED libc.so.6` and no PLT: calls resolve through the dynamic
+loader, which is what makes `puts` work without a linker. `-l<name>` resolves the
+library through the ld script in `/usr/lib` when the file it finds is one, and
+the SONAME of the file at the end of that is what the image asks for, which is
+how `-lm` gets `sqrt` to resolve. `-c` writes a real ELF64 relocatable object.
+`-fPIC` reaches top-level objects through the global offset table so the object
+can go into a shared library later.
 
-`typeof` is a specifier: the operand between the parentheses is a type name or
-an expression, the value written there is never evaluated, and the type of that
-operand is what the declaration that follows declares. So `typeof(x) y = 4;` is
-an object of the type `x` has, `typeof(int) *p` is a pointer to an int, and
-`sizeof(typeof(x))` answers the size of that type. The four spellings are read:
-`typeof` (C23, and a GNU word besides), `__typeof__` and `__typeof` (reserved, so
-they are read in every mode including c89, which is what gcc 16.2.1 does with
-them), and `typeof_unqual`, which is the same type with the qualifiers taken off
-it. Measured on gcc 16.2.1, bare `typeof` is not a word under `-std=c99` and is
-one under `-std=gnu99` and `-std=c23`; this compiler reads it in every mode and
-reports it through the dialect table when the mode does not have it. Two operands
-are refused by name: one whose type was never resolved, and one of an array type,
-which would make the declaration an array the declarator never wrote.
+Verified today on this machine: a program including `stdio.h`, `stdlib.h`,
+`string.h`, `stdint.h`, `stddef.h`, `limits.h`, `errno.h` and `time.h` compiles
+clean with `-c`; enum/switch/shift/bitwise/unsigned code compiles and runs; a
+program with designated initializers, compound literals, bitfields, a union, and
+a struct returned by value compiles and runs.
 
-`__int128` is the 128-bit integer gcc has and no standard does. The tree reads it
-wherever a type can be written: `__int128`, `unsigned __int128` and `signed
-__int128` are the types the model resolves, so `sizeof(__int128)` is 16 and a
-member of one starts at the offset its alignment puts it at. Measured on gcc
-16.2.1, both types occupy 16 bytes on a 16-byte boundary, `struct { char c;
-__int128 v; }` is 32 bytes with `v` at 16, and `long __int128` and `float
-__int128` are refused. A strict mode reports the spelling and a GNU one does not,
-which is the row the dialect table carries; a prototype naming the type is read
-and kept, since its parameter list is a promise. An object of one is storage: the
-declaration is sixteen bytes, a value narrower than that is widened into its two
-words, one object is copied into another, and the value is read back by converting
-it to a narrower type or storing it in a narrower slot, which takes its low word (`(int)` of a stored 300 is 300 and
-`(char)` of one is 44, measured on gcc 16.2.1). A member of that type is the same
-storage at the member's own offset, written and read through a name, a pointer or a
-top-level object, and an array of them is reserved the same way, though an element of
-one is refused by name: an element of sixteen bytes is not a value one instruction
-moves. What this back end has no form for
-is a *value* of that width, so an implicit narrowing store, a parameter of the type
-and a conversion of one to a `double` are refused by name rather than answered with
-something narrower than what was asked for.
+Anything outside the subset exits non-zero with a diagnostic that names the
+construct and its location, instead of writing an output file that would fail
+later. A silent empty output file is treated as a bug.
 
-The back end emits one RWX `PT_LOAD` at `0x400000` with a `PT_INTERP`, its own
-`_start`, `DT_NEEDED libc.so.6` and no PLT: calls are resolved by the dynamic
-loader, which is what makes `puts` work without a linker. `-l` adds the library
-it names to that list: each `-l<name>` is resolved the way a linker would, through
-the ld script in `/usr/lib` when the file it finds is one, and the SONAME of the
-file at the end of that is what the image asks the loader for, which is how
-`-lm` gets `sqrt` to resolve. A frame holds ints, pointers, chars and doubles. A
-char is one byte in its slot and an int when it is read, which is where the
-language's promotion of it happens, and a double is eight bytes in its slot and a
-value in the floating-point registers while it is worked on. An array is a block
-of that frame and its name is the address of its first element, so `puts(buf)`
-passes the bytes themselves. An object defined at the top level is storage the
-image holds instead: one blob laid out beside the code, with the constant it
-starts at written into it, eight bytes of it when the object is a double, and
-every function that names it reads and writes the same bytes. Taking the address
-of a local with `&` is an address like any other, which is what makes
-`scanf("%d", &x)` write into the local itself, and a definition that returns
-`void` is a definition with nothing in the return register to read.
+### Compiler extensions
 
-`optimizer/` accepts `-O0` through `-O3`, `-Os`, and the `-f(no-)builtin`
-spellings. What a level turns on today is one pass: a call whose value the
-compiler knows (`abs`, `labs`, `llabs`, and the reserved `__builtin_` spellings
-of each) with a literal argument folds to that value. A call whose value is read
-is emitted like any other expression (the result arrives in the register a value
-is expected to be in), so `-O0` makes the call and `-O2` folds it to `7`: the
-level decides whether a call the optimizer knows is folded, not whether it can be
-made. `-fno-builtin` and `-fno-builtin-abs` take the fold back; a call written
-`__builtin_abs` is an explicit request and folds at any level.
+The vendor extensions the tree carries are read because C code in the wild, and
+V's generated C in particular, uses them. The spellings that follow the
+reserved-namespace rules (`__typeof__`, `__asm__`) are read in every mode, the
+way gcc reads them; the ones a standard introduced (`typeof`, `auto`,
+`_Generic`, `_Static_assert`, `_BitInt`) are gated by the dialect table and can
+be brought down to an earlier mode with `-fvcc-exts=`.
 
-`-print-ast` parses, prints the tree the emitter would be given, and stops
-without writing anything. It is how a parse or an optimization is read rather
-than guessed at. `-c` is the other half of that: it is accepted and says it
-cannot write an object file yet, which is M4. `-M` writes the make rule that says
-what a file is made of: `-MM` leaves the system headers out of it, `-MD` and
-`-MMD` write it and go on to compile, `-MF` says where the rule goes and `-MT`
-names its target; `-dM` prints what is defined when the read ends, and
-`-include` and `-imacros` read a file before the source does.
+What the tree reads includes `typeof`, `__typeof__`, `__typeof` and
+`typeof_unqual`; C23 `auto`; `_Generic`; `_Static_assert`; `_BitInt(128)`;
+`__int128`; GNU statement expressions; `__asm__`; a postfix `__attribute__`; the
+`__atomic_*` operations; and the count-leading and count-trailing builtins.
 
-An object of a struct or union type is a block of storage whose members are read
-and written at the offsets the layout gives them, for int, char and double members.
-Inside a function that storage is in the frame and at the top level it is in the
-image, and an array of them is a stride of the layout's size times an index. A
-member of a member is the same object read further in, and `->` reads the member
-from the object a pointer names. An object of sixteen bytes or fewer is passed to a
-function and handed back from one as its bytes in the registers the classes of its
-eightbytes name; a larger one is a copy on the stack going in and an address the
-caller names coming back. An assignment between two objects of a type copies the
-bytes, and so does writing a call's result into the object it is assigned to. The
-arguments a call passes past the machine's registers go on the stack, six ints and
-eight doubles being what the registers carry.
+```sh
+./vcc -fvcc-exts=all prog.c -o prog      # every extension the compiler has
+./vcc -fvcc-exts=typeof,generic -std=c99 prog.c   # named ones
+```
 
-Not implemented, in rough order of how much of the tree depends on it: an element of
-an array passed by value, and a call's result passed by value; `enum`; the shift
-and bitwise operators (`<<`, `>>`, `&`, `|`, `^`); unsigned integer types; a value of a
-128-bit integer type, whose objects are stored, copied and read through a cast to a
-narrower type; `switch`; an array
-with an initializer or more than one size; a pointer defined at the top level;
-object files and relocatable output; and V's own generated C. `ROADMAP.md` maps the
-order.
+The names are the rows in `standard/features.v`, not a list kept apart from
+them; `-fvcc-exts` reads the extension column of that table, so a construct that
+gains an extension is a row that changed.
 
-The speed constraint is measured, not assumed, and the current numbers are not
-close. On a workload both compilers accept (`tools/bench.vsh --terms 20000`, a
-constant chain and nothing else), vcc takes about 12x tcc's wall time and 10x its
-peak memory; at 100000 terms it is about 28x the time and 35x the memory, so the
-ratio still grows with the input. Most of that gap is allocation per token and per
-AST node, which is a design problem rather than a constant factor.
+### ISO conformance
 
-## Build
+The compiler carries a dialect table: one row per construct, holding the standard
+it belongs to, whether a GNU dialect takes it, and what this compiler does with
+it. A `-std=` spelling selects a mode (`c89` through `c29`, and the `gnu` dialects
+of each); every spelling this compiler does not implement is recorded and never
+refused, because tcc accepts every spelling and a compiler V may hand any
+spelling to must not fail on one. The table is data, not a chain of branches: a
+construct the compiler gains is a row whose status changes.
+
+Reporting is separate from refusing. A construct the selected mode merely does
+not allow is a pedantic message, silent until `-Wpedantic` or `-pedantic` asks
+for it, promoted to an error by `-pedantic-errors` or `-Werror=pedantic`, and
+silenced by `-w`. A construct the mode does not have at all is a diagnostic the
+compiler raises on its own account, which no flag silences. System headers are
+exempt, because nobody in the build wrote them.
+
+Each row's phrasing was checked against gcc 16.2.1 under the relevant `-std=`,
+and the comment on the row records what was measured. For example, `-std=c99
+-pedantic` on `typeof(int) x = 3;` reports `ISO C99 forbids the typeof specifier`
+and exits non-zero, matching gcc's refusal; `-std=c11` accepts `_Generic`
+silently where `-std=c99 -pedantic` warns.
+
+The suite is 1300 tests, run with `v test .`.
+
+## Where it's going
+
+Targets, in order:
+
+- Full C99 conformance in the tree by the end of October 2026.
+- The V self-build, meaning vcc compiling V's generated C and the result passing
+  V's test suite (bootstrap step 3), by the end of Q4 2026 or early Q1 2027.
+
+Between here and there, the known gaps are the ones named above: the in-house
+linker (multi-unit linking, archives, `-shared`, `-static`) without
+`-external-linker`, V's generated C, and the streaming path that is meant to
+close the speed gap. `ROADMAP.md` lays out the milestones and what verifies
+each one.
+
+Speed is the number to watch, and it is not close yet. Measured with
+`v run tools/bench.vsh` against the tcc this machine has:
+
+| terms | vcc wall | tcc wall | ratio | vcc peak | tcc peak | ratio |
+|---|---|---|---|---|---|---|
+| 2 000 | 27.6 ms | 5.7 ms | 4.9x | 15.2 MB | 3.4 MB | 4.5x |
+| 20 000 | 192.7 ms | 7.4 ms | 25.9x | 54.6 MB | 3.4 MB | 16.2x |
+
+The ratio grows with input because the pipeline allocates per token and per AST
+node, which is a design problem and the M6 problem, not a constant factor to
+trim.
+
+## Extras
+
+### Build and run it
 
 Needs V built from source on Linux x86-64, at a commit that accepts this tree.
 The 0.5.2 release does not: its checker rejects a `for {}` whose every path
-returns, which `parser/parser.v` uses in `parse_parameters` and
-`parse_arguments`. Everything since accepts it, and CI pins the commit it tests
-with in `.github/workflows/ci.yml`.
+returns, which `parser/parser.v` uses. Everything since accepts it, and CI pins
+the commit it tests with in `.github/workflows/ci.yml`.
 
 ```sh
 git clone https://github.com/vlang/v && cd v && make   # once
 cd /path/to/vcc
-v -o vcc .        # build the compiler
-v test .          # lexer, parser, optimizer, printer, pipeline, codegen tests
-v run tools/gate.vsh                          # everything a pull request has to pass
-v run tools/bench.vsh                         # wall time and peak memory, tcc alongside
-v -o vcc . && ./vcc -bench seven.c -o seven   # per-phase timing
+v -o vcc .                 # build the compiler
+v test .                   # the suite
+v run tools/gate.vsh       # format, pure-V rule, build, tests, doc links, workflows
+v run tools/bench.vsh      # wall time and peak memory, tcc alongside
+./vcc -bench file.c -o out # per-phase timings
 ```
 
-`-bench` prints microseconds per phase. It exists from the first commit because
-the speed target is a hard requirement, and a number nobody prints is a number
-nobody watches. `tools/` holds the gate and the benchmark harness; `tools/README.md`
-says what each one checks.
+```sh
+printf '#include <stdio.h>\nint main(void) { puts("Hello, world!"); return 0; }\n' > hello.c
+./vcc hello.c -o hello && ./hello
+./vcc -run hello.c        # same, without leaving an image behind
+```
 
-CI runs the same gate against the pinned V commit, runs the build and the tests
-against V master as an informational job, and writes the benchmark numbers into
-the run summary. Tagging `vX.Y.Z` publishes a binary through
-`.github/workflows/release.yml`, which refuses to publish if the version inside
-the compiler disagrees with the tag.
+`-run` leaves with the program's exit status. `-print-ast` parses, prints the
+tree the emitter would be given, and stops without writing anything, which is
+how a parse or an optimization is read rather than guessed at.
 
+### Flags beyond the V contract
 
-## Layout
+Also accepted: `--version`, `-v`, `-vv`, `-h`, `-hh`, `-E`, `-c`, `-o`, `-run`,
+`-bench`, `-print-ast`, the `-O0` through `-O3` and `-Os` levels, `-fno-builtin`
+and `-fno-builtin-NAME`, `-fPIC`/`-fpic`, `-nostdinc`, `-undef`, `-include`,
+`-imacros`, the dependency flags `-M`/`-MM`/`-MD`/`-MMD`/`-MF`/`-MT`/`-MQ`,
+`-dM`, `-Wclass`/`-Wno-class`, `-femulation=NAME` (define the identity macros of
+gcc, clang or tcc instead of vcc's own), `-external-linker=NAME`, `-shared`,
+`-static`, and the gcc `-print-` family. See `./vcc -hh` for the annotated list.
+
+`-O` today turns on one optimizer pass: a call whose value the compiler knows
+(`abs`, `labs`, `llabs`) with a literal argument folds to that value, `-O0` makes
+the call and `-O2` folds it. `-fno-builtin` takes the fold back.
+
+### Layout
 
 | Path | Contents |
 |---|---|
 | `main.v` | entry point: command line in, output file out, pipeline in between |
 | `cli/` | the tcc-compatible command line: flags, usage, version, phase timings |
 | `tokenize/` | lexer: source text to tokens |
-| `ast/` | node types the parser produces and the back end consumes |
-| `parser/` | recursive descent parser for the supported subset |
+| `diagnostics/` | what a diagnostic is: class, severity, and the one place it becomes text |
+| `standard/` | the dialects: `-std=` spellings, the modes, and the feature table |
+| `preprocess/` | the C preprocessor |
+| `ast/` | node types only |
+| `parser/` | tokens in, `ast` out |
 | `optimizer/` | `ast` in, `ast` out: `-O` levels and the builtin table |
 | `printer/` | `ast` in, text out: what `-print-ast` prints |
-| `backend/` | target description: `arch/` is the machine, `os/` is the system (`os/elf/` writes the ELF64 container), `abi/` is the calling convention, `backend.v` composes them |
-| `codegen/` | translation unit to an emitted unit: constant folding and the emitter |
-| `image/` | the emitted unit: machine code, the data it reads, and the references between them |
+| `backend/` | target description: `arch/` the machine, `os/` the system, `abi/` the calling convention, `backend.v` composes them |
+| `codegen/` | `ast` in, an emitted unit out |
+| `image/` | the emitted unit: machine code, the data it reads, the references between them |
+| `extensions/` | the `-fvcc-exts=` interface, built on the rows in `standard/features.v` |
 | `tools/` | gate and benchmark scripts; not part of the compiler |
-| `extensions/` | the vendor extensions `-fvcc-exts=` names. The names come off the rows in `standard/features.v`, and a name that matches a row turns that construct on |
 
-A target is data rather than a directory of hand-written emission, and it has
-two dimensions. `backend/arch/` describes a machine: its register file, how a
-register is numbered in an instruction, where a function's arguments arrive.
-`backend/os/` describes a system: the kernel entry points a program can call, the
-numbers they take, and the loader constants a container is built from.
-`backend/os/elf/` writes that container: the ELF header, the four program
-headers, the dynamic table and the relocations the loader reads. Neither
-knows the other exists, and every arch-dependent answer the system gives is asked
-for by machine name, which is what lets a second system be written without
-touching the first one's module.
+A new machine, a new system, or a new calling convention is a module of its own
+under `backend/`, and `codegen/` never learns about it.
 
-Each machine and each system is a module of its own, in a directory named for it.
-A V module is a directory, so two machines in one directory would be one module
-with two of every name in it, which is why `backend/arch/x86_64/` is a directory
-and why a second machine is a second directory rather than a second file.
+### What V asks of a C compiler
 
-`backend/backend.v` is where the two meet, in a `Target` composed from one of
-each. The emitter asks that, so a new architecture, a new system, or a new fact
-about either is a table that changed and not a branch in `codegen/`.
-
-Tests live next to the code as `*_test.v` files and run with `v test .`.
-
-## What a drop-in has to satisfy
-
-V does not just hand its generated C to whatever binary is on `PATH`. It looks
-the compiler up, asks it for a version, and picks codegen and flags from the
-answer. Notes for whoever works on interoperability, all read off the V tree:
+Notes for whoever touches interoperability, all read off the V tree:
 
 - V resolves the compiler name from the real path of the binary. A name holding
   `tcc` or `tinyc` is classified as `tinyc` immediately; otherwise V runs
-  `--version` and looks for `tiny c compiler` or `tcc version` in the output.
-  This is why vcc's version line matters beyond cosmetics: it decides whether V
-  passes tcc-only flags and emits tcc-shaped C.
-- `ccompiler_can_assemble` treats anything that answers like tcc as unable to
-  assemble a `.S` file. A replacement that does assemble asm has to be
-  recognized as gcc-like instead, which is a decision about identity and not a
-  flag.
-- V caches build artifacts keyed on the identity of the C compiler, and compares
-  that identity against the default `cc`. `--version` has to be stable and
-  machine-parseable, and every integration test has to run from a clean cache.
-- Flags V passes and a replacement must accept: `-std=gnu11`, `-std=c99`,
-  `-fwrapv`, `-fPIC`, `-w`, `-Werror=implicit-function-declaration`, `-g`,
-  `-bt25`, `-B<dir>`, `-I<dir>`, `-L<dir>`, `-Wl,` passthroughs, `-lc -lm -ldl
-  -lpthread` in that order, `-D` defines, and object files and `.a` archives
-  mixed in with sources. Never error on a flag you do not implement.
-- The vendored tcc also carries a garbage collector, and V links it into every
-  tcc build. `v -showcc -cc tcc probe.v` prints the whole list:
-  `-DGC_THREADS=1 -DGC_BUILTIN_ATOMIC=1 -I<v>/thirdparty/libgc/include
-  <v>/thirdparty/tcc/lib/libgc.a -ldl -lpthread -lm`. So a replacement has to
-  link an archive of prebuilt objects against the program it just compiled, which
-  makes the `libgc.a` path part of the drop-in contract rather than an optional
-  library it could decline.
+  `--version` and looks for `tiny c compiler` or `tcc version`. This is why
+  vcc's version line matters beyond cosmetics: it decides whether V passes
+  tcc-only flags and emits tcc-shaped C.
+- V caches artifacts keyed on that identity and compares it against the default
+  `cc`, so `--version` has to be stable and machine-parseable, and integration
+  tests run from a clean cache.
+- The vendored tcc carries a garbage collector that V links into every tcc
+  build (`.../thirdparty/tcc/lib/libgc.a`), so a replacement has to be able to
+  link an archive against the program it just compiled. `v -showcc -cc tcc
+  probe.v` prints the whole list.
 
-## Read next
+### Docs
 
-- `CONTRIBUTING.md` for the build, test, and commit workflow.
+- `CONTRIBUTING.md` for the build, test and commit workflow.
 - `AGENTS.md` for coding-agent rules in this repository.
 - `ROADMAP.md` for the milestones between the stub and a usable compiler.
+- `tools/README.md` for the gate and the benchmark harness.
 - `ISSUES.md` and `DISCUSSIONS.md` for where reports and questions go.
 - `SECURITY.md` for what counts as a vulnerability in a compiler.
 - `CODE_OF_CONDUCT.md` for how people are expected to treat each other.
