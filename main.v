@@ -240,6 +240,7 @@ fn main() {
 		target:       opts.target
 		entry:        'main'
 		compile_only: opts.compile_only
+		pic:          opts.pic
 		libraries:    opts.libraries
 		library_dirs: opts.library_dirs
 	})
@@ -723,6 +724,7 @@ fn compile_source_object(path string, source string, opts cli.Options) ![]u8 {
 		target:       opts.target
 		entry:        'main'
 		compile_only: true
+		pic:          opts.pic
 		libraries:    opts.libraries
 		library_dirs: opts.library_dirs
 	})

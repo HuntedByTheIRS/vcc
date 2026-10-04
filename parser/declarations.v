@@ -1355,8 +1355,25 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	}
 	if data_seen {
 		if spec.is_extern && !data_defined {
-			// An extern declaration adds no code: it says the object exists
-			// somewhere else, and this compiler has no storage to give it.
+			// An extern declaration adds no code of its own: it says the object
+			// exists somewhere else, and this file has no storage to give it.
+			// The name is still one a body may read, so it is recorded as an
+			// object this unit reaches and does not define; a reference to it
+			// is a reference to the symbol a linker resolves. A declaration of
+			// several names is left unrecorded: this reader keeps one type per
+			// declaration and could not carry the rest, and a name read at the
+			// wrong width is a wrong value rather than a missing feature.
+			if data_name.len > 0 && names.len == 1 {
+				p.extern_objects << ast.Global{
+					name:     data_name
+					typ:      data_type
+					resolved: data_clause
+					count:    data_count
+					external: true
+					line:     data_at.line
+					col:      data_at.col
+				}
+			}
 			return decls
 		}
 		// A pointer object at the top level is one word of storage, and what it

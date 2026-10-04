@@ -413,6 +413,13 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 				}
 				replacement = target.address_of(register, disp)
 			}
+			.got_address {
+				// The load of an object's address out of the global offset
+				// table is what a position-independent object carries. A
+				// program has no such table and no emitter writes one for it,
+				// so reaching this is refused rather than patched.
+				return error('${fixup.name} is reached through the global offset table, which is a relocatable object and not the program this path writes')
+			}
 			.function_address {
 				// The address of a function is computed the way the address of
 				// a top-level object is: the layout has settled where the code
@@ -503,6 +510,15 @@ fn referent_of(program image.Program, sections Sections, kind image.FixupKind, n
 			return sections.globals + (program.globals[name] or {
 				return error('no global ${name} in the image')
 			}).offset
+		}
+		.got_address {
+			// A reference to an object through the global offset table is what
+			// a relocatable object carries, and the table is built by whoever
+			// links it. This path writes a program with every address settled
+			// here and no such table, and the emitter never writes one for a
+			// program, so this is a broken promise rather than an input: it is
+			// named instead of being pointed at a wrong address.
+			return error('${name} is reached through the global offset table, which is a relocatable object and not the program this path writes')
 		}
 	}
 }

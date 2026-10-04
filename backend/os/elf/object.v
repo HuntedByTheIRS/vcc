@@ -145,12 +145,16 @@ struct PartOffsets {
 // ObjectRelocation is one hole the linker has to fill: where it is in .text,
 // which symbol it is against, and what the addend is. call says the reference is
 // a call, which a linker may route through a stub, rather than a distance the
-// code computes for itself.
+// code computes for itself. got says the reference is to the global offset table
+// entry for the symbol rather than to the symbol: the code that reads it is a
+// load of the symbol's address, which is what a position-independent object uses
+// for a symbol another object may define.
 struct ObjectRelocation {
 	offset int
 	symbol int
 	addend i64
 	call   bool
+	got    bool
 }
 
 // object wraps a program in an ELF64 relocatable object that a linker can take
@@ -281,6 +285,26 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 					symbol: symbol
 					addend: -4
 					call:   false
+				}
+			}
+			.got_address {
+				// The instruction loads the object's address out of the table
+				// entry the linker builds for it, so the reference is to the
+				// symbol through the table rather than to the symbol: the
+				// relocation names the symbol and says the distance is to its
+				// GOT entry. It is what a position-independent object writes
+				// for a name another object may define, and the linker refuses
+				// it only when the symbol turns out not to be preemptible at
+				// link time, where a direct reference is refused outright.
+				symbol := symbol_index[fixup.name] or {
+					return error('${fixup.name} is reached through the global offset table but this object defines no such name')
+				}
+				relocations << ObjectRelocation{
+					offset: field
+					symbol: symbol
+					addend: -4
+					call:   false
+					got:    true
 				}
 			}
 			.jump_local, .branch_zero, .branch_nonzero {
@@ -455,7 +479,13 @@ fn place(sizes PartSizes) PartOffsets {
 fn emit_object_relocations(mut output []u8, parts PartOffsets, relocations []ObjectRelocation, target backend.Target) {
 	for i, relocation in relocations {
 		at := parts.rela + i * elf_relocation_size
-		kind := if relocation.call { target.call_relocation() } else { target.address_relocation() }
+		kind := if relocation.call {
+			target.call_relocation()
+		} else if relocation.got {
+			target.got_relocation()
+		} else {
+			target.address_relocation()
+		}
 		put_u64(mut output, at, u64(relocation.offset))
 		put_u64(mut output, at + 8, (u64(relocation.symbol) << 32) | u64(kind))
 		put_u64(mut output, at + 16, u64(relocation.addend))
@@ -512,7 +542,17 @@ fn emit_object_symbols(mut output []u8, parts PartOffsets, program image.Program
 	}
 	for name in program.imports {
 		at := parts.symtab + symbol_index[name] * elf_symbol_size
-		put_symbol(mut output, at, name_offset[name] or { 0 }, symbol_global_function,
+		// An import is a function the loader resolves or an object another
+		// object defines, and the symbol's type says which: both have no value
+		// and no section, because the definition is somewhere this object is
+		// not. A reader of the table that treated an object as a function would
+		// call it; the type is what says not to.
+		info := if program.object_imports[name] {
+			symbol_global_object
+		} else {
+			symbol_global_function
+		}
+		put_symbol(mut output, at, name_offset[name] or { 0 }, info,
 			shn_undef, 0, 0)
 	}
 }

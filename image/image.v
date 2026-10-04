@@ -32,10 +32,18 @@ pub enum FixupKind {
 	// of bytes can be a narrow literal in one program and a wide one in
 	// another and the two are different objects.
 	take_wide_address
-	jump_local       // a jump to a label inside the function being emitted
-	branch_zero      // the same jump, taken when the value last tested was zero
-	branch_nonzero   // and when it was not
-	global_address   // the address of an object defined at the top level
+	jump_local     // a jump to a label inside the function being emitted
+	branch_zero    // the same jump, taken when the value last tested was zero
+	branch_nonzero // and when it was not
+	global_address // the address of an object defined at the top level
+	// got_address is the same address reached the other way: the instruction
+	// loads the object's address out of the global offset table entry the
+	// linker builds for it, rather than computing a direct distance to the
+	// object. It is the reference a position-independent object writes for an
+	// object another object may define, because a direct distance to such a
+	// symbol is one a shared link refuses. A static object, whose name another
+	// object cannot define, keeps global_address.
+	got_address      // the address of an object, out of the global offset table
 	function_address // the address of a function defined in this translation unit
 	import_address   // the address of a function the loader resolves out of a library
 	float_constant   // a double the instruction reads out of the read-only data
@@ -109,6 +117,11 @@ pub mut:
 	// imports are the library symbols the image needs, in the order they were
 	// first called, so that the same input produces the same bytes every run.
 	imports []string
+	// object_imports are the names in `imports` that name an object rather than
+	// a function: an `extern` object another translation unit defines. The
+	// symbol is undefined either way, and the type it is given says what a
+	// reader of the table is looking at.
+	object_imports map[string]bool
 	// libraries are the shared libraries the image names as needed, in the
 	// order the -l flags named them: the loader maps these before the first
 	// instruction runs, and one that is not named is one whose symbols are not

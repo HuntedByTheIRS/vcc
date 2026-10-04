@@ -31,6 +31,12 @@ pub:
 	// the image rather than in any function's frame, and that every function
 	// reads and writes by name.
 	globals []Global
+	// extern_objects are the objects declared at the top level with no storage
+	// here: an `extern` declaration names an object another object defines, so
+	// the name is one this unit can reach but has nothing to place. They are
+	// kept apart from `globals` because a definition is storage and a
+	// declaration is not.
+	extern_objects []Global
 }
 
 pub struct FnDecl {
@@ -155,7 +161,13 @@ pub:
 	// object as a local symbol, so two translation units may each define one of
 	// the same name without the link reading them as two definitions of one
 	// program-wide name.
-	static_    bool
+	static_ bool
+	// external says the declaration named the object but defined no storage here,
+	// which is an `extern` declaration: the object itself is one another object
+	// defines, and this unit can only reach it. The name is not storage this image
+	// holds, so a reference to it is a reference to an undefined symbol, which is
+	// what a linker resolves.
+	external   bool
 	init       ?i64
 	init_float ?f64
 	// init_long is the constant of an object of a long double type, in the
