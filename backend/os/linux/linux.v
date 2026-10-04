@@ -1,5 +1,7 @@
 module linux
 
+import os
+
 // Linux, described where it adds something to a bare machine: the kernel entry
 // points a program can call, the registers their arguments arrive in, and the
 // numbers the loader and the container format are defined by.
@@ -26,15 +28,146 @@ pub const base_library = 'libc.so.6'
 // libc_nonshared.a, would drop the extra file the script brings in.
 pub const base_library_flag = 'c'
 
-// start_files_before are the C runtime's start files a link puts before the
-// program's own objects, and start_files_after is the one it puts after the
-// libraries. crt1.o holds the entry point the kernel lands on, crti.o opens the
-// initialisation and finalisation sections, and crtn.o closes them. They are
-// names to be resolved in the library directories below and not paths, because
-// which directory a system keeps them in is this system's layout and lives with
-// the rest of it.
-pub const start_files_before = ['crt1.o', 'crti.o']
-pub const start_files_after = ['crtn.o']
+// LinkKind is which link a command line asked for. The three differ in the
+// arguments a linker is given and in nothing else, so they are one value with
+// three cases rather than three ways to build a command line.
+//
+// A program is the dynamic one: the kernel hands it to the loader in
+// `interpreter`. A static program names no loader and resolves every library
+// into itself, and a shared object is a file another program loads rather than
+// one the kernel starts, so it has no entry point and no loader either.
+pub enum LinkKind {
+	program
+	static_program
+	shared
+}
+
+// StartFiles is what a link puts around the program's own objects: the names
+// before them and the names after the libraries. crt1.o holds the entry point
+// the kernel lands on, crti.o opens the initialisation and finalisation
+// sections, and crtn.o closes them. crtbeginS.o and crtendS.o open and close
+// the frame registration a shared object needs, and crtbeginT.o and crtend.o
+// the one a static program needs. They are names to be resolved in the
+// directories a link searches and not paths, because which directory a system
+// keeps them in is this system's layout and lives with the rest of it.
+pub struct StartFiles {
+pub:
+	before []string
+	after  []string
+}
+
+// start_files are the start files one kind of link is made of.
+pub fn start_files(kind LinkKind) StartFiles {
+	return match kind {
+		.program {
+			StartFiles{
+				before: ['crt1.o', 'crti.o']
+				after:  ['crtn.o']
+			}
+		}
+		.static_program {
+			StartFiles{
+				before: ['crt1.o', 'crti.o', 'crtbeginT.o']
+				after:  ['crtend.o', 'crtn.o']
+			}
+		}
+		.shared {
+			StartFiles{
+				before: ['crti.o', 'crtbeginS.o']
+				after:  ['crtendS.o', 'crtn.o']
+			}
+		}
+	}
+}
+
+// link_group are the libraries a static link resolves against each other rather
+// than one after the other. It is the one link where the order cannot be
+// written down: libgcc's unwinding reaches for the C library's threads and the
+// C library's own unwinding reaches for libgcc, and a group is how a linker is
+// told to come back to a library it has already passed. The C library ends the
+// group, so what the group holds is the toolchain's own support libraries by
+// their -l names.
+pub const link_group = ['gcc', 'gcc_eh']
+
+// support_dirs are the directories a toolchain keeps the objects that are
+// neither a start file in the library directories nor a library a -l name
+// finds: crtbeginS.o, crtbeginT.o, crtend.o and crtendS.o, and the libgcc
+// archives a static link resolves unwinding against. They sit under one parent
+// in a directory named after the toolchain's release, so the release
+// directories are listed and searched newest first rather than a release being
+// named here.
+pub fn support_dirs(machine string, system string) []string {
+	return match machine {
+		'x86_64' {
+			mut dirs := []string{}
+			for parent in release_parents(machine, system) {
+				dirs << release_dirs(parent)
+			}
+			dirs
+		}
+		else {
+			[]string{}
+		}
+	}
+}
+
+// release_parents are the directories whose subdirectories are toolchain
+// releases. The name of one is a target triple, and the vendor in the middle of
+// a triple is the distribution's word for itself, which is why the machine at
+// the front and the system at the back are what it is matched by rather than a
+// whole name being written here.
+fn release_parents(machine string, system string) []string {
+	root := '/usr/lib/gcc'
+	if !os.is_dir(root) {
+		return []string{}
+	}
+	mut found := []string{}
+	for entry in os.ls(root) or { []string{} } {
+		path := os.join_path(root, entry)
+		if os.is_dir(path) && entry.starts_with('${machine}-') && entry.ends_with('-${system}-gnu') {
+			found << path
+		}
+	}
+	return found
+}
+
+// release_dirs lists the release directories under one parent, newest first.
+// The name of one is the release number and nothing else, and when more than
+// one release is installed the newest is the one a build picks by default.
+fn release_dirs(parent string) []string {
+	if !os.is_dir(parent) {
+		return []string{}
+	}
+	mut found := []string{}
+	for entry in os.ls(parent) or { []string{} } {
+		path := os.join_path(parent, entry)
+		if os.is_dir(path) {
+			found << path
+		}
+	}
+	found.sort_with_compare(fn (a &string, b &string) int {
+		left := release_number(os.base(*a))
+		right := release_number(os.base(*b))
+		if left == right {
+			return 0
+		}
+		return if left > right { -1 } else { 1 }
+	})
+	return found
+}
+
+// release_number is the number a release directory is named after, and 0 for a
+// name that carries none, which sorts that directory last.
+fn release_number(name string) int {
+	mut end := 0
+	for end < name.len && name[end] >= `0` && name[end] <= `9` {
+		end++
+	}
+	if end == 0 {
+		return 0
+	}
+	return name[..end].int()
+}
 
 // Syscall is a kernel entry point: what a compiler can call it, the number the
 // kernel expects in the number register, and the registers its arguments arrive

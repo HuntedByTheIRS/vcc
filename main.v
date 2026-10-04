@@ -621,7 +621,7 @@ fn external_link(opts cli.Options) {
 	} else {
 		'a.out'
 	}
-	args := target.external_link_arguments(objects, opts.library_dirs, opts.libraries, out_path) or {
+	args := target.external_link_arguments(.program, objects, opts.library_dirs, opts.libraries, out_path) or {
 		abort(err.msg())
 		return
 	}

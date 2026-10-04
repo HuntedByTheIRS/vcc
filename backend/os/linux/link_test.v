@@ -11,13 +11,22 @@ import os
 // The start files are looked for on this machine because that is what the
 // builder does; a machine without them is not a machine this compiler can link
 // on, and the test says so rather than asserting a path that would only be true
-// on one distribution.
+// on one distribution. The same goes for the toolchain's own directory, which is
+// where the start files a shared object and a static program need are kept: on a
+// machine that has a compiler and no toolchain beside it, those two links cannot
+// be made at all, and that is a fact about the machine rather than about the
+// argument list.
+
+fn start_file_in(dirs []string, stem string) string {
+	return find_file(stem, dirs) or {
+		panic('${stem} should be on this machine, in one of ${describe_dirs(dirs)}')
+	}
+}
 
 fn test_the_link_arguments_name_the_loader_the_start_files_and_the_directories() {
 	host := backend.host() or { panic('this test needs the host target') }
-	system_dirs := host.library_dirs
-	search_dirs := host.library_dirs_for([]string{})
-	args := link_arguments(host.interpreter, system_dirs, search_dirs, ['x.o'], ['m'], 'out') or {
+	dirs := host.link_dirs([]string{})
+	args := link_arguments(.program, host.interpreter, dirs, ['x.o'], ['m'], 'out') or {
 		panic(err)
 	}
 	// The loader is the system's own, and it is written as the linker's flag.
@@ -25,18 +34,18 @@ fn test_the_link_arguments_name_the_loader_the_start_files_and_the_directories()
 	assert args[1] == host.interpreter
 	// The start files are full paths the same search finds, in the order the
 	// link passes them.
+	files := start_files(.program)
 	mut before := []string{}
-	for stem in start_files_before {
-		path := find_file(stem, system_dirs) or { panic('${stem} should be on this machine') }
+	for stem in files.before {
+		path := start_file_in(dirs, stem)
 		assert path in args
 		before << path
 	}
-	crtn := find_file('crtn.o', system_dirs) or { panic('crtn.o should be on this machine') }
+	crtn := start_file_in(dirs, 'crtn.o')
 	assert crtn in args
 	assert args.index(before[0]) < args.index(before[1])
-	// The library directories are the search a -l name goes through, written as
-	// the linker's -L flags.
-	for dir in search_dirs {
+	// The directories a -l name is looked for in are the linker's own -L flags.
+	for dir in dirs {
 		assert '-L${dir}' in args
 	}
 	assert '-lm' in args
@@ -45,6 +54,58 @@ fn test_the_link_arguments_name_the_loader_the_start_files_and_the_directories()
 	assert args[args.len - 1] == 'out'
 	// crtn.o closes what crti.o opened, so it comes after the libraries.
 	assert args.index(crtn) > args.index('-lc')
+}
+
+// A shared object is loaded rather than started, so no entry point and no loader
+// are part of it: crt1.o, which holds the point the kernel lands on, is not an
+// input at all, and what replaces it is the frame registration a library needs.
+fn test_a_shared_object_is_loaded_rather_than_started() {
+	host := backend.host() or { panic('this test needs the host target') }
+	dirs := host.link_dirs([]string{})
+	args := link_arguments(.shared, host.interpreter, dirs, ['x.o'], []string{}, 'libx.so') or {
+		panic(err)
+	}
+	assert '-shared' in args
+	assert '-dynamic-linker' !in args
+	assert start_file_in(dirs, 'crt1.o') !in args
+	assert start_file_in(dirs, 'crtbeginS.o') in args
+	assert start_file_in(dirs, 'crtendS.o') in args
+	// The static program's pair is not this one: the two register frames in
+	// different ways and a link takes one pair or the other.
+	assert start_file_in(dirs, 'crtbeginT.o') !in args
+	assert '-lc' in args
+	assert args[args.len - 2] == '-o'
+	assert args[args.len - 1] == 'libx.so'
+}
+
+// A static program is started by the kernel with no loader, and its libraries are
+// one group rather than a sequence: libgcc's unwinding reaches for the C
+// library's threads and the C library's unwinding reaches for libgcc, so the
+// order cannot be written down and the linker is told the set instead.
+fn test_a_static_program_resolves_its_libraries_into_itself() {
+	host := backend.host() or { panic('this test needs the host target') }
+	dirs := host.link_dirs([]string{})
+	args := link_arguments(.static_program, host.interpreter, dirs, ['x.o'], ['m'], 'out') or {
+		panic(err)
+	}
+	assert '-static' in args
+	assert '-dynamic-linker' !in args
+	assert start_file_in(dirs, 'crtbeginT.o') in args
+	assert start_file_in(dirs, 'crtend.o') in args
+	assert start_file_in(dirs, 'crtbeginS.o') !in args
+	open := args.index('--start-group')
+	close := args.index('--end-group')
+	assert open > 0
+	assert close > open
+	for library in link_group {
+		assert args.index('-l${library}') > open
+	}
+	// The C library ends the group, because it is what reaches back into it.
+	assert args.index('-lc') > open
+	assert args.index('-lc') < close
+	// A -l the command line named is placed by where it was written and is not
+	// swept into the group: the group is the toolchain resolving itself.
+	assert args.index('-lm') < open
 }
 
 // A directory of its own, because the test file is compiled on its own and the
@@ -63,7 +124,7 @@ fn test_a_start_file_that_is_missing_is_reported_by_name() {
 	defer {
 		os.rmdir_all(dir) or {}
 	}
-	if _ := link_arguments('/lib64/ld-linux-x86-64.so.2', [dir], [dir], ['x.o'], []string{}, 'out') {
+	if _ := link_arguments(.program, '/lib64/ld-linux-x86-64.so.2', [dir], ['x.o'], []string{}, 'out') {
 		assert false, 'a directory with no start files cannot be linked against'
 	} else {
 		assert err.msg().contains('crt1.o')

@@ -15,37 +15,66 @@ module linux
 
 // link_arguments is the ordered argument list for the linker.
 //
-// `interpreter` is the dynamic loader the image names, `start_dirs` is where the
-// start files are looked for, `search_dirs` is where a -l name is looked for and
-// is written as the linker's own -L flags, `objects` are the inputs in the order
-// the command line gave them (this compiler's emitted objects and the foreign
-// ones alike), `libraries` are the -l names the command line asked for in order,
-// and `output` is the program to write.
+// `kind` is which link was asked for: a program the loader starts, a static
+// program the kernel starts with every library resolved into it, or a shared
+// object another program loads. `interpreter` is the dynamic loader the program
+// names and is named by that kind alone, `dirs` is where a -l name and a start
+// file are both looked for, written as the linker's own -L flags as well as
+// being the search this file resolves a start file through, `objects` are the
+// inputs in the order the command line gave them (this compiler's emitted
+// objects and the foreign ones alike), `libraries` are the -l names the
+// command line asked for in order, and `output` is the file to write.
 //
 // The C library is asked for by its -l name and placed after the libraries the
 // command line named, which is what a C program needs and what a -l name is for;
-// crtn.o follows the libraries because that is where the C runtime closes the
-// sections crti.o opened.
-pub fn link_arguments(interpreter string, start_dirs []string, search_dirs []string, objects []string, libraries []string, output string) ![]string {
+// the last start file follows the libraries because that is where the C runtime
+// closes the sections the first one opened. A static link is the exception to
+// that order: its libraries go in a group, because libgcc and the C library
+// reach for each other and the only way to ask a linker to come back to a
+// library it has passed is to name the set it may come back to.
+pub fn link_arguments(kind LinkKind, interpreter string, dirs []string, objects []string, libraries []string, output string) ![]string {
 	mut args := []string{}
-	args << '-dynamic-linker'
-	args << interpreter
-	for stem in start_files_before {
-		args << find_file(stem, start_dirs) or {
-			return error('cannot find ${stem}: searched ${describe_dirs(start_dirs)}')
+	match kind {
+		.program {
+			// The loader is a program's own fact: the kernel hands the image to
+			// it. A shared object is loaded by whoever names it, and a static
+			// program is started with no loader at all.
+			args << '-dynamic-linker'
+			args << interpreter
+		}
+		.static_program {
+			args << '-static'
+		}
+		.shared {
+			args << '-shared'
 		}
 	}
-	for dir in search_dirs {
+	files := start_files(kind)
+	for stem in files.before {
+		args << find_file(stem, dirs) or {
+			return error('cannot find ${stem}: searched ${describe_dirs(dirs)}')
+		}
+	}
+	for dir in dirs {
 		args << '-L${dir}'
 	}
 	args << objects
 	for library in libraries {
 		args << '-l${library}'
 	}
+	if kind == .static_program {
+		args << '--start-group'
+		for library in link_group {
+			args << '-l${library}'
+		}
+	}
 	args << '-l${base_library_flag}'
-	for stem in start_files_after {
-		args << find_file(stem, start_dirs) or {
-			return error('cannot find ${stem}: searched ${describe_dirs(start_dirs)}')
+	if kind == .static_program {
+		args << '--end-group'
+	}
+	for stem in files.after {
+		args << find_file(stem, dirs) or {
+			return error('cannot find ${stem}: searched ${describe_dirs(dirs)}')
 		}
 	}
 	args << '-o'

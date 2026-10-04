@@ -1671,7 +1671,7 @@ fn test_the_dynamic_stride_multiply_is_the_bytes_that_scale_an_index() {
 // where the argument list itself is held to its shape.
 fn test_the_external_link_arguments_come_from_the_target() {
 	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
-	args := target.external_link_arguments(['x.o'], ['/opt/lib'], ['m'], 'out') or {
+	args := target.external_link_arguments(.program, ['x.o'], ['/opt/lib'], ['m'], 'out') or {
 		panic(err)
 	}
 	assert args[0] == '-dynamic-linker'
@@ -1680,6 +1680,12 @@ fn test_the_external_link_arguments_come_from_the_target() {
 	assert '-lm' in args
 	assert '-lc' in args
 	assert 'out' in args
+	// The toolchain's own directory is part of the search the target answers
+	// with, and the -L flags are that whole search: the start files a shared
+	// object and a static program need are in no other directory.
+	for dir in target.link_dirs(['/opt/lib']) {
+		assert '-L${dir}' in args
+	}
 }
 
 // The seam the re-layering is for: a machine that is not the one this file is

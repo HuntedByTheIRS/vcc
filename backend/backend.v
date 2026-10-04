@@ -1326,15 +1326,26 @@ pub fn (t &Target) base_library() string {
 	return t.base_library_name
 }
 
+// link_dirs is everywhere a link on this system looks for a file: the
+// directories a -l name goes through, with the toolchain's own support
+// directory last. It is last so that a library the system keeps is the one a -l
+// name resolves to, and it is in the list at all because crtbeginS.o,
+// crtbeginT.o, crtend.o and the libgcc archives are in no other directory.
+pub fn (t &Target) link_dirs(given []string) []string {
+	mut dirs := t.library_dirs_for(given)
+	dirs << linux.support_dirs(t.arch, t.os)
+	return dirs
+}
+
 // external_link_arguments is the command line a linker named with
 // -external-linker is given. The loader, the start files and the library
 // directories all come from the system's description through linux, so the
 // external link and the in-house image name the same places and a second system
 // is a second directory rather than a second set of strings here.
 //
-// `objects` are the inputs in command-line order, `given_dirs` are the -L
-// directories the command line added, `libraries` are its -l names, and
-// `output` is where the program is written.
-pub fn (t &Target) external_link_arguments(objects []string, given_dirs []string, libraries []string, output string) ![]string {
-	return linux.link_arguments(t.interpreter, t.library_dirs, t.library_dirs_for(given_dirs), objects, libraries, output)
+// `kind` is which link was asked for, `objects` are the inputs in command-line
+// order, `given_dirs` are the -L directories the command line added,
+// `libraries` are its -l names, and `output` is where the file is written.
+pub fn (t &Target) external_link_arguments(kind linux.LinkKind, objects []string, given_dirs []string, libraries []string, output string) ![]string {
+	return linux.link_arguments(kind, t.interpreter, t.link_dirs(given_dirs), objects, libraries, output)
 }
