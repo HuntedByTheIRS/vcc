@@ -815,12 +815,36 @@ fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 	p.compound_unstable--
 	p.depth--
 	return ast.Expr(ast.Conditional{
-		cond:      condition
+		cond:      p.constant_condition(question, condition)
 		then_expr: then_expr
 		else_expr: else_expr
 		typ:       p.conditional_type(question, then_expr, else_expr)
 		line:      question.line
 		col:       question.col
+	})
+}
+
+// constant_condition folds the condition of a conditional expression to an
+// integer literal when it is an integer constant expression this reader can
+// evaluate, and leaves it alone otherwise.
+//
+// 6.5.15 evaluates only the arm the condition selects, so a condition with a
+// value is the same answer on every run and the arm it does not select is never
+// evaluated. Folding the condition here is what tells the emitter that: it can
+// read a literal and cannot evaluate an arbitrary constant expression, so the
+// value in the tree is how only one arm comes to be written. The arm that is not
+// selected stays in the tree, is still read and still checked, which 6.6 and
+// 6.5.15 ask of it; only the emitter stops writing it. The shape this fixes is
+// glibc's `isinf`, whose type dispatch selects a call for a type the machine
+// does not carry and never runs it.
+fn (p Parser) constant_condition(at tokenize.Token, condition ast.Expr) ast.Expr {
+	value := p.constant_value(condition) or { return condition }
+	return ast.Expr(ast.IntLit{
+		value: value
+		text:  '${value}'
+		typ:   types.int_type()
+		line:  at.line
+		col:   at.col
 	})
 }
 
