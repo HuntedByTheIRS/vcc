@@ -1007,6 +1007,12 @@ pub fn (t &Target) extended_zero() []u8 {
 	return t.encoders.extended_zero()
 }
 
+// extended_negate flips the sign of the long double at the top of the x87
+// stack, which is what the unary minus computes on the extended type.
+pub fn (t &Target) extended_negate() []u8 {
+	return t.encoders.extended_negate()
+}
+
 pub fn (t &Target) move_double(dst Register, src Register) ![]u8 {
 	return t.encoders.move_double(t.describe(dst), t.describe(src))
 }

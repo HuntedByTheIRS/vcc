@@ -1293,6 +1293,8 @@ fn test_the_x87_arithmetic_and_comparison_are_the_bytes_the_machine_reads() {
 		0xf9,
 	]
 	assert target.extended_zero() == [u8(0xd9), 0xee]
+	// fchs
+	assert target.extended_negate() == [u8(0xd9), 0xe0]
 	// fcomip %st(1),%st / fstp %st(0) / setb %al / setnp %cl / and al, cl / movzx eax, al
 	assert target.extended_comparison('<', rax, rcx) or {
 		panic('the target description has no such name')

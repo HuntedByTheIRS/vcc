@@ -861,6 +861,16 @@ pub fn extended_zero() []u8 {
 	return [u8(0xd9), u8(0xee)] // fldz
 }
 
+// extended_negate flips the sign of the long double at the top of the x87
+// stack, which is the sign change the unary minus makes. `fchs` changes the
+// sign bit in place and rounds nothing, so -0.0 becomes +0.0, a NaN keeps its
+// payload and takes the other sign, and an infinity takes the opposite sign.
+// gcc 16.2.1 emits the same byte for the same question at -O0, measured on
+// `long double f(long double x) { return -x; }` as `fldt 16(%rbp); fchs`.
+pub fn extended_negate() []u8 {
+	return [u8(0xd9), u8(0xe0)] // fchs
+}
+
 fn scalar_indirect_move(prefix u8, address Register, operand Register, store bool) ![]u8 {
 	if operand.width != 16 {
 		return error('${name}: a floating value is moved through a sixteen-byte register, and ${operand.name} is not one')
@@ -2507,6 +2517,7 @@ pub:
 	extended_arithmetic             fn (string) ![]u8                     = unsafe { nil }
 	extended_compare_zero           fn (string, Register, Register) ![]u8 = unsafe { nil }
 	extended_comparison             fn (string, Register, Register) ![]u8 = unsafe { nil }
+	extended_negate                 fn () []u8                            = unsafe { nil }
 	extended_zero                   fn () []u8                            = unsafe { nil }
 	fetch_add_indirect              fn (Register, Register, int) ![]u8    = unsafe { nil }
 	float_arithmetic                fn (string, Register, Register) ![]u8 = unsafe { nil }
@@ -2647,6 +2658,7 @@ pub fn encoders() Encoders {
 		extended_arithmetic:             &extended_arithmetic
 		extended_compare_zero:           &extended_compare_zero
 		extended_comparison:             &extended_comparison
+		extended_negate:                 &extended_negate
 		extended_zero:                   &extended_zero
 		fetch_add_indirect:              &fetch_add_indirect
 		float_arithmetic:                &float_operator
