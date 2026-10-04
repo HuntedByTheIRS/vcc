@@ -982,6 +982,22 @@ pub fn (t &Target) store_word_extended(address Register) ![]u8 {
 	return t.encoders.store_word_extended(t.describe(address))
 }
 
+// extended_arithmetic computes with the two long doubles at the top of the x87
+// stack and leaves one result there. extended_comparison reads the order of the
+// two into a register as zero or one, and extended_zero pushes +0.0, which is
+// the value a long double function that falls off its end leaves.
+pub fn (t &Target) extended_arithmetic(op string) ![]u8 {
+	return t.encoders.extended_arithmetic(op)
+}
+
+pub fn (t &Target) extended_comparison(op string, reg Register, scratch Register) ![]u8 {
+	return t.encoders.extended_comparison(op, t.describe(reg), t.describe(scratch))
+}
+
+pub fn (t &Target) extended_zero() []u8 {
+	return t.encoders.extended_zero()
+}
+
 pub fn (t &Target) move_double(dst Register, src Register) ![]u8 {
 	return t.encoders.move_double(t.describe(dst), t.describe(src))
 }

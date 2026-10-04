@@ -797,6 +797,53 @@ pub fn store_word_extended(address Register) ![]u8 {
 	return x87_indirect_move(0xdf, 7, address)
 }
 
+// The x87 arithmetic instructions compute with the two values at the top of the
+// stack and leave one result there in place of the pair. Each is two bytes with
+// both operands on the stack: the second byte names the operation and the
+// register the result is left in, so there is no memory operand and no mod
+// field to write. The operands are pushed left first and right second, which
+// leaves the right value on top and the left one below it, the order gcc 16.2.1
+// uses at -O0: `a + b`, `a - b`, `a * b` and `a / b` each load a then b before
+// the instruction, and the one that subtracts or divides is the "reversed" form
+// that takes the value below the top from the one above it.
+pub fn extended_arithmetic(op string) ![]u8 {
+	if op == '+' {
+		return [u8(0xde), u8(0xc1)] // faddp %st,%st(1)
+	}
+	if op == '-' {
+		return [u8(0xde), u8(0xe9)] // fsubrp %st,%st(1)
+	}
+	if op == '*' {
+		return [u8(0xde), u8(0xc9)] // fmulp %st,%st(1)
+	}
+	if op == '/' {
+		return [u8(0xde), u8(0xf9)] // fdivrp %st,%st(1)
+	}
+	return error('${name}: ${op} is not an operation the x87 stack has for two long doubles')
+}
+
+// extended_comparison reads the order of two long doubles already on the stack
+// into a register as zero or one. `fcomip` compares the top of the stack against
+// the register below it, sets the same flags Comisd sets and pops the top;
+// `fstp %st(0)` then drops the value that was below, so both operands are
+// consumed. The two values are pushed right first and left second, leaving the
+// left value on top, because set_float_condition reads the flags as the first
+// operand against the second and this way the first operand is the left one.
+pub fn extended_comparison(op string, reg Register, scratch Register) ![]u8 {
+	mut out := []u8{cap: 16}
+	out << [u8(0xdf), u8(0xf1)] // fcomip %st(1),%st
+	out << [u8(0xdd), u8(0xd8)] // fstp %st(0)
+	out << set_float_condition(op, reg, scratch)!
+	return out
+}
+
+// extended_zero pushes +0.0 onto the x87 stack, which is what a function that
+// returns a long double leaves when its body falls off the end, the same way
+// zero_double is what a double one leaves.
+pub fn extended_zero() []u8 {
+	return [u8(0xd9), u8(0xee)] // fldz
+}
+
 fn scalar_indirect_move(prefix u8, address Register, operand Register, store bool) ![]u8 {
 	if operand.width != 16 {
 		return error('${name}: a floating value is moved through a sixteen-byte register, and ${operand.name} is not one')
@@ -2440,10 +2487,13 @@ pub:
 	double_to_unsigned_int          fn (Register, Register) ![]u8                     = unsafe { nil }
 	double_to_unsigned_word         fn (Register, Register, Register, Register) ![]u8 = unsafe { nil }
 	exchange_indirect               fn (Register, Register, int) ![]u8                = unsafe { nil }
-	fetch_add_indirect              fn (Register, Register, int) ![]u8                = unsafe { nil }
-	float_arithmetic                fn (string, Register, Register) ![]u8             = unsafe { nil }
-	float_to_double                 fn (Register, Register) ![]u8                     = unsafe { nil }
-	float_to_int                    fn (Register, Register) ![]u8                     = unsafe { nil }
+	extended_arithmetic             fn (string) ![]u8                     = unsafe { nil }
+	extended_comparison             fn (string, Register, Register) ![]u8 = unsafe { nil }
+	extended_zero                   fn () []u8                            = unsafe { nil }
+	fetch_add_indirect              fn (Register, Register, int) ![]u8    = unsafe { nil }
+	float_arithmetic                fn (string, Register, Register) ![]u8 = unsafe { nil }
+	float_to_double                 fn (Register, Register) ![]u8         = unsafe { nil }
+	float_to_int                    fn (Register, Register) ![]u8         = unsafe { nil }
 	frame_epilogue                  fn () []u8                              = unsafe { nil }
 	frame_prologue                  fn () []u8                              = unsafe { nil }
 	frame_reserve                   fn (u32) []u8                           = unsafe { nil }
@@ -2576,6 +2626,9 @@ pub fn encoders() Encoders {
 		double_to_unsigned_int:          &double_to_unsigned_int
 		double_to_unsigned_word:         &double_to_unsigned_word
 		exchange_indirect:               &exchange_indirect
+		extended_arithmetic:             &extended_arithmetic
+		extended_comparison:             &extended_comparison
+		extended_zero:                   &extended_zero
 		fetch_add_indirect:              &fetch_add_indirect
 		float_arithmetic:                &float_operator
 		float_to_double:                 &float_to_double
