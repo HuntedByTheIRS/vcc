@@ -27,6 +27,28 @@ Six steps, each reporting on its own line, exit status zero only when all pass:
 The pure-V step is the machine-checked half of the first constraint. It cannot
 prove the compiler is written in V, only that it has not started importing C.
 
+## compliance.vsh
+
+The corpus under `compliance/`, compiled by the tree and run. The suite says the
+compiler does what its own tests say; this says it agrees with a C program nobody
+wrote for it, one that checks about nine hundred of its own answers against the
+standard library.
+
+```sh
+v run tools/compliance.vsh                       # build the tree, then run the corpus
+v run tools/compliance.vsh --compiler /tmp/vcc   # a compiler you already built
+```
+
+It builds the tree under test first unless `--compiler` names a binary, so the run
+describes the current source rather than one from an earlier edit. It fails on
+four things rather than one: a corpus that does not build, a compiler that prints
+anything at all while compiling it, a run that exits non-zero, and a count below
+the floor of 906 the corpus reached when it landed. The floor is a floor and not
+an equality, so adding checks needs no edit here and losing them is a failure.
+
+The mode is `-std=gnu99`; `compliance/README.md` says why, and why `-lm` is not
+optional.
+
 ## bench.vsh
 
 Wall time and peak memory for a compile, with tcc on the same input as the
