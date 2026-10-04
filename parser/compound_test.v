@@ -34,8 +34,8 @@ fn test_a_compound_literal_declares_an_unnamed_object() {
 	assert object.kind == .var_decl
 	assert object.decl_name.starts_with('__vcc_compound_')
 	assert object.decl_count == 3
-	assert object.decl_stride == 4
-	assert object.resolved.same(types.array_of(types.int_type(), 3))
+	assert object.decl_stride() == 4
+	assert object.resolved().same(types.array_of(types.int_type(), 3))
 	for i in 1 .. 7 {
 		assert body[i].kind == .assign
 		assert body[i].target == object.decl_name
@@ -58,7 +58,7 @@ fn test_a_compound_literal_is_an_lvalue() {
 	assert body[0].kind == .var_decl
 	assert body[0].decl_name.starts_with('__vcc_compound_')
 	assert body[5].kind == .assign
-	assert body[5].subscript != none
+	assert body[5].subscript() != none
 }
 
 fn test_sizeof_a_compound_literal_is_a_constant() {

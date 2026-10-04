@@ -312,9 +312,9 @@ fn test_typeof_names_the_type_of_a_value_and_of_a_type() {
 	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
 	assert body[1].decl_type == 'int'
-	assert body[1].resolved.same(types.int_type())
+	assert body[1].resolved().same(types.int_type())
 	assert body[2].decl_type == 'int'
-	assert body[2].resolved.same(types.int_type())
+	assert body[2].resolved().same(types.int_type())
 }
 
 // typeof of an expression is the type of the value the expression has, and the
@@ -336,7 +336,7 @@ fn test_typeof_carries_the_pointer_the_operand_had() {
 	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
 	assert body[1].decl_type == 'int *'
-	assert body[1].resolved.kind == .pointer
+	assert body[1].resolved().kind == .pointer
 }
 
 // The operand is a type name when a type name is written there, and a typedef is
@@ -346,7 +346,7 @@ fn test_typeof_over_a_type_name_resolves_through_a_typedef() {
 	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
 	assert body[0].decl_type == 'int'
-	assert body[0].resolved.same(types.int_type())
+	assert body[0].resolved().same(types.int_type())
 }
 
 // typeof_unqual is the same specifier with the qualifiers taken off the type it
@@ -359,7 +359,7 @@ fn test_typeof_unqual_drops_the_qualifiers_the_operand_had() {
 	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
 	assert body[1].decl_type == 'int'
-	assert !body[1].resolved.is_const()
+	assert !body[1].resolved().is_const()
 }
 
 // An operand whose type this compiler never resolved has no type to give a
@@ -685,8 +685,8 @@ fn test_a_local_typedef_of_a_struct_read_before_its_body_sees_the_definition() {
 	assert body[0].kind == .var_decl
 	assert body[0].decl_name == 'u'
 	assert body[0].decl_type == 'struct U'
-	assert body[0].resolved.is_complete()
-	assert body[0].resolved.members.len == 2
+	assert body[0].resolved().is_complete()
+	assert body[0].resolved().members.len == 2
 	assert body[1].kind == .assign
 	assert body[3].kind == .return_stmt
 }
@@ -719,7 +719,7 @@ fn test_a_local_array_whose_size_is_not_a_number_is_reported() {
 	assert result.diagnostics[0].msg.contains('constraint violation')
 	assert !result.diagnostics[0].warning
 	assert result.unit.decls[0].body.len == 2
-	assert result.unit.decls[0].body[0].decl_vla_size != none
+	assert result.unit.decls[0].body[0].decl_vla_size() != none
 }
 
 fn test_an_assignment_writes_to_a_name() {
@@ -1031,7 +1031,7 @@ fn test_an_assignment_through_a_dereference_writes_what_the_pointer_points_at() 
 	body := result.unit.decls[0].body
 	assert body[2].kind == .assign
 	assert body[2].target == ''
-	target := body[2].deref or {
+	target := body[2].deref() or {
 		assert false
 		return
 	}
@@ -1048,7 +1048,7 @@ fn test_an_assignment_through_a_pointer_to_a_pointer_keeps_both_dereferences() {
 	result := parsed('int main() { int x = 1; int *p = &x; int **pp = &p; **pp = 7; return x; }')
 	assert result.diagnostics.len == 0
 	body := result.unit.decls[0].body
-	target := body[3].deref or {
+	target := body[3].deref() or {
 		assert false
 		return
 	}
@@ -1079,7 +1079,7 @@ fn test_a_compound_assignment_through_a_dereference_is_the_assignment_it_means()
 	statement := body[2]
 	assert statement.kind == .assign
 	assert statement.compound == '+'
-	assert statement.deref != none
+	assert statement.deref() != none
 	value := statement.expr or {
 		assert false
 		return
@@ -2234,13 +2234,13 @@ fn test_a_switch_holds_its_case_labels_as_statements() {
 	assert inner[0].kind == .block
 	arms := inner[0].body
 	assert arms[0].kind == .case_stmt
-	assert arms[0].case_value == 0
+	assert arms[0].case_value() == 0
 	assert arms[1].kind == .case_stmt
-	assert arms[1].case_value == 1
+	assert arms[1].case_value() == 1
 	assert arms[2].kind == .assign
 	assert arms[3].kind == .break_stmt
 	assert arms[4].kind == .case_stmt
-	assert arms[4].case_value == 2
+	assert arms[4].case_value() == 2
 	assert arms[6].kind == .default_stmt
 }
 
@@ -2312,9 +2312,9 @@ fn test_a_goto_and_a_label_are_a_jump_and_a_place() {
 	body := result.unit.decls[0].body
 	assert body.len == 3
 	assert body[0].kind == .goto_stmt
-	assert body[0].label == 'done'
+	assert body[0].label() == 'done'
 	assert body[1].kind == .label_stmt
-	assert body[1].label == 'done'
+	assert body[1].label() == 'done'
 	assert body[2].kind == .return_stmt
 }
 

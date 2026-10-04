@@ -1351,8 +1351,8 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 // skips a `static` definition nothing in the file names before its body is
 // read, and a statement in one of those is never seen at all.
 fn (mut e Emitter) emit_asm(stmt ast.Stmt) !void {
-	if stmt.asm_text.len > 0 || stmt.asm_outputs > 0 || stmt.asm_inputs > 0 {
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm statement ${stmt.asm_spelling} is not emitted by this compiler')
+	if stmt.asm_text().len > 0 || stmt.asm_outputs() > 0 || stmt.asm_inputs() > 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm statement ${stmt.asm_spelling()} is not emitted by this compiler')
 		return error('asm statement')
 	}
 }
@@ -1580,16 +1580,16 @@ fn (e Emitter) returns_eight_byte_integer() bool {
 // storage and nothing else, which is what C says it is: the slot is there for
 // whatever the function writes into it next.
 fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
-	if size_expr := stmt.decl_vla_size {
+	if size_expr := stmt.decl_vla_size() {
 		// A variable-length array is the one declaration whose storage is
 		// claimed while the program runs rather than reserved by the frame.
 		return e.emit_vla_decl(stmt, size_expr)
 	}
-	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes, stmt.decl_stride,
+	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes(), stmt.decl_stride(),
 		stmt.line, stmt.col)!
 	// What makes an object an argument list is the type it was declared with,
 	// because that is what says how the four operations over a list may treat it.
-	if abi.is_argument_list(stmt.resolved) {
+	if abi.is_argument_list(stmt.resolved()) {
 		e.argument_lists << stmt.decl_name
 	}
 	init := stmt.init or { return }
@@ -1670,7 +1670,7 @@ fn (mut e Emitter) emit_vla_decl(stmt ast.Stmt, size_expr ast.Expr) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.decl_name} is a variable-length array, and a variable-length array may not be initialized')
 		return error('VLA initializer')
 	}
-	slot := e.declare_vla(stmt.decl_name, stmt.decl_stride, stmt.line, stmt.col)!
+	slot := e.declare_vla(stmt.decl_name, stmt.decl_stride(), stmt.line, stmt.col)!
 	// The size the object is, before the frame rounds it up: sizeof answers with
 	// this and not with the padded size, because padding is a fact about the
 	// stack and not about the object.
@@ -1719,16 +1719,16 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 	// written by the path that computes that address once and reads and writes
 	// through it. A name target is not one of those: reading a name has no side
 	// effect to repeat, and the expansion in expr is emitted directly below.
-	if stmt.compound != '' && (stmt.field != none || stmt.deref != none || stmt.subscript != none || stmt.index != none) {
+	if stmt.compound != '' && (stmt.field != none || stmt.deref() != none || stmt.subscript() != none || stmt.index != none) {
 		return e.assign_compound(stmt, depth)
 	}
-	if deref := stmt.deref {
+	if deref := stmt.deref() {
 		return e.assign_deref(stmt, deref, expr, depth)
 	}
 	if member := stmt.field {
 		return e.assign_member(stmt, *member, expr, depth)
 	}
-	if subscript := stmt.subscript {
+	if subscript := stmt.subscript() {
 		return e.assign_subscript(stmt, subscript, expr, depth)
 	}
 	if subscript := stmt.index {
@@ -3359,7 +3359,7 @@ fn (mut e Emitter) collect_cases(body []ast.Stmt, mut cases []CaseTarget) {
 		match stmt.kind {
 			.case_stmt {
 				cases << CaseTarget{
-					value: stmt.case_value
+					value: stmt.case_value()
 					label: e.label()
 				}
 			}
@@ -3447,8 +3447,9 @@ fn (mut e Emitter) emit_case_label(stmt ast.Stmt, is_default bool) !void {
 // written before the place it lands on. What is not settled until then is
 // whether a label of that name is written at all.
 fn (mut e Emitter) emit_goto(stmt ast.Stmt) !void {
-	if !(stmt.label in e.goto_used) {
-		e.goto_used[stmt.label] = LabelUse{
+	label := stmt.label()
+	if !(label in e.goto_used) {
+		e.goto_used[label] = LabelUse{
 			line: stmt.line
 			col:  stmt.col
 		}
@@ -3467,7 +3468,7 @@ fn (mut e Emitter) emit_goto(stmt ast.Stmt) !void {
 		}
 	}
 	if active.len > 0 {
-		enclosing := e.vla_label_counts[stmt.label]
+		enclosing := e.vla_label_counts[label]
 		mut at := 0
 		if enclosing > 0 {
 			at = enclosing - 1
@@ -3477,20 +3478,21 @@ fn (mut e Emitter) emit_goto(stmt ast.Stmt) !void {
 		}
 		e.restore_stack_pointer(active[at])
 	}
-	e.jump(e.named_label(stmt.label))!
+	e.jump(e.named_label(label))!
 }
 
 // emit_label places the label a goto jumps to. Two labels of one name in a
 // function are refused, which is what gcc reports as a duplicate label: a name
 // for two places is not a name.
 fn (mut e Emitter) emit_label(stmt ast.Stmt) !void {
-	if e.goto_placed[stmt.label] {
-		e.diagnostics << problem(stmt.line, stmt.col, 'duplicate label ${stmt.label}')
+	label := stmt.label()
+	if e.goto_placed[label] {
+		e.diagnostics << problem(stmt.line, stmt.col, 'duplicate label ${label}')
 		return error('duplicate label')
 	}
-	name := e.named_label(stmt.label)
+	name := e.named_label(label)
 	e.place(name)
-	e.goto_placed[stmt.label] = true
+	e.goto_placed[label] = true
 }
 
 // named_label is the machine label a function's named label is emitted at,
@@ -3957,7 +3959,7 @@ fn (mut c VlaCounter) statement(stmt ast.Stmt) {
 	match stmt.kind {
 		.block { c.scope(stmt.body) }
 		.var_decl {
-			if stmt.decl_vla_size != none && c.active.len > 0 {
+			if stmt.decl_vla_size() != none && c.active.len > 0 {
 				c.active[c.active.len - 1] = true
 			}
 		}
@@ -3996,7 +3998,7 @@ fn (mut c VlaCounter) statement(stmt ast.Stmt) {
 					enclosing++
 				}
 			}
-			c.counts[stmt.label] = enclosing
+			c.counts[stmt.label()] = enclosing
 		}
 		else {}
 	}
@@ -4017,7 +4019,7 @@ fn function_has_vla(stmts []ast.Stmt) bool {
 fn statement_has_vla(stmt ast.Stmt) bool {
 	match stmt.kind {
 		.block { return function_has_vla(stmt.body) }
-		.var_decl { return stmt.decl_vla_size != none }
+		.var_decl { return stmt.decl_vla_size() != none }
 		.if_stmt { return function_has_vla(stmt.then_body) || function_has_vla(stmt.else_body) }
 		.while_stmt { return function_has_vla(stmt.body) || function_has_vla(stmt.step) }
 		.do_while_stmt { return function_has_vla(stmt.body) }
@@ -5848,15 +5850,25 @@ fn assignment_statement(assign ast.Assign) ?ast.Stmt {
 			return none
 		}
 	}
+	// The element or the address an assignment writes through is what the
+	// statement needs an extra part for, and an assignment to a name has
+	// neither: building one for every assignment would put back the bytes the
+	// extra part exists to keep out of the node.
+	mut extra := ?&ast.StmtExtra(none)
+	if subscript != none || deref != none {
+		extra = &ast.StmtExtra{
+			subscript: subscript
+			deref:     deref
+		}
+	}
 	return ast.Stmt{
-		kind:      .assign
-		expr:      assign.value
-		target:    target
-		subscript: subscript
-		field:     member
-		deref:     deref
-		line:      assign.line
-		col:       assign.col
+		kind:   .assign
+		expr:   assign.value
+		target: target
+		field:  member
+		extra:  extra
+		line:   assign.line
+		col:    assign.col
 	}
 }
 

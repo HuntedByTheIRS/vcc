@@ -94,10 +94,10 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			}
 			.var_decl {
 				elements := if stmt.decl_count > 0 { '[${stmt.decl_count}]' } else { '' }
-				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name}${elements} at ${stmt.line}:${stmt.col}${typed(stmt.resolved)}'
+				out << '${indent}declaration of ${stmt.decl_type} ${stmt.decl_name}${elements} at ${stmt.line}:${stmt.col}${typed(stmt.resolved())}'
 			}
 			.assign {
-				if stmt.deref != none {
+				if stmt.deref() != none {
 					out << '${indent}assignment through a dereference at ${stmt.line}:${stmt.col}'
 				} else {
 					out << '${indent}assignment to ${stmt.target} at ${stmt.line}:${stmt.col}'
@@ -122,19 +122,19 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 				out << '${indent}switch at ${stmt.line}:${stmt.col}'
 			}
 			.case_stmt {
-				out << '${indent}case ${stmt.case_value} at ${stmt.line}:${stmt.col}'
+				out << '${indent}case ${stmt.case_value()} at ${stmt.line}:${stmt.col}'
 			}
 			.default_stmt {
 				out << '${indent}default at ${stmt.line}:${stmt.col}'
 			}
 			.label_stmt {
-				out << '${indent}label ${stmt.label} at ${stmt.line}:${stmt.col}'
+				out << '${indent}label ${stmt.label()} at ${stmt.line}:${stmt.col}'
 			}
 			.goto_stmt {
-				out << '${indent}goto ${stmt.label} at ${stmt.line}:${stmt.col}'
+				out << '${indent}goto ${stmt.label()} at ${stmt.line}:${stmt.col}'
 			}
 			.asm_stmt {
-				out << '${indent}asm statement ${stmt.asm_spelling} at ${stmt.line}:${stmt.col}'
+				out << '${indent}asm statement ${stmt.asm_spelling()} at ${stmt.line}:${stmt.col}'
 			}
 		}
 		if expr := stmt.expr {
@@ -144,7 +144,7 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			out << '${indent}subscript'
 			dump_expression(index, depth + 1, mut out)
 		}
-		if deref := stmt.deref {
+		if deref := stmt.deref() {
 			out << '${indent}through'
 			dump_expression(deref, depth + 1, mut out)
 		}

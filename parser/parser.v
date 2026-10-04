@@ -411,9 +411,23 @@ fn (p Parser) with_declared_types(stmts []ast.Stmt) []ast.Stmt {
 	for stmt in stmts {
 		if stmt.kind == .var_decl {
 			if symbol := p.scopes.lookup(stmt.decl_name) {
+				// What the declaration resolved to is the symbol's type. A
+				// statement that already carried an extra part keeps it, the
+				// stride and the width a compound declaration worked out among
+				// the rest, because this pass is about the type and nothing
+				// else.
+				mut extra := &ast.StmtExtra{
+					resolved: symbol.typ
+				}
+				if source := stmt.extra {
+					extra = &ast.StmtExtra{
+						...*source
+						resolved: symbol.typ
+					}
+				}
 				out << ast.Stmt{
 					...stmt
-					resolved: symbol.typ
+					extra: extra
 				}
 				continue
 			}
@@ -481,7 +495,7 @@ fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map
 			// pointer it writes through is the expression below.
 			p.check_undeclared_name(stmt.target, stmt.line, stmt.col, mut reported)
 		}
-		if deref := stmt.deref {
+		if deref := stmt.deref() {
 			p.check_undeclared_expression(deref, mut reported)
 		}
 		if expr := stmt.expr {
@@ -492,13 +506,13 @@ fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map
 		}
 		// A variable-length array's size expression carries the names its
 		// bounds were written with, at the point the declaration runs.
-		if size := stmt.decl_vla_size {
+		if size := stmt.decl_vla_size() {
 			p.check_undeclared_expression(size, mut reported)
 		}
 		if index := stmt.index {
 			p.check_undeclared_expression(index, mut reported)
 		}
-		if subscript := stmt.subscript {
+		if subscript := stmt.subscript() {
 			p.check_undeclared_expression(subscript, mut reported)
 		}
 		if cond := stmt.cond {
@@ -2571,10 +2585,10 @@ fn (p Parser) trailing_value(stmt ast.Stmt) ?ast.Expr {
 // target is put back the way the expression reader read it when the same
 // assignment is written where a value is wanted.
 fn (p Parser) assignment_target(stmt ast.Stmt) ?ast.Expr {
-	if subscript := stmt.subscript {
+	if subscript := stmt.subscript() {
 		return subscript
 	}
-	if deref := stmt.deref {
+	if deref := stmt.deref() {
 		return deref
 	}
 	if member := stmt.field {

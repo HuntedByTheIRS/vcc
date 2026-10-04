@@ -145,14 +145,16 @@ fn (mut p Parser) compound_literal_object(name string, spec DeclSpec, d Declarat
 	bytes := p.aggregate_bytes(declared)
 	mut stmts := []ast.Stmt{}
 	stmts << ast.Stmt{
-		kind:        .var_decl
-		decl_name:   name
-		decl_type:   p.spelling_of(spec, d.pointer_count())
-		decl_count:  count
-		decl_stride: stride
-		bytes:       bytes
-		line:        at.line
-		col:         at.col
+		kind:       .var_decl
+		decl_name:  name
+		decl_type:  p.spelling_of(spec, d.pointer_count())
+		decl_count: count
+		extra:      &ast.StmtExtra{
+			decl_stride: stride
+			bytes:       bytes
+		}
+		line:       at.line
+		col:        at.col
 	}
 	array := target.kind == .array
 	element := if array { target.element() or { target } } else { target }

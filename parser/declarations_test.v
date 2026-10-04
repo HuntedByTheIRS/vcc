@@ -2016,8 +2016,8 @@ fn test_a_non_constant_bound_at_file_scope_is_a_constraint_violation() {
 	body := declarations_of('int main(void) { int n = 3; int a[n]; return 0; }')
 	assert body.diagnostics.len == 0
 	decl := body.unit.decls[0].body[1]
-	assert decl.decl_vla_size != none
-	assert decl.decl_stride == 4
+	assert decl.decl_vla_size() != none
+	assert decl.decl_stride() == 4
 }
 
 // The conditional operator is an operator 6.6p3 leaves in a constant expression,

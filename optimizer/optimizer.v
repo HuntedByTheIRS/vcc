@@ -312,8 +312,21 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 		// value: `*p = v` reads the pointer, so a builtin call inside it is
 		// folded the same way.
 		mut deref := ?ast.Expr(none)
-		if value := stmt.deref {
+		if value := stmt.deref() {
 			deref = rewrite(value, opts, 0)
+		}
+		// The name a goto jumps to and the constant a case label names are not
+		// expressions, so they are carried over as they are: a rewrite that
+		// dropped them would turn a jump into a jump to nothing. They are
+		// carried in an extra part built only when there is one to carry, so
+		// that a statement with none of them is a statement of the size it was.
+		mut extra := ?&ast.StmtExtra(none)
+		if deref != none || stmt.label() != '' || stmt.kind == .case_stmt {
+			extra = &ast.StmtExtra{
+				deref:      deref
+				label:      stmt.label()
+				case_value: stmt.case_value()
+			}
 		}
 		out << ast.Stmt{
 			kind:       stmt.kind
@@ -324,17 +337,12 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 			decl_count: stmt.decl_count
 			target:     stmt.target
 			index:      index
-			deref:      deref
+			extra:      extra
 			cond:       cond
 			body:       rewrite_body(stmt.body, opts)
 			step:       rewrite_body(stmt.step, opts)
 			then_body:  rewrite_body(stmt.then_body, opts)
 			else_body:  rewrite_body(stmt.else_body, opts)
-			// The name a goto jumps to and the constant a case label names are
-			// not expressions, so they are carried over as they are: a rewrite
-			// that dropped them would turn a jump into a jump to nothing.
-			label:      stmt.label
-			case_value: stmt.case_value
 			line:       stmt.line
 			col:        stmt.col
 		}

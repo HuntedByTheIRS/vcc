@@ -40,9 +40,9 @@ fn asm_run(image []u8) int {
 fn test_the_memory_barrier_is_read_and_emitted_as_nothing() {
 	unit := asm_unit('int f(void) {\n\t__asm__ __volatile__("" ::: "memory");\n\treturn 41;\n}\nint main(void) { return f() + 1; }')
 	assert unit.decls[0].body[0].kind == .asm_stmt
-	assert unit.decls[0].body[0].asm_text == ''
-	assert unit.decls[0].body[0].asm_spelling == '""'
-	assert unit.decls[0].body[0].asm_clobbers == ['memory']
+	assert unit.decls[0].body[0].asm_text() == ''
+	assert unit.decls[0].body[0].asm_spelling() == '""'
+	assert unit.decls[0].body[0].asm_clobbers() == ['memory']
 	emitted := emit(unit, Options{})
 	assert emitted.diagnostics.len == 0
 	assert asm_run(emitted.bytes) == 42
@@ -56,9 +56,9 @@ fn test_the_memory_barrier_is_read_and_emitted_as_nothing() {
 fn test_an_asm_instruction_body_is_refused_by_name_with_its_text() {
 	unit := asm_unit('int main(void) {\n\tint q = 1;\n\t__asm__ ("div %[y]" : [q] "=a" (q) : [y] "r" (q));\n\treturn q;\n}')
 	assert unit.decls[0].body[1].kind == .asm_stmt
-	assert unit.decls[0].body[1].asm_text == 'div %[y]'
-	assert unit.decls[0].body[1].asm_outputs == 1
-	assert unit.decls[0].body[1].asm_inputs == 1
+	assert unit.decls[0].body[1].asm_text() == 'div %[y]'
+	assert unit.decls[0].body[1].asm_outputs() == 1
+	assert unit.decls[0].body[1].asm_inputs() == 1
 	emitted := emit(unit, Options{})
 	assert emitted.diagnostics.len == 1
 	assert !emitted.diagnostics[0].warning
@@ -74,7 +74,7 @@ fn test_an_asm_instruction_body_is_refused_by_name_with_its_text() {
 fn test_adjacent_string_literals_join_into_one_instruction_text() {
 	unit := asm_unit('int main(void) {\n\tint lo = 1;\n\t__asm__ ("mulq %%rdx\\n\\t" "addq %[z], %%rax\\n\\t" : [lo] "=a" (lo) : [z] "r" (lo));\n\treturn lo;\n}')
 	assert unit.decls[0].body[1].kind == .asm_stmt
-	assert unit.decls[0].body[1].asm_text == 'mulq %%rdx\n\taddq %[z], %%rax\n\t'
+	assert unit.decls[0].body[1].asm_text() == 'mulq %%rdx\n\taddq %[z], %%rax\n\t'
 	emitted := emit(unit, Options{})
 	assert emitted.diagnostics.len == 1
 	assert emitted.diagnostics[0].msg.contains('mulq %%rdx')

@@ -235,14 +235,16 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 		return []ast.Stmt{}
 	}
 	return [ast.Stmt{
-		kind:         .asm_stmt
-		asm_text:     text
-		asm_spelling: spelling
-		asm_outputs:  outputs
-		asm_inputs:   inputs
-		asm_clobbers: clobbers
-		line:         start.line
-		col:          start.col
+		kind:  .asm_stmt
+		extra: &ast.StmtExtra{
+			asm_text:     text
+			asm_spelling: spelling
+			asm_outputs:  outputs
+			asm_inputs:   inputs
+			asm_clobbers: clobbers
+		}
+		line:  start.line
+		col:   start.col
 	}]
 }
 
@@ -446,9 +448,11 @@ fn (mut p Parser) parse_deref_assignment(start tokenize.Token, target ast.Expr, 
 				deref := ast.Expr(target)
 				return ast.Stmt{
 					kind:     .assign
-					deref:    deref
 					expr:     p.compound_expansion(op, arithmetic, deref, value)
 					compound: arithmetic
+					extra:    &ast.StmtExtra{
+						deref: deref
+					}
 					line:     start.line
 					col:      start.col
 				}
@@ -459,8 +463,10 @@ fn (mut p Parser) parse_deref_assignment(start tokenize.Token, target ast.Expr, 
 			p.check_assignment(target.typ, value, op)
 			return ast.Stmt{
 				kind:  .assign
-				deref: ast.Expr(target)
 				expr:  value
+				extra: &ast.StmtExtra{
+					deref: ast.Expr(target)
+				}
 				line:  start.line
 				col:   start.col
 			}
@@ -647,17 +653,19 @@ fn (mut p Parser) parse_assignment() !ast.Stmt {
 				})
 				p.check_assignment(element, expr, op)
 				return ast.Stmt{
-					kind:      .assign
-					subscript: ast.Expr(ast.Index{
-						base:  base
-						index: subscript
-						typ:   element
-						line:  t.line
-						col:   t.col
-					})
-					expr:      expr
-					line:      t.line
-					col:       t.col
+					kind:  .assign
+					expr:  expr
+					extra: &ast.StmtExtra{
+						subscript: ast.Expr(ast.Index{
+							base:  base
+							index: subscript
+							typ:   element
+							line:  t.line
+							col:   t.col
+						})
+					}
+					line:  t.line
+					col:   t.col
 				}
 			}
 		}
@@ -750,11 +758,13 @@ fn (mut p Parser) parse_subscript_assignment(index ast.Index) !ast.Stmt {
 	value := p.parse_assignment_expression()!
 	p.check_assignment(index.typ, value, op)
 	return ast.Stmt{
-		kind:      .assign
-		subscript: ast.Expr(index)
-		expr:      value
-		line:      index.line
-		col:       index.col
+		kind:  .assign
+		expr:  value
+		extra: &ast.StmtExtra{
+			subscript: ast.Expr(index)
+		}
+		line:  index.line
+		col:   index.col
 	}
 }
 
@@ -1067,7 +1077,9 @@ fn (mut p Parser) parse_label_statement(name tokenize.Token) ![]ast.Stmt {
 	p.next() // :
 	mut out := [ast.Stmt{
 		kind:  .label_stmt
-		label: name.text
+		extra: &ast.StmtExtra{
+			label: name.text
+		}
 		line:  name.line
 		col:   name.col
 	}]
@@ -1111,7 +1123,9 @@ fn (mut p Parser) parse_goto_statement() ![]ast.Stmt {
 	}
 	return [ast.Stmt{
 		kind:  .goto_stmt
-		label: name.text
+		extra: &ast.StmtExtra{
+			label: name.text
+		}
 		line:  t.line
 		col:   t.col
 	}]
@@ -1211,10 +1225,12 @@ fn (mut p Parser) parse_case_label() ![]ast.Stmt {
 	}
 	p.case_values[p.case_values.len - 1][value] = true
 	mut out := [ast.Stmt{
-		kind:       .case_stmt
-		case_value: value
-		line:       t.line
-		col:        t.col
+		kind:  .case_stmt
+		extra: &ast.StmtExtra{
+			case_value: value
+		}
+		line:  t.line
+		col:   t.col
 	}]
 	out << p.statement_under_label()!
 	return out
@@ -1840,27 +1856,29 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// writes an initializer defines the object and is emitted below.
 		if !spec.is_typedef && !(spec.is_extern && !has_initializer) {
 			stmts << ast.Stmt{
-				kind:          .var_decl
-				init:          decl_init
-				decl_name:     d.name
-				decl_type:     if spec.auto_deduced {
+				kind:       .var_decl
+				init:       decl_init
+				decl_name:  d.name
+				decl_type:  if spec.auto_deduced {
 					declared.describe()
 				} else {
 					p.spelling_of(spec, d.pointer_count())
 				}
-				decl_count:    count
-				decl_stride:   vla_stride
-				decl_vla_size: vla_size
-				// The declarator decides whether the object is the aggregate or
-				// something derived from it: `struct S x;` is the object, and
-				// `struct S *p;` is one word holding an address, which the back end
-				// sizes from the spelling.
-				// An array of aggregates carries the size of one element here, and
-				// the count it was declared with travels beside it: the frame reserves
-				// the product, and an index scales by the size of one element.
-				bytes:         p.aggregate_bytes(declared)
-				line:          d.name_at.line
-				col:           d.name_at.col
+				decl_count: count
+				extra:      &ast.StmtExtra{
+					decl_stride:   vla_stride
+					decl_vla_size: vla_size
+					// The declarator decides whether the object is the aggregate or
+					// something derived from it: `struct S x;` is the object, and
+					// `struct S *p;` is one word holding an address, which the back end
+					// sizes from the spelling.
+					// An array of aggregates carries the size of one element here, and
+					// the count it was declared with travels beside it: the frame reserves
+					// the product, and an index scales by the size of one element.
+					bytes:         p.aggregate_bytes(declared)
+				}
+				line:       d.name_at.line
+				col:        d.name_at.col
 			}
 		}
 		// A union's brace initializer is the one member it names, written at the
@@ -2190,11 +2208,13 @@ fn (p Parser) store_a_leaf(name string, at tokenize.Token, write BraceWrite, val
 			})
 			if path := p.array_element_path(base, general_target, write.offset, at) {
 				return ast.Stmt{
-					kind:      .assign
-					subscript: path
-					expr:      value
-					line:      at.line
-					col:       at.col
+					kind:  .assign
+					expr:  value
+					extra: &ast.StmtExtra{
+						subscript: path
+					}
+					line:  at.line
+					col:   at.col
 				}
 			}
 		}

@@ -148,21 +148,21 @@ fn test_an_enum_typed_object_is_the_integer_type_its_enumerators_require() {
 		'c99_small')
 	assert small.decl_name == 'e'
 	assert small.decl_type == 'unsigned int'
-	assert small.resolved.kind == types.Kind.enum_
-	assert small.resolved.tag == 'c99_small'
-	assert small.resolved.enum_underlying() == types.Kind.unsigned_int
+	assert small.resolved().kind == types.Kind.enum_
+	assert small.resolved().tag == 'c99_small'
+	assert small.resolved().enum_underlying() == types.Kind.unsigned_int
 	neg := enum_object_declaration('enum c99_neg { NEG_MIN = -3, NEG_ZERO = 0, NEG_POS = 3 };',
 		'c99_neg')
 	assert neg.decl_type == 'int'
-	assert neg.resolved.enum_underlying() == types.Kind.int_
+	assert neg.resolved().enum_underlying() == types.Kind.int_
 	big := enum_object_declaration('enum c99_big { BIG = 65535 };', 'c99_big')
 	assert big.decl_type == 'unsigned int'
 	both := enum_object_declaration('enum c99_both { BN = -1, BP = 4000000000 };', 'c99_both')
 	assert both.decl_type == 'long'
-	assert both.resolved.enum_underlying() == types.Kind.long
+	assert both.resolved().enum_underlying() == types.Kind.long
 	huge := enum_object_declaration('enum c99_huge { H = 5000000000 };', 'c99_huge')
 	assert huge.decl_type == 'unsigned long'
-	assert huge.resolved.enum_underlying() == types.Kind.unsigned_long
+	assert huge.resolved().enum_underlying() == types.Kind.unsigned_long
 }
 
 // A typedef name for an enum and an anonymous enum spell the same integer type,

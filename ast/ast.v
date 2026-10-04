@@ -301,27 +301,17 @@ pub:
 	decl_name  string
 	decl_type  string
 	decl_count int
-	// decl_vla_size is the number of bytes a variable-length array declaration
-	// claims, as an expression evaluated where the declaration runs: for
-	// `int a[n]` it is `n * sizeof(int)`, and for `int m[r][c]` it is
-	// `r * c * sizeof(int)`. It is none for a declaration whose size is a
-	// constant, which is what the frame reserves for every other object. The
-	// type's vla flag says which declaration this is; a vla declaration without
-	// this expression is not emitted.
-	decl_vla_size ?Expr
-	// decl_stride is the size of one element of an array declaration: what an
-	// index scales by and what the frame reserves a count of. For an array of
-	// arrays it is the whole row, which is the size of the element's own type
-	// and not the scalar at the bottom. It is zero for a declaration that is
-	// not an array, where the back end sizes the value from its spelling.
-	decl_stride int
-	resolved    types.Type
-	// bytes is how many bytes of storage the object is when its type is an
-	// aggregate, and zero for an object the back end sizes from its spelling.
-	// A struct is not the address of anything and has no spelling the back end
-	// can size, so how much room it takes is a fact the reader got from the
-	// model's layout and the back end is handed rather than asked for.
-	bytes int
+	// extra is what a statement carries only when it is one of the statements
+	// that has one: the type and the byte width a declaration resolved to, the
+	// bound and the stride of a variable-length array, the element an assignment
+	// of an element writes through, the dereference an assignment writes
+	// through, the name a goto jumps to, the value a case names, and the whole
+	// of an asm statement. Every one of them was a field of its own here, which
+	// put all of them in every statement in the tree. A declaration's resolved
+	// type alone is 192 bytes, and the tree holds hundreds of thousands of
+	// assignments and returns that never read it. A statement that has one holds
+	// it by pointer; the rest are nil, and read it through the accessors below.
+	extra ?&StmtExtra
 	// target is the name an assignment writes to, index is the subscript of
 	// an array element: `a[i] = v` writes to an element, and a plain `x = v`
 	// has none. field is the member of an aggregate the assignment writes to,
@@ -337,13 +327,6 @@ pub:
 	target string
 	index  ?Expr
 	field  ?&Field
-	// deref is the dereference an assignment writes through when the target
-	// is not a name: `*p = v` writes the value at the address the pointer
-	// holds, so what the store needs is that address and the tree keeps the
-	// expression that gives it, a Unary whose operand is the pointer. It is
-	// none for an assignment to a name, and target is empty for one written
-	// through a dereference.
-	deref ?Expr
 	// compound is the arithmetic operator of a compound assignment: `+` for
 	// `+=`, `-` for `-=`, and the empty string for a plain `=`. The reader
 	// expands the spelling into the assignment it means in `expr` as well, and
@@ -355,11 +338,6 @@ pub:
 	// string means the value in `expr` is written as it stands, which is what
 	// every plain assignment does.
 	compound string
-	// subscript is the element an assignment writes to when its base is not a
-	// name the target fields can address, which is what `3[p] = 9` and
-	// `p[3] = 9` for a pointer p are. The element node is carried whole because
-	// the address it is stored through is computed from the base's value.
-	subscript ?Expr
 	// cond is the controlling expression of an if or a while: what has to be
 	// true for the branch to be taken, or for the loop to go round again.
 	cond ?Expr
@@ -376,15 +354,62 @@ pub:
 	// when it was not written.
 	then_body []Stmt
 	else_body []Stmt
+	line      int
+	col       int
+}
+
+// StmtExtra is the part of a statement only some statements carry, held by
+// pointer from `Stmt.extra` so that the statements without one pay eight bytes
+// for it rather than the whole of it. What is here is here because the statement
+// that reads it is a declaration, an assignment that writes through an element
+// or an address, a label, a case, or an asm statement, and the statements that
+// are none of those are most of the tree.
+pub struct StmtExtra {
+pub:
+	// resolved is the type a declaration resolved to, and the zero value for
+	// one that declares nothing.
+	resolved types.Type
+	// bytes is how many bytes of storage the object is when its type is an
+	// aggregate, and zero for an object the back end sizes from its spelling.
+	// A struct is not the address of anything and has no spelling the back end
+	// can size, so how much room it takes is a fact the reader got from the
+	// model's layout and the back end is handed rather than asked for.
+	bytes int
+	// decl_vla_size is the number of bytes a variable-length array declaration
+	// claims, as an expression evaluated where the declaration runs: for
+	// `int a[n]` it is `n * sizeof(int)`, and for `int m[r][c]` it is
+	// `r * c * sizeof(int)`. It is none for a declaration whose size is a
+	// constant, which is what the frame reserves for every other object. The
+	// type's vla flag says which declaration this is; a vla declaration without
+	// this expression is not emitted.
+	decl_vla_size ?Expr
+	// decl_stride is the size of one element of an array declaration: what an
+	// index scales by and what the frame reserves a count of. For an array of
+	// arrays it is the whole row, which is the size of the element's own type
+	// and not the scalar at the bottom. It is zero for a declaration that is
+	// not an array, where the back end sizes the value from its spelling.
+	decl_stride int
+	// deref is the dereference an assignment writes through when the target
+	// is not a name: `*p = v` writes the value at the address the pointer
+	// holds, so what the store needs is that address and the tree keeps the
+	// expression that gives it, a Unary whose operand is the pointer. It is
+	// none for an assignment to a name, and target is empty for one written
+	// through a dereference.
+	deref ?Expr
+	// subscript is the element an assignment writes to when its base is not a
+	// name the target fields can address, which is what `3[p] = 9` and
+	// `p[3] = 9` for a pointer p are. The element node is carried whole because
+	// the address it is stored through is computed from the base's value.
+	subscript ?Expr
+	// case_value is the integer constant a case label names, as written. C
+	// converts it to the type of the controlling expression, and that
+	// conversion is made where the label is placed.
+	case_value i64
 	// label is the name a goto jumps to and the name a label statement
 	// declares. Labels are a namespace of their own: a label named `x` and an
 	// object named `x` in the same function are two different names, and only
 	// the label one is a place to jump to.
 	label string
-	// case_value is the integer constant a case label names, as written. C
-	// converts it to the type of the controlling expression, and that
-	// conversion is made where the label is placed.
-	case_value i64
 	// asm_text is the instruction text of a statement-level GNU asm, with the
 	// escapes of its adjacent string literals resolved and the literals joined.
 	// It is empty both for the barrier and for a statement whose only string
@@ -405,8 +430,117 @@ pub:
 	// later pass may not keep across the statement, which is the whole of what
 	// an accepted barrier tells the optimizer.
 	asm_clobbers []string
-	line         int
-	col          int
+}
+
+// The rest of this file is how a statement answers for what is in its extra
+// part. A reader asks the statement and not the pointer, so a statement that is
+// not one of the kinds that carries a field answers the zero value it answered
+// before the field moved: a statement with no dereference is still none, an
+// assignment with no stride is still zero. Nothing outside this file reads
+// through the pointer, which is what keeps a statement without an extra part
+// from being a case every reader has to think about.
+@[inline]
+pub fn (stmt Stmt) resolved() types.Type {
+	if extra := stmt.extra {
+		return extra.resolved
+	}
+	return types.Type{}
+}
+
+@[inline]
+pub fn (stmt Stmt) bytes() int {
+	if extra := stmt.extra {
+		return extra.bytes
+	}
+	return 0
+}
+
+@[inline]
+pub fn (stmt Stmt) decl_vla_size() ?Expr {
+	if extra := stmt.extra {
+		return extra.decl_vla_size
+	}
+	return none
+}
+
+@[inline]
+pub fn (stmt Stmt) decl_stride() int {
+	if extra := stmt.extra {
+		return extra.decl_stride
+	}
+	return 0
+}
+
+@[inline]
+pub fn (stmt Stmt) deref() ?Expr {
+	if extra := stmt.extra {
+		return extra.deref
+	}
+	return none
+}
+
+@[inline]
+pub fn (stmt Stmt) subscript() ?Expr {
+	if extra := stmt.extra {
+		return extra.subscript
+	}
+	return none
+}
+
+@[inline]
+pub fn (stmt Stmt) case_value() i64 {
+	if extra := stmt.extra {
+		return extra.case_value
+	}
+	return 0
+}
+
+@[inline]
+pub fn (stmt Stmt) label() string {
+	if extra := stmt.extra {
+		return extra.label
+	}
+	return ''
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_text() string {
+	if extra := stmt.extra {
+		return extra.asm_text
+	}
+	return ''
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_spelling() string {
+	if extra := stmt.extra {
+		return extra.asm_spelling
+	}
+	return ''
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_outputs() int {
+	if extra := stmt.extra {
+		return extra.asm_outputs
+	}
+	return 0
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_inputs() int {
+	if extra := stmt.extra {
+		return extra.asm_inputs
+	}
+	return 0
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_clobbers() []string {
+	if extra := stmt.extra {
+		return extra.asm_clobbers
+	}
+	return []
 }
 
 // Expr is one of the expression shapes the stub understands. A call is parsed

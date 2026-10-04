@@ -72,10 +72,10 @@ fn test_a_local_declaration_carries_the_type_it_declared() {
 	assert body.len == 3
 	assert body[0].kind == .var_decl
 	assert body[0].decl_name == 'x'
-	assert body[0].resolved.same(types.int_type())
+	assert body[0].resolved().same(types.int_type())
 	assert body[1].kind == .var_decl
 	assert body[1].decl_name == 'c'
-	assert body[1].resolved.same(types.char_type())
+	assert body[1].resolved().same(types.char_type())
 	// `x + c` converts both to int, and neither operand keeps its own type.
 	returned := body[2].expr or {
 		assert false
@@ -97,7 +97,7 @@ fn test_an_inner_declaration_hides_an_outer_one_and_the_outer_one_comes_back() {
 	assert inner.kind == .block
 	assert inner.body.len == 1
 	assert inner.body[0].decl_name == 'x'
-	assert inner.body[0].resolved.same(types.char_type())
+	assert inner.body[0].resolved().same(types.char_type())
 	returned := body[2].expr or {
 		assert false
 		return
@@ -943,7 +943,7 @@ fn test_an_object_of_an_aggregate_type_carries_the_size_of_its_layout() {
 	body := decl.body
 	assert body.len == 2
 	assert body[0].decl_type == 'struct S'
-	assert body[0].bytes == 8
+	assert body[0].bytes() == 8
 }
 
 // A member is a value at an offset into the object, and the offset comes from the
@@ -1598,7 +1598,7 @@ fn test_a_parameter_and_a_local_of_the_128_bit_type_are_typed_as_the_declaration
 	assert body[0].kind == .var_decl
 	assert body[0].decl_name == 'r'
 	assert body[0].decl_type == '__int128'
-	assert body[0].resolved.same(types.int128_type())
+	assert body[0].resolved().same(types.int128_type())
 }
 
 fn test_a_call_to_a_function_the_128_bit_type_is_written_on_is_read_against_its_declaration() {
@@ -1632,18 +1632,18 @@ fn test_a_parenthesised_pointer_is_a_pointer_to_what_it_wraps() {
 	arrays := checked('int main(void) { int *p[5]; return 0; }')
 	array_decl := arrays.unit.decls[0].body[0]
 	assert array_decl.kind == .var_decl
-	assert array_decl.resolved.kind == .array
-	assert array_decl.resolved.count == 5
-	assert array_decl.resolved.base.kind == .pointer
-	assert array_decl.resolved.base.base.same(types.int_type())
+	assert array_decl.resolved().kind == .array
+	assert array_decl.resolved().count == 5
+	assert array_decl.resolved().base.kind == .pointer
+	assert array_decl.resolved().base.base.same(types.int_type())
 
 	pointers := checked('int main(void) { int (*q)[5]; return 0; }')
 	pointer_decl := pointers.unit.decls[0].body[0]
 	assert pointer_decl.kind == .var_decl
-	assert pointer_decl.resolved.kind == .pointer
-	assert pointer_decl.resolved.base.kind == .array
-	assert pointer_decl.resolved.base.count == 5
-	assert pointer_decl.resolved.base.base.same(types.int_type())
+	assert pointer_decl.resolved().kind == .pointer
+	assert pointer_decl.resolved().base.kind == .array
+	assert pointer_decl.resolved().base.count == 5
+	assert pointer_decl.resolved().base.base.same(types.int_type())
 }
 
 // A suffix between the parentheses and the star binds to the star and not to
@@ -1653,10 +1653,10 @@ fn test_a_suffix_inside_the_parentheses_binds_before_the_stars() {
 	row := checked('int main(void) { int (*fp[3])(void); return 0; }')
 	fp := row.unit.decls[0].body[0]
 	assert fp.kind == .var_decl
-	assert fp.resolved.kind == .array
-	assert fp.resolved.count == 3
-	assert fp.resolved.base.kind == .pointer
-	assert fp.resolved.base.base.kind == .function
+	assert fp.resolved().kind == .array
+	assert fp.resolved().count == 3
+	assert fp.resolved().base.kind == .pointer
+	assert fp.resolved().base.base.kind == .function
 }
 
 // A declaration whose star is outside the parentheses around the function
@@ -1668,12 +1668,12 @@ fn test_the_stars_and_the_suffixes_take_the_order_the_parentheses_wrote() {
 	result := checked('int main(void) { int (*(*fp)(void))[3]; return 0; }')
 	fp := result.unit.decls[0].body[0]
 	assert fp.kind == .var_decl
-	assert fp.resolved.kind == .pointer
-	assert fp.resolved.base.kind == .function
-	assert fp.resolved.base.base.kind == .pointer
-	assert fp.resolved.base.base.base.kind == .array
-	assert fp.resolved.base.base.base.count == 3
-	assert fp.resolved.base.base.base.base.same(types.int_type())
+	assert fp.resolved().kind == .pointer
+	assert fp.resolved().base.kind == .function
+	assert fp.resolved().base.base.kind == .pointer
+	assert fp.resolved().base.base.base.kind == .array
+	assert fp.resolved().base.base.base.count == 3
+	assert fp.resolved().base.base.base.base.same(types.int_type())
 }
 
 // A typedef names the type its declarator wrote, and a parameter list in that
@@ -1696,8 +1696,8 @@ fn test_a_function_returning_a_pointer_and_a_pointer_to_a_function_differ() {
 	pointing := checked('int main(void) { int (*f)(void); return 0; }')
 	f := pointing.unit.decls[0].body[0]
 	assert f.kind == .var_decl
-	assert f.resolved.kind == .pointer
-	assert f.resolved.base.kind == .function
+	assert f.resolved().kind == .pointer
+	assert f.resolved().base.kind == .function
 
 	returning := checked('int *g(void);\nint main(void) { return 0; }')
 	assert returning.diagnostics.len == 0
