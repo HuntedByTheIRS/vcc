@@ -171,7 +171,7 @@ const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long
 // name one of these.
 const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .bool_, .char_, .signed_char,
 	.unsigned_char, .short, .unsigned_short, .double, .float, .long, .unsigned_long, .long_long,
-	.unsigned_long_long, .long_double, .complex_float, .complex_double]
+	.unsigned_long_long, .long_double, .complex_float, .complex_double, .complex_long_double]
 
 // max_expression_depth bounds how deep one expression nests: a parenthesis, a
 // prefix operator, a cast, a `?:`, a `[` index, a call's argument list and a
@@ -1584,18 +1584,13 @@ fn (mut p Parser) real_or_imaginary(op tokenize.Token, operand ast.Expr) ast.Exp
 // out of storage; its own type is the component's, since a part of a complex
 // value is a real value.
 //
-// A component this compiler has no width for is refused by name rather than read
-// at the width of a double: `long double _Complex` is carried by the model and
-// not by the back end, which moves the two widths the machine's complex types
-// use. The refusal names the operand's type and the operator, so the site says
-// which part of which value was out of reach.
+// A `long double _Complex` component is the extended type, sixteen bytes, and the
+// back end reads it at that width rather than at the width of a double; the
+// component's own kind is what the node's type is, so the two cases are the same
+// answer here.
 fn (mut p Parser) complex_part(op tokenize.Token, operand ast.Expr, value types.Type) ast.Expr {
 	kind := value.kind.complex_component() or {
 		p.error_at(op, 'unsupported: ${op.text} takes a value of a complex type, and ${value.describe()} has no component this compiler can read')
-		return p.zero_value(op, types.Type{})
-	}
-	if kind == .long_double {
-		p.error_at(op, 'unsupported: ${op.text} reads one part of ${value.describe()}, and this compiler does not carry a long double component')
 		return p.zero_value(op, types.Type{})
 	}
 	component := types.scalar(kind) or { types.Type{} }

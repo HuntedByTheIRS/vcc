@@ -603,8 +603,10 @@ fn is_imaginary_constant(text string) bool {
 // floating reader gives the coefficient.
 //
 // The suffix attaches to a floating constant, and the two refusals here are the
-// spellings that are not one. A `long double _Complex` is named and refused: the
-// type the spelling asks for is the one this compiler has no value for. An
+// spellings that are not one. A `long double _Complex` is named and refused here
+// because this constant reader carries the extended value of a real constant and
+// has no form for the imaginary one: the type is carried now, so the refusal is
+// the reader's, at the constant, and not the compiler's. An
 // integer coefficient is refused as well, because gcc 16.2.1 reads `1i` as a
 // `float _Complex` and answering a `double _Complex` for it would be a type the
 // program did not write.
@@ -614,7 +616,7 @@ fn parse_imaginary_literal(text string) !(f64, bool) {
 		return error('${text}: not an imaginary constant')
 	}
 	if body.ends_with('l') || body.ends_with('L') {
-		return error('${text}: a long double imaginary constant names a long double complex, a type this compiler does not implement')
+		return error('${text}: a long double imaginary constant names a long double complex, which this constant reader does not carry; write the value as a real long double constant times `I` instead')
 	}
 	if !is_floating_constant(body) {
 		return error('${text}: an imaginary constant is written on a floating constant, and ${body} is not one')

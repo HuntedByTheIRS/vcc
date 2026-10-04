@@ -141,6 +141,20 @@ fn (e Emitter) is_extended(expr ast.Expr) bool {
 // expression is worth. A call that does not return one leaves the accumulator
 // as it found it.
 fn (mut e Emitter) store_extended_result(call ast.Call, line int, col int) !void {
+	if e.returns_a_complex_long_double(call) {
+		// The pair comes back on the x87 stack, st(0) the real part and st(1)
+		// the imaginary one, so the first pop is the real part. It is written
+		// into a frame temporary of its own and the address of that is what the
+		// call expression is worth.
+		temporary := e.reserve(complex_long_double_bytes)
+		base := e.frame_pointer(line, col)!
+		register := e.scratch(line, col)!
+		e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+		e.append(e.target.store_extended(register)!)
+		e.append(e.target.address_of_slot(base, i32(temporary.offset + complex_long_double_component), register))
+		e.append(e.target.store_extended(register)!)
+		return e.leave_address(temporary, line, col)
+	}
 	if !e.returns_a_long_double(call) {
 		return
 	}

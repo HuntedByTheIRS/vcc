@@ -238,10 +238,11 @@ fn test_a_static_function_nothing_names_is_stepped_over() {
 	assert late.unit.decls.len == 1
 	// A definition a call can reach is read as it always was, and its
 	// unsupported type is refused where it is written. `long double` is read
-	// now, so the type that makes the point is the one that still has no form.
-	reached := parsed('static long double _Complex id (long double _Complex x) { return x; }\nint main() { id(1); return 0; }')
+	// now, and so is its complex form, so the type that makes the point is
+	// `_Imaginary`, which C99 leaves optional and this compiler has no value for.
+	reached := parsed('static long double _Imaginary id (long double _Imaginary x) { return x; }\nint main() { id(1); return 0; }')
 	assert reached.diagnostics.len == 1
-	assert reached.diagnostics[0].msg.contains('_Complex')
+	assert reached.diagnostics[0].msg.contains('unsupported type long')
 }
 
 fn test_a_read_through_an_address_is_typed_as_what_it_points_at() {
@@ -1253,24 +1254,27 @@ fn test_a_member_of_something_without_members_is_refused() {
 
 fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type() {
 	// The name is not what is asked about, the type it names is: `Wide` is a
-	// `long double _Complex` here, and the refusal names the first word of it
+	// `long double _Imaginary` here, and the refusal names the first word of it
 	// rather than `Wide`. It happens at the declaration, which is where the
 	// object is defined and not only where something uses it.
-	wider := parsed('typedef long double _Complex Wide;\nWide x;')
+	wider := parsed('typedef long double _Imaginary Wide;\nWide x;')
 	assert wider.diagnostics.len == 1
 	assert wider.diagnostics[0].msg == 'unsupported type long'
 	assert wider.diagnostics[0].line == 2
 	// A parameter is the same question, asked where the call's frame is laid
 	// out, and a parameter is the one place a type of several words is spelled
 	// in full.
-	parameter := parsed('typedef long double _Complex Wide;\nint f(Wide b) { return 0; }')
+	parameter := parsed('typedef long double _Imaginary Wide;\nint f(Wide b) { return 0; }')
 	assert parameter.diagnostics.len == 1
-	assert parameter.diagnostics[0].msg.contains('unsupported type long double _Complex')
+	assert parameter.diagnostics[0].msg.contains('unsupported type long double _Imaginary')
 	// A `long double` is not that case either: the type has a width and a form,
 	// and the calling convention a value of it travels by is written now, so a
-	// parameter of the type is read.
+	// parameter of the type is read. Its complex form is a value of that same
+	// convention, two components wide, and is read for the same reason.
 	wide_parameter := parsed('typedef long double Wide;\nint f(Wide b) { return 0; }')
 	assert wide_parameter.diagnostics.len == 0
+	complex_parameter := parsed('typedef long double _Complex Wide;\nint f(Wide b) { return 0; }')
+	assert complex_parameter.diagnostics.len == 0
 }
 
 fn test_a_definitions_floating_return_types_are_all_read() {
@@ -1298,11 +1302,11 @@ fn test_a_definitions_floating_return_types_are_all_read() {
 	assert prototype.unit.decls[0].ret_type.same(types.long_double_type())
 }
 
-fn test_the_two_complex_types_the_back_end_moves_are_read() {
-	// The model has the complex types and the back end now hands over the two
+fn test_the_three_complex_types_the_back_end_moves_are_read() {
+	// The model has the complex types and the back end now hands over the three
 	// it has a width for, so a definition, a parameter and a local of
-	// `double _Complex` or `float _Complex` are all read. Measured on gcc
-	// 16.2.1, which accepts each of these.
+	// `double _Complex`, `float _Complex` or `long double _Complex` are all read.
+	// Measured on gcc 16.2.1, which accepts each of these.
 	complex := parsed('double _Complex f(void) { return 0; }')
 	assert complex.diagnostics.len == 0
 	assert complex.unit.decls[0].ret_type.same(types.complex_double_type())
@@ -1317,12 +1321,17 @@ fn test_the_two_complex_types_the_back_end_moves_are_read() {
 	// are compatible types and both occupy sixteen bytes.
 	bare := parsed('int main(void) { _Complex z = 0; return 0; }')
 	assert bare.diagnostics.len == 0
-	// `long double _Complex` is a type the back end has no value for, and it is
-	// refused by the word that makes it complex rather than quietly read as a
-	// `double _Complex`, which is a different type of a different width.
+	// A `long double _Complex` is the extended format twice over: measured on
+	// gcc 16.2.1 it is two sixteen-byte components, thirty-two bytes in all,
+	// and its parts and its calls are read now.
+	long_complex := parsed('long double _Complex f(void) { return 0; }')
+	assert long_complex.diagnostics.len == 0
+	assert long_complex.unit.decls[0].ret_type.same(types.complex_long_double_type())
+	long_parameter := parsed('int h(long double _Complex z) { return 0; }')
+	assert long_parameter.diagnostics.len == 0
+	assert long_parameter.unit.decls[0].params[0].resolved.same(types.complex_long_double_type())
 	long_local := parsed('int main(void) { long double _Complex z = 0; return 0; }')
-	assert long_local.diagnostics.len == 1
-	assert long_local.diagnostics[0].msg == 'unsupported type _Complex'
+	assert long_local.diagnostics.len == 0
 	// `_Imaginary` is optional in C99 and this compiler has no model for it.
 	imaginary := parsed('_Imaginary g(void) { return 0; }')
 	assert imaginary.diagnostics.len == 1
@@ -1335,9 +1344,9 @@ fn test_a_type_the_emitter_has_no_form_for_is_refused_by_its_first_word() {
 	// narrow integer spellings, `short` among them, are not that case any more,
 	// and neither is `long double`, whose type this compiler now lays out: the
 	// type here is one that is still two words with no form, a `typedef` of a
-	// `long double _Complex`, where the message names the first word rather
-	// than the word that makes it complex.
-	wider := parsed('typedef long double _Complex Wide;\nWide h;')
+	// `long double _Imaginary`, where the message names the first word rather
+	// than the word that makes it imaginary.
+	wider := parsed('typedef long double _Imaginary Wide;\nWide h;')
 	assert wider.diagnostics.len == 1
 	assert wider.diagnostics[0].msg == 'unsupported type long'
 	assert wider.diagnostics[0].line == 2

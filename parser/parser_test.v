@@ -28,10 +28,12 @@ fn test_a_diagnostic_names_the_file_its_token_came_from() {
 	// because the parser reported a header's position under the name of the file
 	// The preprocessor fills a token's file in, and the message
 	// names that. The type here is one the compiler still has no form for - a
-	// bare `long double` is read now, so the one that makes the point is its
-	// complex form - so the diagnostic is still a refusal and the subject is
-	// still the file it names.
-	result := parsed_from('long double _Complex x;', '/usr/include/stdlib.h')
+	// bare `long double` is read now, and so is its complex form, which this
+	// compiler carries at sixteen bytes a component - so the one that makes the
+	// point is `_Imaginary`, which C99 leaves optional and this compiler models
+	// no value for - and the diagnostic is still a refusal that still names the
+	// file it came from.
+	result := parsed_from('long double _Imaginary x;', '/usr/include/stdlib.h')
 	assert result.diagnostics.len >= 1
 	assert result.diagnostics[0].file == '/usr/include/stdlib.h'
 }
@@ -637,9 +639,9 @@ fn test_a_declaration_may_name_several_objects() {
 // has no form for is reported where the declaration is written, and what comes
 // after the declaration still parses.
 fn test_a_local_declaration_with_an_unsupported_type_is_reported() {
-	result := parsed('int main() { long double _Complex n = 0; return 0; }')
+	result := parsed('int main() { _Imaginary n = 0; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('unsupported type _Complex')
+	assert result.diagnostics[0].msg.contains('unsupported type _Imaginary')
 	assert result.unit.decls[0].body.len == 1
 	assert result.unit.decls[0].body[0].kind == .return_stmt
 }
@@ -1785,16 +1787,16 @@ fn test_a_name_nothing_declares_is_refused_with_the_name_and_its_location() {
 // unsigned short u = 0; u = 1; return 0; }` was `unsupported type unsigned` and
 // then `u is used here and nothing in this file declares it`; it is one message
 // now, and the type the case is measured with is one this compiler still has no
-// form for.
+// form for - `_Imaginary`, which C99 leaves optional.
 fn test_a_name_a_refused_declaration_declares_is_not_reported_again() {
-	result := parsed('int main(void) { long double _Complex u = 0; u = 1; return 0; }')
+	result := parsed('int main(void) { _Imaginary u = 0; u = 1; return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('unsupported type _Complex')
+	assert result.diagnostics[0].msg.contains('unsupported type _Imaginary')
 	// The same at the top level, where the declarator was read before the type was
 	// refused and the name was recorded as a matter of course.
-	global := parsed('long double _Complex g = 1;\nint main(void) { return g; }')
+	global := parsed('_Imaginary g = 1;\nint main(void) { return g; }')
 	assert global.diagnostics.len == 1
-	assert global.diagnostics[0].msg.contains('unsupported type _Complex')
+	assert global.diagnostics[0].msg.contains('unsupported type _Imaginary')
 }
 
 // One diagnostic per name, however many times it is read: three uses of a name
@@ -2446,15 +2448,18 @@ fn test_a_part_of_a_complex_value_is_the_component_it_names() {
 	assert (literal as ast.IntLit).value == 4
 }
 
-// A component this compiler has no width for is refused by name rather than read
-// at the width of a double. gcc carries a `long double _Complex`; this compiler
-// does not carry a long double at all, so the part of one names the component
-// and the operator and stops there.
-fn test_a_part_of_a_long_double_complex_is_refused_by_name() {
-	result := parsed('int main(void) { double x = __real__ ((long double _Complex) 0); return 0; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('__real__ reads one part of long double _Complex')
-	assert result.diagnostics[0].msg.contains('does not carry a long double component')
+// A component of a `long double _Complex` is one part of the extended format,
+// sixteen bytes, and this compiler reads both. Measured on gcc 16.2.1, the type
+// is two sixteen-byte components with the real one at the lower address and the
+// return in `st(0)`/`st(1)`, so `__real__` of one is a `long double` rather than
+// a refusal. The write of a part is still refused, because no store for one
+// exists yet.
+fn test_a_part_of_a_long_double_complex_is_read() {
+	result := parsed('int main(void) { long double x = __real__ ((long double _Complex) 0); return 0; }')
+	assert result.diagnostics.len == 0
+
+	imaginary := parsed('int main(void) { long double y = __imag__ ((long double _Complex) 0); return 0; }')
+	assert imaginary.diagnostics.len == 0
 }
 
 // `__real__ z` for a complex z names one part of a pair and not the object, so an

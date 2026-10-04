@@ -1159,6 +1159,34 @@ fn test_a_component_read_from_a_library_call_is_the_value_the_library_wrote() {
 	os.rm(binary) or {}
 }
 
+// The extended complex type crosses a call the same way: an argument is a
+// thirty-two byte object in memory, the real part at the lower address, and the
+// return leaves two extended components on the x87 stack, st(0) the real part
+// and st(1) the imaginary one. Measured on gcc 16.2.1: `sizeof` is thirty-two,
+// `csqrtl(4.0L)` is exactly 2.0 in the real part and 0.0 in the imaginary one,
+// so the comparison is about the convention rather than about the library. The
+// real argument is converted to the complex type with a zero imaginary part
+// before the call, which is 6.3.2.2 and the shape the corpus's `csqrtl(4.0L)`
+// is written in.
+fn test_the_extended_complex_type_crosses_a_library_call() {
+	source := scratch('complex_long_call.c')
+	binary := scratch('complex_long_call')
+	program := 'long double _Complex csqrtl(long double _Complex);\n' +
+		'long double creall(long double _Complex);\n' +
+		'long double cimagl(long double _Complex);\n' +
+		'int main(void) {\n' +
+		'    long double _Complex c = csqrtl(4.0L);\n' +
+		'    if (sizeof c != 32) { return 1; }\n' +
+		'    if (creall(c) != 2.0L) { return 2; }\n' +
+		'    if (cimagl(c) != 0.0L) { return 3; }\n' +
+		'    return 0;\n' +
+		'}\n'
+	exit_status := compile_and_run(['-lm', source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // The other half of that: with the library not named, the compile is refused and
 // the symbol is named. It used to compile and die at load saying which symbol it
 // could not find, which was silent at compile time, and a build that trusts the
@@ -1754,7 +1782,7 @@ fn test_a_typedef_of_a_pointer_reads_through_it() {
 // image has to hold. The refusal is at the declaration, so an object nothing uses
 // is refused too rather than dropped quietly.
 fn test_a_typedef_of_a_type_with_no_form_is_refused_by_that_type() {
-	program := 'typedef long double _Complex Wide;\nWide x;\nint main(void) { return 0; }\n'
+	program := 'typedef long double _Imaginary Wide;\nWide x;\nint main(void) { return 0; }\n'
 	lexed := tokenize.lex(program)
 	assert lexed.diagnostics.len == 0
 	parsed := parser.parse(lexed.tokens)

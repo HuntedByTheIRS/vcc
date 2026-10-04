@@ -1697,16 +1697,17 @@ fn test_a_definition_may_return_a_pointer() {
 // same way a pointer object's declaration is: by naming the word. A bare long
 // double is the other side of that: the type holds and the calling convention a
 // value of it travels by is written, so both a pointer to one and a value of one
-// are accepted. `long double _Complex` is the type that still has no form,
-// because its component is a long double and no conversion to it exists.
+// are accepted. `_Imaginary` is the type that still has no form, because C99
+// leaves it optional and this compiler models no value for it; `long double
+// _Complex` used to make the point and is now carried.
 fn test_a_pointer_to_a_type_the_emitter_has_no_form_for_is_refused_by_name() {
-	pointer := declarations_of('long double _Complex *f(void) { return 0; }')
+	pointer := declarations_of('long double _Imaginary *f(void) { return 0; }')
 	assert pointer.diagnostics.len == 1
-	assert pointer.diagnostics[0].msg.contains('unsupported type _Complex')
+	assert pointer.diagnostics[0].msg.contains('unsupported type long')
 
-	value := declarations_of('long double _Complex f(void) { return 0; }')
+	value := declarations_of('long double _Imaginary f(void) { return 0; }')
 	assert value.diagnostics.len == 1
-	assert value.diagnostics[0].msg.contains('unsupported type _Complex')
+	assert value.diagnostics[0].msg.contains('unsupported type long')
 
 	long_pointer := declarations_of('long double *f(void) { return 0; }')
 	assert long_pointer.diagnostics.len == 0
@@ -1715,6 +1716,12 @@ fn test_a_pointer_to_a_type_the_emitter_has_no_form_for_is_refused_by_name() {
 	long_value := declarations_of('long double f(void) { return 0; }')
 	assert long_value.diagnostics.len == 0
 	assert long_value.unit.decls[0].ret_type.describe() == 'long double'
+
+	// The extended complex type is a value now, and a definition returning it is
+	// a declaration this compiler reads rather than a refusal.
+	complex_value := declarations_of('long double _Complex f(void) { return 0; }')
+	assert complex_value.diagnostics.len == 0
+	assert complex_value.unit.decls[0].ret_type.describe() == 'long double _Complex'
 }
 
 fn test_a_declaration_with_no_declarator_is_reported() {
