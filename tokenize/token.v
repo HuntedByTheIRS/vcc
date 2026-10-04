@@ -35,9 +35,16 @@ pub struct Token {
 pub:
 	kind Kind
 	text string
-	line int
-	col  int
-	file string
+	// space says a run of whitespace stood in front of this token in the text
+	// it was read from, with a comment counting as whitespace because C replaces
+	// one with a space before it looks. It is kept because stringizing has to
+	// put the argument back the way it was spelled: C99 6.10.3.2 is the tokens,
+	// a run of whitespace between two of them as one space, and none at either
+	// end. Everywhere else the answer is not read and the field costs a byte.
+	space bool
+	line  int
+	col   int
+	file  string
 }
 
 // Diagnostic is one thing that went wrong, with the place it went wrong. The
