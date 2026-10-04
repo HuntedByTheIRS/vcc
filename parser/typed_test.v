@@ -1233,6 +1233,24 @@ fn test_a_member_read_through_a_pointer_is_a_field_that_says_so() {
 	assert member.through_pointer
 }
 
+// A path that begins with an arrow reads every member of the path from the
+// object the pointer names, so the whole Field says the address comes from the
+// pointer's value. `p->in.c` is one Field at the sum of the offsets, and the
+// pointer's value is what the offsets are added to, not the frame.
+fn test_a_member_path_through_a_pointer_stays_through_the_pointer() {
+	decl := first('struct I { int a; char c; };\nstruct O { int n; struct I in; };\nint main() { struct O o; struct O *p = &o; return p->in.c; }')
+	body := decl.body
+	returned := body[2].expr or {
+		assert false
+		return
+	}
+	member := returned as ast.Field
+	assert member.name == 'p'
+	assert member.member == 'in.c'
+	assert member.offset == 8
+	assert member.through_pointer
+}
+
 // An arrow on a name that holds no pointer has no object to be read through, and
 // the refusal names the name and the type it does hold.
 fn test_an_arrow_on_a_name_that_is_not_a_pointer_is_refused() {

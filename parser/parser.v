@@ -1090,7 +1090,12 @@ fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through
 	}
 	mut member := p.parse_member(base, ?ast.Expr(none), aggregate, 0, '', through_pointer, index)!
 	for p.at_punct('.') {
-		member = p.parse_member(base, ?ast.Expr(none), member.typ, member.offset, member.member, false, index)!
+		// Every dot after the first reads further into the same object, and
+		// that object is still the one the first access named: a path that
+		// began with `->` keeps reading from the pointer's value the whole
+		// way in, so the flag the first access set travels with each step.
+		member = p.parse_member(base, ?ast.Expr(none), member.typ, member.offset, member.member,
+			through_pointer, index)!
 	}
 	return member
 }
@@ -1117,8 +1122,11 @@ fn (mut p Parser) parse_general_member_path(object ast.Expr, through_pointer boo
 	}
 	mut member := p.parse_member(object_desc, object, aggregate, 0, '', through_pointer, ?ast.Expr(none))!
 	for p.at_punct('.') {
-		member = p.parse_member(object_desc, object, member.typ, member.offset, member.member, false,
-			?ast.Expr(none))!
+		// The dots after the first read further into the same object, which is
+		// still the one the first access named, so a path that began with `->`
+		// keeps reading from the pointer's value the whole way in.
+		member = p.parse_member(object_desc, object, member.typ, member.offset, member.member,
+			through_pointer, ?ast.Expr(none))!
 	}
 	return member
 }

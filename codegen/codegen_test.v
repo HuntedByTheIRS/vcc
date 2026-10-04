@@ -326,6 +326,18 @@ fn test_a_member_read_through_a_top_level_pointer_reads_the_object() {
 	assert run_image(written.bytes) == 59
 }
 
+// A path that begins with an arrow keeps reading from the pointer's value for
+// every member of the path, not only the first: `p->in.c` is the char at
+// offsetof(struct O, in) + offsetof(struct I, c) from the object p points at,
+// and a store into the same member lands at that byte. Measured with gcc 16.2.1,
+// the program below exits 57.
+fn test_a_nested_member_path_through_a_pointer_reads_and_writes_the_target() {
+	program := emit(translation_unit('struct I { int a; char c; }; struct O { int n; struct I in; }; int main(void) { struct O o; struct O *p = &o; o.n = 3; p->in.a = 5; p->in.c = 7; return p->in.a * 10 + p->in.c; }'),
+		Options{})
+	assert program.diagnostics.len == 0
+	assert run_image(program.bytes) == 57
+}
+
 // A member whose declared type is an array is an address wherever a value is
 // wanted, the way an array's name is: `first(s.data)` passes the address of the
 // member's first element and not the bytes of the array. A flexible array member
