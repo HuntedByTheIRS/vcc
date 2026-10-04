@@ -592,6 +592,54 @@ fn test_a_file_scope_floating_constant_expression_element_is_folded() {
 	assert refused.diagnostics[0].msg.contains('written constant')
 }
 
+// A file-scope object of the extended type starts at the value its initializer
+// names, whatever the spelling. A long double literal keeps that value in the
+// extended field of the tree (ast.FloatLit.long_value) and leaves its double
+// field zero, and a reader that folded the literal as a double wrote the double
+// 0.0 into every such object: measured with this compiler, `static long double
+// g = 12.0L;` read 0 where gcc 16.2.1 reads 12. 12.0L is 1.5 * 2^3, whose
+// extended form is the significand 0xc000000000000000 and the exponent 0x4002,
+// and 0x1.8p+3L is the same value the corpus writes at main.c:266.
+fn test_a_file_scope_long_double_keeps_the_value_of_its_initializer() {
+	decimal := declarations_of('static long double g = 12.0L;')
+	assert decimal.diagnostics.len == 0
+	assert decimal.unit.globals.len == 1
+	twelve := decimal.unit.globals[0].init_long or {
+		assert false
+		return
+	}
+	assert twelve.mantissa == u64(0xc000000000000000)
+	assert twelve.sign_exp == 0x4002
+	// The hexadecimal spelling of the same value is the same bytes.
+	hexadecimal := declarations_of('static const long double h = 0x1.8p+3L;')
+	assert hexadecimal.diagnostics.len == 0
+	same := hexadecimal.unit.globals[0].init_long or {
+		assert false
+		return
+	}
+	assert same.mantissa == twelve.mantissa
+	assert same.sign_exp == twelve.sign_exp
+	// A different value is a different exponent: 0.5L is 1.0 * 2^-1.
+	half := declarations_of('static const long double h = 0.5L;')
+	assert half.diagnostics.len == 0
+	value := half.unit.globals[0].init_long or {
+		assert false
+		return
+	}
+	assert value.mantissa == u64(0x8000000000000000)
+	assert value.sign_exp == 0x3ffe
+	// The sign written in front of a constant is part of its value, which the
+	// extended form carries in the top bit of the sign and exponent word.
+	negative := declarations_of('static const long double n = -12.0L;')
+	assert negative.diagnostics.len == 0
+	signed := negative.unit.globals[0].init_long or {
+		assert false
+		return
+	}
+	assert signed.mantissa == u64(0xc000000000000000)
+	assert signed.sign_exp == 0xc002
+}
+
 // A const-qualified element of a floating type belongs to the floating class,
 // and the elements of a const brace initializer are floating constants:
 // `const double b[2][2] = {{2.0, 3.0}, {4.0, 5.0}}` writes 2.0 and 3.0 into the

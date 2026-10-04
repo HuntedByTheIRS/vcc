@@ -836,6 +836,30 @@ fn test_the_extended_type_is_refused_where_it_is_not_converted_to_a_double() {
 	assert initialised.diagnostics[0].msg.contains('long double')
 }
 
+// A top-level object of the extended type starts at the value its constant
+// initializer names: the sixteen bytes the reader computed are written into the
+// image's data, so a program that reads the object at run time reads that value
+// and not the zero the storage starts as. Measured before the reader carried the
+// extended constant, `static const long double g = 0x1.8p+3L;` read 0 where gcc
+// 16.2.1 reads 12, and the read below exited 1.
+fn test_a_top_level_long_double_holds_its_initializer_in_the_image() {
+	emitted := emit(translation_unit('static const long double g = 0x1.8p+3L;\nint main(void) { return g == 12.0L ? 0 : 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+	// The value is a fact about the object and not the comparison: an object
+	// whose initializer names a different value reads that one.
+	half := emit(translation_unit('static const long double g = 0.5L;\nint main(void) { return g == 0.5L ? 0 : 1; }'),
+		Options{})
+	assert half.diagnostics.len == 0
+	assert run_image(half.bytes) == 0
+	// The sign written in front of the constant is part of its value.
+	negative := emit(translation_unit('static const long double g = -12.0L;\nint main(void) { return g == -12.0L ? 0 : 1; }'),
+		Options{})
+	assert negative.diagnostics.len == 0
+	assert run_image(negative.bytes) == 0
+}
+
 // A long double travels by the x87 convention: a function returns it in st(0), a
 // call passes it as its sixteen bytes in memory, and a definition reads its
 // parameter from the stack at the offset the frame layout gives it. Each program
