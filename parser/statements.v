@@ -1586,6 +1586,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		mut general_list := ?BraceList(none)
 		mut general_writes := []BraceWrite{}
 		mut general_target := declared
+		has_initializer := p.at_punct('=')
 		if p.at_punct('=') {
 			p.next()
 			if p.at_punct('{') {
@@ -1831,7 +1832,13 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// stands at file scope: gcc 16.2.1 accepts `typedef struct U U;
 		// struct U { int a; };` there, and an object is not involved until
 		// one is declared.
-		if !spec.is_typedef {
+		//
+		// An `extern` declaration with no initializer is the same: it
+		// declares a name and gives the object no storage in this frame, so
+		// no local is emitted and a use of the name reaches the top-level
+		// object the declaration refers to. An `extern` declaration that
+		// writes an initializer defines the object and is emitted below.
+		if !spec.is_typedef && !(spec.is_extern && !has_initializer) {
 			stmts << ast.Stmt{
 				kind:          .var_decl
 				init:          decl_init

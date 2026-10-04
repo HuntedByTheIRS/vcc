@@ -107,6 +107,41 @@ fn test_a_source_file_becomes_a_runnable_binary() {
 	os.rm(binary) or {}
 }
 
+// A block-scope `extern` declaration of a file-scope object names that object
+// and gives the name no storage in the frame. Before this the declaration was
+// emitted as a local like any other, and a read of the name read the
+// uninitialized slot: measured on gcc 16.2.1 with -std=gnu99 the same program
+// exits 100, and this compiler read address-shaped garbage. The local `got`
+// makes the wrong answer a value of its own rather than zero, so a read of the
+// slot is told apart from a read of the object.
+fn test_a_block_scope_extern_reads_the_file_scope_object() {
+	source := scratch('block_extern.c')
+	binary := scratch('block_extern')
+	program := 'static int obj = 100;\nint main(void) {\n    int got = -1;\n    { extern int obj; got = obj; }\n    return got;\n}\n'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 100
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
+// A file-scope declaration with several declarators defines one object per
+// declarator, and each is an object the rest of the program can name. Before
+// this only the first reached the tree: `static int a = 0, b = 0;` refused
+// `&b` with "the address of b is not implemented" and refused `b = 5` with "no
+// local of that name is in scope", and the last initializer overwrote the
+// first's, so `static int a = 5, b = 7;` read 7 from `a`. The program here
+// names the second declarator by address and by assignment, and reads the
+// fourth's value; measured on gcc 16.2.1 with -std=gnu99 it exits 0.
+fn test_a_file_scope_declaration_reaches_every_declarator() {
+	source := scratch('multi_declarator.c')
+	binary := scratch('multi_declarator')
+	program := 'static int a = 5, b = 0, c[2] = { 3, 4 }, d = 7;\nint main(void) {\n    b = 6;\n    if (&b == 0) { return 1; }\n    if (b != 6) { return 2; }\n    if (a != 5) { return 3; }\n    if (c[1] != 4) { return 4; }\n    if (d != 7) { return 5; }\n    return 0;\n}\n'
+	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // A variable-length array declared in a loop body claims its storage on the
 // stack when the declaration runs, and the storage is given back where the block
 // ends. Before that release, each time round subtracted again and the stack grew

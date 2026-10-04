@@ -130,6 +130,31 @@ fn test_an_extern_object_is_read_and_dropped() {
 	assert result.unit.decls.len == 0
 }
 
+// A block-scope `extern` declaration of a file-scope object gives the name no
+// storage in the frame: the object lives at file scope and the name reaches it
+// there. Before this the declaration was emitted as a local like any other and
+// a read of the name read that uninitialized slot. Measured on gcc 16.2.1 and
+// this compiler, `static int obj = 100;` with `{ extern int obj; got = obj; }`
+// in main exits 100, and this compiler read address-shaped garbage. The name is
+// still declared, so a use of it is not refused, but no local statement is
+// built for it.
+fn test_a_block_scope_extern_object_emits_no_local() {
+	result := declarations_of('static int obj = 100;\nint main(void) { int got = 0; { extern int obj; got = obj; } return got; }')
+	assert result.diagnostics.len == 0
+	main_fn := result.unit.decls[0]
+	assert main_fn.name == 'main'
+	// The body is the local `got`, the nested block, and the return.
+	assert main_fn.body.len == 3
+	assert main_fn.body[0].kind == .var_decl
+	assert main_fn.body[0].decl_name == 'got'
+	assert main_fn.body[1].kind == .block
+	// The block holds the assignment alone: the extern declaration left no
+	// statement of its own.
+	assert main_fn.body[1].body.len == 1
+	assert main_fn.body[1].body[0].kind == .assign
+	assert main_fn.body[2].kind == .return_stmt
+}
+
 // A file-scope `static` gives a name internal linkage (6.2.2p3), and the
 // declaration has to carry it: the object writer writes such a definition with
 // the local binding, so two translation units may each define one of the same
@@ -154,6 +179,45 @@ fn test_a_file_scope_static_name_carries_internal_linkage() {
 	assert objects.unit.globals[0].static_
 	assert objects.unit.globals[1].name == 'open'
 	assert !objects.unit.globals[1].static_
+}
+
+// A file-scope declaration with several declarators defines one object per
+// declarator, each with the type and the initializer written for it. Only the
+// first used to reach the tree and the last initializer overwrote the first's,
+// so `static int a = 5, b = 7;` defined `a` as 7 and left `b` with no object:
+// measured, the program returned 7 where gcc 16.2.1 returns 5. The declarators
+// here are a scalar with its own value, a pointer to one of them, and an array,
+// so the group covers three derived types in one declaration. The pointers and
+// the arrays are written without addresses of names read later, because a
+// file-scope address initializer is a separate path and not what this checks.
+fn test_a_file_scope_declaration_registers_every_declarator() {
+	mixed := declarations_of('static int a = 5, *b = 0, c[3] = { 1, 2, 3 }, d = 9;')
+	assert mixed.diagnostics.len == 0
+	assert mixed.unit.globals.len == 4
+	assert mixed.unit.globals[0].name == 'a'
+	assert mixed.unit.globals[0].init or { -1 } == 5
+	assert mixed.unit.globals[1].name == 'b'
+	assert mixed.unit.globals[1].typ == 'int *'
+	assert mixed.unit.globals[2].name == 'c'
+	assert mixed.unit.globals[2].count == 3
+	assert mixed.unit.globals[2].inits[0] == 1 && mixed.unit.globals[2].inits[2] == 3
+	assert mixed.unit.globals[3].name == 'd'
+	assert mixed.unit.globals[3].init or { -1 } == 9
+	// A function-pointer declarator beside a scalar is the same question: each
+	// name is an object of the type its own declarator built.
+	pointers := declarations_of('int (*fp)(int) = 0, g = 9;')
+	assert pointers.diagnostics.len == 0
+	assert pointers.unit.globals.len == 2
+	assert pointers.unit.globals[0].name == 'fp'
+	assert pointers.unit.globals[0].resolved.describe() == 'int (int) *'
+	assert pointers.unit.globals[1].name == 'g'
+	assert pointers.unit.globals[1].init or { -1 } == 9
+	// No initializer is still one object per name, each zeroed.
+	plain := declarations_of('int a, b;')
+	assert plain.diagnostics.len == 0
+	assert plain.unit.globals.len == 2
+	assert plain.unit.globals[0].name == 'a'
+	assert plain.unit.globals[1].name == 'b'
 }
 
 // A brace initializer is a definition even when the declaration says extern:
