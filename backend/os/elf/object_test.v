@@ -404,3 +404,47 @@ fn test_a_weak_definition_is_weak_in_the_symbol_table() {
 	assert u16_at(bytes, callee + 6) == section_text
 	assert u64_at(bytes, callee + 8) == 5
 }
+
+// A definition with internal linkage is a local symbol, and the format wants
+// every local before every global, so it stands with the section symbols ahead
+// of where a linker starts reading globals. That is what keeps two translation
+// units from meeting over a name each defines with `static` (6.2.2p3): a local
+// symbol is this object's own and a linker never resolves it against another.
+fn test_a_static_definition_is_a_local_symbol() {
+	mut program := one_call()
+	program.internal['callee'] = true
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	// The null entry and the three section symbols come first; the static
+	// function is the next local.
+	callee := symbol_entry_at(bytes, first_global_symbol)
+	assert bytes[callee + 4] == symbol_local_function
+	assert u16_at(bytes, callee + 6) == section_text
+	assert u64_at(bytes, callee + 8) == 5
+	// It is a local, so the first global is one past it, and the table says so.
+	assert u32_at(bytes, section_header_at(bytes, section_symtab) + 44) == first_global_symbol + 1
+	// A call to it is still a relocation against this symbol: the reference to
+	// a local definition is resolved inside the object.
+	assert u32(relocation_info(bytes, 0) >> 32) == first_global_symbol
+}
+
+// A static object is the same answer with the object type in the low nibble,
+// which is the pair that tells the two local definitions apart.
+fn test_a_static_object_is_a_local_symbol() {
+	mut program := image.Program{}
+	program.globals_blob = []u8{len: 8, init: u8(0)}
+	program.globals['keep'] = image.GlobalSlot{
+		offset: 0
+		width:  8
+	}
+	program.internal['keep'] = true
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	keep := symbol_entry_at(bytes, first_global_symbol)
+	assert bytes[keep + 4] == symbol_local_object
+	assert u16_at(bytes, keep + 6) == section_data
+	assert u64_at(bytes, keep + 8) == 0
+	assert u32_at(bytes, section_header_at(bytes, section_symtab) + 44) == first_global_symbol + 1
+}

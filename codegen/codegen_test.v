@@ -4165,6 +4165,17 @@ fn test_a_weak_attribute_on_a_definition_runs() {
 	assert run_image(emitted.bytes) == 7
 }
 
+// A file-scope `static` function is a definition like any other to the program
+// itself: its body is emitted and a call in the file binds to it, and the
+// program runs. Only the object's symbol table treats it differently, and that
+// is checked where the object is written.
+fn test_a_static_function_definition_runs() {
+	emitted := emit(translation_unit('static int helper(int n) { return n * 3; }\nint main(void) { return helper(4); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 12
+}
+
 // `__attribute__((aligned(16)))` on a top-level object is a layout request the
 // image keeps: the object's address is a multiple of sixteen, which it is only
 // when the storage was placed at the alignment the declaration asked for. The

@@ -149,6 +149,13 @@ pub mut:
 	// binding, which `__attribute__((weak))` asks for. The object's symbol
 	// table says WEAK rather than GLOBAL for a name in it.
 	weak map[string]bool
+	// internal is every function and object this unit defines with internal
+	// linkage, which a file-scope `static` gives a name (6.2.2p3). The object's
+	// symbol table writes such a name with the local binding, so a definition
+	// here cannot meet one in another translation unit the way two external
+	// definitions of a name do. It is a different question from weak, which
+	// still leaves the name visible to the link.
+	internal map[string]bool
 }
 
 // import_data_count is how many of the references inside the writable data name

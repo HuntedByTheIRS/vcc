@@ -570,6 +570,13 @@ fn (mut e Emitter) build() ![]u8 {
 			if decl.weak {
 				e.program.weak[decl.name] = true
 			}
+			// A definition the file wrote `static` has internal linkage, so
+			// its object symbol wears the local binding and another unit may
+			// define the same name. A prototype never reaches the symbol
+			// table, so only a definition is recorded here.
+			if decl.static_ {
+				e.program.internal[decl.name] = true
+			}
 		}
 		// A definition and a prototype are both a parameter list this back end
 		// can read, so both fill the same tables. Only a body written here makes
@@ -10121,6 +10128,14 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 // blob and the image is required to be the same bytes for the same input.
 fn (mut e Emitter) place_defined_objects() {
 	for global in e.unit.globals {
+		// An object the file defined with `static` has internal linkage, which
+		// is a question about its symbol binding and not about its storage: it
+		// is laid out here like any other, and the object writer marks it
+		// local. It is recorded for every definition in the unit, whether or
+		// not a function reached it, because the symbol table names them all.
+		if global.static_ {
+			e.program.internal[global.name] = true
+		}
 		if _ := e.global_of(global.name) {
 		}
 	}
