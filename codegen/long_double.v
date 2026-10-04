@@ -474,6 +474,43 @@ fn (mut e Emitter) emit_extended_comparison(step ast.Binary, depth int) !void {
 	e.append(e.target.extended_comparison(step.op, register, scratch)!)
 }
 
+// emit_extended_test leaves the truth of a long double in the accumulator as
+// zero or one, which is what a condition on one is worth. The value is at the
+// address the expression left in the accumulator, and the question is its
+// comparison with zero. The comparison is `fucomip`, the unordered-aware form
+// gcc 16.2.1 emits for a condition: a NaN is not equal to zero, so `if (x)` is
+// true for a NaN, and a comparison that did not report the unordered case would
+// call it false, a silently wrong branch rather than a missing one.
+//
+// gcc 16.2.1 writes the same three instructions for the same question at -O0,
+// measured on `long double f(void); if (f())`:
+//   fldt 16(%rbp); fldz; fucomip %st(1),%st; fstp %st(0)
+// and then reads the two flags with `jp` for the unordered case and `jne` for
+// the unequal one, or, as a value, with `setne` and `setp` combined.
+// set_float_condition('!=') is that combination, so the only thing this needs
+// from the encoder is the unordered-aware compare.
+fn (mut e Emitter) emit_extended_test(line int, col int) !void {
+	address := e.accumulator(line, col)!
+	e.append(e.target.load_extended(address)!)
+	e.append(e.target.extended_zero())
+	scratch := e.scratch(line, col)!
+	e.append(e.target.extended_compare_zero('!=', address, scratch)!)
+}
+
+// emit_extended_logical_not leaves `!x` for a long double in the accumulator as
+// zero or one: one exactly when the value compares equal to zero, which is the
+// same comparison the truth test makes read the other way round. A NaN is not
+// equal to zero, so `!x` is zero for a NaN, which set_float_condition('==')
+// answers by taking the unordered case back out of the equality.
+fn (mut e Emitter) emit_extended_logical_not(unary ast.Unary, depth int) !void {
+	e.emit_expr_at(unary.expr, depth + 1)!
+	address := e.accumulator(unary.line, unary.col)!
+	e.append(e.target.load_extended(address)!)
+	e.append(e.target.extended_zero())
+	scratch := e.scratch(unary.line, unary.col)!
+	e.append(e.target.extended_compare_zero('==', address, scratch)!)
+}
+
 // emit_extended_conditional writes `c ? a : b` where the arms have the extended
 // type. Each arm leaves the address of its sixteen bytes in the accumulator, so
 // the branch machinery carries an address the same way it carries a value in a

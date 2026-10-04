@@ -4071,11 +4071,10 @@ fn (mut e Emitter) branch(kind image.FixupKind, name string, line int, col int) 
 // no constant.
 fn (mut e Emitter) emit_test(value ast.Expr, line int, col int) !void {
 	if e.long_double_of(value) {
-		// The truth value of a long double is the comparison of it with zero,
-		// which the x87 stack makes with an instruction this back end does not
-		// write: testing the address the value is at would ask whether the
-		// object exists, which is a different question entirely.
-		return e.refuse_a_long_double_operation('a truth test', line, col)
+		// The truth value of a long double is its comparison with zero, which
+		// the x87 stack makes in the long-double file; the value's address is
+		// in the accumulator, where the comparison reads it.
+		return e.emit_extended_test(line, col)
 	}
 	register := e.accumulator(line, col)!
 	if e.floating_of(value) {
@@ -5661,10 +5660,13 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		return e.emit_complex_part(unary, depth)
 	}
 	if e.long_double_of(unary.expr) {
-		// A sign change or a logical not on a value of the extended type would
-		// have to be computed in a double, and the guard has already answered so
-		// for every other operator: this is the one place the operand is known
-		// to be a long double rather than a register value.
+		// The logical not asks whether the value is zero, which is the
+		// comparison with zero the x87 stack makes; a sign change would need a
+		// negate on that stack, which this back end does not write, so it stays
+		// refused by name.
+		if unary.op == '!' {
+			return e.emit_extended_logical_not(unary, depth)
+		}
 		return e.refuse_a_long_double_operation(unary.op, unary.line, unary.col)
 	}
 	if e.wide_value(unary.expr) {
