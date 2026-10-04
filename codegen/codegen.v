@@ -5141,6 +5141,23 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.load_accumulator(slot, expr.line, expr.col)!
 		}
 		ast.Field {
+			if expr.typ.is_array() {
+				// A member whose type is an array decays to a pointer to its
+				// first element wherever a value is wanted (6.3.2.1p3), the
+				// way an array's name does: the value it is worth is the
+				// member's own address, and the bytes of the array are not read
+				// as a value. The two places the operand is not decayed never
+				// reach here: `sizeof` is folded to its constant where it is
+				// written, and `&` takes the address without reading the member.
+				//
+				// A flexible array member has no length, so there is no width
+				// to read its contents at and no size to guess: its storage is
+				// the bytes past the object, and the address of those bytes is
+				// what `memcpy(fam.data, ...)` is handed. This is the one value
+				// a flexible member can be.
+				e.field_address(expr, depth, expr.line, expr.col)!
+				return
+			}
 			if e.writes_a_long_double(expr.spelling) {
 				// A member of the extended type is sixteen bytes at an offset
 				// into the object that holds it, and the value of the member is
@@ -8132,6 +8149,14 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 			// the layout. A char member is an int when it is read, which is the
 			// promotion every char gets and the same answer an element of a char
 			// array is sized at.
+			//
+			// A member whose type is an array is not read at all: it decays to
+			// a pointer to its first element (6.3.2.1p3), so the value it is
+			// worth is the machine's word. A flexible array member is the same,
+			// and it has no width of its own to answer with.
+			if expr.typ.is_array() {
+				return e.target.word_size
+			}
 			width := e.type_width(expr.spelling) or { return none }
 			return if width < 4 { 4 } else { width }
 		}

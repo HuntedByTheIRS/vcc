@@ -326,6 +326,27 @@ fn test_a_member_read_through_a_top_level_pointer_reads_the_object() {
 	assert run_image(written.bytes) == 59
 }
 
+// A member whose declared type is an array is an address wherever a value is
+// wanted, the way an array's name is: `first(s.data)` passes the address of the
+// member's first element and not the bytes of the array. A flexible array member
+// is that same address and nothing else, because it has no length and no width
+// to read; `sizeof` of a struct that ends in one excludes it. Measured with gcc
+// 16.2.1, the three programs below exit 65, 4 and 1.
+fn test_a_member_of_array_type_is_an_address_where_a_value_is_wanted() {
+	fixed := emit(translation_unit('struct S { int n; char data[4]; }; int first(char *p) { return p[0]; } int main(void) { struct S s; s.data[0] = 65; s.data[1] = 0; return first(s.data); }'),
+		Options{})
+	assert fixed.diagnostics.len == 0
+	assert run_image(fixed.bytes) == 65
+	sized := emit(translation_unit('struct S { int n; char data[]; }; int main(void) { return sizeof(struct S); }'),
+		Options{})
+	assert sized.diagnostics.len == 0
+	assert run_image(sized.bytes) == 4
+	flexible := emit(translation_unit('struct S { int n; char data[]; }; struct S g; int got(char *p) { return p != (char *)0; } int main(void) { return got(g.data); }'),
+		Options{})
+	assert flexible.diagnostics.len == 0
+	assert run_image(flexible.bytes) == 1
+}
+
 // A pointer to an aggregate is an ordinary pointer for a subscript: `e[i]` is
 // `*(e + i)`, so the index is scaled by the size of the aggregate and the
 // member that follows is read from the element the address names, not from the
