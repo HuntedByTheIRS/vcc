@@ -4078,6 +4078,62 @@ fn test_a_conditional_converts_its_arm_to_the_type_the_two_arms_share() {
 	assert run_image(other.bytes) == 1
 }
 
+// The value of a conditional whose type is float is a float and not a double.
+// 6.5.15 gives the conditional the type its two arms have in common, and the
+// emitter converted every floating arm to a double, which is the right widening
+// for a double result and the wrong one for a float. A whole-number float
+// widened to double keeps its four bytes in the upper half of the register, so
+// the four-byte store a float use makes read the low half and found zero: every
+// conditional whose type was float evaluated to 0.0f. Measured with gcc 16.2.1,
+// this program exits 0, and on the tree before this it exited 1 at the first
+// check. The arms are a name, a call, an integer and a nested conditional; the
+// uses are a comparison, an initializer, an assignment, a call argument and a
+// return; and a native `single_of` answers for the sizeof half of the corpus's
+// checks, which was right even while the value was wrong.
+fn test_a_conditional_whose_type_is_float_is_a_float_value() {
+	source := 'float fa(void) { return 4.0f; }
+float fb(void) { return 5.0f; }
+int g = 0;
+float side(void) { g = 1; return 9.0f; }
+float takef(float v) { return v; }
+float pick(int c, float a, float b) { return c ? a : b; }
+int main(void) {
+	float x = 4.0f;
+	float y = 5.0f;
+	if ((1 ? x : y) != 4.0f) { return 1; }
+	if ((0 ? x : y) != 5.0f) { return 2; }
+	if ((1 ? y : x) != 5.0f) { return 3; }
+	if ((1 ? fa() : fb()) != 4.0f) { return 4; }
+	if ((0 ? fa() : fb()) != 5.0f) { return 5; }
+	if ((1 ? x : 3) != 4.0f) { return 6; }
+	if ((0 ? x : 3) != 3.0f) { return 7; }
+	if ((1 ? (1 ? x : y) : y) != 4.0f) { return 8; }
+	if ((0 ? x : (1 ? y : x)) != 5.0f) { return 9; }
+	if (takef(1 ? x : y) != 4.0f) { return 10; }
+	if (takef(0 ? x : y) != 5.0f) { return 11; }
+	if (pick(1, x, y) != 4.0f) { return 12; }
+	if (pick(0, x, y) != 5.0f) { return 13; }
+	float z = 1 ? x : y;
+	if (z != 4.0f) { return 14; }
+	z = 0 ? x : y;
+	if (z != 5.0f) { return 15; }
+	if ((1 ? x : y) + 1.0f != 5.0f) { return 16; }
+	if (sizeof(1 ? x : y) != sizeof(float)) { return 17; }
+	int r = 1;
+	if ((r ? x : y) != 4.0f) { return 18; }
+	r = 0;
+	if ((r ? x : y) != 5.0f) { return 19; }
+	float s = 1 ? x : side();
+	if (s != 4.0f || g != 0) { return 20; }
+	float t = 0 ? x : side();
+	if (t != 9.0f || g != 1) { return 21; }
+	return 0;
+}'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 // An arm narrower than the type the two arms share is widened with its own
 // signedness before the arms meet: an int -1 in a long conditional is -1 and
 // not 4294967295. Measured with gcc 16.2.1 on both programs.

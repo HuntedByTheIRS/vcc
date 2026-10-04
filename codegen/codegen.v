@@ -8080,10 +8080,22 @@ fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !voi
 // own signedness, which is the conversion an int to a long makes. A four-byte
 // result is what the register already holds, since a char read into one arrives
 // as the int the language promotes it to.
+//
+// A float result converts the arm to a float and not to a double, which is the
+// difference between the two floating widths: the arm's value has to be the type
+// the conditional is worth, and a whole-number float widened to double puts its
+// four bytes in the upper half of the register, so the float store a use of the
+// conditional makes reads the low half and finds zero. An arm already a float
+// needs no conversion, an integer arm is converted into the register, and a
+// double arm is narrowed to the result the conditional has.
 fn (mut e Emitter) emit_conditional_arm(arm ast.Expr, result types.Type, depth int) !void {
 	e.emit_expr_at(arm, depth + 1)!
 	if result.is_floating() {
-		e.convert_to_double(arm, expr_line(arm), expr_col(arm))!
+		if result.kind == .float {
+			e.convert_to_single(arm, expr_line(arm), expr_col(arm))!
+		} else {
+			e.convert_to_double(arm, expr_line(arm), expr_col(arm))!
+		}
 		return
 	}
 	if e.eight_byte_integer(result) {
