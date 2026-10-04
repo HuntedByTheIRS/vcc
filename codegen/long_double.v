@@ -1,5 +1,7 @@
 module codegen
 
+import abi
+
 // Long double is the target's extended-precision type: eighty significant bits
 // held in sixteen bytes of memory, which is the format this machine's x87 stack
 // carries. This file is the whole of the type's support in the back end - the
@@ -80,16 +82,43 @@ fn (e Emitter) returns_a_long_double(call ast.Call) bool {
 	return e.returns[call.name] == 'long double'
 }
 
-// long_double_argument is the first argument of a call that is a long double, or
-// none when every one of them is a value this back end passes. A long double
-// argument travels by the x87 convention, which is not the sequence of argument
-// registers the call below writes, so naming the argument is what keeps the
-// address of the value from being handed over as though it were the value.
-fn (e Emitter) long_double_argument(call ast.Call) ?ast.Expr {
-	for argument in call.args {
-		if e.long_double_of(argument) {
-			return argument
+// extended_parameter says whether a call's parameter at `position` is the
+// extended type, or none when no declaration answers for that position: a call
+// nothing prototypes, or an argument past the parameters a prototype names. The
+// argument's own type answers in that case, which is the same fallback
+// argument_is_double makes.
+fn (e Emitter) extended_parameter(call ast.Call, position int) ?bool {
+	if parameter := call_parameter(call, position) {
+		return abi.travels_on_the_x87_stack(parameter)
+	}
+	if extendeds := e.extended_params[call.name] {
+		if position < extendeds.len {
+			return extendeds[position]
 		}
+	}
+	return none
+}
+
+// extended_argument says whether the convention hands argument `position` over
+// in memory, which is a parameter of the extended type or, where nothing
+// declares it, an argument that is itself a long double. A long double travels
+// by the x87 convention and not in the argument register file, so the address
+// of its value is not what the callee expects to read and a call has to hand
+// over the sixteen bytes themselves.
+fn (e Emitter) extended_argument(call ast.Call, position int, arg ast.Expr) bool {
+	if known := e.extended_parameter(call, position) {
+		return known
+	}
+	return e.is_extended(arg)
+}
+
+// long_double_argument is argument `position` of a call when the convention
+// hands it over in memory, or none when it is a value the argument registers
+// carry. It is the seam the call's placement reads, so the address of a long
+// double's value is never handed over as though it were the value itself.
+fn (e Emitter) long_double_argument(call ast.Call, position int, arg ast.Expr) ?ast.Expr {
+	if e.extended_argument(call, position, arg) {
+		return arg
 	}
 	return none
 }
