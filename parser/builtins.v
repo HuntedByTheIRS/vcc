@@ -793,7 +793,24 @@ fn constant_double(expr ast.Expr) ?f64 {
 // float_constant and integer_constant are the two nodes the builtins above build
 // in place of a call. They are written where the call was written, so a
 // diagnostic about one points at the line that asked for it.
+//
+// A floating builtin of the extended type - `__builtin_huge_vall`,
+// `__builtin_infl`, `__builtin_nanl` - answers a long double, and a long double
+// value in the tree is the extended value the emitter writes and not the double
+// the builtin computed. The node carries both: the double it holds, which the
+// folder reads, and the extended value, so the emitter is never handed a long
+// double literal with nothing of the extended type to write.
 fn float_constant(value f64, typ types.Type, text string, at tokenize.Token) ast.Expr {
+	if typ.kind == .long_double {
+		return ast.Expr(ast.FloatLit{
+			value:      value
+			long_value: types.long_double_from_double(value)
+			text:       text
+			typ:        typ
+			line:       at.line
+			col:        at.col
+		})
+	}
 	return ast.Expr(ast.FloatLit{
 		value: value
 		text:  text

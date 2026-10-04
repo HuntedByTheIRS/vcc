@@ -1,7 +1,43 @@
 module types
 
+import math
+
 // The type model is data, so these tests read the data back: what a kind is, what
 // a derived type is derived from, and what two types have to do with each other.
+
+// A double is exactly a long double, so the conversion is a copy of the fields
+// and not a rounding. The bytes are gcc 16.2.1's, read back from a long double
+// with memcpy for `1.5L`, `-0.0L`, `HUGE_VALL`, `-HUGE_VALL` and
+// `__builtin_nanl("")`: an infinity keeps its sign, a NaN keeps its quiet bit,
+// and a double subnormal becomes an extended normal because the extended
+// exponent range reaches below the double's.
+fn test_a_double_converts_to_the_extended_format_bit_for_bit() {
+	assert long_double_from_double(0.0).is_zero()
+	negative_zero := long_double_from_double(-0.0)
+	assert negative_zero.mantissa == 0 && negative_zero.sign_exp == 0x8000
+	positive_infinity := long_double_from_double(math.inf(1))
+	assert positive_infinity.mantissa == u64(0x8000000000000000)
+	assert positive_infinity.sign_exp == 0x7fff
+	negative_infinity := long_double_from_double(-math.inf(1))
+	assert negative_infinity.mantissa == u64(0x8000000000000000)
+	assert negative_infinity.sign_exp == 0xffff
+	nan := long_double_from_double(math.nan())
+	// The kind is what matters and what is checked: the exponent field all
+	// ones with the integer bit and the quiet bit above it set. The payload
+	// below them is the double's own, which is why the bytes are not asserted
+	// here - gcc's `__builtin_nanl("")` and this host's `math.nan()` carry
+	// different payloads, and both are a quiet NaN.
+	assert nan.sign_exp == 0x7fff
+	assert nan.mantissa & u64(0xc000000000000000) == u64(0xc000000000000000)
+	one_and_a_half := long_double_from_double(1.5)
+	assert one_and_a_half.mantissa == u64(0xc000000000000000)
+	assert one_and_a_half.sign_exp == 0x3fff
+	// The smallest double subnormal, 2^-1074, is an extended normal with the
+	// extended format's smallest exponent field and the integer bit alone.
+	tiny := long_double_from_double(math.f64_from_bits(1))
+	assert tiny.mantissa == u64(0x8000000000000000)
+	assert tiny.sign_exp == 0x3bcd
+}
 
 fn test_the_scalar_types_are_complete_and_spelled_the_way_c_writes_them() {
 	assert int_type().describe() == 'int'
