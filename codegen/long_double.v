@@ -94,6 +94,62 @@ fn (e Emitter) long_double_argument(call ast.Call) ?ast.Expr {
 	return none
 }
 
+// is_extended says whether an expression is worth a long double value, which is
+// the address of its sixteen bytes. A call whose signature returns one is one
+// even where the reader left the call expression's own type unresolved, so the
+// question is asked the way returns_a_long_double asks it.
+fn (e Emitter) is_extended(expr ast.Expr) bool {
+	if expr is ast.Call {
+		return e.returns_a_long_double(expr)
+	}
+	return e.long_double_of(expr)
+}
+
+// store_extended_result hands a call that returns a long double to the
+// expression around it. The convention leaves the value on the x87 stack and a
+// long double value in this back end is the address of its sixteen bytes, so
+// the value is written into a frame temporary and that address is what the call
+// expression is worth. A call that does not return one leaves the accumulator
+// as it found it.
+fn (mut e Emitter) store_extended_result(call ast.Call, line int, col int) !void {
+	if !e.returns_a_long_double(call) {
+		return
+	}
+	temporary := e.reserve(long_double_bytes)
+	base := e.frame_pointer(line, col)!
+	register := e.scratch(line, col)!
+	e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+	e.append(e.target.store_extended(register)!)
+	return e.leave_address(temporary, line, col)
+}
+
+// emit_extended_return leaves the value a function returns on the x87 stack,
+// which is where the convention hands a long double back. An expression of the
+// type is already the address of sixteen bytes, so it is loaded from there; any
+// other value is converted into a frame temporary first and loaded from that,
+// which is the conversion a return makes when the two classes differ.
+fn (mut e Emitter) emit_extended_return(expr ast.Expr, line int, col int) !void {
+	if e.is_extended(expr) {
+		e.emit_expr(expr)!
+		register := e.accumulator(line, col)!
+		e.append(e.target.load_extended(register)!)
+		e.append(e.target.frame_epilogue())
+		return
+	}
+	temporary := e.reserve(long_double_bytes)
+	base := e.frame_pointer(line, col)!
+	address := e.value_slot(0)
+	register := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+	e.store_accumulator(address, line, col)!
+	e.emit_expr(expr)!
+	e.convert_value_to_extended(address, expr, line, col)!
+	destination := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(base, i32(temporary.offset), destination))
+	e.append(e.target.load_extended(destination)!)
+	e.append(e.target.frame_epilogue())
+}
+
 // word_from_bytes reads eight bytes of an object representation as the machine
 // word they are, least significant byte first, which is how this target stores
 // a value.
@@ -171,18 +227,15 @@ fn (mut e Emitter) store_long_double(slot Slot, expr ast.Expr, line int, col int
 }
 
 fn (mut e Emitter) store_long_double_at(address Slot, expr ast.Expr, line int, col int, depth int) !void {
-	if e.long_double_of(expr) {
+	if e.is_extended(expr) {
 		// A value of the same type is a copy of sixteen bytes, from wherever its
 		// address is: a literal materialized into a temporary, or an object the
-		// program named.
+		// program named, or a call whose sixteen bytes came back on the x87
+		// stack and were put in a temporary of their own.
 		e.emit_expr_at(expr, depth + 1)!
 		source := e.value_slot(depth + 1)
 		e.store_accumulator(source, line, col)!
 		return e.copy_address_object(source, address, long_double_bytes, line, col)
-	}
-	if expr is ast.Call {
-		e.diagnostics << problem(line, col, 'unsupported: the call to ${expr.name} is stored in a long double, and a function that hands one back needs the x87 return convention, which this compiler does not emit')
-		return error('long double return')
 	}
 	if e.is_a_pointer(expr) {
 		e.diagnostics << problem(line, col, 'unsupported: a pointer is stored in a long double, and there is no conversion between them')

@@ -865,7 +865,8 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// answer in. Measured on gcc 16.2.1, which returns one in rax and the
 		// word above it in rdx, and which clears rdx when the returned
 		// expression is narrower than the type.
-	} else if decl.ret_type.kind != .pointer && decl.ret != 'int' && decl.ret != 'unsigned int'
+	} else if !abi.travels_on_the_x87_stack(decl.ret_type)
+		&& decl.ret_type.kind != .pointer && decl.ret != 'int' && decl.ret != 'unsigned int'
 		&& decl.ret != 'void'
 		&& decl.ret != 'double' && decl.ret != 'float'
 		&& !e.eight_byte_integer(types.from_words(decl.ret.split(' ')) or { types.Type{} })
@@ -1119,6 +1120,11 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			// of a float and in the eight of a double.
 			register := e.float_accumulator(decl.line, decl.col)!
 			e.append(e.target.zero_double(register)!)
+		} else if e.writes_a_long_double(decl.ret) {
+			// A long double comes back on the x87 stack, so the zero a function
+			// that falls off its end leaves is pushed there: an int zero in the
+			// result register would be read as no long double at all.
+			e.append(e.target.extended_zero())
 		} else {
 			result := e.accumulator(decl.line, decl.col)!
 			e.append(e.target.move_immediate32(result, 0)!)
@@ -1337,6 +1343,12 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 			stmt.line, stmt.col)!
 		e.append(e.target.frame_epilogue())
 		return
+	}
+	if e.writes_a_long_double(e.returning) {
+		// A long double comes back on the x87 stack and not in a register, so
+		// the value is put there instead of being converted into the result
+		// register.
+		return e.emit_extended_return(expr, stmt.line, stmt.col)
 	}
 	if e.writes_a_128(e.returning) {
 		// A function of a 128-bit type answers with the pair, so the expression
@@ -8909,12 +8921,10 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		else {}
 	}
-	if e.returns_a_long_double(call) {
-		// A function that hands a long double back returns it on the x87 stack,
-		// which is a convention this back end does not write.
-		e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} hands back a long double, and the x87 return convention a long double comes back in is not one this compiler emits')
-		return error('long double return')
-	}
+	// A call that hands a long double back leaves it on the x87 stack rather
+	// than in the result register. The call is written the same way as any
+	// other, and what it is worth to the expression around it is settled after
+	// the call runs, at each of the places below that emit one.
 	if argument := e.long_double_argument(call) {
 		// A long double argument travels by the x87 convention too, so the
 		// address of the value is not what the callee expects to read.
@@ -9316,12 +9326,12 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		register := e.accumulator(call.line, call.col)!
 		e.append(e.target.call_register(register)!)
 		e.release_call_stack()
-		return
+		return e.store_extended_result(call, call.line, call.col)
 	}
 	if call.name in e.program.defined {
 		e.reference(e.target.call_near(0), .call_local, call.name, '')
 		e.release_call_stack()
-		return
+		return e.store_extended_result(call, call.line, call.col)
 	}
 	e.import_symbol(call.name)
 	// A library function this compiler has no prototype for may be variadic, and
@@ -9343,6 +9353,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		e.reference(e.target.call_slot(0), .call_import, call.name, '')
 	}
 	e.release_call_stack()
+	return e.store_extended_result(call, call.line, call.col)
 }
 
 // release_call_stack gives back the stack a call took for the arguments its
