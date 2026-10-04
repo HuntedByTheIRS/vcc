@@ -372,7 +372,7 @@ fn (mut l Lexer) lex_directive() Token {
 	// spellings, and the text carries the `#`: the two are the same token and
 	// differ in the spelling a person wrote, so what the rest of the compiler
 	// reads past the opening is the same either way.
-	mut text := '#'
+	mut text := '#'.bytes()
 	if l.digraphs && l.at() == `%` {
 		l.advance() // %
 		l.advance() // :
@@ -386,7 +386,7 @@ fn (mut l Lexer) lex_directive() Token {
 		// it: C replaces every comment with a space before it looks for
 		// directives, so the newline inside one does not end the line.
 		if c == `/` && l.peek(1) == `*` {
-			text += ' '
+			text << ` `
 			if !l.skip_block_comment() {
 				break
 			}
@@ -403,14 +403,14 @@ fn (mut l Lexer) lex_directive() Token {
 		// away, so what is copied here is the line the person continued.
 		if c == `"` || c == `'` {
 			quote := c
-			text += c.ascii_str()
+			text << c
 			l.advance()
 			for l.pos < l.src.len && l.at() != `\n` {
 				inner := l.at()
-				text += inner.ascii_str()
+				text << inner
 				l.advance()
 				if inner == `\\` && l.pos < l.src.len {
-					text += l.at().ascii_str()
+					text << l.at()
 					l.advance()
 					continue
 				}
@@ -420,12 +420,12 @@ fn (mut l Lexer) lex_directive() Token {
 			}
 			continue
 		}
-		text += c.ascii_str()
+		text << c
 		l.advance()
 	}
 	return Token{
 		kind: .directive
-		text: text.trim_space()
+		text: text.bytestr().trim_space()
 		line: line
 		col:  col
 	}
@@ -436,10 +436,16 @@ fn (mut l Lexer) lex_token() ?Token {
 	start_col := l.col
 	c := l.at()
 	if is_ident_start(c) || (c == `\\` && l.universal_name() != none) {
-		mut text := ''
+		// The text is collected as bytes and turned into a string once. Building
+		// it a character at a time with `+=` allocated a length-one string for
+		// every character and then a new string for every join, which on V's own
+		// generated C is millions of allocations that are thrown away as soon as
+		// the token is made (`u8.ascii_str` is one `malloc_noscan` per call).
+		mut text := []u8{}
 		for l.pos < l.src.len {
-			if is_ident_char(l.at()) {
-				text += l.at().ascii_str()
+			ch := l.at()
+			if is_ident_char(ch) {
+				text << ch
 				l.advance()
 				continue
 			}
@@ -450,19 +456,20 @@ fn (mut l Lexer) lex_token() ?Token {
 			// the text is itself something C reads back as the same name.
 			name := l.universal_name() or { break }
 			l.check_universal_name(name, start_line, start_col)
-			text += canonical_name(name.value)
+			text << canonical_name(name.value).bytes()
 			for _ in 0 .. name.width {
 				l.advance()
 			}
 		}
+		identifier := text.bytestr()
 		// L"x", u'x' and u8"x" are one literal, not an identifier and a string.
 		if l.pos < l.src.len && (l.at() == `"` || l.at() == `'`)
-			&& text in ['L', 'u', 'U', 'u8'] {
-			return l.lex_quoted(text, start_line, start_col)
+			&& identifier in ['L', 'u', 'U', 'u8'] {
+			return l.lex_quoted(identifier, start_line, start_col)
 		}
 		return Token{
 			kind: .identifier
-			text: text
+			text: identifier
 			line: start_line
 			col:  start_col
 		}
@@ -512,23 +519,23 @@ fn (mut l Lexer) lex_token() ?Token {
 // letters, dots and exponent signs, so `1.5e-3f` and `0x1p-4` come out whole.
 // Whether the result is a valid number is the parser's problem, as in C.
 fn (mut l Lexer) lex_number(start_line int, start_col int) ?Token {
-	mut text := ''
+	mut text := []u8{}
 	mut seen_dot := false
 	for l.pos < l.src.len {
 		ch := l.at()
 		if is_digit(ch) || is_ident_char(ch) {
-			text += ch.ascii_str()
+			text << ch
 			l.advance()
 			continue
 		}
 		if ch == `.` && !seen_dot && l.peek(1) != `.` {
 			seen_dot = true
-			text += '.'
+			text << `.`
 			l.advance()
 			continue
 		}
 		if (ch == `+` || ch == `-`) && text.len > 0 && text[text.len - 1] in [`e`, `E`, `p`, `P`] {
-			text += ch.ascii_str()
+			text << ch
 			l.advance()
 			continue
 		}
@@ -536,7 +543,7 @@ fn (mut l Lexer) lex_number(start_line int, start_col int) ?Token {
 	}
 	return Token{
 		kind: .number
-		text: text
+		text: text.bytestr()
 		line: start_line
 		col:  start_col
 	}
@@ -545,7 +552,8 @@ fn (mut l Lexer) lex_number(start_line int, start_col int) ?Token {
 fn (mut l Lexer) lex_quoted(prefix string, start_line int, start_col int) ?Token {
 	quote := l.at()
 	kind := if quote == `"` { Kind.string } else { Kind.character }
-	mut text := prefix + quote.ascii_str()
+	mut text := prefix.bytes()
+	text << quote
 	l.advance()
 	mut closed := false
 	for l.pos < l.src.len {
@@ -554,15 +562,15 @@ fn (mut l Lexer) lex_quoted(prefix string, start_line int, start_col int) ?Token
 			break
 		}
 		if ch == `\\` {
-			text += ch.ascii_str()
+			text << ch
 			l.advance()
 			if l.pos < l.src.len {
-				text += l.at().ascii_str()
+				text << l.at()
 				l.advance()
 			}
 			continue
 		}
-		text += ch.ascii_str()
+		text << ch
 		l.advance()
 		if ch == quote {
 			closed = true
@@ -579,7 +587,7 @@ fn (mut l Lexer) lex_quoted(prefix string, start_line int, start_col int) ?Token
 	}
 	return Token{
 		kind: kind
-		text: text
+		text: text.bytestr()
 		line: start_line
 		col:  start_col
 	}
@@ -769,7 +777,7 @@ fn (l Lexer) peek(n int) u8 {
 // ahead is the next n characters of the text the phases produced, for the
 // longest-match-first punctuation table.
 fn (l Lexer) ahead(n int) string {
-	mut out := ''
+	mut out := []u8{cap: n}
 	mut at := l.pos
 	for _ in 0 .. n {
 		if at >= l.src.len {
@@ -779,10 +787,10 @@ fn (l Lexer) ahead(n int) string {
 		if byte == 0 && next >= l.src.len {
 			break
 		}
-		out += byte.ascii_str()
+		out << byte
 		at = next
 	}
-	return out
+	return out.bytestr()
 }
 
 fn is_digit(c u8) bool {
