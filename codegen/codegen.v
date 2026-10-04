@@ -9119,6 +9119,19 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		'__builtin_clz', '__builtin_clzll' {
 			return e.emit_count_leading(call, depth)
 		}
+		'atexit' {
+			// glibc defines atexit in libc_nonshared.a, the static half of
+			// the C library, and not in the shared libc.so.6 whose dynamic
+			// symbol table this image resolves against, so the name resolves
+			// against no library the image names. It is a wrapper around
+			// __cxa_atexit, which libc.so.6 does export, and this emits it
+			// rather than importing a name nothing holds. A unit that defines
+			// its own atexit is left alone: the call then binds to that
+			// definition.
+			if call.callee == none && call.args.len == 1 && call.name !in e.program.defined {
+				return e.emit_atexit(call, depth)
+			}
+		}
 		else {}
 	}
 	// A call that hands a long double back leaves it on the x87 stack rather
@@ -9642,6 +9655,61 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	}
 	e.release_call_stack(entry_pushed)
 	return e.store_extended_result(call, call.line, call.col)
+}
+
+// emit_atexit writes the wrapper glibc defines for atexit, which this image
+// cannot take from the C library: atexit lives in libc_nonshared.a, the static
+// half, and not in the shared libc.so.6 whose dynamic symbol table is what the
+// link check at the end of build reads, so the name is one no library the image
+// names answers for. Emitting the wrapper is the function's definition and not
+// a stand-in for one, the way this emitter already answers the argument-list
+// operations and the machine builtins itself. glibc's atexit is
+//
+//	int atexit(void (*func)(void)) {
+//		return __cxa_atexit((void (*)(void *))func, NULL, __dso_handle);
+//	}
+//
+// so the call is one to __cxa_atexit, which libc.so.6 does export, and the
+// value the wrapper is worth is __cxa_atexit's own result, which is what glibc
+// returns.
+//
+// The third argument is a null handle. This image writes its own start instead
+// of linking crt1.o and crtbegin.o, and a program is never finalized as a
+// shared object, so a per-image handle would be read only by a __cxa_finalize
+// this program never calls. glibc's exit runs every handler registered through
+// __cxa_atexit regardless of the handle it was registered with, so the
+// observable behaviour, the handlers in reverse order of registration once
+// after main returns, is the same as gcc's. Measured on gcc 16.2.1:
+// `__cxa_atexit(f, 0, 0)` returns 0 and f runs at exit exactly as glibc's own
+// atexit arranges.
+fn (mut e Emitter) emit_atexit(call ast.Call, depth int) !void {
+	wrapper := ast.Call{
+		name: '__cxa_atexit'
+		args: [
+			call.args[0],
+			e.null_pointer(call.line, call.col),
+			e.null_pointer(call.line, call.col),
+		]
+		typ:  call.typ
+		line: call.line
+		col:  call.col
+	}
+	return e.emit_call(wrapper, depth)
+}
+
+// null_pointer is the null pointer constant the wrapper above hands over where
+// the C library's own atexit writes NULL. It is a zero typed as a pointer, so
+// the call passes a whole word for it the way it passes the handler: the value
+// the argument is worth is the address zero, and the width the argument is
+// handed over at is the width a pointer argument has.
+fn (e Emitter) null_pointer(line int, col int) ast.Expr {
+	return ast.Expr(ast.IntLit{
+		value: 0
+		text:  '0'
+		typ:   types.pointer_to(types.void_type())
+		line:  line
+		col:   col
+	})
 }
 
 // release_call_stack gives back the stack a call took for the arguments its
