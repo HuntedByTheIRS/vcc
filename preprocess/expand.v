@@ -75,6 +75,12 @@ struct Arguments {
 	// macro's name with no ( after it is just a name in the text.
 	called bool
 	lists  [][]Piece
+	// seps[i] says a run of whitespace stood in front of the comma that
+	// separates lists[i] from lists[i + 1]. The comma itself is not part of
+	// either argument, so its spelling is kept here: stringizing __VA_ARGS__
+	// writes those commas back between the arguments, and whether a space
+	// stood before one is the source's answer and not this compiler's.
+	seps []bool
 	// next is the index of the first token after the call's closing ), or
 	// where the reader already was when there was no call.
 	next int
@@ -97,6 +103,7 @@ fn (mut p Processor) collect_arguments(tokens []Piece, from int, tok tokenize.To
 		}
 	}
 	mut lists := [][]Piece{}
+	mut seps := []bool{}
 	mut current := []Piece{}
 	mut depth := 1
 	mut i := from + 1
@@ -112,11 +119,13 @@ fn (mut p Processor) collect_arguments(tokens []Piece, from int, tok tokenize.To
 					return Arguments{
 						called: true
 						lists:  lists
+						seps:   seps
 						next:   i + 1
 					}
 				}
 			} else if t.tok.text == ',' && depth == 1 {
 				lists << current
+				seps << t.tok.space
 				current = []Piece{}
 				i++
 				continue
@@ -336,13 +345,18 @@ fn (mut p Processor) substitute(macro Macro, arguments Arguments, site Piece) []
 		mut rest := []Piece{}
 		for index in macro.params.len .. lists.len {
 			if index > macro.params.len {
+				// The comma is put back with the spacing the source gave the
+				// one it stands for, which is what stringizing __VA_ARGS__
+				// writes out: `S(1, 2, 3)` is "1, 2, 3" and `S(1,2,3)` is
+				// "1,2,3", which is gcc's answer and C99 6.10.3.2's.
 				rest << Piece{
 					tok: tokenize.Token{
-						kind: .punct
-						text: ','
-						line: tok.line
-						col:  tok.col
-						file: tok.file
+						kind:  .punct
+						text:  ','
+						space: index - 1 < arguments.seps.len && arguments.seps[index - 1]
+						line:  tok.line
+						col:   tok.col
+						file:  tok.file
 					}
 				}
 			}
@@ -485,13 +499,18 @@ fn is_paste(t tokenize.Token) bool {
 }
 
 // stringized writes an argument the way a # writes it: the tokens as they were
-// spelled with one space between them, quoted, and with the quotes and
-// backslashes of the text escaped so the result is the string literal it says
-// it is.
+// spelled, a run of whitespace between two of them as one space and none at
+// either end, quoted, and with the quotes and backslashes of the text escaped
+// so the result is the string literal it says it is.
+//
+// The space goes in front of a token when the source put one there, which is
+// C99 6.10.3.2 and not a space between every pair: `a + b` keeps its spaces and
+// `a+b` has none, and a comma separating variadic arguments carries the
+// argument's own spacing rather than a pair of spaces this compiler added.
 fn stringized(tokens []Piece, tok tokenize.Token) tokenize.Token {
 	mut spelling := ''
 	for index, t in tokens {
-		if index > 0 {
+		if index > 0 && t.tok.space {
 			spelling += ' '
 		}
 		spelling += t.tok.text
@@ -516,14 +535,17 @@ fn stringized(tokens []Piece, tok tokenize.Token) tokenize.Token {
 
 // at_use_site moves a token of a replacement or of an argument to the place the
 // macro was used: what the standard asks, and what makes a diagnostic inside an
-// expansion point at something a person wrote.
+// expansion point at something a person wrote. The spelling's own spacing stays
+// with it, because it is still the token's: an argument is stringized where it
+// was read, and moving it should not lose the space a # has to write back.
 fn at_use_site(t tokenize.Token, use tokenize.Token) tokenize.Token {
 	return tokenize.Token{
-		kind: t.kind
-		text: t.text
-		line: use.line
-		col:  use.col
-		file: use.file
+		kind:  t.kind
+		text:  t.text
+		space: t.space
+		line:  use.line
+		col:   use.col
+		file:  use.file
 	}
 }
 
