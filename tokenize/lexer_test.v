@@ -160,6 +160,25 @@ fn test_a_comment_does_not_move_a_directive_off_the_start_of_its_line() {
 	assert tokens[0].line == 2
 }
 
+fn test_a_token_records_whether_whitespace_came_before_it() {
+	// Stringizing reads this: C99 6.10.3.2 is the tokens as spelled, so the
+	// lexer is the only stage that can say where a space stood.
+	tokens := lex('a b,c\n  d').tokens
+	assert !tokens[0].space
+	assert tokens[1].space
+	assert !tokens[2].space
+	assert !tokens[3].space
+	assert tokens[4].space
+}
+
+fn test_a_comment_counts_as_the_space_before_a_token() {
+	// C replaces a comment with a space before anything looks, so a token that
+	// followed one was written with a space in front of it.
+	tokens := lex('a /* here */ b').tokens
+	assert !tokens[0].space
+	assert tokens[1].space
+}
+
 fn test_a_fragment_lexes_its_hashes_as_punctuators() {
 	fragment := lex_fragment('define S(x) #x', true)
 	assert fragment.len == 7

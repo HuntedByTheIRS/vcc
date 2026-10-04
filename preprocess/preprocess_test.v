@@ -388,6 +388,25 @@ fn test_a_string_is_made_out_of_the_argument_as_it_was_written() {
 	assert processed('#define S(x) #x\nS(N)\n#define N 1\n') == ['"N"']
 }
 
+fn test_a_string_keeps_the_whitespace_the_argument_was_written_with() {
+	// C99 6.10.3.2: the tokens as they were spelled, a run of whitespace
+	// between two of them as one space, and none at either end. A `#` is not
+	// the tokens joined by spaces: `a+b` has none to keep and `a + b` has its
+	// own, and both are gcc's answer.
+	assert processed('#define X(x) #x\nX(a + b)\n') == ['"a + b"']
+	assert processed('#define X(x) #x\nX(a+b)\n') == ['"a+b"']
+	assert processed('#define X(x) #x\nX( a )\n') == ['"a"']
+}
+
+fn test_the_variadic_arguments_keep_the_spacing_they_were_written_with() {
+	// __VA_ARGS__ is the arguments with the commas between them, and each
+	// comma is as the source spelled it, so the spaced and the unspaced call
+	// are two strings. Measured beside gcc 16.2.1, which prints the same.
+	assert processed('#define S(...) #__VA_ARGS__\nS(1, 2, 3)\n') == ['"1, 2, 3"']
+	assert processed('#define S(...) #__VA_ARGS__\nS(1,2,3)\n') == ['"1,2,3"']
+	assert processed('#define S(...) #__VA_ARGS__\nS(only_one)\n') == ['"only_one"']
+}
+
 fn test_two_tokens_are_joined_into_one_by_a_double_hash() {
 	assert processed('#define J(a, b) a ## b\nJ(x, y)\n') == ['xy']
 	assert processed('#define J(a, b) a ## b\nJ(, y)\n') == ['y']

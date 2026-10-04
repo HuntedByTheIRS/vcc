@@ -281,9 +281,13 @@ fn (mut l Lexer) run() []Token {
 	// and settling the position here is what makes its first token report that.
 	l.settle()
 	mut tokens := []Token{}
+	// pending_space is whether the text walked over since the last token holds
+	// whitespace or a comment, which is what the next token records as `space`.
+	mut pending_space := false
 	for l.pos < l.src.len {
 		c := l.at()
-		if c == ` ` || c == `\t` || c == `\r` || c == `\n` || c == `\v` || c == `\f` {
+		if c == ` ` || c == `	` || c == `\r` || c == `\n` || c == `\v` || c == `\f` {
+			pending_space = true
 			l.advance()
 			continue
 		}
@@ -291,12 +295,14 @@ fn (mut l Lexer) run() []Token {
 		// not there to end the comment, which is what carries the comment onto
 		// the next line.
 		if c == `/` && l.peek(1) == `/` {
+			pending_space = true
 			for l.pos < l.src.len && l.at() != `\n` {
 				l.advance()
 			}
 			continue
 		}
 		if c == `/` && l.peek(1) == `*` {
+			pending_space = true
 			if !l.skip_block_comment() {
 				break
 			}
@@ -313,12 +319,21 @@ fn (mut l Lexer) run() []Token {
 		// declaration.
 		opens_directive := c == `#` || (l.digraphs && c == `%` && l.peek(1) == `:`)
 		if opens_directive && l.directives && l.at_line_start {
-			tokens << l.lex_directive()
+			got := l.lex_directive()
+			tokens << Token{
+				...got
+				space: pending_space
+			}
+			pending_space = false
 			l.at_line_start = false
 			continue
 		}
-		tok := l.lex_token() or { break }
-		tokens << tok
+		got := l.lex_token() or { break }
+		tokens << Token{
+			...got
+			space: pending_space
+		}
+		pending_space = false
 		l.at_line_start = false
 	}
 	tokens << Token{
