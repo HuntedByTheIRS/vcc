@@ -256,3 +256,13 @@ fn test_the_argument_list_type_is_a_pointer() {
 	assert spelling.contains('*')
 	assert spelling.contains('__va_list_tag')
 }
+
+// The extended type is the one the convention hands over in memory rather than
+// in a register, so the question is asked of it alone: a double and an int are
+// values in the two files, and a pointer is a word in the general one.
+fn test_the_extended_type_is_the_one_that_carries_no_register() {
+	assert travels_on_the_x87_stack(types.long_double_type())
+	assert !travels_on_the_x87_stack(types.double_type())
+	assert !travels_on_the_x87_stack(types.float_type())
+	assert !travels_on_the_x87_stack(types.int_type())
+}
