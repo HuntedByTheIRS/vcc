@@ -90,8 +90,12 @@ fn main() {
 	}
 	// -external-linker is its own path: it links the inputs this compiler cannot
 	// consume and is taken before the single-input refusals below, because those
-	// refusals are what the flag exists to lift.
-	if opts.external_linker != '' {
+	// refusals are what the flag exists to lift. A run that stops before a link
+	// keeps to the ordinary path and the flag goes unused, the way a linker flag
+	// that names a tool a run never reaches does anywhere else: it asks for
+	// something the run does not do, and refusing the command line would make a
+	// flag that decides nothing an error.
+	if opts.external_linker != '' && opts.links() {
 		external_link(opts)
 		return
 	}
@@ -583,15 +587,9 @@ fn link_kind(opts cli.Options) linux.LinkKind {
 // linker writes the program. Every failure is reported and ends the run
 // non-zero. The in-house path is never taken in place of a link that was asked
 // for: a link that quietly did nothing is the worst outcome this flag can have,
-// and the reason the tool is resolved before any object is written.
+// and the reason the tool is resolved before any object is written. A run that
+// stops before a link never arrives here; the caller asks `links()` first.
 fn external_link(opts cli.Options) {
-	// A run that stops before a link has nothing for a linker to do. Running the
-	// link anyway would silently drop what the flag asked for, and so would
-	// dropping the flag; either way the command line would not mean what it
-	// says.
-	if !opts.links() {
-		abort('-external-linker=${opts.external_linker} performs a link, and -c, -E, -M, -MD, -dM and -print-ast ask for a run that stops before one')
-	}
 	// Two kinds of link at once is one kind of link dropped in silence: the
 	// linker would be given one of the two flags and the file would not be what
 	// the other asked for.

@@ -473,6 +473,15 @@ fn test_a_run_that_stops_before_a_link_says_so() {
 	assert !parse(['-dM', 'x.c'])!.links()
 	assert !parse(['-print-ast', 'x.c'])!.links()
 	assert !parse(['-print-multiarch'])!.links()
+	// A linker named on a run that stops before a link is a flag with nothing to
+	// do rather than an error: the name is read and kept, the run keeps to the
+	// ordinary path, and no linker is resolved for it. What the flag would have
+	// done is not lost either, because the flag and the run disagree about
+	// whether there is a link at all, and the run is the one that decides.
+	stopped := parse(['-c', '-external-linker=ld', 'x.c'])!
+	assert stopped.external_linker == 'ld'
+	assert !stopped.links()
+	assert stopped.in_house_link_refusal() == none
 }
 
 // The path that runs without a linker writes a program, so the two flags that
