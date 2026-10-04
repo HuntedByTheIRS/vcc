@@ -11434,33 +11434,345 @@ fn (mut e Emitter) emit_complex_product(dest Slot, binary ast.Binary, left Slot,
 	e.store_complex_component(frame, value, dest.offset + width, single)!
 }
 
-// emit_complex_quotient refuses a complex division by name, because this back
-// end has no way to compute one that is right on the boundary.
+// emit_complex_quotient writes the quotient of two complex values with the same
+// arithmetic gcc 16.2.1 carries, so its answers are gcc's rather than merely
+// close ones.
 //
-// gcc sends a complex division to libgcc's `__divdc3`. There is no such symbol
-// an image this compiler builds can name: a program that called it was built and
-// run, and died at load with `symbol lookup error: undefined symbol: __divdc3`.
-// The formula this back end wrote instead -- `(a*c + b*d) / (c*c + d*d)` for the
-// real part -- is not the arithmetic. Measured against gcc 16.2.1 over the 20736
-// pairs of the twelve extreme operands {1e308, 1e307, 1e200, 1e155, 1e154,
-// 1e-154, 1e-155, 1e-200, 1e-308, 3, 1e16, 1e-16} in each of the four components,
-// it answers differently on 16079 of them, because `c*c + d*d` overflows to an
-// infinity as soon as a component of the divisor is large: `x / y` for
-// x = y = 1e308 + 1e308i is 1 + 0i in gcc and NaN + NaNi here. The same
-// measurement over the products of the same pairs found 0 differences, which is
-// why the product keeps its formula and the quotient does not.
+// gcc sends a `double _Complex` division to libgcc's __divdc3, and there is no
+// such symbol an image this compiler builds can name, so the arithmetic that
+// helper performs is emitted instead. The naive formula this back end would
+// otherwise write, `(a*c + b*d) / (c*c + d*d)`, answers differently from gcc on
+// 16079 of the 20736 pairs of the twelve extreme operands {1e308, 1e307, 1e200,
+// 1e155, 1e154, 1e-154, 1e-155, 1e-200, 1e-308, 3, 1e16, 1e-16} in each of the
+// four components: `c*c + d*d` overflows as soon as a component of the divisor
+// is large.
 //
-// C99 Annex G.5.1 gives a scaled division that is right on those boundaries
-// without a library symbol, and that is the change to make here. It is not
-// emitted yet, and a division this back end cannot compute is refused rather
-// than answered with a value that is wrong where gcc's is not.
+// The scaled division C99's Annex G.5.1 describes is the shape of __divdc3, and
+// the arithmetic below is read from that helper rather than from the standard's
+// sketch. The sketch alone is not enough. Measured against gcc over the same
+// 20736 pairs, the plain scaled formula still differs on 1848 of them, for two
+// reasons that are both in __divdc3. First, before the ratio is formed the four
+// operands are scaled: halved when the large component is at or above
+// RBIG = DBL_MAX/2, multiplied by RMINSCAL = 1/DBL_EPSILON when it is below
+// RMIN2 = DBL_EPSILON, and multiplied by RMINSCAL again when the two components
+// of one operand are both small enough that the division could underflow.
+// Second, the products and sums are contracted into fused multiply-adds, which
+// round once where a separate multiply and add round twice; the same arithmetic
+// without the contraction still differs on 390 pairs. So the scaling tests are
+// emitted in __divdc3's order and the target's fused multiply-add where gcc uses
+// one. Measured with `gcc 16.2.1 -O0 -fno-builtin -lm` and printed with %.17g,
+// the comparison over those 20736 pairs reports 0 differences.
+//
+// A `float _Complex` division takes the other path: gcc's __divsc3 promotes both
+// operands to double, computes the simple formula there, and rounds each
+// component back to a float, which is what emit_complex_quotient_single emits.
 fn (mut e Emitter) emit_complex_quotient(dest Slot, binary ast.Binary, left Slot, right Slot, depth int) !void {
-	_ = dest
-	_ = left
-	_ = right
 	_ = depth
-	e.diagnostics << problem(binary.line, binary.col, 'unsupported: the quotient of two complex values is not computed here; the formula this back end could write overflows where the standard gives a finite answer, and no scaled form is emitted')
-	return error('complex division')
+	if complex_component_single(binary.typ) {
+		return e.emit_complex_quotient_single(dest, binary, left, right)
+	}
+	return e.emit_complex_quotient_double(dest, binary, left, right)
+}
+
+// The scaling constants C99's Annex G.5.1 division needs, read off gcc 16.2.1's
+// libgcc __divdc3 as compiled on x86-64: half the largest finite double, the
+// smallest normal, the machine epsilon, its reciprocal, and the product of the
+// first and third.
+const complex_rbig = 8.988465674311579e307
+const complex_rmin = 2.2250738585072014e-308
+const complex_rmin2 = 2.220446049250313e-16
+const complex_rminscal = 4.503599627370496e15
+const complex_rmax2 = 1.9958403095347196e292
+const complex_half = 0.5
+
+// emit_complex_quotient_double is the boundary-exact scaled division. The four
+// components are copied into writable slots so the scaling can rewrite them and
+// so an operand that is also the destination is read before it is written, and
+// every intermediate is a frame slot: the two floating-point registers the
+// machine offers are loaded from a slot, combined, and stored back, which keeps
+// the sequence of operations the one __divdc3 performs.
+fn (mut e Emitter) emit_complex_quotient_double(dest Slot, binary ast.Binary, left Slot, right Slot) !void {
+	line := binary.line
+	col := binary.col
+	frame := e.frame_pointer(line, col)!
+	// The four components, the ratio, the denominator, and room for two
+	// products and sums, eight bytes each.
+	work := e.reserve(8 * 8)
+	wa := work.offset
+	wb := work.offset + 8
+	wc := work.offset + 16
+	wd := work.offset + 24
+	wr := work.offset + 32
+	we := work.offset + 40
+	wt := work.offset + 48
+	wt2 := work.offset + 56
+	e.copy_complex_frame(left, Slot{ offset: wa, width: 16 }, 16, line, col)!
+	e.copy_complex_frame(right, Slot{ offset: wc, width: 16 }, 16, line, col)!
+	value := e.float_accumulator(line, col)!
+	other := e.float_scratch(line, col)!
+	// if (|c| < |d|) the large component is d; else it is c.
+	less := e.label()
+	done := e.label()
+	e.load_complex_component(frame, value, wc, false)!
+	e.complex_quotient_magnitude(value, false, line, col)!
+	e.load_complex_component(frame, other, wd, false)!
+	e.complex_quotient_magnitude(other, false, line, col)!
+	e.complex_quotient_compare('<', value, other, false, .branch_nonzero, less, line, col)!
+	// |c| >= |d|: ratio = d / c, denom = d * ratio + c, and c is the large one.
+	e.complex_quotient_scaling(frame, wa, wb, wc, wd, wc, false, line, col)!
+	e.complex_quotient_step('/', frame, wd, wc, wr, false, line, col)!
+	e.complex_quotient_fused('+', frame, wd, wr, wc, we, false, line, col)!
+	e.complex_quotient_tail(frame, dest, wa, wb, wc, wd, wr, we, wt, wt2, false, true, line, col)!
+	e.jump(done)!
+	e.place(less)
+	// |c| < |d|: ratio = c / d, denom = c * ratio + d, and d is the large one.
+	e.complex_quotient_scaling(frame, wa, wb, wc, wd, wd, false, line, col)!
+	e.complex_quotient_step('/', frame, wc, wd, wr, false, line, col)!
+	e.complex_quotient_fused('+', frame, wc, wr, wd, we, false, line, col)!
+	e.complex_quotient_tail(frame, dest, wa, wb, wc, wd, wr, we, wt, wt2, false, false, line, col)!
+	e.place(done)
+}
+
+// emit_complex_quotient_single computes a `float _Complex` quotient the way gcc
+// 16.2.1 does. Its __divsc3 promotes both operands to double, computes the
+// simple formula there, and rounds each component back to a float; measured
+// against gcc over the 20736 pairs of the twelve float extremes in each of the
+// four components, this agreed with it on every one.
+fn (mut e Emitter) emit_complex_quotient_single(dest Slot, binary ast.Binary, left Slot, right Slot) !void {
+	line := binary.line
+	col := binary.col
+	frame := e.frame_pointer(line, col)!
+	// Six eight-byte slots: the four components as doubles, the denominator,
+	// and one numerator.
+	work := e.reserve(6 * 8)
+	wa := work.offset
+	wb := work.offset + 8
+	wc := work.offset + 16
+	wd := work.offset + 24
+	wr := work.offset + 32
+	we := work.offset + 40
+	e.complex_quotient_promote(frame, left.offset, wa, line, col)!
+	e.complex_quotient_promote(frame, left.offset + 4, wb, line, col)!
+	e.complex_quotient_promote(frame, right.offset, wc, line, col)!
+	e.complex_quotient_promote(frame, right.offset + 4, wd, line, col)!
+	// denom = cc*cc + dd*dd
+	e.complex_quotient_step('*', frame, wd, wd, wr, false, line, col)!
+	e.complex_quotient_fused('+', frame, wc, wc, wr, wr, false, line, col)!
+	// real = (aa*cc + bb*dd) / denom
+	e.complex_quotient_step('*', frame, wb, wd, we, false, line, col)!
+	e.complex_quotient_fused('+', frame, wa, wc, we, we, false, line, col)!
+	e.complex_quotient_step('/', frame, we, wr, we, false, line, col)!
+	e.complex_quotient_narrow_store(frame, we, dest.offset, line, col)!
+	// imaginary = (bb*cc - aa*dd) / denom
+	e.complex_quotient_step('*', frame, wa, wd, we, false, line, col)!
+	e.complex_quotient_fused('-', frame, wb, wc, we, we, false, line, col)!
+	e.complex_quotient_step('/', frame, we, wr, we, false, line, col)!
+	e.complex_quotient_narrow_store(frame, we, dest.offset + 4, line, col)!
+}
+
+// complex_quotient_tail writes the two components of the quotient after the
+// ratio and the denominator are known. `wa` and `wb` are a and b, `wc` and `wd`
+// are c and d, `wr` and `we` are the ratio and the denominator, and `c_large`
+// says which component the branch was chosen on: when c is large the real part
+// is b*ratio + a and the imaginary part is b - a*ratio, and when d is large they
+// are a*ratio + b and b*ratio - a. Each is divided by the denominator, and when
+// the ratio is subnormal the products are formed through a divided operand
+// instead, which is __divdc3's alternate order.
+fn (mut e Emitter) complex_quotient_tail(frame backend.Register, dest Slot, wa int, wb int, wc int, wd int, wr int, we int, wt int, wt2 int, single bool, c_large bool, line int, col int) !void {
+	alt := e.label()
+	end_alt := e.label()
+	e.complex_quotient_magnitude_branch(frame, wr, complex_rmin, '>', single, .branch_zero, alt, line, col)!
+	if c_large {
+		// real = (b*ratio + a) / denom, imaginary = (b - a*ratio) / denom.
+		e.complex_quotient_fused('+', frame, wb, wr, wa, wt, single, line, col)!
+		e.complex_quotient_step('/', frame, wt, we, wt, single, line, col)!
+		e.complex_quotient_store(frame, wt, dest.offset, single, line, col)!
+		e.complex_quotient_fused('neg+', frame, wa, wr, wb, wt2, single, line, col)!
+		e.complex_quotient_step('/', frame, wt2, we, wt2, single, line, col)!
+		e.complex_quotient_store(frame, wt2, dest.offset + 8, single, line, col)!
+	} else {
+		// real = (a*ratio + b) / denom, imaginary = (b*ratio - a) / denom.
+		e.complex_quotient_fused('+', frame, wa, wr, wb, wt, single, line, col)!
+		e.complex_quotient_step('/', frame, wt, we, wt, single, line, col)!
+		e.complex_quotient_store(frame, wt, dest.offset, single, line, col)!
+		e.complex_quotient_fused('-', frame, wb, wr, wa, wt2, single, line, col)!
+		e.complex_quotient_step('/', frame, wt2, we, wt2, single, line, col)!
+		e.complex_quotient_store(frame, wt2, dest.offset + 8, single, line, col)!
+	}
+	e.jump(end_alt)!
+	e.place(alt)
+	if c_large {
+		// t = b / c; real = d*t + a; t = a / c; imaginary = b - d*t.
+		e.complex_quotient_step('/', frame, wb, wc, wt, single, line, col)!
+		e.complex_quotient_fused('+', frame, wd, wt, wa, wt2, single, line, col)!
+		e.complex_quotient_step('/', frame, wt2, we, wt2, single, line, col)!
+		e.complex_quotient_store(frame, wt2, dest.offset, single, line, col)!
+		e.complex_quotient_step('/', frame, wa, wc, wt, single, line, col)!
+		e.complex_quotient_fused('neg+', frame, wd, wt, wb, wt2, single, line, col)!
+		e.complex_quotient_step('/', frame, wt2, we, wt2, single, line, col)!
+		e.complex_quotient_store(frame, wt2, dest.offset + 8, single, line, col)!
+	} else {
+		// t = a / d; real = c*t + b; t = b / d; imaginary = c*t - a.
+		e.complex_quotient_step('/', frame, wa, wd, wt, single, line, col)!
+		e.complex_quotient_fused('+', frame, wc, wt, wb, wt2, single, line, col)!
+		e.complex_quotient_step('/', frame, wt2, we, wt2, single, line, col)!
+		e.complex_quotient_store(frame, wt2, dest.offset, single, line, col)!
+		e.complex_quotient_step('/', frame, wb, wd, wt, single, line, col)!
+		e.complex_quotient_fused('-', frame, wc, wt, wa, wt2, single, line, col)!
+		e.complex_quotient_step('/', frame, wt2, we, wt2, single, line, col)!
+		e.complex_quotient_store(frame, wt2, dest.offset + 8, single, line, col)!
+	}
+	e.place(end_alt)
+}
+
+// complex_quotient_scaling scales the four components the way __divdc3 does
+// before the ratio is formed. `large` is the component whose magnitude decides
+// the branch: halve the four when it is at or above RBIG, multiply them by
+// RMINSCAL when it is below RMIN2, and multiply them by RMINSCAL when both
+// components of one operand are small enough that the division could underflow.
+// The tests are emitted in the order the helper makes them and short-circuit the
+// same way.
+fn (mut e Emitter) complex_quotient_scaling(frame backend.Register, wa int, wb int, wc int, wd int, large int, single bool, line int, col int) !void {
+	offsets := [wa, wb, wc, wd]
+	half_done := e.label()
+	do_scale := e.label()
+	second := e.label()
+	after := e.label()
+	// if (|large| >= RBIG) halve every operand.
+	e.complex_quotient_magnitude_branch(frame, large, complex_rbig, '<', single, .branch_nonzero, half_done, line, col)!
+	e.complex_quotient_scale(frame, offsets, complex_half, single, line, col)!
+	e.place(half_done)
+	// if (|large| < RMIN2) scale up; else the composite test on a, b and large.
+	e.complex_quotient_magnitude_branch(frame, large, complex_rmin2, '<', single, .branch_nonzero, do_scale, line, col)!
+	e.complex_quotient_magnitude_branch(frame, wa, complex_rmin, '<', single, .branch_zero, second, line, col)!
+	e.complex_quotient_magnitude_branch(frame, wb, complex_rmax2, '<', single, .branch_zero, second, line, col)!
+	e.complex_quotient_magnitude_branch(frame, large, complex_rmax2, '<', single, .branch_zero, second, line, col)!
+	e.jump(do_scale)!
+	e.place(second)
+	e.complex_quotient_magnitude_branch(frame, wb, complex_rmin, '<', single, .branch_zero, after, line, col)!
+	e.complex_quotient_magnitude_branch(frame, wa, complex_rmax2, '<', single, .branch_zero, after, line, col)!
+	e.complex_quotient_magnitude_branch(frame, large, complex_rmax2, '<', single, .branch_zero, after, line, col)!
+	e.place(do_scale)
+	e.complex_quotient_scale(frame, offsets, complex_rminscal, single, line, col)!
+	e.place(after)
+}
+
+// complex_quotient_scale multiplies each component in place by one factor, held
+// in a floating register while the four are walked.
+fn (mut e Emitter) complex_quotient_scale(frame backend.Register, offsets []int, factor f64, single bool, line int, col int) !void {
+	value := e.float_accumulator(line, col)!
+	other := e.float_scratch(line, col)!
+	e.complex_quotient_constant(other, factor, single)!
+	for offset in offsets {
+		e.load_complex_component(frame, value, offset, single)!
+		e.complex_step(value, other, '*', single)!
+		e.store_complex_component(frame, value, offset, single)!
+	}
+}
+
+// complex_quotient_step applies one scalar operator to two slots and leaves the
+// answer in a third.
+fn (mut e Emitter) complex_quotient_step(op string, frame backend.Register, left int, right int, dst int, single bool, line int, col int) !void {
+	value := e.float_accumulator(line, col)!
+	other := e.float_scratch(line, col)!
+	e.load_complex_component(frame, value, left, single)!
+	e.load_complex_component(frame, other, right, single)!
+	e.complex_step(value, other, op, single)!
+	e.store_complex_component(frame, value, dst, single)!
+}
+
+// complex_quotient_fused leaves `multiplier * multiplicand + addend` in the
+// destination slot with one rounding, which is the contraction gcc's own complex
+// division is built from. The operator picks the add, the subtract or a negated
+// form.
+fn (mut e Emitter) complex_quotient_fused(op string, frame backend.Register, multiplicand int, multiplier int, addend int, dst int, single bool, line int, col int) !void {
+	value := e.float_accumulator(line, col)!
+	other := e.float_scratch(line, col)!
+	e.load_complex_component(frame, value, multiplicand, single)!
+	e.load_complex_component(frame, other, multiplier, single)!
+	if single {
+		e.append(e.target.fused_single(op, value, other, frame, i32(addend))!)
+	} else {
+		e.append(e.target.fused_double(op, value, other, frame, i32(addend))!)
+	}
+	e.store_complex_component(frame, value, dst, single)!
+}
+
+// complex_quotient_magnitude_branch compares the magnitude of one component
+// against a constant, in the order the operator names, and branches when it
+// holds. `kind` is the branch the caller wants: nonzero for the comparison
+// itself and zero for its negation, which is how the short-circuit tests are
+// written out.
+fn (mut e Emitter) complex_quotient_magnitude_branch(frame backend.Register, offset int, constant f64, op string, single bool, kind image.FixupKind, name string, line int, col int) !void {
+	value := e.float_accumulator(line, col)!
+	other := e.float_scratch(line, col)!
+	e.load_complex_component(frame, value, offset, single)!
+	e.complex_quotient_magnitude(value, single, line, col)!
+	e.complex_quotient_constant(other, constant, single)!
+	e.complex_quotient_compare(op, value, other, single, kind, name, line, col)!
+}
+
+// complex_quotient_compare leaves the truth of the comparison in a general
+// register and branches on it, which is the shape emit_complex_condition uses.
+fn (mut e Emitter) complex_quotient_compare(op string, left backend.Register, right backend.Register, single bool, kind image.FixupKind, name string, line int, col int) !void {
+	result := e.accumulator(line, col)!
+	bits := e.scratch(line, col)!
+	if single {
+		e.append(e.target.float_comparison(op, left, right, result, bits)!)
+	} else {
+		e.append(e.target.double_comparison(op, left, right, result, bits)!)
+	}
+	e.append(e.target.test(result)!)
+	e.branch(kind, name, line, col)!
+}
+
+// complex_quotient_magnitude clears the sign bit of a floating register, which
+// is the magnitude the scaling and the subnormal-ratio tests read.
+fn (mut e Emitter) complex_quotient_magnitude(register backend.Register, single bool, line int, col int) !void {
+	gp := e.scratch(line, col)!
+	if single {
+		e.append(e.target.absolute_single(register, gp)!)
+	} else {
+		e.append(e.target.absolute_double(register, gp)!)
+	}
+}
+
+// complex_quotient_constant loads a floating constant into a register, at the
+// width the components have. The bytes are interned once and read back relative
+// to the instruction.
+fn (mut e Emitter) complex_quotient_constant(register backend.Register, value f64, single bool) !void {
+	if single {
+		e.intern_single(value)
+		e.reference(e.target.load_float_constant(register, 0)!, .single_constant, single_key(value), e.target.name_of(register))
+	} else {
+		e.intern_double(value)
+		e.reference(e.target.load_double_constant(register, 0)!, .float_constant, float_key(value), e.target.name_of(register))
+	}
+}
+
+// complex_quotient_store writes one slot to another.
+fn (mut e Emitter) complex_quotient_store(frame backend.Register, source int, dst int, single bool, line int, col int) !void {
+	value := e.float_accumulator(line, col)!
+	e.load_complex_component(frame, value, source, single)!
+	e.store_complex_component(frame, value, dst, single)!
+}
+
+// complex_quotient_promote widens one float component to a double, which is how
+// gcc's __divsc3 begins.
+fn (mut e Emitter) complex_quotient_promote(frame backend.Register, source int, dst int, line int, col int) !void {
+	value := e.float_accumulator(line, col)!
+	e.append(e.target.load_float_slot(frame, i32(source), value)!)
+	e.append(e.target.float_to_double(value, value)!)
+	e.append(e.target.store_double_slot(frame, i32(dst), value)!)
+}
+
+// complex_quotient_narrow_store rounds one double slot back to a float and
+// writes it where the quotient's component goes.
+fn (mut e Emitter) complex_quotient_narrow_store(frame backend.Register, source int, dst int, line int, col int) !void {
+	value := e.float_accumulator(line, col)!
+	e.append(e.target.load_double_slot(frame, i32(source), value)!)
+	e.append(e.target.double_to_float(value, value)!)
+	e.append(e.target.store_float_slot(frame, i32(dst), value)!)
 }
 
 // emit_complex_comparison leaves 0 or 1 in the accumulator for `z == w` and

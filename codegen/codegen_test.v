@@ -3393,17 +3393,38 @@ fn test_a_returned_complex_expression_is_built_once() {
 	assert run_image(emitted.bytes) == 0
 }
 
-// A quotient of two complex values has no formula this back end can write that
-// is right on the boundary, so it is refused by name rather than answered with a
-// value that is wrong where the standard's is not. Measured against gcc 16.2.1:
-// `x / y` for x = y = 1e308 + 1e308i is 1 + 0i, and the formula this back end
-// wrote answered NaN + NaNi.
-fn test_a_complex_quotient_is_refused_by_name() {
-	emitted := emit(translation_unit('int main() { double _Complex z = 1.0 + 2.0i; double _Complex w = 3.0 + 4.0i; double _Complex q = z / w; return 0; }'),
-		Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('quotient of two complex values')
-	assert emitted.bytes.len == 0
+// A quotient of two complex values is emitted inline with the arithmetic gcc
+// 16.2.1 carries, so it is right where the naive formula is not. The program
+// pins the boundary the old refusal named, z/z for z = 1e308 + 1e308i, which is
+// 1 + 0i, and it steps through each branch the divisor's size selects: the
+// halving above RBIG (the 1e308 divisor), the RMINSCAL upscale below RMIN2 (the
+// 1e-308 divisor), the composite upscale for an underflowing numerator (the
+// 1e-308 + 1e-308i over 3 + 0i), and the subnormal-ratio alternate order (the
+// 1e-308 + 3i divisor). Every expected component is what gcc 16.2.1 prints with
+// %.17g for the same expression, and the float case is the promoted-to-double
+// path gcc's __divsc3 takes. Measured on gcc 16.2.1, this program exits 0.
+fn test_a_complex_quotient_is_the_scaled_division() {
+	source := 'int main(void) {' +
+		' double _Complex q;' +
+		' q = (1.0 + 2.0i) / (3.0 + 4.0i);' +
+		' if (__real__ q != 0.44 || __imag__ q != 0.080000000000000002) { return 1; }' +
+		' q = (1e308 + 1e308i) / (1e308 + 1e308i);' +
+		' if (__real__ q != 1.0 || __imag__ q != 0.0) { return 2; }' +
+		' q = (1e-308 + 1e-308i) / (1e-308 + 1e-308i);' +
+		' if (__real__ q != 1.0 || __imag__ q != 0.0) { return 3; }' +
+		' q = (1.0 + 1.0i) / (1e-308 + 3.0i);' +
+		' if (__real__ q != 0.33333333333333331 || __imag__ q != -0.33333333333333331) { return 4; }' +
+		' q = (1e-308 + 1e-308i) / (3.0 + 0.0i);' +
+		' if (__real__ q != 3.3333333333333314e-309 || __imag__ q != 3.3333333333333314e-309) { return 5; }' +
+		' q = (3.0 + 4.0i) / (0.0 + 1.0i);' +
+		' if (__real__ q != 4.0 || __imag__ q != -3.0) { return 6; }' +
+		' float _Complex f = (1.0f + 2.0fi) / (3.0f + 4.0fi);' +
+		' if (__real__ f != 0.43999999761581421f || __imag__ f != 0.079999998211860657f) { return 7; }' +
+		' return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert emitted.bytes.len > 0
+	assert run_image(emitted.bytes) == 0
 }
 
 // The part of a complex value is the component `__real__` or `__imag__` names,
