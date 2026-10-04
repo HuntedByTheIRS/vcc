@@ -1248,6 +1248,35 @@ fn test_a_constant_conditional_of_a_complex_type_is_converted_to_it() {
 	os.rm(binary) or {}
 }
 
+// A conditional whose type is float, in the shape `<tgmath.h>` writes: a
+// `sizeof` dispatch over one call per floating width, handed to a `float`
+// parameter, the corpus's `sqrt(4.0f)`. The result type is a float, so the arm
+// has to be a float and not a double: before this the arm was widened to double
+// and the four-byte return read the low half of it, which is zero, so this
+// program exited 1 at the first check. Measured on gcc 16.2.1, it exits 0.
+fn test_a_float_conditional_dispatched_by_sizeof_is_a_float_value() {
+	source := scratch('float_conditional.c')
+	binary := scratch('float_conditional')
+	program := 'float sqrtf(float);\n' +
+		'double sqrt(double);\n' +
+		'float dispatchf(float a) { return sizeof(a) == sizeof(float) ? sqrtf(a) : (float)sqrt((double)a); }\n' +
+		'double dispatchd(double a) { return sizeof(a) == sizeof(double) ? sqrt(a) : (double)sqrtf((float)a); }\n' +
+		'int main(void) {\n' +
+		'    float f = 4.0f;\n' +
+		'    float r = dispatchf(f);\n' +
+		'    if (r != 2.0f) { return 1; }\n' +
+		'    if (sizeof(dispatchf(f)) != sizeof(float)) { return 2; }\n' +
+		'    if (sizeof(1 ? f : f) != sizeof(float)) { return 3; }\n' +
+		'    double d = 4.0;\n' +
+		'    if (dispatchd(d) != 2.0) { return 4; }\n' +
+		'    return 0;\n' +
+		'}\n'
+	exit_status := compile_and_run(['-lm', source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // The other half of that: with the library not named, the compile is refused and
 // the symbol is named. It used to compile and die at load saying which symbol it
 // could not find, which was silent at compile time, and a build that trusts the
