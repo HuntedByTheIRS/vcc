@@ -61,7 +61,16 @@ pub mut:
 	external_linker string
 	input_type      string
 	compile_only    bool
-	preprocess      bool
+	// shared is -shared: the link writes a shared object another program loads
+	// rather than a program the kernel starts. It is a kind of link and not a
+	// kind of compilation, so it says nothing about a run that stops before a
+	// link, which is what -c does.
+	shared bool
+	// static_link is -static: the link resolves every library into the file
+	// rather than leaving the loader to map it, and the program that comes out
+	// names no loader and no library.
+	static_link bool
+	preprocess  bool
 	// print_ast stops after the tree is built: nothing is emitted and nothing is
 	// written, which is what `-print-ast` is for.
 	print_ast     bool
@@ -216,6 +225,13 @@ pub fn parse(args []string) !Options {
 			opts.show_help_all = true
 		} else if arg == '-c' {
 			opts.compile_only = true
+		} else if arg == '-shared' {
+			// -shared is a link option: which file comes out, not how the
+			// source is read. -c stops before a link, so the two do not
+			// conflict and a run with both writes an object.
+			opts.shared = true
+		} else if arg == '-static' {
+			opts.static_link = true
 		} else if arg == '-E' {
 			opts.preprocess = true
 		} else if arg == '-print-ast' {
@@ -411,6 +427,52 @@ pub fn (opts Options) asks_query() bool {
 		|| opts.print_sysroot_headers_suffix
 }
 
+// links says whether this run reaches a link. A run that stops earlier has
+// nothing for a linker to do, and each of those is an option here rather than a
+// list of flag names compared where the question is asked: -c writes a
+// relocatable object, -E, -M, -MD and -dM answer a question about the source,
+// -print-ast dumps the tree, and a -print- query answers before an input is
+// read. It is what the two places that decide whether to link ask.
+pub fn (opts Options) links() bool {
+	return !opts.compile_only && !opts.preprocess && !opts.print_ast && !opts.dump_macros
+		&& !opts.deps && !opts.asks_query()
+}
+
+// link_kind_conflict_refusal is the message for a command line that gives both
+// of the flags naming a kind of link, and none when it gives at most one. The
+// two ask for different files: a shared object is loaded by a program that names
+// it, and a static program is started by the kernel with its libraries inside
+// it, so no single link is both and the other flag would be dropped in silence.
+pub fn (opts Options) link_kind_conflict_refusal() ?string {
+	if opts.shared && opts.static_link {
+		return '-shared and -static ask for different links: a shared object is loaded by a program that names it, and a static program is started with its libraries inside it'
+	}
+	return none
+}
+
+// in_house_link_refusal is the message for a command line whose kind of link the
+// path with no linker does not write, and none when it writes it: that path
+// writes a program, linked against the shared C library, so a shared object and
+// a static program are both refused by name and the message says what would
+// write them. A run that stops before a link is not one of these, because
+// neither flag has anything to decide about a run that never reaches one, and
+// neither is a plain run, which is the program this path writes.
+pub fn (opts Options) in_house_link_refusal() ?string {
+	if !opts.links() {
+		return none
+	}
+	if conflict := opts.link_kind_conflict_refusal() {
+		return conflict
+	}
+	if opts.shared {
+		return '-shared needs -external-linker=NAME: this compiler writes a program linked against the shared C library, and a linker is what writes the shared object'
+	}
+	if opts.static_link {
+		return '-static needs -external-linker=NAME: this compiler writes a program linked against the shared C library, and a linker is what resolves the libraries into the file'
+	}
+	return none
+}
+
 // search_dirs_text renders `-print-search-dirs` in the shape gcc uses: where the
 // compiler is, where its helper programs are looked for, and where its libraries
 // are looked for. gcc names its private install tree and its cc1/as/collect2
@@ -492,6 +554,13 @@ pub fn usage(all bool) string {
 	out << '                    archive. NAME must not be a C compiler (cc, gcc,'
 	out << '                    clang, c++, tcc); name ld or lld instead. With the'
 	out << '                    flag unset every input is refused exactly as before'
+	out << '  -shared               what the link writes: a shared object another'
+	out << '                        program loads, with no entry point and no loader'
+	out << '  -static               a program with every library resolved into itself'
+	out << '                        and no loader named in it'
+	out << '                        both are work a linker does here: without'
+	out << '                        -external-linker=NAME each is refused by name'
+	out << '                        rather than written as a program'
 	out << ''
 	out << 'Query options, which answer a question and stop without compiling (gcc'
 	out << 'spells these the same way; each needs no input file and exits 0):'

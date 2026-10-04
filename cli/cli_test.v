@@ -441,3 +441,78 @@ fn test_the_external_linker_is_in_the_help() {
 	assert usage(false).contains('-external-linker=NAME')
 	assert usage(true).contains('-external-linker')
 }
+
+// The two flags that name a kind of link are read and not recorded: a build that
+// passes one and is told nothing has been told the flag was passed over, and
+// what it asked for is the file that comes out.
+fn test_a_kind_of_link_is_read_rather_than_recorded() {
+	shared := parse(['-shared', 'x.c'])!
+	assert shared.shared
+	assert !shared.static_link
+	assert shared.ignored.len == 0
+	st := parse(['-static', 'x.c'])!
+	assert st.static_link
+	assert !st.shared
+	assert st.ignored.len == 0
+	// Both together are read here and decided where a run uses them: whether the
+	// two can be combined is a question about the link, not about the spelling.
+	both := parse(['-shared', '-static', 'x.c'])!
+	assert both.shared && both.static_link
+}
+
+// Whether a run reaches a link is one fact, and it is the flags that decide it:
+// the kind a link flag names has nothing to decide when the run stops before
+// there is one.
+fn test_a_run_that_stops_before_a_link_says_so() {
+	assert parse(['x.c'])!.links()
+	assert parse(['-shared', 'x.c'])!.links()
+	assert parse(['-static', '-o', 'out', 'x.c'])!.links()
+	assert !parse(['-c', 'x.c'])!.links()
+	assert !parse(['-E', 'x.c'])!.links()
+	assert !parse(['-M', 'x.c'])!.links()
+	assert !parse(['-dM', 'x.c'])!.links()
+	assert !parse(['-print-ast', 'x.c'])!.links()
+	assert !parse(['-print-multiarch'])!.links()
+}
+
+// The path that runs without a linker writes a program, so the two flags that
+// ask for another kind of file are refused by name and the message says what
+// would write them. The same flags on a run that stops before a link are not a
+// refusal: there is nothing for them to decide.
+fn test_the_kind_of_link_is_refused_by_name_when_nothing_writes_it() {
+	assert parse(['x.c'])!.in_house_link_refusal() == none
+	assert parse(['-c', '-shared', 'x.c'])!.in_house_link_refusal() == none
+	assert parse(['-E', '-static', 'x.c'])!.in_house_link_refusal() == none
+	shared := parse(['-shared', 'x.c'])!.in_house_link_refusal() or {
+		panic('a shared object is not what this path writes')
+	}
+	assert shared.contains('-shared')
+	assert shared.contains('-external-linker=NAME')
+	st := parse(['-static', 'x.c'])!.in_house_link_refusal() or {
+		panic('a static program is not what this path writes')
+	}
+	assert st.contains('-static')
+	assert st.contains('-external-linker=NAME')
+	both := parse(['-shared', '-static', 'x.c'])!.in_house_link_refusal() or {
+		panic('a shared object and a static program are different links')
+	}
+	assert both.contains('-shared') && both.contains('-static')
+}
+
+// Both flags at once are refused on either path. A linker given the two takes one
+// of them, so the file would be what one flag asked for and the other would be
+// gone without a word, which is the outcome the whole flag surface exists to
+// avoid.
+fn test_two_kinds_of_link_at_once_are_refused() {
+	assert parse(['-shared', 'x.c'])!.link_kind_conflict_refusal() == none
+	assert parse(['-static', 'x.c'])!.link_kind_conflict_refusal() == none
+	conflict := parse(['-shared', '-static', 'x.c'])!.link_kind_conflict_refusal() or {
+		panic('a shared object and a static program are two different files')
+	}
+	assert conflict.contains('-shared') && conflict.contains('-static')
+}
+
+fn test_the_kind_of_link_is_in_the_help() {
+	assert usage(false).contains('-shared')
+	assert usage(false).contains('-static')
+}

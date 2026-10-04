@@ -1,6 +1,7 @@
 module main
 
 import backend
+import backend.os.linux
 import cli
 import codegen
 import diagnostics
@@ -93,6 +94,14 @@ fn main() {
 	if opts.external_linker != '' {
 		external_link(opts)
 		return
+	}
+	// -shared and -static decide what a link writes, and the path that runs
+	// with no linker writes one kind of file: a program, linked against the
+	// shared C library. Handing back a program for either would be this
+	// compiler answering a question it was not asked, so each is refused by
+	// name and says what it needs instead.
+	if refusal := opts.in_house_link_refusal() {
+		abort(refusal)
 	}
 	if opts.inputs.len > 1 {
 		abort('linking more than one input is not implemented yet')
@@ -553,6 +562,19 @@ fn abort(message string) {
 	exit(1)
 }
 
+// link_kind is which link the command line asked for, read off the two flags
+// that name one. Whether the two may both be given is decided where the run is
+// refused and not here, so this answers and does not judge.
+fn link_kind(opts cli.Options) linux.LinkKind {
+	if opts.shared {
+		return .shared
+	}
+	if opts.static_link {
+		return .static_program
+	}
+	return .program
+}
+
 // external_link performs the final link with the program -external-linker named.
 //
 // It is the one path that links more than one input and inputs that are not C:
@@ -567,8 +589,14 @@ fn external_link(opts cli.Options) {
 	// link anyway would silently drop what the flag asked for, and so would
 	// dropping the flag; either way the command line would not mean what it
 	// says.
-	if opts.compile_only || opts.preprocess || opts.print_ast || opts.dump_macros || opts.deps {
+	if !opts.links() {
 		abort('-external-linker=${opts.external_linker} performs a link, and -c, -E, -M, -MD, -dM and -print-ast ask for a run that stops before one')
+	}
+	// Two kinds of link at once is one kind of link dropped in silence: the
+	// linker would be given one of the two flags and the file would not be what
+	// the other asked for.
+	if refusal := opts.link_kind_conflict_refusal() {
+		abort(refusal)
 	}
 	if refusal := cli.external_linker_refusal(opts.external_linker) {
 		abort(refusal)
@@ -621,7 +649,7 @@ fn external_link(opts cli.Options) {
 	} else {
 		'a.out'
 	}
-	args := target.external_link_arguments(.program, objects, opts.library_dirs, opts.libraries, out_path) or {
+	args := target.external_link_arguments(link_kind(opts), objects, opts.library_dirs, opts.libraries, out_path) or {
 		abort(err.msg())
 		return
 	}
