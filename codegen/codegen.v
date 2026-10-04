@@ -8906,6 +8906,13 @@ fn (mut e Emitter) emit_count_leading(call ast.Call, depth int) !void {
 // function in the same translation unit binds to that definition; every other
 // name is a symbol the loader resolves before the program starts.
 fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
+	// The bytes this call pushes for the arguments its registers ran out for have
+	// to be counted from what was already on the stack when it started, because a
+	// call an argument is made of is emitted while this call's own pushes are
+	// standing. That inner call is a call of its own: it gives back the bytes it
+	// pushed and leaves the count where it found it, which is this call's count
+	// and not zero.
+	entry_pushed := e.stack_pushed
 	// The argument-list operations and the machine builtins are answered before
 	// anything else: they reach the emitter as calls, and the path below would
 	// write a call to a name no image holds.
@@ -9414,12 +9421,12 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		e.load_accumulator(callee_slot, call.line, call.col)!
 		register := e.accumulator(call.line, call.col)!
 		e.append(e.target.call_register(register)!)
-		e.release_call_stack()
+		e.release_call_stack(entry_pushed)
 		return e.store_extended_result(call, call.line, call.col)
 	}
 	if call.name in e.program.defined {
 		e.reference(e.target.call_near(0), .call_local, call.name, '')
-		e.release_call_stack()
+		e.release_call_stack(entry_pushed)
 		return e.store_extended_result(call, call.line, call.col)
 	}
 	e.import_symbol(call.name)
@@ -9441,7 +9448,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	} else {
 		e.reference(e.target.call_slot(0), .call_import, call.name, '')
 	}
-	e.release_call_stack()
+	e.release_call_stack(entry_pushed)
 	return e.store_extended_result(call, call.line, call.col)
 }
 
@@ -9450,11 +9457,21 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 // arguments have to still be on the stack when the callee reads them; that is
 // the one ordering this has to get right, and the machine code says so when it
 // is wrong.
-fn (mut e Emitter) release_call_stack() {
-	if e.stack_pushed > 0 {
-		e.append(e.target.stack_release(u32(e.stack_pushed)))
-		e.stack_pushed = 0
+//
+// `entry` is what `stack_pushed` was when the call started. Only the bytes this
+// call pushed are released, and the count is put back to `entry` rather than
+// cleared, because an enclosing call's stack arguments can be standing while
+// this one is emitted: an argument that is itself a call is evaluated after the
+// enclosing call has pushed the arguments written before it, and clearing the
+// count here would give those bytes back early, so the enclosing call's later
+// release would not match and the callee would read its arguments from the
+// wrong place.
+fn (mut e Emitter) release_call_stack(entry int) {
+	pushed := e.stack_pushed - entry
+	if pushed > 0 {
+		e.append(e.target.stack_release(u32(pushed)))
 	}
+	e.stack_pushed = entry
 }
 
 // ArgPlace is where one argument is passed: which of the machine's two files
