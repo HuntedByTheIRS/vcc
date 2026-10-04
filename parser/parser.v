@@ -386,7 +386,7 @@ fn (mut p Parser) report_pending_bounds() {
 			p.error_span(bound.at_line, bound.at_col, 'a constraint violation: the bound of ${bound.object} is not an integer constant expression, and an object at file scope needs a size that is one')
 			continue
 		}
-		p.error_span(bound.name_line, bound.name_col, 'unsupported: ${bound.name} is used here and nothing in this file declares it')
+		p.error_span(bound.name_line, bound.name_col, 'a constraint violation: ${bound.name} is used here and nothing in this file declares it')
 	}
 }
 
@@ -574,7 +574,16 @@ fn (mut p Parser) check_undeclared_name(name string, line int, col int, mut repo
 		return
 	}
 	reported[name] = true
-	p.error_span(line, col, 'unsupported: ${name} is used here and nothing in this file declares it')
+	// The class is the program's, not this compiler's: a name nothing declares is
+	// the constraint C99 states as an implicit declaration. gcc 16.2.1 reports it
+	// as an error in every mode measured (`-std=gnu11`, `-std=c99`, `-std=c23`,
+	// `-std=c2y`: `error: implicit declaration of function 'helper'
+	// [-Wimplicit-function-declaration]`, exit 1), and nothing here is a construct
+	// this compiler lacks: the name has no place in the image and that is the
+	// program's doing. It stays an error rather than the warning gcc's own flag
+	// would make of it, because an image with an unresolved call is not one this
+	// back end can write.
+	p.error_span(line, col, 'a constraint violation: ${name} is used here and nothing in this file declares it')
 }
 
 // skip_statement moves past a statement that failed, so the rest of the block

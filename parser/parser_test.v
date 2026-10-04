@@ -707,6 +707,13 @@ fn test_a_local_array_whose_size_is_not_a_number_is_reported() {
 	result := parsed('int main() { int a[n]; return 0; }')
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('n is used here and nothing in this file declares it')
+	// The class is the program's and not this compiler's: a name nothing declares
+	// is the constraint C99 states as an implicit declaration, and gcc 16.2.1
+	// reports it as an error in every mode measured. Calling it unsupported would
+	// say this compiler lacks the construct, which is the one thing it is not.
+	assert !result.diagnostics[0].msg.contains('unsupported')
+	assert result.diagnostics[0].msg.contains('constraint violation')
+	assert !result.diagnostics[0].warning
 	assert result.unit.decls[0].body.len == 2
 	assert result.unit.decls[0].body[0].decl_vla_size != none
 }
