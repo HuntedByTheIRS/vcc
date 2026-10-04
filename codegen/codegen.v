@@ -3648,10 +3648,8 @@ fn (e Emitter) normalize_a_bool_constant(written string, value i64) i64 {
 // written. The object's storage in the image carries a width and not a type, so a
 // value stored into it reads the signedness off the declaration.
 fn (e Emitter) global_written(name string) string {
-	for global in e.unit.globals {
-		if global.name == name {
-			return global.typ
-		}
+	if global := e.global_definition(name) {
+		return global.typ
 	}
 	return ''
 }
@@ -9741,6 +9739,38 @@ fn (mut e Emitter) import_symbol(name string) {
 	}
 }
 
+// import_object records a name another object defines as an undefined symbol of
+// the table, and marks it an object rather than a function so that the symbol's
+// type says what it is. The order is the order the names are first reached in,
+// the same as an imported function.
+fn (mut e Emitter) import_object(name string) {
+	if name !in e.program.imports {
+		e.program.imports << name
+	}
+	e.program.object_imports[name] = true
+}
+
+// global_definition is the declaration of a top-level object by name: one this
+// unit defines, or one it declares with no storage here. A definition is
+// storage the image holds; an `extern` declaration is a name another object
+// defines, which this unit can reach and has nothing to place for. The two are
+// one question here because a reader that wants the type or the width does not
+// care which it is, and the place that lays out storage asks `global_of` rather
+// than this.
+fn (e Emitter) global_definition(name string) ?ast.Global {
+	for global in e.unit.globals {
+		if global.name == name {
+			return global
+		}
+	}
+	for global in e.unit.extern_objects {
+		if global.name == name {
+			return global
+		}
+	}
+	return none
+}
+
 // global_shape is what a top-level object's declaration says about its storage:
 // the width of one element and how many there are. It asks the tree rather than
 // the image, so an expression can ask it while it is being sized, before anything
@@ -9749,57 +9779,55 @@ fn (e Emitter) global_shape(name string) ?image.GlobalSlot {
 	if slot := e.program.globals[name] {
 		return slot
 	}
-	for global in e.unit.globals {
-		if global.name == name {
-			if global.bytes > 0 {
-				// An object of an aggregate type: its storage is as many bytes
-				// as the layout says and it has no element width a load could
-				// use, which is why nothing may read the name as a value. An
-				// array of them keeps the count, because that is what says the
-				// name is an array and how far an index reaches.
-				return image.GlobalSlot{
-					offset: 0
-					width:  global.bytes
-					count:  global.count
-					object: true
-				}
+	if global := e.global_definition(name) {
+		if global.bytes > 0 {
+			// An object of an aggregate type: its storage is as many bytes
+			// as the layout says and it has no element width a load could
+			// use, which is why nothing may read the name as a value. An
+			// array of them keeps the count, because that is what says the
+			// name is an array and how far an index reaches.
+			return image.GlobalSlot{
+				offset: 0
+				width:  global.bytes
+				count:  global.count
+				object: true
 			}
-			if e.writes_a_128(global.typ) {
-				// An object of a 128-bit type at the top level is sixteen bytes of
-				// storage and a value type rather than an aggregate: the width is
-				// what an element of an array of them scales by, and the count is
-				// how many there are. The value question is the one a local of the
-				// type has, and it is refused where a name is read as a value
-				// rather than here, because the storage is real and the layout and
-				// an element address both need this shape.
-				return image.GlobalSlot{
-					offset: 0
-					width:  wide_bytes
-					count:  global.count
-				}
+		}
+		if e.writes_a_128(global.typ) {
+			// An object of a 128-bit type at the top level is sixteen bytes of
+			// storage and a value type rather than an aggregate: the width is
+			// what an element of an array of them scales by, and the count is
+			// how many there are. The value question is the one a local of the
+			// type has, and it is refused where a name is read as a value
+			// rather than here, because the storage is real and the layout and
+			// an element address both need this shape.
+			return image.GlobalSlot{
+				offset: 0
+				width:  wide_bytes
+				count:  global.count
 			}
-			// The width of one element is the size of the element's own type, which
-			// for an array of arrays is the row and not the scalar at the bottom:
-			// `int a[2][3]` steps by twelve bytes per row, and reading the written
-			// spelling `int` would give four and overlap the rows. A scalar element
-			// resolves to the same answer the spelling does.
-			element := if global.count > 0 {
-				if elem := global.resolved.element() {
-					e.representation.size_of(elem) or { e.type_width(global.typ) or { return none } }
-				} else {
-					e.type_width(global.typ) or { return none }
-				}
+		}
+		// The width of one element is the size of the element's own type, which
+		// for an array of arrays is the row and not the scalar at the bottom:
+		// `int a[2][3]` steps by twelve bytes per row, and reading the written
+		// spelling `int` would give four and overlap the rows. A scalar element
+		// resolves to the same answer the spelling does.
+		element := if global.count > 0 {
+			if elem := global.resolved.element() {
+				e.representation.size_of(elem) or { e.type_width(global.typ) or { return none } }
 			} else {
 				e.type_width(global.typ) or { return none }
 			}
-			return image.GlobalSlot{
-				offset:   0
-				width:    element
-				count:    if global.count > 0 { global.count } else { 0 }
-				floating: e.writes_a_double(global.typ)
-				single:   e.writes_a_float(global.typ)
-				unsigned: e.written_is_unsigned(global.typ)
-			}
+		} else {
+			e.type_width(global.typ) or { return none }
+		}
+		return image.GlobalSlot{
+			offset:   0
+			width:    element
+			count:    if global.count > 0 { global.count } else { 0 }
+			floating: e.writes_a_double(global.typ)
+			single:   e.writes_a_float(global.typ)
+			unsigned: e.written_is_unsigned(global.typ)
 		}
 	}
 	return none
@@ -9810,13 +9838,11 @@ fn (e Emitter) global_shape(name string) ?image.GlobalSlot {
 // tree says so before the storage has been laid out, so this asks the declaration
 // rather than the blob.
 fn (e Emitter) global_is_floating(name string) bool {
-	for global in e.unit.globals {
-		if global.name == name {
-			// An array's name is an address, so only an object that holds one
-			// floating value is read as one.
-			return global.count == 0
-				&& (e.writes_a_double(global.typ) || e.writes_a_float(global.typ))
-		}
+	if global := e.global_definition(name) {
+		// An array's name is an address, so only an object that holds one
+		// floating value is read as one.
+		return global.count == 0
+			&& (e.writes_a_double(global.typ) || e.writes_a_float(global.typ))
 	}
 	return false
 }
@@ -9824,10 +9850,8 @@ fn (e Emitter) global_is_floating(name string) bool {
 // global_is_single is the same question asked for the four-byte member of the
 // class, which is what decides the width of the load that reads it.
 fn (e Emitter) global_is_single(name string) bool {
-	for global in e.unit.globals {
-		if global.name == name {
-			return global.count == 0 && e.writes_a_float(global.typ)
-		}
+	if global := e.global_definition(name) {
+		return global.count == 0 && e.writes_a_float(global.typ)
 	}
 	return false
 }
@@ -9836,21 +9860,17 @@ fn (e Emitter) global_is_single(name string) bool {
 // top-level array: `a[0]` is a floating value when a is an array of them, which
 // is the class the element is read and written with.
 fn (e Emitter) global_element_is_floating(name string) bool {
-	for global in e.unit.globals {
-		if global.name == name {
-			return global.count > 0
-				&& (e.writes_a_double(global.typ) || e.writes_a_float(global.typ))
-		}
+	if global := e.global_definition(name) {
+		return global.count > 0
+			&& (e.writes_a_double(global.typ) || e.writes_a_float(global.typ))
 	}
 	return false
 }
 
 // global_element_is_single is that question at four bytes.
 fn (e Emitter) global_element_is_single(name string) bool {
-	for global in e.unit.globals {
-		if global.name == name {
-			return global.count > 0 && e.writes_a_float(global.typ)
-		}
+	if global := e.global_definition(name) {
+		return global.count > 0 && e.writes_a_float(global.typ)
 	}
 	return false
 }
@@ -9947,14 +9967,21 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 	if slot := e.program.globals[name] {
 		return slot
 	}
-	mut definition := ?ast.Global(none)
-	for global in e.unit.globals {
-		if global.name == name {
-			definition = global
-			break
+	object := e.global_definition(name) or { return none }
+	if object.external {
+		// An object another object defines: this unit reaches the name and has
+		// nothing to place for it, so there is no storage here to lay out. The
+		// symbol is imported undefined and every reference to it is one a
+		// linker resolves. The path that writes a program itself has nowhere to
+		// put a reference to an object in another file, so it leaves the name
+		// unanswered and the use is refused where it is written rather than
+		// pointed at storage this image does not have.
+		if !e.compile_only {
+			return none
 		}
+		e.import_object(name)
+		return e.global_shape(name)
 	}
-	object := definition or { return none }
 	shape := e.global_shape(name) or { return none }
 	element := shape.width
 	// A definition with no written count is one value, and one with a count is

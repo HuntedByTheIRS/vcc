@@ -324,6 +324,32 @@ fn test_an_object_with_internal_linkage_is_a_local_symbol() {
 	assert u32(relocation_info(bytes, 0) & 0xffffffff) == x86_64().address_relocation()
 }
 
+// An object another object defines is an undefined symbol with the object type
+// rather than the function type: a reference through the table is a reference
+// to storage, and a reader that took the symbol for code would call it.
+fn test_an_imported_object_is_an_undefined_symbol_of_the_object_type() {
+	mut program := image.Program{}
+	program.text = [u8(0x48), u8(0x8b), u8(0x05), u8(0), u8(0), u8(0), u8(0), u8(0xc3)]
+	program.imports << 'counter'
+	program.object_imports['counter'] = true
+	program.fixups << image.Fixup{
+		start:    0
+		length:   7
+		kind:     .got_address
+		name:     'counter'
+		register: 'rax'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	entry := symbol_entry_at(bytes, first_global_symbol)
+	assert bytes[entry + 4] == symbol_global_object
+	assert u16_at(bytes, entry + 6) == shn_undef
+	assert u64_at(bytes, entry + 8) == 0
+	assert relocation_count(bytes) == 1
+	assert u32(relocation_info(bytes, 0) & 0xffffffff) == x86_64().got_relocation()
+}
+
 // The relocations against the writable data live in a table of their own, and
 // these read one entry out of it the way a linker does.
 

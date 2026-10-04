@@ -74,6 +74,12 @@ mut:
 	// functions are code; the objects are collected here and travel with the
 	// tree, since a body reads them by name.
 	globals []ast.Global
+	// extern_objects is every object this file declared at the top level with
+	// no storage here: an `extern` declaration names an object another object
+	// defines, so the name travels with the tree as a reachable name and not
+	// as storage. It is kept apart from globals so nothing lays out storage for
+	// a declaration.
+	extern_objects []ast.Global
 	// declared is every name this file declares anywhere, wherever it was
 	// declared: an object, a function, a typedef, a parameter. It is what the
 	// check at the end of the unit asks a name the tree carries against, and it
@@ -289,8 +295,9 @@ fn (mut p Parser) parse_unit() ast.TranslationUnit {
 		decls << p.parse_declaration()
 	}
 	return ast.TranslationUnit{
-		decls:   decls
-		globals: p.globals
+		decls:          decls
+		globals:        p.globals
+		extern_objects: p.extern_objects
 	}
 }
 

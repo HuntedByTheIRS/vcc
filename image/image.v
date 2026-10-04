@@ -117,6 +117,11 @@ pub mut:
 	// imports are the library symbols the image needs, in the order they were
 	// first called, so that the same input produces the same bytes every run.
 	imports []string
+	// object_imports are the names in `imports` that name an object rather than
+	// a function: an `extern` object another translation unit defines. The
+	// symbol is undefined either way, and the type it is given says what a
+	// reader of the table is looking at.
+	object_imports map[string]bool
 	// libraries are the shared libraries the image names as needed, in the
 	// order the -l flags named them: the loader maps these before the first
 	// instruction runs, and one that is not named is one whose symbols are not

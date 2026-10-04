@@ -548,7 +548,17 @@ fn emit_object_symbols(mut output []u8, parts PartOffsets, program image.Program
 	}
 	for name in program.imports {
 		at := parts.symtab + symbol_index[name] * elf_symbol_size
-		put_symbol(mut output, at, name_offset[name] or { 0 }, symbol_global_function,
+		// An import is a function the loader resolves or an object another
+		// object defines, and the symbol's type says which: both have no value
+		// and no section, because the definition is somewhere this object is
+		// not. A reader of the table that treated an object as a function would
+		// call it; the type is what says not to.
+		info := if program.object_imports[name] {
+			symbol_global_object
+		} else {
+			symbol_global_function
+		}
+		put_symbol(mut output, at, name_offset[name] or { 0 }, info,
 			shn_undef, 0, 0)
 	}
 }
