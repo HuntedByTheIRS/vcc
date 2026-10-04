@@ -803,6 +803,65 @@ fn test_the_extended_type_is_refused_where_it_is_not_converted_to_a_double() {
 	assert initialised.diagnostics[0].msg.contains('long double')
 }
 
+// A long double travels by the x87 convention: a function returns it in st(0), a
+// call passes it as its sixteen bytes in memory, and a definition reads its
+// parameter from the stack at the offset the frame layout gives it. Each program
+// here exits 0 exactly when the value that came back or went in is the one the
+// arithmetic says it is, so the status is the check. Measured on gcc 16.2.1 at
+// -O0 -fno-builtin, which accepts each of them and exits 0.
+fn test_a_long_double_call_and_return_travel_by_the_x87_convention() {
+	emitted := emit(translation_unit('long double addl(long double a, long double b) { return a + b; }
+int main(void) { return addl(1.25L, 2.5L) == 3.75L ? 0 : 1; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+	// The same comparison against a value the arithmetic does not give answers 1,
+	// which is what makes the 0 above the convention and not a constant.
+	wrong := emit(translation_unit('int main(void) { return 1.25L + 2.5L == 3.7L ? 0 : 1; }'),
+		Options{})
+	assert wrong.diagnostics.len == 0
+	assert run_image(wrong.bytes) == 1
+	// A return of a value that is not a long double converts it into the extended
+	// format, which is what the corpus's `return diff <= ...` does with the int a
+	// comparison is worth.
+	converted := emit(translation_unit('long double f(void) { return 1; }
+int main(void) { return f() == 1.0L ? 0 : 1; }'), Options{})
+	assert converted.diagnostics.len == 0
+	assert run_image(converted.bytes) == 0
+}
+
+fn test_a_long_double_parameter_is_read_where_the_caller_wrote_it() {
+	// The first long double parameter is at 16(%rbp) and a second at 32(%rbp),
+	// which is where gcc reads them, and the argument registers beside them keep
+	// their own places.
+	emitted := emit(translation_unit('long double pick(int a, long double z, int b, long double w) { return w; }
+int main(void) { return pick(1, 2.5L, 3, 4.75L) == 4.75L ? 0 : 1; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+	// An odd number of eight-byte words before the long double takes a padding
+	// word, so seven ints put it sixteen bytes further in and not eight.
+	odd := emit(translation_unit('long double pick(int a, int b, int c, int d, int e, int f, int g, long double z) { return z; }
+int main(void) { return pick(1, 2, 3, 4, 5, 6, 7, 8.125L) == 8.125L ? 0 : 1; }'), Options{})
+	assert odd.diagnostics.len == 0
+	assert run_image(odd.bytes) == 0
+}
+
+fn test_a_long_double_conditional_and_arithmetic_are_computed_on_the_stack() {
+	// The conditional picks one arm's value, and the subtraction and
+	// multiplication are the x87 instructions the type needs rather than the
+	// double arithmetic that would round it.
+	emitted := emit(translation_unit('int main(void) { long double a = 3.0L; long double b = 1.5L;
+long double s = a > b ? a : b;
+return s - 1.5L * 2.0L == 0.0L ? 0 : 1; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+	// A comparison of a long double with an int converts the int, so the order is
+	// read in the extended format on both sides.
+	mixed := emit(translation_unit('int main(void) { long double a = 3.0L; return a > 2 ? 0 : 1; }'),
+		Options{})
+	assert mixed.diagnostics.len == 0
+	assert run_image(mixed.bytes) == 0
+}
+
 // The narrow integer types are values a register holds. A read widens the value to
 // the int the promotion makes it, with the value's sign kept or with zero above it
 // when the type is unsigned, and a store writes the low byte or the low two bytes
