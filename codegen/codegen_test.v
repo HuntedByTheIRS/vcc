@@ -3397,6 +3397,40 @@ fn test_a_top_level_double_array_folds_a_floating_constant_expression() {
 	assert run_image(literal.bytes) == 232
 }
 
+// A const-qualified aggregate of a floating element type is a table of floating
+// constants, and the elements of a rank-2 or deeper table reach the image as the
+// floating bytes. Measured on gcc 16.2.1, the rank-2 table below exits 64 for
+// `(int)b[0][0] + (int)b[0][1] * 2 + (int)b[1][0] * 4 + (int)b[1][1] * 8`, and
+// before the fix the elements were written as integers, so every read came back
+// the denormal 9.88e-324 and the program exited 0.
+fn test_a_const_floating_aggregate_writes_its_elements_floating() {
+	rank_two := emit(translation_unit('const double b[2][2] = {{2.0, 3.0}, {4.0, 5.0}};\nint main(void) { return (int)b[0][0] + (int)b[0][1] * 2 + (int)b[1][0] * 4 + (int)b[1][1] * 8; }'),
+		Options{})
+	assert rank_two.diagnostics.len == 0
+	assert run_image(rank_two.bytes) == 2 + 6 + 16 + 40
+	// Rank three is the same class, and its last element is the one read.
+	rank_three := emit(translation_unit('const double b[2][2][2] = {{{1.0, 2.0}, {3.0, 4.0}}, {{5.0, 6.0}, {7.0, 9.0}}};\nint main(void) { return (int)b[1][1][1]; }'),
+		Options{})
+	assert rank_three.diagnostics.len == 0
+	assert run_image(rank_three.bytes) == 9
+	// A const float element is the single class and not the double one.
+	single := emit(translation_unit('const float f[2][2] = {{2.0f, 3.0f}, {4.0f, 5.0f}};\nint main(void) { return (int)f[0][0] + (int)f[1][1]; }'),
+		Options{})
+	assert single.diagnostics.len == 0
+	assert run_image(single.bytes) == 7
+}
+
+// The folded floating constant expression the lane added reaches a rank-2
+// table's element too: `{{(1.0) / (12.0), 2.0}, {3.0, 4.0}}` holds
+// 0.083333333333333329 at b[0][0], so `(int)(b[0][0] * 1000.0)` exits 83 where
+// the integer folder's zero left it at 0.
+fn test_a_const_floating_aggregate_folds_a_floating_constant_expression() {
+	emitted := emit(translation_unit('const double b[2][2] = {{(1.0) / (12.0), 2.0}, {3.0, 4.0}};\nint main(void) { return (int)(b[0][0] * 1000.0); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 83
+}
+
 fn test_the_logical_not_of_a_double_is_a_comparison_with_zero() {
 	// `!d` compares the value with zero, and zero comes from the exclusive-or of a
 	// register with itself. That instruction is the packed-double one and not the

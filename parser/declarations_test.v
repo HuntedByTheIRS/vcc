@@ -566,6 +566,39 @@ fn test_a_file_scope_floating_constant_expression_element_is_folded() {
 	assert refused.diagnostics[0].msg.contains('written constant')
 }
 
+// A const-qualified element of a floating type belongs to the floating class,
+// and the elements of a const brace initializer are floating constants:
+// `const double b[2][2] = {{2.0, 3.0}, {4.0, 5.0}}` writes 2.0 and 3.0 into the
+// first row and not the integers 2 and 3. Measured on gcc 16.2.1, the eight
+// bytes at b start `00 00 00 00 00 00 00 40` (2.0), and a program reading b[0][0]
+// through a `double` is the same bytes.
+fn test_a_const_floating_aggregate_takes_floating_elements() {
+	result := declarations_of('static const double b[2][2] = {{2.0, 3.0}, {4.0, 5.0}};')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 1
+	object := result.unit.globals[0]
+	entries := object.member_inits
+	assert entries.len == 4
+	assert entries[0].offset == 0
+	assert entries[1].offset == 8
+	assert entries[2].offset == 16
+	assert entries[3].offset == 24
+	assert entries[0].spelling == 'double'
+	assert (entries[0].init_float or { -1.0 }) == 2.0
+	assert (entries[1].init_float or { -1.0 }) == 3.0
+	assert (entries[2].init_float or { -1.0 }) == 4.0
+	assert (entries[3].init_float or { -1.0 }) == 5.0
+	assert entries[0].init == none
+	// The single class is the element's own, and a const float element is the
+	// four-byte one: the two classes are told apart by the spelling.
+	single := declarations_of('static const float f[2][2] = {{2.0f, 3.0f}, {4.0f, 5.0f}};')
+	assert single.diagnostics.len == 0
+	sentries := single.unit.globals[0].member_inits
+	assert sentries.len == 4
+	assert sentries[0].spelling == 'float'
+	assert (sentries[0].init_float or { -1.0 }) == 2.0
+}
+
 // A compound literal is an element an aggregate list may hold, because 6.7.8p1
 // makes an element an assignment-expression and 6.5.2.5 makes a compound
 // literal one. At file scope the literal's object has static storage duration
