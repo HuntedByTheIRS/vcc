@@ -1075,6 +1075,28 @@ pub fn (t &Target) negate_single(reg Register, gp Register) ![]u8 {
 	return t.encoders.negate_single(t.describe(reg), t.describe(gp))
 }
 
+// absolute_double and absolute_single clear a floating value's sign bit, which
+// is the magnitude the scaled complex division compares before it chooses a
+// branch. They are the sign flip one instruction over: btr in place of btc.
+pub fn (t &Target) absolute_double(reg Register, gp Register) ![]u8 {
+	return t.encoders.absolute_double(t.describe(reg), t.describe(gp))
+}
+
+pub fn (t &Target) absolute_single(reg Register, gp Register) ![]u8 {
+	return t.encoders.absolute_single(t.describe(reg), t.describe(gp))
+}
+
+// fused_double and fused_single compute a product and a sum with one rounding,
+// which the complex quotient needs to answer the same value gcc's own helper
+// does. The operator picks the add, the subtract or a negated form.
+pub fn (t &Target) fused_double(op string, dst Register, src2 Register, base Register, disp i32) ![]u8 {
+	return t.encoders.fused_double(op, t.describe(dst), t.describe(src2), t.describe(base), disp)
+}
+
+pub fn (t &Target) fused_single(op string, dst Register, src2 Register, base Register, disp i32) ![]u8 {
+	return t.encoders.fused_single(op, t.describe(dst), t.describe(src2), t.describe(base), disp)
+}
+
 // int_to_double widens a four-byte integer to a double, and double_to_int
 // truncates a double to a four-byte integer. Those are the two conversions the
 // language asks for between the classes, and the machine keeps them in the
