@@ -896,6 +896,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						params:   d.function_params()
 						defined:  true
 						weak:     spec.attributes.weak || trailing.weak
+						static_:  spec.storage == .static_
 						body:     statements
 						line:     d.name_at.line
 						col:      d.name_at.col
@@ -919,6 +920,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 					resolved: p.declared_type(spec.clause, d)
 					params:   d.function_params()
 					weak:     spec.attributes.weak || trailing.weak
+					static_:  spec.storage == .static_
 					body:     []ast.Stmt{}
 					line:     d.name_at.line
 					col:      d.name_at.col
@@ -1422,6 +1424,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				bytes:        bytes
 				alignment:    data_alignment
 				weak:         data_weak
+				static_:      spec.storage == .static_
 				init:         data_init
 				init_float:   data_init_float
 				address:      data_address
@@ -1513,6 +1516,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			count:         data_count
 			alignment:     data_alignment
 			weak:          data_weak
+			static_:       spec.storage == .static_
 			init:          init
 			init_float:    init_float
 			init_long:     data_init_long

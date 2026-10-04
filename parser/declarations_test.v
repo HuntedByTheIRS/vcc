@@ -130,6 +130,32 @@ fn test_an_extern_object_is_read_and_dropped() {
 	assert result.unit.decls.len == 0
 }
 
+// A file-scope `static` gives a name internal linkage (6.2.2p3), and the
+// declaration has to carry it: the object writer writes such a definition with
+// the local binding, so two translation units may each define one of the same
+// name without the link reading them as two definitions of one program-wide
+// name. A declaration without `static` keeps external linkage. The static
+// function here is one something calls, because an uncalled one is stepped over
+// before it reaches the tree.
+fn test_a_file_scope_static_name_carries_internal_linkage() {
+	result := declarations_of('static int helper(int n) { return n * 2; }\nint call(int n) { return helper(n); }')
+	assert result.diagnostics.len == 0
+	assert result.unit.decls.len == 2
+	assert result.unit.decls[0].name == 'helper'
+	assert result.unit.decls[0].defined
+	assert result.unit.decls[0].static_
+	assert result.unit.decls[1].name == 'call'
+	assert !result.unit.decls[1].static_
+
+	objects := declarations_of('static int table[4] = { 1, 2, 3, 4 };\nint open[4] = { 1, 2, 3, 4 };')
+	assert objects.diagnostics.len == 0
+	assert objects.unit.globals.len == 2
+	assert objects.unit.globals[0].name == 'table'
+	assert objects.unit.globals[0].static_
+	assert objects.unit.globals[1].name == 'open'
+	assert !objects.unit.globals[1].static_
+}
+
 // A brace initializer is a definition even when the declaration says extern:
 // the object has to live somewhere, and the values written are the ones the
 // image holds. Measured with gcc 16.2.1 and this compiler, `int x[2] = {1, 2};`

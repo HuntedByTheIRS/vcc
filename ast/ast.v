@@ -60,6 +60,12 @@ pub:
 	// rather than one that collides with a second definition, and the object
 	// says so in the symbol table.
 	weak bool
+	// static_ says the declaration gave the name internal linkage, which a
+	// file-scope `static` does (6.2.2p3). A definition of such a name is written
+	// into the object as a local symbol, so two translation units may each
+	// define one of the same name without the link reading them as two
+	// definitions of one program-wide name.
+	static_ bool
 	// body is the statements the definition wrote. It is empty both for a
 	// prototype and for a definition written as `{}`, so defined is what tells
 	// the two apart.
@@ -143,7 +149,13 @@ pub:
 	alignment int
 	// weak says the declaration asked for the weak symbol binding, with
 	// `__attribute__((weak))`. The object says so in its symbol table.
-	weak       bool
+	weak bool
+	// static_ says the declaration gave the object internal linkage, which a
+	// file-scope `static` does (6.2.2p3). Its definition is written into the
+	// object as a local symbol, so two translation units may each define one of
+	// the same name without the link reading them as two definitions of one
+	// program-wide name.
+	static_    bool
 	init       ?i64
 	init_float ?f64
 	// init_long is the constant of an object of a long double type, in the
