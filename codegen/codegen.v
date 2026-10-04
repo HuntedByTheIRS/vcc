@@ -9126,14 +9126,21 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				// An object goes on the stack in one piece, its words pushed from
 				// the last one to the first: the stack grows down, so the word
 				// pushed last is the one at the lowest address, which is the
-				// object's first word. The address of the object is taken again
-				// for each word, which keeps the register the word travels in
-				// free of it, and the object's last word is only as wide as the
-				// object has left, so nothing past its end is read.
+				// object's first word. The object's address is taken once and
+				// parked, because an object computed here, a call's result or a
+				// conditional of them, is materialized by taking its address: a
+				// second take for each word would compute the object once per
+				// word, so a call would run once per word and each run's
+				// temporary would overwrite the last. The object's last word is
+				// only as wide as the object has left, so nothing past its end is
+				// read.
 				class := e.aggregate_argument(call, i) or {
 					e.diagnostics << problem(call.line, call.col, 'internal: an object handed over on the stack has no class in the signature of ${call.name}')
 					return error('no class')
 				}
+				e.object_hand_over_address(arg, class, depth + i + 1)!
+				source := e.value_slot(depth + i)
+				e.store_accumulator(source, line, col)!
 				mut k := place.words - 1
 				for k >= 0 {
 					offset := k * width
@@ -9142,8 +9149,8 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 					} else {
 						width
 					}
-					e.object_hand_over_address(arg, class, depth + i + 1)!
 					base := e.accumulator(line, col)!
+					e.load_argument(source, base, e.target.word_size, line, col)!
 					if offset > 0 {
 						e.append(e.target.add_immediate(base, offset))
 					}

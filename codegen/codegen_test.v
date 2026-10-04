@@ -3871,6 +3871,26 @@ fn test_the_arm_a_structure_conditional_selects_is_the_one_that_runs() {
 	assert run_image(selected.bytes) == 0
 }
 
+// An object of more than two eightbytes is handed over as an argument on the
+// stack, word by word, and an object computed by an expression, a conditional
+// of calls here, is materialized by taking its address. Taking that address
+// again for each word ran the expression once per word: a 24-byte object called
+// its function three times and each call wrote its temporary over the last, so
+// the callee read garbage from the middle of the object. The counter below
+// catches the re-evaluation and the sum catches the overwrite. Measured on gcc
+// 16.2.1, which calls the function once and exits 0; before this compiler
+// answered -16 or thereabouts and called it three times.
+fn test_a_memory_class_object_argument_is_evaluated_once() {
+	source := 'struct E { long a; long b; long c; };' +
+		' long calls = 0;' +
+		' struct E fe(void) { calls = calls + 1; struct E r; r.a = 5; r.b = 6; r.c = 7; return r; }' +
+		' long takee(struct E v) { return v.a + v.b + v.c; }' +
+		' int main(void) { long k = 1; if (takee(k ? fe() : fe()) != 18) return 1; if (calls != 1) return 2; return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 // A member is read from any expression the reader can build, not only a name: a
 // chained arrow through a linked list, an element of an array of structs, and
 // the object a call hands back by value. Measured on gcc 16.2.1, the four
