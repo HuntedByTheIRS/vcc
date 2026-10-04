@@ -78,6 +78,13 @@ pub const relocation_glob_dat = u64(6)
 // It is R_X86_64_64 in this machine's psABI: the symbol's value plus the addend,
 // which is zero here.
 pub const relocation_absolute = u64(1)
+// A relocation that asks the loader to copy a symbol's value into this image:
+// the bytes of the symbol's size at the place it names are the storage of an
+// object another object defines, and the loader fills them from the library's
+// definition. It is R_X86_64_COPY in this machine's psABI, the kind a program
+// that is not position independent writes for a variable it names out of a
+// shared library.
+pub const relocation_copy = u64(5)
 
 // The st_info byte of every symbol this image imports: global, and of function
 // type. The symbols are undefined, which is to say the value comes from
@@ -140,6 +147,13 @@ pub fn executable(program image.Program, target backend.Target) ![]u8 {
 		dynstr << name.bytes()
 		dynstr << u8(0)
 	}
+	// The names of the objects this image holds a copy of come after the
+	// imported functions, the same order their symbols stand in the table.
+	for name in program.copy_objects {
+		symbol_names[name] = dynstr.len
+		dynstr << name.bytes()
+		dynstr << u8(0)
+	}
 	// needed is where each library's name starts in the string table, in the
 	// order the DT_NEEDED entries name them.
 	mut needed := []int{}
@@ -157,7 +171,7 @@ pub fn executable(program image.Program, target backend.Target) ![]u8 {
 	put(mut output, sections.dynstr, dynstr)
 	put(mut output, sections.strings, program.string_blob)
 	put(mut output, sections.globals, program.globals_blob)
-	emit_symbols(mut output, program, sections, symbol_names)
+	emit_symbols(mut output, program, sections, symbol_names, base)
 	emit_hash(mut output, program, sections)
 	emit_relocations(mut output, program, sections, base)
 	emit_dynamic(mut output, program, sections, dynstr.len, needed, base)
@@ -189,15 +203,19 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	globals := offset
 	offset = align(offset + program.globals_blob.len, 8)
 	dynsym := offset
-	offset = align(offset + (program.imports.len + 1) * elf_symbol_size, 8)
+	// One null entry the container requires, then one per imported function and
+	// one per object this image holds a copy of.
+	offset = align(offset + (program.imports.len + program.copy_objects.len + 1) * elf_symbol_size, 8)
 	hash := offset
-	offset = align(offset + hash_size(program.imports.len + 1), 8)
+	offset = align(offset + hash_size(program.imports.len + program.copy_objects.len + 1), 8)
 	got := offset
 	offset = align(offset + program.imports.len * 8, 8)
 	rela := offset
-	// One relocation per import, plus one per address in the writable data that
-	// names a symbol the loader resolves.
-	offset = align(offset + (program.imports.len + program.import_data_count()) * elf_relocation_size, 8)
+	// One relocation per import, one copy relocation per object this image
+	// holds a copy of, plus one per address in the writable data that names a
+	// symbol the loader resolves.
+	offset = align(offset + (program.imports.len + program.copy_objects.len +
+		program.import_data_count()) * elf_relocation_size, 8)
 	dynamic := offset
 	offset = align(offset + dynamic_entry_count(library_count) * elf_dynamic_entry_size, 8)
 	return Sections{
@@ -223,23 +241,62 @@ fn hash_size(symbol_count int) int {
 }
 
 // emit_symbols writes the dynamic symbol table: a null entry the container
-// requires, then one entry per imported function. Each is a name in the string
-// table, marked global and of function type, with no value and no section,
-// because its definition is somewhere this image is not.
-fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbol_names map[string]int) {
+// requires, then one entry per imported function and one per object this image
+// holds a copy of. An imported function is a name in the string table, marked
+// global and of function type, with no value and no section, because its
+// definition is somewhere this image is not. An object this image copies is the
+// other way round: the definition the loader copies from is the library's, and
+// the entry here says where the copy goes and how big it is, so its type is
+// object and it carries a value and a size. The size is the one thing the loader
+// reads to know how many bytes to copy, and it is the storage's own size, the
+// same width the object writer gives a definition. The section index is left
+// undefined because this image has no section header table to name one in, and
+// the loader's copy path reads the size and the place, not the section.
+fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbol_names map[string]int, base u64) {
 	for i, name in program.imports {
 		at := sections.dynsym + (i + 1) * elf_symbol_size
 		put_u32(mut output, at, u32(symbol_names[name]))
 		output[at + 4] = symbol_global_function
 	}
+	for i, name in program.copy_objects {
+		at := sections.dynsym + (program.imports.len + i + 1) * elf_symbol_size
+		slot := program.globals[name] or { image.GlobalSlot{} }
+		width := if slot.count > 0 { slot.width * slot.count } else { slot.width }
+		put_u32(mut output, at, u32(symbol_names[name]))
+		output[at + 4] = symbol_global_object
+		put_u64(mut output, at + 8, base + u64(sections.globals + slot.offset))
+		put_u64(mut output, at + 16, u64(width))
+	}
 }
 
-// emit_hash writes the SysV hash table. Nothing in this image is looked up by
-// name, so the buckets and the chains stay zero; the loader reads the header to
-// learn how many symbols the table holds.
+// emit_hash writes the SysV hash table. It has one bucket, so every symbol hangs
+// off the same chain and the table is correct whatever the names are: the bucket
+// names the first symbol of the chain and each symbol's chain entry names the
+// next. The chain is filled rather than left empty, because a name lookup walks
+// it: the loader finds a symbol by hashing its name to a bucket and following the
+// chain, so a symbol that is in no chain is not found. An image whose references
+// the library resolves never needs to be searched by name, which is why the chain
+// used to be empty, but an image that holds a copy of a library object does: the
+// library's own references to that object have to find this image's copy, and
+// they find it through this chain. The symbols are the imports and the copies, in
+// the order their entries stand in the dynamic table, starting at one because the
+// null symbol is never in a chain.
 fn emit_hash(mut output []u8, program image.Program, sections Sections) {
 	put_u32(mut output, sections.hash, 1) // one bucket
-	put_u32(mut output, sections.hash + 4, u32(program.imports.len + 1))
+	put_u32(mut output, sections.hash + 4, u32(program.imports.len + program.copy_objects.len + 1))
+	mut head := u32(0)
+	mut index := 1
+	for _ in program.imports {
+		put_u32(mut output, sections.hash + 8 + 4 * (1 + index), head)
+		head = u32(index)
+		index++
+	}
+	for _ in program.copy_objects {
+		put_u32(mut output, sections.hash + 8 + 4 * (1 + index), head)
+		head = u32(index)
+		index++
+	}
+	put_u32(mut output, sections.hash + 8, head)
 }
 
 // emit_relocations writes one relocation per import: the loader resolves the
@@ -252,10 +309,21 @@ fn emit_relocations(mut output []u8, program image.Program, sections Sections, b
 		put_u64(mut output, at + 8, (u64(i + 1) << 32) | relocation_glob_dat)
 		// The addend is zero, which says the address itself is the value.
 	}
+	// One copy relocation per object this image holds a copy of: the place is
+	// the storage in this image, and the symbol is the one the entry in the
+	// dynamic table names. The addend is zero, because the copy fills the
+	// storage itself rather than an offset into it.
+	for i, name in program.copy_objects {
+		slot := program.globals[name] or { image.GlobalSlot{} }
+		at := sections.rela + (program.imports.len + i) * elf_relocation_size
+		put_u64(mut output, at, base + u64(sections.globals + slot.offset))
+		put_u64(mut output, at + 8,
+			(u64(program.imports.len + i + 1) << 32) | relocation_copy)
+	}
 	// One more relocation per address in the writable data that names a symbol
 	// the loader resolves: the address goes into the eight bytes the data fixup
 	// points at, and the symbol is the same one its calls go through.
-	mut entry := program.imports.len
+	mut entry := program.imports.len + program.copy_objects.len
 	for fixup in program.data_fixups {
 		if fixup.kind != .import_address {
 			continue
@@ -294,7 +362,7 @@ fn emit_dynamic(mut output []u8, program image.Program, sections Sections, dynst
 	entries << [dt_symtab, base + u64(sections.dynsym)]
 	entries << [dt_rela, base + u64(sections.rela)]
 	entries << [dt_relasz,
-		u64((program.imports.len + program.import_data_count()) * elf_relocation_size)]
+		u64((program.imports.len + program.copy_objects.len + program.import_data_count()) * elf_relocation_size)]
 	entries << [dt_relaent, u64(elf_relocation_size)]
 	entries << [dt_strsz, u64(dynstr_len)]
 	entries << [dt_syment, u64(elf_symbol_size)]

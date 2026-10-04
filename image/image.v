@@ -158,6 +158,15 @@ pub mut:
 	// declaration asked for more than the word size to land at its alignment,
 	// because every object's offset is measured from the start of the blob.
 	globals_alignment int
+	// copy_objects is every name in `globals` that stands for an object another
+	// object defines: the storage is here, the definition is in a shared
+	// library, and the loader copies the library's object into this storage
+	// when the program starts. It is the shape a non-position-independent
+	// executable uses for a variable it names out of a library, and a copy
+	// relocation is what asks for it. The names are in the order they were
+	// first reached so that the same input writes the same bytes, and the size
+	// the relocation carries is read from the name's slot.
+	copy_objects []string
 	// weak is every function and object this unit defines with a weak symbol
 	// binding, which `__attribute__((weak))` asks for. The object's symbol
 	// table says WEAK rather than GLOBAL for a name in it.

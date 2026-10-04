@@ -737,7 +737,16 @@ fn (mut e Emitter) build() ![]u8 {
 	// a program and is left out, because a linker resolves its symbols later.
 	if !e.compile_only {
 		dirs := linux.search_dirs(e.library_dirs, e.target.library_dirs)
-		unresolved := linux.unresolved_imports(e.program.imports, e.libraries, dirs)
+		// The names a program reaches out of a library are the functions it
+		// calls and the objects it copies, and both have to bind: a copy is not
+		// an import in the image, but it is a name the program cannot start
+		// without, and the loader would refuse it with nothing on this
+		// compiler's stderr. So the question is asked of both, and a name no
+		// library defines is refused here by name, the way a link refuses an
+		// undefined reference.
+		mut requested := e.program.imports.clone()
+		requested << e.program.copy_objects
+		unresolved := linux.unresolved_imports(requested, e.libraries, dirs)
 		if unresolved.len > 0 {
 			for name in unresolved {
 				e.diagnostics << problem(1, 1, 'undefined reference to `${name}`: no library the image names defines it')
@@ -10202,6 +10211,17 @@ fn (mut e Emitter) import_object(name string) {
 	e.program.object_imports[name] = true
 }
 
+// import_copy_object records a name this image holds storage for and the loader
+// fills by copying the library's object into it, once. The name's slot in
+// `globals` carries the width the symbol's size is read from, so only the order
+// is kept here, and it is the order the names are first reached in, the same as
+// an imported function, so that the same input writes the same bytes.
+fn (mut e Emitter) import_copy_object(name string) {
+	if name !in e.program.copy_objects {
+		e.program.copy_objects << name
+	}
+}
+
 // global_definition is the declaration of a top-level object by name: one this
 // unit defines, or one it declares with no storage here. A definition is
 // storage the image holds; an `extern` declaration is a name another object
@@ -10421,18 +10441,20 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 	}
 	object := e.global_definition(name) or { return none }
 	if object.external {
-		// An object another object defines: this unit reaches the name and has
-		// nothing to place for it, so there is no storage here to lay out. The
-		// symbol is imported undefined and every reference to it is one a
-		// linker resolves. The path that writes a program itself has nowhere to
-		// put a reference to an object in another file, so it leaves the name
-		// unanswered and the use is refused where it is written rather than
-		// pointed at storage this image does not have.
-		if !e.compile_only {
-			return none
+		// An object another object defines. An object file leaves the name
+		// undefined and every reference to it is one a linker resolves: the
+		// symbol is imported with no storage here and the relocation names it.
+		if e.compile_only {
+			e.import_object(name)
+			return e.global_shape(name)
 		}
-		e.import_object(name)
-		return e.global_shape(name)
+		// A program this back end links itself holds the storage for the
+		// object and the loader copies the library's object into it, which is
+		// the copy relocation a program that is not position independent
+		// writes for a variable it names out of a shared library. The storage
+		// is laid out here, zeros to start, and the name is recorded so the
+		// container writes the symbol and the relocation that fills it.
+		return e.place_copy_object(name, object)
 	}
 	shape := e.global_shape(name) or { return none }
 	element := shape.width
@@ -10585,6 +10607,38 @@ fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
 	if address := object.address {
 		e.write_data_address(address, offset)
 	}
+	return slot
+}
+
+// place_copy_object lays out the storage a program this back end links holds for
+// an object another object defines, and records the name so the container writes
+// the dynamic symbol and the copy relocation that fills it. It is the shape a
+// non-position-independent image uses for a variable it names out of a shared
+// library: the image carries the variable and the loader copies the library's
+// value into it when the program starts, so a reference to the name is a
+// reference to this image's storage. The storage is the object's own size, which
+// is read from the slot the layout registers, and the symbol carries that size
+// because it is how many bytes the loader copies. The object has no initializer
+// here - its value comes from the library - so the storage starts as zeros.
+fn (mut e Emitter) place_copy_object(name string, object ast.Global) ?image.GlobalSlot {
+	shape := e.global_shape(name) or { return none }
+	// One object, so as many elements as the declaration counted, or one when it
+	// wrote no count. An object of an aggregate type is the layout's byte size
+	// whether or not the declaration counted elements.
+	count := if shape.count > 0 { shape.count } else { 1 }
+	offset := e.place_global(object.alignment)
+	e.program.globals_blob << []u8{len: count * shape.width, init: u8(0)}
+	slot := image.GlobalSlot{
+		offset:   offset
+		width:    shape.width
+		count:    shape.count
+		object:   shape.object
+		floating: shape.floating
+		single:   shape.single
+		unsigned: shape.unsigned
+	}
+	e.program.globals[name] = slot
+	e.import_copy_object(name)
 	return slot
 }
 
