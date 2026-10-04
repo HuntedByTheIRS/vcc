@@ -7,12 +7,12 @@
 <p align="center">A C compiler written in V, built to replace the tcc that V vendors in <code>thirdparty/tcc</code>.</p>
 
 <p align="center">
-  <a href="https://github.com/HuntedByTheIRS/vcc/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HuntedByTheIRS/vcc/ci.yml?style=flat-square&label=ci" alt="ci status"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/HuntedByTheIRS/vcc?style=flat-square" alt="license"></a>
-  <a href="https://github.com/HuntedByTheIRS/vcc"><img src="https://img.shields.io/github/languages/top/HuntedByTheIRS/vcc?style=flat-square&label=pure%20V" alt="pure V: 100%"></a>
-  <a href="ROADMAP.md"><img src="https://img.shields.io/badge/platform-linux%20x86--64-2ea043?style=flat-square" alt="platform: Linux x86-64"></a>
-  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/tests-1300-2ea043?style=flat-square" alt="tests: 1300"></a>
-  <a href="https://github.com/HuntedByTheIRS/vcc/commits/main"><img src="https://img.shields.io/github/last-commit/HuntedByTheIRS/vcc?style=flat-square" alt="last commit"></a>
+  <a href="https://github.com/HuntedByTheIRS/vcc/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HuntedByTheIRS/vcc/ci.yml?style=flat&label=ci" alt="ci status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/HuntedByTheIRS/vcc?style=flat" alt="license"></a>
+  <a href="https://github.com/HuntedByTheIRS/vcc"><img src="https://img.shields.io/github/languages/top/HuntedByTheIRS/vcc?style=flat&label=pure%20V" alt="pure V: 100%"></a>
+  <a href="ROADMAP.md"><img src="https://img.shields.io/badge/platform-linux%20x86--64-2ea043?style=flat" alt="platform: Linux x86-64"></a>
+  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/tests-1300-2ea043?style=flat" alt="tests: 1300"></a>
+  <a href="https://github.com/HuntedByTheIRS/vcc/commits/main"><img src="https://img.shields.io/github/last-commit/HuntedByTheIRS/vcc?style=flat" alt="last commit"></a>
 </p>
 
 It has one job: be a drop-in for that tcc. Same command line, the same work, so
