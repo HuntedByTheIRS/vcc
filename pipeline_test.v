@@ -1187,6 +1187,32 @@ fn test_the_extended_complex_type_crosses_a_library_call() {
 	os.rm(binary) or {}
 }
 
+// A constant conditional whose arms are a complex type, handed to a parameter of
+// that type. `<tgmath.h>` is where the shape comes from rather than a program:
+// with a `__GNUC__` this compiler predefines, glibc's type-generic macros expand
+// to a chain of conditionals over `sizeof` and `__builtin_classify_type`, so
+// `creal(conj(z))` hands a conditional to `creal`'s parameter. The condition is a
+// constant, so 6.5.15 selects one arm and the other is never evaluated; measured
+// on gcc 16.2.1, this program exits 0.
+fn test_a_constant_conditional_of_a_complex_type_is_converted_to_it() {
+	source := scratch('complex_conditional.c')
+	binary := scratch('complex_conditional')
+	program := 'double _Complex csqrt(double _Complex);\n' +
+		'double creal(double _Complex);\n' +
+		'int main(void) {\n' +
+		'    double _Complex z = csqrt(-9.0);\n' +
+		'    if (creal(1 ? z : z) != 0.0) { return 1; }\n' +
+		'    double _Complex w = 1.0 + 2.0 * 1.0iF;\n' +
+		'    if (creal(0 ? z : w) != 1.0) { return 2; }\n' +
+		'    if (creal(1 ? w : z) != 1.0) { return 3; }\n' +
+		'    return 0;\n' +
+		'}\n'
+	exit_status := compile_and_run(['-lm', source, '-o', binary], program)
+	assert exit_status == 0
+	os.rm(source) or {}
+	os.rm(binary) or {}
+}
+
 // The other half of that: with the library not named, the compile is refused and
 // the symbol is named. It used to compile and die at load saying which symbol it
 // could not find, which was silent at compile time, and a build that trusts the

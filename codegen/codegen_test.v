@@ -3462,6 +3462,43 @@ fn test_a_component_read_from_a_call_result_is_the_value_the_call_wrote() {
 	assert run_image(emitted.bytes) == 0
 }
 
+// A conditional whose two arms are complex values is itself a complex value:
+// 6.5.15p3 gives it the arms' type, and the arm that runs is copied into
+// wherever the conditional is used. glibc's <tgmath.h> writes `creal(conj(z))`
+// as a call to `creal` whose argument is the conditional `conj` expands to, so
+// before this every such value use was refused with "a value of type double
+// _Complex written as this expression is not one this back end computes". The
+// program checks an initializer, an assignment, a call argument, a return, a
+// component read and a runtime (non-constant) condition, and reads both
+// components each time, so a read of the wrong half or a dropped imaginary part
+// is reported. Measured on gcc 16.2.1, it exits 0.
+fn test_a_conditional_of_two_complex_arms_is_used_as_a_value() {
+	source := 'double _Complex mk(int c) { double _Complex p = 1.0 + 2.0i; double _Complex q = 3.0 - 4.0i; return c ? p : q; }' +
+		' double _Complex pick(int c, double _Complex a, double _Complex b) { return c ? a : b; }' +
+		' int main(void) {' +
+		' double _Complex a = 1.0 + 2.0i;' +
+		' double _Complex b = 3.0 - 4.0i;' +
+		' double _Complex z = 1 ? a : b;' +
+		' if (__real__ z != 1.0 || __imag__ z != 2.0) { return 1; }' +
+		' double _Complex w = 0 ? a : b;' +
+		' if (__real__ w != 3.0 || __imag__ w != -4.0) { return 2; }' +
+		' double _Complex t; t = 0 ? a : b;' +
+		' if (__real__ t != 3.0 || __imag__ t != -4.0) { return 3; }' +
+		' if (__real__ (1 ? a : b) != 1.0 || __imag__ (1 ? a : b) != 2.0) { return 4; }' +
+		' if (__real__ (0 ? a : b) != 3.0 || __imag__ (0 ? a : b) != -4.0) { return 5; }' +
+		' double _Complex r = mk(1);' +
+		' if (__real__ r != 1.0 || __imag__ r != 2.0) { return 6; }' +
+		' double _Complex s = mk(0);' +
+		' if (__real__ s != 3.0 || __imag__ s != -4.0) { return 7; }' +
+		' int flag = 2;' +
+		' double _Complex r2 = pick(flag, a, b);' +
+		' if (__real__ r2 != 1.0 || __imag__ r2 != 2.0) { return 8; }' +
+		' return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 // A `long double _Complex` is the extended format twice over: two sixteen-byte
 // components, the real part at the lower address, thirty-two bytes in all.
 // `__real__` and `__imag__` name the two parts at that width, `sizeof` is

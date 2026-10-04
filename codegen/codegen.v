@@ -11104,6 +11104,38 @@ fn (mut e Emitter) emit_complex_into_type(dest Slot, destination types.Type, exp
 			return e.copy_complex_frame(source, dest, dest.width, line, col)
 		}
 	}
+	if expr is ast.Conditional {
+		// 6.5.15 evaluates only the arm the condition selects. glibc's
+		// <tgmath.h> spells every complex dispatch as a conditional whose
+		// condition the reader folds and whose arms name calls at each of the
+		// three complex widths: `creal(conj(z))` reaches here as a call to
+		// `creal` whose argument is the conditional `conj` expands to, whose
+		// taken arm is a `double _Complex` `conj` call and whose untaken arm
+		// names `conjl`, a `long double _Complex` this back end does not move.
+		// Writing both arms would hand the emitter a type it refuses, so the
+		// constant condition is folded to the arm it selects, which is the
+		// fold emit_conditional makes for a scalar.
+		if expr.cond is ast.IntLit {
+			value := (expr.cond as ast.IntLit).value
+			arm := if value != 0 { expr.then_expr } else { expr.else_expr }
+			return e.emit_complex_into_type(dest, destination, arm, depth)
+		}
+		// A complex value is two components in the frame and never one
+		// register, so the branch carries no value between the arms: each arm
+		// writes the same destination object and the object holds whichever
+		// arm ran. The condition is evaluated before either arm, which is the
+		// order 6.5.15 gives it.
+		e.emit_condition(expr.cond, depth + 1, expr.line, expr.col)!
+		else_label := e.label()
+		end_label := e.label()
+		e.branch(.branch_zero, else_label, expr.line, expr.col)!
+		e.emit_complex_into_type(dest, destination, expr.then_expr, depth + 1)!
+		e.jump(end_label)!
+		e.place(else_label)
+		e.emit_complex_into_type(dest, destination, expr.else_expr, depth + 1)!
+		e.place(end_label)
+		return
+	}
 	if expr is ast.Ident || expr is ast.Field || expr is ast.Index {
 		// Storage that is not the frame: a member, an element, or a name whose
 		// storage is in the image. Its address is taken and the bytes copied,
