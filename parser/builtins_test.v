@@ -512,3 +512,38 @@ fn test_a_count_trailing_of_a_non_integer_is_refused() {
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('trailing zeros of an integer')
 }
+
+// The two leading-zero counts are calls of type int, which is what gcc gives
+// both spellings, and the operand is kept as written: the back end emits the
+// machine's bsr and xor rather than the reader folding a value it did not
+// compute. gcc 16.2.1 answers 28 for `__builtin_clz(8)` and 60 for
+// `__builtin_clzll(8)`.
+fn test_the_count_leading_builtins_are_read_as_calls_of_type_int() {
+	wide := builtin_read('int main(void) { return __builtin_clzll(8); }')
+	assert wide.diagnostics.len == 0
+	wide_value := wide.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	wide_call := wide_value as ast.Call
+	assert wide_call.name == '__builtin_clzll'
+	assert wide_call.typ.kind == .int_
+	narrow := builtin_read('int main(void) { int v = 8; return __builtin_clz(v); }')
+	assert narrow.diagnostics.len == 0
+	narrow_value := narrow.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	narrow_call := narrow_value as ast.Call
+	assert narrow_call.name == '__builtin_clz'
+	assert narrow_call.typ.kind == .int_
+	assert (narrow_call.args[0] as ast.Ident).name == 'v'
+}
+
+// A count-leading of a non-integer is refused by name, and the message names the
+// leading zeros rather than the trailing ones the ctz case asserts.
+fn test_a_count_leading_of_a_non_integer_is_refused() {
+	result := builtin_read('int main(void) { return __builtin_clz(1.5); }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('leading zeros of an integer')
+}

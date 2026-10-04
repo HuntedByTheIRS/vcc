@@ -1299,6 +1299,18 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 						data_problem = true
 						literal_refused = true
 					}
+				} else if address := p.file_scope_cast_address() {
+					// A cast of an address to an integer type is an address
+					// constant (6.6p9), and the layout writes it at the width
+					// of an address: an object narrower than one cannot hold
+					// it, which is what gcc 16.2.1 refuses (`int iv =
+					// (int)&x;` is `initializer element is not constant`).
+					if (p.representation.size_of(data_clause) or { 0 }) == 8 {
+						data_address = address
+					} else {
+						p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is an address cast to an integer type narrower than an address')
+						data_problem = true
+					}
 				} else {
 					constant := p.file_scope_constant()
 					data_init = constant.integer
@@ -1904,10 +1916,19 @@ fn (mut p Parser) file_scope_constant() FileConstant {
 // a caller that finds no address can read the same place as a number instead, and
 // a null pointer constant is still a number.
 //
+// A cast in front of the address is read and dropped. 6.6p9 makes a cast of an
+// address constant to a pointer or an integer type an address constant, so
+// `(char *)&x` and `(long)&x` are the address of x, which is what gcc 16.2.1
+// writes: the two programs below are accepted, and `(void *)0`, whose operand is
+// a number and not an address, is left to the constant reader.
+//
 // The name is kept rather than resolved. This reader knows the scope, and whether
 // a name is a function or an object is a question about the whole file's
 // definitions, which the back end asks where it lays the storage out.
 fn (mut p Parser) file_scope_address() ?ast.AddressInit {
+	if p.at_punct('(') {
+		return p.file_scope_cast_address()
+	}
 	if p.peek().kind == .string {
 		token := p.next()
 		literal := parse_string_literal(token.text) or {
@@ -2005,6 +2026,49 @@ fn (mut p Parser) file_scope_address() ?ast.AddressInit {
 		}
 	}
 	return none
+}
+
+// file_scope_cast_address reads a cast in front of an address and answers the
+// address its operand names: `(char *)&x`, `(long)&x`, `(void *)"abc"`. 6.6p9
+// makes a cast of an address constant to a pointer or an integer type an address
+// constant, so the target type decides nothing about the value the layout writes
+// and is read and dropped. A target narrower than an address is refused because
+// the value would not fit it: gcc 16.2.1 refuses `int iv = (int)&x;` with
+// `initializer element is not constant`, and an object that held half an address
+// would be a wrong value rather than a refusal.
+//
+// A cast whose operand is not an address answers none with every token and
+// diagnostic given back, so `(void *)0` and `(double)3` are still read by the
+// constant reader at the same place.
+fn (mut p Parser) file_scope_cast_address() ?ast.AddressInit {
+	if !p.at_punct('(') {
+		return none
+	}
+	saved := p.pos
+	saved_diagnostics := p.diagnostics.len
+	p.next() // (
+	spec, d, _ := p.parse_type_name_parts(1) or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	if !p.expect_punct(')') {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	declared := p.declared_type(spec.clause, d)
+	if (p.representation.size_of(declared) or { 0 }) != 8 {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	address := p.file_scope_address() or {
+		p.pos = saved
+		p.diagnostics = p.diagnostics[..saved_diagnostics]
+		return none
+	}
+	return address
 }
 
 // file_scope_part_offset reads the parts written after the name of an object in a
@@ -2168,22 +2232,44 @@ fn (mut p Parser) folded_file_initializer() ?FileConstant {
 		p.diagnostics = p.diagnostics[..saved_diagnostics]
 		return none
 	}
-	value := p.constant_value(expr) or {
-		p.pos = saved_pos
-		p.diagnostics = p.diagnostics[..saved_diagnostics]
-		// An address difference is a constant (6.6) equal to the distance
-		// between two parts of an object, but its two terms are relocations
-		// the layout settles and their difference is not a number this reader
-		// folds. The shape is refused by name rather than read as a number
-		// that would be wrong.
-		if p.is_address_difference(expr) {
-			p.error_at(p.peek(), 'unsupported: an address difference in a static initializer is not implemented, and the address of one part of an object less another is a relocation the layout settles rather than a number written here')
+	if value := p.constant_value(expr) {
+		return FileConstant{
+			integer: value
 		}
-		return none
 	}
-	return FileConstant{
-		integer: value
+	// An element of a floating object is a floating constant expression, which
+	// the integer folder above does not evaluate: `const double b[2] = {(1.0) /
+	// ((((6.0) * (2.0)) * (1.0))), 2.0};` is a value the image writes, and V's
+	// generated C is full of them.
+	if float := p.floating_constant_value(expr) {
+		return FileConstant{
+			floating: float
+		}
 	}
+	// A cast of an integer constant expression to a pointer type is an address
+	// constant (6.6p9) whose value is the integer it names rather than a
+	// reference: `(void *)0` is the null pointer constant and `(void *)5` is
+	// the address 5, which is what gcc 16.2.1 writes. The value is stored as
+	// the number it is, so a caller that wanted a number and a caller that
+	// wanted a pointer both hold it.
+	if expr is ast.Cast && expr.typ.is_pointer() {
+		if value := p.constant_value(expr.expr) {
+			return FileConstant{
+				integer: value
+			}
+		}
+	}
+	p.pos = saved_pos
+	p.diagnostics = p.diagnostics[..saved_diagnostics]
+	// An address difference is a constant (6.6) equal to the distance
+	// between two parts of an object, but its two terms are relocations
+	// the layout settles and their difference is not a number this reader
+	// folds. The shape is refused by name rather than read as a number
+	// that would be wrong.
+	if p.is_address_difference(expr) {
+		p.error_at(p.peek(), 'unsupported: an address difference in a static initializer is not implemented, and the address of one part of an object less another is a relocation the layout settles rather than a number written here')
+	}
+	return none
 }
 
 // is_an_address says whether an expression is one whose value is an address: the
@@ -2596,6 +2682,13 @@ fn (mut p Parser) file_scope_brace_constant() ?NumberConstant {
 // and is answered as the zero it is, which is what the member it initializes
 // holds.
 //
+// A floating constant expression is the other class of value an element may be:
+// 6.6p4 makes one a constant expression, and the element of a double array is
+// written into the image as the value it folds to, so `{(1.0) / (12.0)}` is the
+// same bytes as the literal `8.3333333333333332e-02` and not the division the
+// program would make at run time. It is answered as a floating constant, which
+// is what the object's own conversion then places.
+//
 // Nothing is read when the shape is not a constant expression: the cursor and
 // every diagnostic are given back, so the caller refuses the element at its own
 // location rather than at the first term of an expression it did not finish.
@@ -2628,6 +2721,14 @@ fn (mut p Parser) file_scope_element_constant() ?NumberConstant {
 		return NumberConstant{
 			number: FileConstant{
 				integer: value
+			}
+			at:     at
+		}
+	}
+	if float := p.floating_constant_value(expr) {
+		return NumberConstant{
+			number: FileConstant{
+				floating: float
 			}
 			at:     at
 		}

@@ -3345,11 +3345,90 @@ fn test_a_top_level_double_holds_its_initializer_in_the_image() {
 	assert run_image(whole.bytes) == 6
 }
 
+// 6.6p9 makes a cast of an address constant to a pointer or an integer type an
+// address constant, and a cast of an integer constant expression to a pointer
+// type the same. Measured on gcc 16.2.1, the three programs below exit 3:
+// `g_main_argv` in V's generated C is initialized with `NULL`, which arrives from
+// a header as `((void *)0)`, and a pointer-typed global cannot hold it before
+// this.
+fn test_a_file_scope_cast_initializer_is_an_address_constant() {
+	null := emit(translation_unit('void *g = ((void *)0);\nint main(void) { return g == 0 ? 3 : 4; }'),
+		Options{})
+	assert null.diagnostics.len == 0
+	assert run_image(null.bytes) == 3
+	address := emit(translation_unit('int x = 5;\nchar *p = (char *)&x;\nint main(void) { return p == (char *)&x ? 3 : 4; }'),
+		Options{})
+	assert address.diagnostics.len == 0
+	assert run_image(address.bytes) == 3
+	// The same address in an eight-byte integer object is the value the pointer
+	// holds, which is what casting it to an integer type means.
+	integer := emit(translation_unit('int x = 5;\nlong l = (long)&x;\nint main(void) { int *p = &x; return l == (long)p ? 3 : 4; }'),
+		Options{})
+	assert integer.diagnostics.len == 0
+	assert run_image(integer.bytes) == 3
+}
+
 fn test_a_double_and_an_int_convert_both_ways() {
 	emitted := emit(translation_unit('int main() { int n = 7; double d = n; d = d / 2.0; int r = d * 2; return r; }'),
 		Options{})
 	assert emitted.diagnostics.len == 0
 	assert run_image(emitted.bytes) == 7
+}
+
+// A double array at the top level holds the value its element's floating
+// constant expression folds to, which is what V's generated C writes for
+// `math__bernoulli` and the other tables. Measured on gcc 16.2.1, the program
+// below exits 83: (1.0 / 12.0) * 1000 truncated is 83. The element with no
+// parentheses is the same value, and used to write no object at all.
+fn test_a_top_level_double_array_folds_a_floating_constant_expression() {
+	parenthesized := emit(translation_unit('const double b[2] = {(1.0) / ((((6.0) * (2.0)) * (1.0))), 2.0};\nint main(void) { return (int)(b[0] * 1000.0); }'),
+		Options{})
+	assert parenthesized.diagnostics.len == 0
+	assert run_image(parenthesized.bytes) == 83
+	bare := emit(translation_unit('const double b[2] = {1.0 / 12.0, 2.0};\nint main(void) { return (int)(b[0] * 1000.0); }'),
+		Options{})
+	assert bare.diagnostics.len == 0
+	assert run_image(bare.bytes) == 83
+	// The read is not a special case of the initializer: the same arithmetic
+	// over a value the machine reads at run time still works.
+	literal := emit(translation_unit('const double b[2] = {1.0, 2.0};\nint main(void) { return (int)(b[0] * 1000.0); }'),
+		Options{})
+	assert literal.diagnostics.len == 0
+	assert run_image(literal.bytes) == 232
+}
+
+// A const-qualified aggregate of a floating element type is a table of floating
+// constants, and the elements of a rank-2 or deeper table reach the image as the
+// floating bytes. Measured on gcc 16.2.1, the rank-2 table below exits 64 for
+// `(int)b[0][0] + (int)b[0][1] * 2 + (int)b[1][0] * 4 + (int)b[1][1] * 8`, and
+// before the fix the elements were written as integers, so every read came back
+// the denormal 9.88e-324 and the program exited 0.
+fn test_a_const_floating_aggregate_writes_its_elements_floating() {
+	rank_two := emit(translation_unit('const double b[2][2] = {{2.0, 3.0}, {4.0, 5.0}};\nint main(void) { return (int)b[0][0] + (int)b[0][1] * 2 + (int)b[1][0] * 4 + (int)b[1][1] * 8; }'),
+		Options{})
+	assert rank_two.diagnostics.len == 0
+	assert run_image(rank_two.bytes) == 2 + 6 + 16 + 40
+	// Rank three is the same class, and its last element is the one read.
+	rank_three := emit(translation_unit('const double b[2][2][2] = {{{1.0, 2.0}, {3.0, 4.0}}, {{5.0, 6.0}, {7.0, 9.0}}};\nint main(void) { return (int)b[1][1][1]; }'),
+		Options{})
+	assert rank_three.diagnostics.len == 0
+	assert run_image(rank_three.bytes) == 9
+	// A const float element is the single class and not the double one.
+	single := emit(translation_unit('const float f[2][2] = {{2.0f, 3.0f}, {4.0f, 5.0f}};\nint main(void) { return (int)f[0][0] + (int)f[1][1]; }'),
+		Options{})
+	assert single.diagnostics.len == 0
+	assert run_image(single.bytes) == 7
+}
+
+// The folded floating constant expression the lane added reaches a rank-2
+// table's element too: `{{(1.0) / (12.0), 2.0}, {3.0, 4.0}}` holds
+// 0.083333333333333329 at b[0][0], so `(int)(b[0][0] * 1000.0)` exits 83 where
+// the integer folder's zero left it at 0.
+fn test_a_const_floating_aggregate_folds_a_floating_constant_expression() {
+	emitted := emit(translation_unit('const double b[2][2] = {{(1.0) / (12.0), 2.0}, {3.0, 4.0}};\nint main(void) { return (int)(b[0][0] * 1000.0); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 83
 }
 
 fn test_the_logical_not_of_a_double_is_a_comparison_with_zero() {
@@ -4044,6 +4123,36 @@ fn test_the_trailing_zero_counts_are_their_own_values_in_one_argument_list() {
 		Options{})
 	assert runtime.diagnostics.len == 0
 	assert run_image(runtime.bytes) == 3
+}
+
+// The count-leading builtins are the machine's bsr and xor, and the values are
+// what gcc 16.2.1 computes on nonzero input: `__builtin_clz(8)` is 28,
+// `__builtin_clzll(8)` is 60, `__builtin_clzll(1)` is 63 and `__builtin_clz(1)`
+// is 31. A wrong answer for a nonzero argument is worse than a refusal, so the
+// operands include a value the machine reads at run time as well as folded ones.
+fn test_the_leading_zero_counts_are_the_machines_bsr_and_xor() {
+	eight32 := emit(translation_unit('int main(void) { return __builtin_clz(8); }'),
+		Options{})
+	assert eight32.diagnostics.len == 0
+	assert run_image(eight32.bytes) == 28
+	eight64 := emit(translation_unit('int main(void) { return __builtin_clzll(8); }'),
+		Options{})
+	assert eight64.diagnostics.len == 0
+	assert run_image(eight64.bytes) == 60
+	one64 := emit(translation_unit('int main(void) { return __builtin_clzll(1); }'),
+		Options{})
+	assert one64.diagnostics.len == 0
+	assert run_image(one64.bytes) == 63
+	one32 := emit(translation_unit('int main(void) { return __builtin_clz(1); }'),
+		Options{})
+	assert one32.diagnostics.len == 0
+	assert run_image(one32.bytes) == 31
+	// The same instruction on a value the machine reads at run time rather than
+	// one folded while the tree was read.
+	runtime := emit(translation_unit('int main(void) { volatile unsigned v = 8; return __builtin_clz(v); }'),
+		Options{})
+	assert runtime.diagnostics.len == 0
+	assert run_image(runtime.bytes) == 28
 }
 
 // A machine builtin's value is as wide as the type it operates on, and the

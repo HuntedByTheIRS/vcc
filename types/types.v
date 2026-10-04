@@ -1212,11 +1212,17 @@ pub fn (t Type) underlying_type() Type {
 
 // storage_spelling is the type as the back end reads it: an enumerated type is
 // spelled as the integer type its enumerators require, and every other type as
-// itself. The back end sizes and signs a value from a spelling, and it has a
-// form for `unsigned int` and none for `enum c99_small`, so an enum's storage is
-// the type gcc 16.2.1 gives it and not the tag it was written with.
+// itself with the qualifiers taken off. The back end sizes and signs a value
+// from a spelling, and it has a form for `unsigned int` and none for
+// `enum c99_small`, so an enum's storage is the type gcc 16.2.1 gives it and not
+// the tag it was written with. A qualifier is a property of the declaration
+// rather than of the storage: `const double` and `double` are the same eight
+// bytes, and a caller that read the class of a value off the spelling
+// (`initializer_for`, which answers in the class a written `double` or `float`
+// asks for) would take a `const double` for an integer type and write the
+// elements of a const floating aggregate as integers.
 pub fn (t Type) storage_spelling() string {
-	return t.underlying_type().describe()
+	return unqualified(t.underlying_type()).describe()
 }
 
 // is_unsigned_type says whether a value of this type is unsigned, reading an

@@ -8781,6 +8781,17 @@ fn (mut e Emitter) emit_count_trailing(call ast.Call, depth int) !void {
 	e.append(e.target.bit_scan_forward(accumulator, accumulator, call.name == '__builtin_ctzll')!)
 }
 
+// emit_count_leading answers `__builtin_clz` and `__builtin_clzll` with the
+// number of leading zero bits, which is one bsr and one xor at either width. gcc
+// answers an int for both, and a program that asks this of zero has asked a
+// question with no answer; the value the machine then leaves is undefined, as it
+// is for gcc.
+fn (mut e Emitter) emit_count_leading(call ast.Call, depth int) !void {
+	e.emit_expr_at(call.args[0], depth + 1)!
+	accumulator := e.accumulator(call.line, call.col)!
+	e.append(e.target.count_leading(accumulator, accumulator, call.name == '__builtin_clzll')!)
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -8838,6 +8849,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		'__builtin_ctz', '__builtin_ctzll' {
 			return e.emit_count_trailing(call, depth)
+		}
+		'__builtin_clz', '__builtin_clzll' {
+			return e.emit_count_leading(call, depth)
 		}
 		else {}
 	}

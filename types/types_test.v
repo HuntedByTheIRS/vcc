@@ -388,6 +388,26 @@ fn test_an_enum_answers_with_its_underlying_type() {
 	assert !int_type().is_unsigned_type()
 }
 
+// A qualifier belongs to the declaration and not to the storage, so the spelling
+// the back end reads off a type has it taken off. `const double` and `double`
+// are the same eight bytes, and the class of a floating object is read off the
+// spelling, so a spelling that kept the `const` made `initializer_for` answer the
+// integer class for it and wrote a const `double` aggregate as integers.
+fn test_storage_spelling_drops_the_qualifiers() {
+	const_double := qualified(double_type(), Qualifiers{
+		const_: true
+	})
+	assert const_double.describe() == 'const double'
+	assert const_double.storage_spelling() == 'double'
+	assert double_type().storage_spelling() == 'double'
+	assert float_type().storage_spelling() == 'float'
+	// A qualifier on a pointer is dropped too, and the pointee keeps its own.
+	assert qualified(pointer_to(double_type()), Qualifiers{
+		const_: true
+	}).storage_spelling() == 'double *'
+	assert pointer_to(const_double).storage_spelling() == 'const double *'
+}
+
 // 6.7.6.3p15: in the determination of type compatibility each parameter
 // declared with a qualified type is taken as having the unqualified version of
 // its declared type. The qualifier belongs to the parameter, so `void *restrict`
