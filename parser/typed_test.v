@@ -237,10 +237,11 @@ fn test_a_static_function_nothing_names_is_stepped_over() {
 	assert late.diagnostics.len == 0
 	assert late.unit.decls.len == 1
 	// A definition a call can reach is read as it always was, and its
-	// unsupported type is refused where it is written.
-	reached := parsed('static long double id (long double x) { return x; }\nint main() { return id(1); }')
+	// unsupported type is refused where it is written. `long double` is read
+	// now, so the type that makes the point is the one that still has no form.
+	reached := parsed('static long double _Complex id (long double _Complex x) { return x; }\nint main() { id(1); return 0; }')
 	assert reached.diagnostics.len == 1
-	assert reached.diagnostics[0].msg.contains('long double')
+	assert reached.diagnostics[0].msg.contains('_Complex')
 }
 
 fn test_a_read_through_an_address_is_typed_as_what_it_points_at() {
@@ -1265,42 +1266,34 @@ fn test_a_typedef_of_a_type_the_emitter_has_no_form_for_is_refused_by_that_type(
 	parameter := parsed('typedef long double _Complex Wide;\nint f(Wide b) { return 0; }')
 	assert parameter.diagnostics.len == 1
 	assert parameter.diagnostics[0].msg.contains('unsupported type long double _Complex')
-	// A `long double` is not that case any more: the type has a width and a form,
-	// and what a parameter of the type is refused by is the stack a value of it
-	// travels in.
+	// A `long double` is not that case either: the type has a width and a form,
+	// and the calling convention a value of it travels by is written now, so a
+	// parameter of the type is read.
 	wide_parameter := parsed('typedef long double Wide;\nint f(Wide b) { return 0; }')
-	assert wide_parameter.diagnostics.len == 1
-	assert wide_parameter.diagnostics[0].msg.contains('cannot take one as a parameter')
+	assert wide_parameter.diagnostics.len == 0
 }
 
-fn test_a_float_definition_is_read_and_a_long_double_one_is_refused_by_name() {
+fn test_a_definitions_floating_return_types_are_all_read() {
 	// DELIVERABLE 2's own test, carried forward: a type the back end has no form
 	// for is refused by name and location rather than misread as something the
 	// emitter does have a form for.
 	//
-	// `double` left this list first and `float` leaves it now, and that is a
-	// change in what is true rather than in what is checked: the back end has
-	// instructions for both of them, so a definition that returns one is a
-	// definition and not a refusal. `long double` is still refused, by the same
-	// reader, at the same place, and the refusal names what is missing now that
-	// the type itself holds: the x87 stack's calling convention.
+	// `double` left this list first, `float` next, and `long double` leaves it
+	// now, and that is a change in what is true rather than in what is checked:
+	// the back end has a form and a calling convention for all three, so a
+	// definition that returns one is a definition and not a refusal. What this
+	// test used to assert was the x87 stack's calling convention, and that
+	// convention is written now: the value comes back in st(0).
 	narrow := parsed('float f(void) { return 0; }')
 	assert narrow.diagnostics.len == 0
 	assert narrow.unit.decls[0].ret_type.same(types.float_type())
 	// The type is one this reader has a spelling and a width for, which is what
-	// makes it the back end's to refuse and not the reader's.
+	// makes it the back end's to emit and not the reader's to refuse.
 	widened := parsed('double f(void) { return 0; }')
 	assert widened.diagnostics.len == 0
-	// `long double` is one type written as two words, so the refusal names it
-	// rather than the first word of it, and it says what is missing: a value of
-	// the type is carried in the x87 stack, which this compiler has no calling
-	// convention for.
 	wide := parsed('long double f(void) { return 0; }')
-	assert wide.diagnostics.len == 1
-	assert wide.diagnostics[0].msg == 'unsupported: long double is a type the x87 stack carries and this compiler has no calling convention for it yet, so a function cannot return it'
-	assert wide.diagnostics[0].line == 1
-	// The model answers for the type all the same, which is what makes the
-	// refusal the back end's and not the reader's.
+	assert wide.diagnostics.len == 0
+	assert wide.unit.decls[0].ret_type.same(types.long_double_type())
 	prototype := checked('long double f(void);')
 	assert prototype.unit.decls[0].ret_type.same(types.long_double_type())
 }
