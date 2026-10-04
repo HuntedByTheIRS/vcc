@@ -994,6 +994,15 @@ pub fn (t &Target) extended_comparison(op string, reg Register, scratch Register
 	return t.encoders.extended_comparison(op, t.describe(reg), t.describe(scratch))
 }
 
+// extended_compare_zero is the comparison a condition on a long double makes:
+// the value at the top of the x87 stack against zero, unordered-aware, leaving
+// zero or one in a register. `extended_comparison` reads the order of two
+// values the program named, and this is the one the language asks for when a
+// value is used as a condition.
+pub fn (t &Target) extended_compare_zero(op string, reg Register, scratch Register) ![]u8 {
+	return t.encoders.extended_compare_zero(op, t.describe(reg), t.describe(scratch))
+}
+
 pub fn (t &Target) extended_zero() []u8 {
 	return t.encoders.extended_zero()
 }

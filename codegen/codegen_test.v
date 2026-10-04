@@ -887,6 +887,28 @@ return s - 1.5L * 2.0L == 0.0L ? 0 : 1; }'), Options{})
 	assert run_image(mixed.bytes) == 0
 }
 
+// A long double used as a condition is its comparison with zero, and the
+// comparison has to be the unordered-aware one: a NaN is not equal to zero, so
+// `if (x)` is true for a NaN and `!x` is false, which is the pair of flags gcc
+// 16.2.1 reads out of `fucomip`. This program exits 0 exactly when the NaN is
+// true, the zero is false and the logical not is the other way round, and exits
+// 1 if the NaN were called false - the silent wrong branch this back end treats
+// as a bug. The second program is the corpus's own shape, a long double
+// returned from a function and used directly as a condition. Measured on gcc
+// 16.2.1 at -O0 -fno-builtin, both exit 0.
+fn test_a_long_double_truth_test_reports_a_nan_as_true() {
+	emitted := emit(translation_unit('int main(void) { long double z = 0.0L; long double notanumber = z / z;
+return (notanumber ? 0 : 1) + (!notanumber ? 1 : 0) + (1.0L ? 0 : 1) + (0.0L ? 1 : 0); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+	corpus := emit(translation_unit('long double nearlyl(long double a, long double b) { return a <= b; }
+int main(void) { return (nearlyl(1.0L, 2.0L) ? 0 : 1) + (nearlyl(2.0L, 1.0L) ? 1 : 0); }'),
+		Options{})
+	assert corpus.diagnostics.len == 0
+	assert run_image(corpus.bytes) == 0
+}
+
 // The narrow integer types are values a register holds. A read widens the value to
 // the int the promotion makes it, with the value's sign kept or with zero above it
 // when the type is unsigned, and a store writes the low byte or the low two bytes

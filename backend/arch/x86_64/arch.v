@@ -837,6 +837,23 @@ pub fn extended_comparison(op string, reg Register, scratch Register) ![]u8 {
 	return out
 }
 
+// extended_compare_zero compares the long double at the top of the x87 stack
+// with zero and leaves zero or one in a register, which is the comparison a
+// condition on a long double makes. The instruction is the unordered-aware
+// `fucomip`, the form gcc 16.2.1 emits for a zero test: a NaN is not equal to
+// zero, so `if (x)` is true for a NaN, and only a comparison that reports the
+// unordered case says so. `fcomip` reads the same flags, but it raises the
+// invalid exception on a quiet NaN where gcc's instruction does not, so the
+// spelling that matches is the one written. The value is expected at the top of
+// the stack with zero pushed above it; `emit_extended_test` loads them so.
+pub fn extended_compare_zero(op string, reg Register, scratch Register) ![]u8 {
+	mut out := []u8{cap: 16}
+	out << [u8(0xdf), u8(0xe9)] // fucomip %st(1),%st
+	out << [u8(0xdd), u8(0xd8)] // fstp %st(0)
+	out << set_float_condition(op, reg, scratch)!
+	return out
+}
+
 // extended_zero pushes +0.0 onto the x87 stack, which is what a function that
 // returns a long double leaves when its body falls off the end, the same way
 // zero_double is what a double one leaves.
@@ -2488,6 +2505,7 @@ pub:
 	double_to_unsigned_word         fn (Register, Register, Register, Register) ![]u8 = unsafe { nil }
 	exchange_indirect               fn (Register, Register, int) ![]u8                = unsafe { nil }
 	extended_arithmetic             fn (string) ![]u8                     = unsafe { nil }
+	extended_compare_zero           fn (string, Register, Register) ![]u8 = unsafe { nil }
 	extended_comparison             fn (string, Register, Register) ![]u8 = unsafe { nil }
 	extended_zero                   fn () []u8                            = unsafe { nil }
 	fetch_add_indirect              fn (Register, Register, int) ![]u8    = unsafe { nil }
@@ -2627,6 +2645,7 @@ pub fn encoders() Encoders {
 		double_to_unsigned_word:         &double_to_unsigned_word
 		exchange_indirect:               &exchange_indirect
 		extended_arithmetic:             &extended_arithmetic
+		extended_compare_zero:           &extended_compare_zero
 		extended_comparison:             &extended_comparison
 		extended_zero:                   &extended_zero
 		fetch_add_indirect:              &fetch_add_indirect
