@@ -3905,6 +3905,92 @@ fn test_the_arm_a_structure_conditional_selects_is_the_one_that_runs() {
 	assert run_image(selected.bytes) == 0
 }
 
+// An object of more than two eightbytes is handed over as an argument on the
+// stack, word by word, and an object computed by an expression, a conditional
+// of calls here, is materialized by taking its address. Taking that address
+// again for each word ran the expression once per word: a 24-byte object called
+// its function three times and each call wrote its temporary over the last, so
+// the callee read garbage from the middle of the object. The counter below
+// catches the re-evaluation and the sum catches the overwrite. Measured on gcc
+// 16.2.1, which calls the function once and exits 0; before this compiler
+// answered -16 or thereabouts and called it three times.
+fn test_a_memory_class_object_argument_is_evaluated_once() {
+	source := 'struct E { long a; long b; long c; };' +
+		' long calls = 0;' +
+		' struct E fe(void) { calls = calls + 1; struct E r; r.a = 5; r.b = 6; r.c = 7; return r; }' +
+		' long takee(struct E v) { return v.a + v.b + v.c; }' +
+		' int main(void) { long k = 1; if (takee(k ? fe() : fe()) != 18) return 1; if (calls != 1) return 2; return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// A return of a call whose type is a structure or a union is an object handed
+// over by value that is not a name, a member or an element. The bytes the call
+// hands back are written into a temporary of this level and the return reads
+// them from there, the same materialization a conditional's value takes. The
+// machine has three shapes here and all three are checked: one eightbyte in a
+// register, two eightbytes each in the register its class names (INTEGER and
+// SSE), and more than two, where the call is given storage to write into. A
+// call handed over as an argument and a member read off a call result are
+// checked beside them, because a fix at this end reaches every place that hands
+// an object over by value. Measured on gcc 16.2.1, the program below exits 0.
+fn test_a_call_of_a_structure_type_is_returned_by_value() {
+	source := 'struct A { int a; };' +
+		' struct B { int a; int b; };' +
+		' struct C { double a; double b; };' +
+		' struct D { long a; long b; long c; long d; };' +
+		' struct E { long a; long b; long c; };' +
+		' union U { long a; double b; };' +
+		' struct A fa(void) { struct A r; r.a = 7; return r; }' +
+		' struct A ga(void) { return fa(); }' +
+		' struct B fb(void) { struct B r; r.a = 3; r.b = 4; return r; }' +
+		' struct B gb(void) { return fb(); }' +
+		' struct C fc(void) { struct C r; r.a = 1.5; r.b = 2.5; return r; }' +
+		' struct C gc(void) { return fc(); }' +
+		' struct D fd(void) { struct D r; r.a = 1; r.b = 2; r.c = 3; r.d = 4; return r; }' +
+		' struct D gd(void) { return fd(); }' +
+		' struct E fe(void) { struct E r; r.a = 5; r.b = 6; r.c = 7; return r; }' +
+		' struct E ge(void) { return fe(); }' +
+		' union U fu(void) { union U r; r.a = 11; return r; }' +
+		' union U gu(void) { return fu(); }' +
+		' int takeb(struct B v) { return v.a * 10 + v.b; }' +
+		' int takee(struct E v) { return v.a + v.b + v.c; }' +
+		' int main(void) {' +
+		' struct A a = ga(); if (a.a != 7) return 1;' +
+		' struct B b = gb(); if (b.a != 3 || b.b != 4) return 2;' +
+		' struct C c = gc(); if (c.a != 1.5 || c.b != 2.5) return 3;' +
+		' struct D d = gd(); if (d.a != 1 || d.b != 2 || d.c != 3 || d.d != 4) return 4;' +
+		' struct E e = ge(); if (e.a != 5 || e.b != 6 || e.c != 7) return 5;' +
+		' union U u = gu(); if (u.a != 11) return 6;' +
+		' if (takeb(fb()) != 34) return 7;' +
+		' if (takee(fe()) != 18) return 8;' +
+		' if (ga().a != 7) return 9;' +
+		' return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+// The same hand-over through a call written to a pointer: the class is the type
+// the pointer carries, so `p()` hands the object back the way a named call
+// does, whether it is returned, assigned or read for a member. Measured on gcc
+// 16.2.1, the program below exits 0.
+fn test_a_structure_a_call_through_a_pointer_returns_is_handed_over_by_value() {
+	source := 'struct B { int a; int b; };' +
+		' struct B fb(void) { struct B r; r.a = 3; r.b = 4; return r; }' +
+		' struct B via(struct B (*p)(void)) { return p(); }' +
+		' int main(void) {' +
+		' struct B (*q)(void) = fb;' +
+		' struct B x = via(q); if (x.a != 3 || x.b != 4) return 1;' +
+		' struct B y = q(); if (y.a != 3 || y.b != 4) return 2;' +
+		' if (q().a != 3) return 3;' +
+		' return 0; }'
+	emitted := emit(translation_unit(source), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 // A member is read from any expression the reader can build, not only a name: a
 // chained arrow through a linked list, an element of an array of structs, and
 // the object a call hands back by value. Measured on gcc 16.2.1, the four
