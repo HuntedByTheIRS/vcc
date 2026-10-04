@@ -2125,6 +2125,41 @@ fn test_a_conditional_binds_looser_than_the_binary_operators() {
 	assert (conditional.else_expr as ast.Ident).name == 'd'
 }
 
+// 6.5.15 evaluates only the arm the condition selects, and a condition the
+// reader can evaluate is the same answer on every run, so the reader folds it to
+// its value. The arm that is not selected stays in the tree and is still read
+// and checked; only the emitter stops writing it, which is why the fold is on
+// the condition and not on the whole expression. A condition that is not
+// constant is left as written, so both of its arms stay.
+fn test_a_constant_condition_is_folded_to_its_value() {
+	selected := parsed('int main(void) { return (2 > 1) ? 7 : 9; }')
+	assert selected.diagnostics.len == 0
+	selected_expr := selected.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	conditional := selected_expr as ast.Conditional
+	assert conditional.cond is ast.IntLit
+	assert (conditional.cond as ast.IntLit).value != 0
+	zeroed := parsed('int main(void) { return 0 ? 7 : 9; }')
+	assert zeroed.diagnostics.len == 0
+	zero_expr := zeroed.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	is_zero := zero_expr as ast.Conditional
+	assert is_zero.cond is ast.IntLit
+	assert (is_zero.cond as ast.IntLit).value == 0
+	runtime := parsed('int f(int c) { return c ? 7 : 9; }')
+	assert runtime.diagnostics.len == 0
+	runtime_expr := runtime.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	kept := runtime_expr as ast.Conditional
+	assert kept.cond is ast.Ident
+}
+
 // The GNU spelling with the middle operand left out is refused by name: the
 // extension repeats the condition, and reading the tokens that way would be a
 // value the standard does not give them.
