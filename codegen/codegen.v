@@ -5678,11 +5678,18 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 	}
 	if e.long_double_of(unary.expr) {
 		// The logical not asks whether the value is zero, which is the
-		// comparison with zero the x87 stack makes; a sign change would need a
-		// negate on that stack, which this back end does not write, so it stays
-		// refused by name.
+		// comparison with zero the x87 stack makes. The sign change is the
+		// stack's own negate, which flips the sign bit in place, and the
+		// unary plus computes nothing at all: the operand's address is the
+		// value. Anything else is refused by name.
 		if unary.op == '!' {
 			return e.emit_extended_logical_not(unary, depth)
+		}
+		if unary.op == '-' {
+			return e.emit_extended_negate(unary, depth)
+		}
+		if unary.op == '+' {
+			return e.emit_expr_at(unary.expr, depth)
 		}
 		return e.refuse_a_long_double_operation(unary.op, unary.line, unary.col)
 	}

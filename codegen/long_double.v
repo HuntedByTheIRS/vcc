@@ -511,6 +511,27 @@ fn (mut e Emitter) emit_extended_logical_not(unary ast.Unary, depth int) !void {
 	e.append(e.target.extended_compare_zero('==', address, scratch)!)
 }
 
+// emit_extended_negate writes the sign change on a long double. The value at the
+// address the operand left in the accumulator is loaded onto the x87 stack,
+// `fchs` flips its sign there, and the result is stored into a frame temporary
+// whose address is what the negation is worth. The instruction changes the sign
+// bit and nothing else, so -0.0 becomes +0.0 and stays a different value from
+// +0.0, a NaN keeps its payload and takes the other sign, and an infinity takes
+// the opposite sign. Subtracting from zero would round a signalling NaN and turn
+// -0.0 into +0.0, neither of which is what the operator asks for.
+fn (mut e Emitter) emit_extended_negate(unary ast.Unary, depth int) !void {
+	e.emit_expr_at(unary.expr, depth + 1)!
+	base := e.frame_pointer(unary.line, unary.col)!
+	register := e.accumulator(unary.line, unary.col)!
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.extended_negate())
+	result := e.reserve(long_double_bytes)
+	address := e.accumulator(unary.line, unary.col)!
+	e.append(e.target.address_of_slot(base, i32(result.offset), address))
+	e.append(e.target.store_extended(address)!)
+	return e.leave_address(result, unary.line, unary.col)
+}
+
 // emit_extended_conditional writes `c ? a : b` where the arms have the extended
 // type. Each arm leaves the address of its sixteen bytes in the accumulator, so
 // the branch machinery carries an address the same way it carries a value in a
