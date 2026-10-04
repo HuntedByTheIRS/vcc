@@ -237,6 +237,25 @@ fn test_the_exit_status_is_the_returned_constant() {
 	assert run_image(emitted.bytes) == 7
 }
 
+fn test_a_program_reads_an_object_a_library_defines() {
+	// A file-scope `extern` object is storage this image holds, and the loader
+	// fills it by copying the library's definition into it. The name read as a
+	// value is a read of this image's storage, and the value in it is the
+	// library's, so the program answers what gcc 16.2.1 building the same
+	// source answers.
+	emitted := emit(translation_unit('extern void *stdout; int main() { return stdout != 0 ? 0 : 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+	// A name no library the image names defines is refused here by name, the way
+	// a link refuses an undefined reference, and the name does not become a read
+	// of zero.
+	missing := emit(translation_unit('extern int no_such_object_anywhere; int main() { return no_such_object_anywhere; }'),
+		Options{})
+	assert missing.diagnostics.len == 1
+	assert missing.diagnostics[0].msg.contains('no_such_object_anywhere')
+}
+
 fn test_a_read_through_an_address_reads_the_value_at_it() {
 	// Measured with gcc 16.2.1 on the same programs: the char 65 behind an
 	// address is 65, an array's name is the address of its first element, the int
