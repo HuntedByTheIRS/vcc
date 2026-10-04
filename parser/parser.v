@@ -30,6 +30,14 @@ struct PendingBound {
 	at_col    int
 }
 
+// IdentSpan is the first and the last place an identifier text appears in the
+// token stream. Both are token indices, and a name that appears once has the
+// same number for each.
+struct IdentSpan {
+	first int
+	last  int
+}
+
 struct Parser {
 mut:
 	tokens      []tokenize.Token
@@ -86,6 +94,15 @@ mut:
 	// is a set of names rather than the scope table because that check is about
 	// the unit and not about which block a name was visible in.
 	declared map[string]bool
+	// ident_span says, for every identifier text in the stream, where its first
+	// and its last occurrence sit. `skip_uncalled_static` asks whether a
+	// function's name is written anywhere outside its own definition, and the
+	// name is an identifier in the stream itself, so both occurrences are in
+	// these two numbers: everything the question needs is a comparison, where
+	// walking the stream for each `static` a file has was one walk per
+	// declaration on V's own generated C. A name that is not here is not an
+	// identifier anywhere in the stream.
+	ident_span map[string]IdentSpan
 	// current_function is the name of the function whose body is being read, and
 	// empty outside one. The function-name spellings read it: 6.4.2.2 makes
 	// `__func__` a static array holding the name of the enclosing function, and
@@ -202,8 +219,10 @@ pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 		scopes:         types.new_table()
 		representation: representation_of(target)
 		declared:       map[string]bool{}
+		ident_span:     map[string]IdentSpan{}
 	}
 	p.declare_argument_list()
+	p.index_identifiers()
 	unit := p.parse_unit()
 	// A file-scope bound that named something the scope did not have is answered
 	// now, because the whole file has been read and whether the name is declared
@@ -248,6 +267,32 @@ fn (mut p Parser) declare_argument_list() {
 fn representation_of(target ?backend.Target) types.Representation {
 	chosen := target or { return types.Representation{} }
 	return types.from_target(chosen).representation
+}
+
+// index_identifiers records where the first and the last occurrence of every
+// identifier text in the stream sit. It is one walk of the stream, and it buys
+// the `static` step-over the two numbers it needs to answer, for every `static`
+// definition in the file, without walking the stream again each time. Only the
+// names a definition declares are ever asked about, and the stream holds far
+// more tokens than it holds distinct names, so this is smaller than the stream
+// it is built from.
+fn (mut p Parser) index_identifiers() {
+	for i, tok in p.tokens {
+		if tok.kind != .identifier {
+			continue
+		}
+		if existing := p.ident_span[tok.text] {
+			p.ident_span[tok.text] = IdentSpan{
+				first: existing.first
+				last:  i
+			}
+			continue
+		}
+		p.ident_span[tok.text] = IdentSpan{
+			first: i
+			last:  i
+		}
+	}
 }
 
 // is_type_name says whether a name is one this file has declared as a type

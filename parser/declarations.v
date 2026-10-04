@@ -654,11 +654,12 @@ fn (mut p Parser) skip_uncalled_static() bool {
 	if end < 0 {
 		return false
 	}
-	for j, t in p.tokens {
-		if j >= start && j <= end {
-			continue
-		}
-		if t.kind == .identifier && t.text == name {
+	// The name is written outside the definition exactly when one of its
+	// occurrences is outside it, and the span recorded for the stream says
+	// where they all are. A name the stream does not hold as an identifier at
+	// all is nowhere, which is also nowhere outside the definition.
+	if span := p.ident_span[name] {
+		if span.first < start || span.last > end {
 			return false
 		}
 	}
