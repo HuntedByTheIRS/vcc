@@ -887,7 +887,7 @@ fn install_dir() string {
 // gcc's -v opens with.
 fn verbose_header_lines(opts cli.Options) []string {
 	mut out := []string{}
-	out << 'vcc version ${cli.version} (pure V, stub)'
+	out << 'vcc version ${cli.version} (pure V)'
 	target := backend.resolve(opts.target) or {
 		out << 'target: none (${err.msg()})'
 		return out

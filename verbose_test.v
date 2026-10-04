@@ -39,7 +39,7 @@ fn test_the_header_names_this_compiler_and_its_target() {
 	opts := cli.parse(['-verbose', '-std=gnu11', 'x.c'])!
 	lines := verbose_header_lines(opts)
 	assert lines.len == 3
-	assert lines[0] == 'vcc version ${cli.version} (pure V, stub)'
+	assert lines[0] == 'vcc version ${cli.version} (pure V)'
 	assert lines[1] == 'target: ${host.name}'
 	assert lines[2].starts_with('standard: gnu11')
 }

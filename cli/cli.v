@@ -13,13 +13,13 @@ import standard
 pub const version = '0.0.1'
 
 pub fn version_line() string {
-	return 'vcc ${version} (pure V, stub)'
+	return 'vcc ${version} (pure V)'
 }
 
 // Options is the command line after it has been read, in the terms the rest of
 // the compiler uses.
 //
-// Flags this stub cannot honor are recorded rather than refused. V passes a
+// Flags this compiler cannot honor are recorded rather than refused. V passes a
 // compiler flags for features it expects to be there (-bt25 and the -Wl,
 // passthroughs among them), and a compiler that errors on one of them fails a
 // build it was supposed to serve.
@@ -523,8 +523,8 @@ pub fn usage(all bool) string {
 	out << 'Usage: vcc [options...] [-o outfile] infile.c'
 	out << ''
 	out << 'A C compiler written in V, meant to replace the tcc that V vendors in'
-	out << 'thirdparty/tcc. Status: a stub. It compiles a function that returns a'
-	out << 'constant, and says so for everything else.'
+	out << 'thirdparty/tcc. It compiles a subset of C to a Linux x86-64 executable and'
+	out << 'refuses the rest with a diagnostic naming the construct and its location.'
 	out << ''
 	out << 'General options:'
 	out << '  -o outfile    set the output filename (default a.out)'
@@ -557,9 +557,10 @@ pub fn usage(all bool) string {
 	out << '  -imacros file read a file before the source for its macros only'
 	out << '  -undef        do not define the macros that describe the target'
 	out << '  -dM           print the macros that are defined when the read ends'
-	out << '  -std=version  -std version   the dialect: c99 and gnu99 are the ones'
-	out << '                this compiler honors, and every other spelling is'
-	out << '                recorded and never refused'
+	out << '  -std=version  -std version   the dialect: the spelling selects the mode'
+	out << '                the construct table is checked against (c89 through c29'
+	out << '                and the gnu dialects of each); a spelling this compiler'
+	out << '                does not implement is recorded and never refused'
 	out << '  -Wpedantic -pedantic      report what the selected dialect forbids'
 	out << '  -pedantic-errors          the same as an error (-Werror=pedantic too)'
 	out << '  -Wclass -Wno-class        one class of diagnostic, on or off: the last'
@@ -612,8 +613,9 @@ pub fn usage(all bool) string {
 		out << ''
 		out << 'What a replacement for the bundled tcc is asked to accept, and what'
 		out << 'this compiler does with each one today:'
-		out << '  -std=gnu11 -std c99   both spellings; c99 and gnu99 select the dialect,'
-		out << '                        and every other spelling is recorded, never refused'
+		out << '  -std=gnu11 -std c99   both spellings; the spelling selects a dialect mode,'
+		out << '                        and one this compiler does not implement is recorded,'
+		out << '                        never refused'
 		out << '  -Wpedantic -pedantic   the constructs the selected dialect does not allow,'
 		out << '                        in vcc words; -pedantic-errors and -Werror=pedantic'
 		out << '                        make them errors and -w or -Wno-pedantic silence them'
