@@ -26,10 +26,12 @@ fn test_a_diagnostic_names_the_file_its_token_came_from() {
 	// Measured: `#include <stdlib.h>` over a two-line program reported
 	// `prog.c:33:1: unsupported type unsigned`, a line the program does not have,
 	// because the parser reported a header's position under the name of the file
-	// it was handed. The preprocessor fills a token's file in, and the message
-	// names that. The type here is one the compiler still has no form for, so the
-	// diagnostic is still a refusal and the subject is still the file it names.
-	result := parsed_from('long double f() { return 1; }', '/usr/include/stdlib.h')
+	// The preprocessor fills a token's file in, and the message
+	// names that. The type here is one the compiler still has no form for - a
+	// bare `long double` is read now, so the one that makes the point is its
+	// complex form - so the diagnostic is still a refusal and the subject is
+	// still the file it names.
+	result := parsed_from('long double _Complex x;', '/usr/include/stdlib.h')
 	assert result.diagnostics.len >= 1
 	assert result.diagnostics[0].file == '/usr/include/stdlib.h'
 }

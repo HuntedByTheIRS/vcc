@@ -256,6 +256,12 @@ mut:
 	// parameters those are, and the width cannot answer it: a pair is sixteen
 	// bytes and is not handed over at that width.
 	wide_params map[string][]bool
+	// extended_params says, for the same functions, which parameters are the
+	// extended floating type. Such a parameter is passed in memory, sixteen
+	// bytes at a time, rather than in a register, so a call has to know which
+	// parameters those are and the width cannot answer it: a long double is
+	// sixteen bytes and is not handed over in any register.
+	extended_params map[string][]bool
 	// return_classes says, for the same functions, which of them hand an object
 	// of an aggregate type back, and how many bytes of one. The value comes back
 	// in the register its class names rather than converted.
@@ -617,6 +623,7 @@ fn (mut e Emitter) build() ![]u8 {
 			mut unsigneds := []bool{}
 			mut aggregates := []abi.Class{}
 			mut wides := []bool{}
+			mut extendeds := []bool{}
 			mut sized := true
 			for param in decl.params {
 				// Which parameters are 128-bit values is read here rather than
@@ -624,6 +631,10 @@ fn (mut e Emitter) build() ![]u8 {
 				// not the width it is handed over at: it travels as a pair of
 				// words in two registers at once.
 				wides << e.writes_a_128(param.typ)
+				// A long double parameter is passed in memory rather than in a
+				// register, so which parameters are one is a question the width
+				// cannot answer and a call has to be told.
+				extendeds << abi.travels_on_the_x87_stack(param.resolved)
 				// A parameter that is an object of an aggregate type is handed
 				// over as its bytes in one register: how many bytes it is and
 				// which file the register belongs to are the two facts the call
@@ -660,6 +671,7 @@ fn (mut e Emitter) build() ![]u8 {
 				}
 			}
 			e.wide_params[decl.name] = wides
+			e.extended_params[decl.name] = extendeds
 			if sized {
 				e.signatures[decl.name] = widths
 				e.float_params[decl.name] = classes
@@ -865,7 +877,8 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// answer in. Measured on gcc 16.2.1, which returns one in rax and the
 		// word above it in rdx, and which clears rdx when the returned
 		// expression is narrower than the type.
-	} else if decl.ret_type.kind != .pointer && decl.ret != 'int' && decl.ret != 'unsigned int'
+	} else if !abi.travels_on_the_x87_stack(decl.ret_type)
+		&& decl.ret_type.kind != .pointer && decl.ret != 'int' && decl.ret != 'unsigned int'
 		&& decl.ret != 'void'
 		&& decl.ret != 'double' && decl.ret != 'float'
 		&& !e.eight_byte_integer(types.from_words(decl.ret.split(' ')) or { types.Type{} })
@@ -953,6 +966,22 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	mut doubles := 0
 	mut stacked := 0
 	for _, param in decl.params {
+		if abi.travels_on_the_x87_stack(param.resolved) {
+			// A long double parameter arrives in memory: sixteen bytes at the
+			// alignment the type has, which is sixteen. An odd number of
+			// eight-byte words before it is a padding word the caller wrote, so
+			// it is skipped and the value still starts at a multiple of
+			// sixteen. Measured on gcc 16.2.1: `addl` reads its first long
+			// double with `fldt 16(%rbp)` and its second with `fldt 32(%rbp)`.
+			if stacked % 2 == 1 {
+				stacked++
+			}
+			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col)!
+			at := 2 * e.target.word_size + stacked * e.target.word_size
+			e.copy_stack_object(object, at, param.line, param.col)!
+			stacked += 2
+			continue
+		}
 		// How this parameter is handed over is the target's answer for the type
 		// the declaration resolved to, and it is asked here rather than read off
 		// the node.
@@ -1119,6 +1148,11 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			// of a float and in the eight of a double.
 			register := e.float_accumulator(decl.line, decl.col)!
 			e.append(e.target.zero_double(register)!)
+		} else if e.writes_a_long_double(decl.ret) {
+			// A long double comes back on the x87 stack, so the zero a function
+			// that falls off its end leaves is pushed there: an int zero in the
+			// result register would be read as no long double at all.
+			e.append(e.target.extended_zero())
 		} else {
 			result := e.accumulator(decl.line, decl.col)!
 			e.append(e.target.move_immediate32(result, 0)!)
@@ -1337,6 +1371,12 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 			stmt.line, stmt.col)!
 		e.append(e.target.frame_epilogue())
 		return
+	}
+	if e.writes_a_long_double(e.returning) {
+		// A long double comes back on the x87 stack and not in a register, so
+		// the value is put there instead of being converted into the result
+		// register.
+		return e.emit_extended_return(expr, stmt.line, stmt.col)
 	}
 	if e.writes_a_128(e.returning) {
 		// A function of a 128-bit type answers with the pair, so the expression
@@ -7282,6 +7322,9 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 	if binary.left.typ.kind.is_complex() || binary.right.typ.kind.is_complex() {
 		return e.emit_complex_comparison(binary, depth)
 	}
+	if e.extended_step(binary) {
+		return e.emit_extended_binary(binary, depth)
+	}
 	if binary.op == '&&' || binary.op == '||' {
 		return e.emit_short_circuit(binary, depth)
 	}
@@ -7851,11 +7894,10 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 // to the type the conditional is worth before they meet.
 fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !void {
 	if conditional.typ.kind == .long_double {
-		// The two arms would each have to leave a sixteen-byte value, and there
-		// is no register for one to arrive in. Computing the arms as doubles
-		// would narrow whichever one ran.
-		return e.refuse_a_long_double_operation('a conditional expression', conditional.line,
-			conditional.col)
+		// The two arms are values of the extended type, and a value of that type
+		// is the address of its sixteen bytes, so the branch carries the address
+		// of whichever arm ran the way it carries a register elsewhere.
+		return e.emit_extended_conditional(conditional, depth)
 	}
 	if e.wide_value(ast.Expr(conditional)) {
 		// Two arms of a 128-bit type would each have to leave a pair of
@@ -8909,18 +8951,10 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		else {}
 	}
-	if e.returns_a_long_double(call) {
-		// A function that hands a long double back returns it on the x87 stack,
-		// which is a convention this back end does not write.
-		e.diagnostics << problem(call.line, call.col, 'unsupported: the call to ${call.name} hands back a long double, and the x87 return convention a long double comes back in is not one this compiler emits')
-		return error('long double return')
-	}
-	if argument := e.long_double_argument(call) {
-		// A long double argument travels by the x87 convention too, so the
-		// address of the value is not what the callee expects to read.
-		e.diagnostics << problem(expr_line(argument), expr_col(argument), 'unsupported: the argument passed to ${call.name} is a long double, and the x87 calling convention one is passed by is not one this compiler emits')
-		return error('long double argument')
-	}
+	// A call that hands a long double back leaves it on the x87 stack rather
+	// than in the result register. The call is written the same way as any
+	// other, and what it is worth to the expression around it is settled after
+	// the call runs, at each of the places below that emit one.
 	mut places := []ArgPlace{cap: call.args.len}
 	// A call written to an expression calls the address that expression is
 	// worth. The address is computed before anything else and waits in a slot of
@@ -8947,6 +8981,27 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	mut doubles := 0
 	mut stacked := 0
 	for i, arg in call.args {
+		if e.long_double_argument(call, i, arg) != none {
+			// A long double is handed over in memory: sixteen bytes, at the
+			// alignment the type has, which is sixteen. An odd number of
+			// eight-byte words already on the stack therefore takes a padding
+			// word first so that the argument starts at a multiple of sixteen.
+			// The value is pushed in the stack pass, where its two words are
+			// written straight from the value's sixteen bytes.
+			pad := stacked % 2 == 1
+			if pad {
+				stacked++
+			}
+			places << ArgPlace{
+				stack:    true
+				position: stacked
+				extended: true
+				pad:      pad
+				words:    2
+			}
+			stacked += 2
+			continue
+		}
 		// The two sequences run out separately: a call with six ints and nine
 		// doubles has three doubles on the stack and every int in a register.
 		// The ones a sequence ran out for go on the stack in the order they
@@ -9063,6 +9118,12 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
+		if place.extended {
+			// A long double is written in the stack pass, which pushes its two
+			// words straight from the value's sixteen bytes rather than parking
+			// the address of them in a slot.
+			continue
+		}
 		if place.object {
 			// An object is not read into a slot of its own: its own bytes are
 			// read after the stack this call takes has been made, either into
@@ -9176,6 +9237,39 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			arg := call.args[i]
 			line := expr_line(arg)
 			col := expr_col(arg)
+			if place.extended {
+				// A long double goes on the stack as its own sixteen bytes: the
+				// words are pushed from the last to the first, so the low word
+				// is at the lower address the callee reads first. The value is
+				// materialized once and its address parked, because an
+				// expression computed here is materialized by taking its
+				// address and a second take per word would compute it twice.
+				// When an odd number of eight-byte words was already on the
+				// stack, the padding word is reserved after the two, so it lands
+				// below them and the value still starts at a multiple of
+				// sixteen.
+				e.emit_expr_at(arg, depth + i + 1)!
+				source := e.value_slot(depth + i)
+				e.store_accumulator(source, line, col)!
+				mut k := place.words - 1
+				for k >= 0 {
+					base := e.accumulator(line, col)!
+					e.load_argument(source, base, e.target.word_size, line, col)!
+					if k > 0 {
+						e.append(e.target.add_immediate(base, k * width))
+					}
+					value := e.scratch(line, col)!
+					e.append(e.target.load_indirect(base, value, width)!)
+					e.append(e.target.push_register(value))
+					e.stack_pushed += width
+					k--
+				}
+				if place.pad {
+					e.append(e.target.frame_reserve(u32(width)))
+					e.stack_pushed += width
+				}
+				continue
+			}
 			if place.object {
 				// An object goes on the stack in one piece, its words pushed from
 				// the last one to the first: the stack grows down, so the word
@@ -9246,6 +9340,11 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
+		if place.extended {
+			// A long double was pushed whole in the stack pass; no register is
+			// loaded for it.
+			continue
+		}
 		if place.object && !place.stack {
 			// The object's own bytes, read straight into the two argument
 			// registers: the second eightbyte is eight bytes further in, and the
@@ -9316,12 +9415,12 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		register := e.accumulator(call.line, call.col)!
 		e.append(e.target.call_register(register)!)
 		e.release_call_stack()
-		return
+		return e.store_extended_result(call, call.line, call.col)
 	}
 	if call.name in e.program.defined {
 		e.reference(e.target.call_near(0), .call_local, call.name, '')
 		e.release_call_stack()
-		return
+		return e.store_extended_result(call, call.line, call.col)
 	}
 	e.import_symbol(call.name)
 	// A library function this compiler has no prototype for may be variadic, and
@@ -9343,6 +9442,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		e.reference(e.target.call_slot(0), .call_import, call.name, '')
 	}
 	e.release_call_stack()
+	return e.store_extended_result(call, call.line, call.col)
 }
 
 // release_call_stack gives back the stack a call took for the arguments its
@@ -9382,6 +9482,15 @@ struct ArgPlace {
 	// pair waits in a slot of its own until the registers are loaded, so nothing
 	// of it is read from the slot a value argument waits in.
 	wide bool
+	// extended says the argument is a long double, which travels in memory as
+	// sixteen bytes rather than in any register. It is written in the stack pass
+	// like an object, pushing its two words straight from the value's bytes.
+	extended bool
+	// pad says the sixteen-byte-aligned extended argument this place is one of
+	// needed a padding word before it, because an odd number of eight-byte words
+	// was already on the stack. The word is reserved below the two the value
+	// pushes, so the argument still starts at a multiple of sixteen.
+	pad bool
 }
 
 // store_return_eightbyte writes one of the registers a call handed its object back

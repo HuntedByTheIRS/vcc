@@ -79,6 +79,28 @@ pub fn class_of(r types.Representation, declared types.Type) Class {
 	}
 }
 
+// The extended floating type does not travel in a register file at all, which
+// is why it is a question of its own beside the eightbyte classes rather than a
+// row of them. Its value is sixteen bytes of memory that the machine computes
+// with on the x87 stack, so the convention passes a long double argument by
+// copying those sixteen bytes onto the argument stack and hands a returned one
+// back on the x87 stack rather than in a register. The question a caller and a
+// callee have to reach the same answer to is not "which register carries this"
+// but "this one carries no register", and an eightbyte class cannot say that.
+//
+// Measured on gcc 16.2.1 at -O0 -fno-builtin: sizeof(long double) and
+// _Alignof(long double) are both 16, a callee reads its first long double
+// parameter with fldt 16(%rbp) and a second with fldt 32(%rbp), and a caller
+// that has an odd number of eight-byte words on the stack before a long double
+// argument inserts eight bytes of padding so that the argument starts sixteen
+// bytes in rather than eight.
+pub const extended_bytes = 16
+pub const extended_alignment = 16
+
+pub fn travels_on_the_x87_stack(typ types.Type) bool {
+	return typ.kind == .long_double
+}
+
 // PairPlaces is where the two eightbytes of an object of two of them go, and it is
 // the one answer a caller and a callee both have to reach, because an object the
 // caller puts in a register and the callee expects in memory arrives as whatever

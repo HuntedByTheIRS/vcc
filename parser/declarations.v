@@ -3913,23 +3913,11 @@ fn (mut p Parser) check_definition(spec DeclSpec, d Declarator) {
 	// A return type with a star is one address wide whatever it points at, so
 	// the base type is asked the same question a local of pointer type is: the
 	// emitter sizes the value from the star and never lays out what is under it.
-	// The `long double` clause below is about a value the emitter has to give a
-	// form to, so it is asked only of a return type that is not a pointer, and a
-	// pointer to one takes the same answer a pointer object takes. A complex
-	// type is a value the emitter does have a form for now: it travels as its
-	// two components through the aggregate path, so `double _Complex` and
+	// A complex type is a value the emitter does have a form for: it travels as
+	// its two components through the aggregate path, so `double _Complex` and
 	// `float _Complex` are not refused here, and `long double _Complex` is
 	// refused by its `_Complex` word below because no form for its component
 	// exists.
-	if d.pointer_count() == 0 && spec.clause.kind == .long_double {
-		// The type itself holds now - it has a size, a form and constants - but a
-		// value of it is carried in the x87 stack, whose calling convention this
-		// compiler does not emit yet, so a value passed back would be read from
-		// the wrong place. The refusal names the stack rather than claiming the
-		// type does not exist.
-		p.error_at(spec.start, 'unsupported: long double is a type the x87 stack carries and this compiler has no calling convention for it yet, so a function cannot return it')
-		return
-	}
 	if offender := p.unsupported_type_word(spec, d.pointer_count()) {
 		p.error_at(spec.start, 'unsupported type ${offender}')
 		return
@@ -5370,13 +5358,6 @@ fn (mut p Parser) parse_parameter_list(depth int) !Params {
 				params.note_problem('unsupported: a parameter of a definition needs a name', spec.start)
 			} else if d.is_array() && d.pointer_count() == 0 && spec.clause.kind == .void_ {
 				params.note_problem('a constraint violation: ${d.name} is declared as an array of void, and 6.7.5.2p1 makes the element type of an array an object type', spec.start)
-			} else if d.pointer_count() == 0 && spec.clause.kind == .long_double {
-				// The type holds now, but a value of it is carried in the x87
-				// stack, whose calling convention this compiler does not emit
-				// yet, so an argument would be handed over in the wrong place.
-				// An array of them adjusts to a pointer and is not asked this:
-				// an address is what the call passes.
-				params.note_problem('unsupported: long double is a type the x87 stack carries and this compiler has no calling convention for it yet, so a function cannot take one as a parameter', spec.start)
 			} else if !p.parameter_type_is_known(spec, d.pointer_count()) {
 				// The type as the parameter wrote it, so that `double _Complex`
 				// and `long long` are named rather than a word of them.

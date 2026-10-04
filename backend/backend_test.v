@@ -1265,6 +1265,56 @@ fn test_the_float_instructions_are_the_bytes_the_machine_reads() {
 	]
 }
 
+// The x87 arithmetic and comparison a long double is computed with. The four
+// operations are two bytes each with both operands on the stack and no memory
+// operand; the comparison is `fcomip %st(1),%st` followed by `fstp %st(0)` to
+// drop the second operand, then the same flag reading a Comisd uses. The bytes
+// are what the machine's own assembler produces for `faddp %st,%st(1)`,
+// `fsubrp %st,%st(1)`, `fmulp %st,%st(1)`, `fdivrp %st,%st(1)`,
+// `fcomip %st(1),%st`, `fstp %st(0)` and `fldz`.
+fn test_the_x87_arithmetic_and_comparison_are_the_bytes_the_machine_reads() {
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	rax := target.reg('rax') or { panic('the target description has no such name') }
+	rcx := target.reg('rcx') or { panic('the target description has no such name') }
+	assert target.extended_arithmetic('+') or { panic('the target description has no such name') } == [
+		u8(0xde),
+		0xc1,
+	]
+	assert target.extended_arithmetic('-') or { panic('the target description has no such name') } == [
+		u8(0xde),
+		0xe9,
+	]
+	assert target.extended_arithmetic('*') or { panic('the target description has no such name') } == [
+		u8(0xde),
+		0xc9,
+	]
+	assert target.extended_arithmetic('/') or { panic('the target description has no such name') } == [
+		u8(0xde),
+		0xf9,
+	]
+	assert target.extended_zero() == [u8(0xd9), 0xee]
+	// fcomip %st(1),%st / fstp %st(0) / setb %al / setnp %cl / and al, cl / movzx eax, al
+	assert target.extended_comparison('<', rax, rcx) or {
+		panic('the target description has no such name')
+	} == [
+		u8(0xdf),
+		0xf1,
+		0xdd,
+		0xd8,
+		0x0f,
+		0x92,
+		0xc0,
+		0x0f,
+		0x9b,
+		0xc1,
+		0x20,
+		0xc8,
+		0x0f,
+		0xb6,
+		0xc0,
+	]
+}
+
 // The conversion of an unsigned four-byte integer to a double. The signed
 // instruction reads the top bit of the integer as a sign and sign-extends, so
 // 3000000000u reaches it as -1294967296. The unsigned form clears the upper half

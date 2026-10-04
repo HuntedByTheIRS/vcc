@@ -1,5 +1,7 @@
 module codegen
 
+import abi
+
 // Long double is the target's extended-precision type: eighty significant bits
 // held in sixteen bytes of memory, which is the format this machine's x87 stack
 // carries. This file is the whole of the type's support in the back end - the
@@ -80,18 +82,101 @@ fn (e Emitter) returns_a_long_double(call ast.Call) bool {
 	return e.returns[call.name] == 'long double'
 }
 
-// long_double_argument is the first argument of a call that is a long double, or
-// none when every one of them is a value this back end passes. A long double
-// argument travels by the x87 convention, which is not the sequence of argument
-// registers the call below writes, so naming the argument is what keeps the
-// address of the value from being handed over as though it were the value.
-fn (e Emitter) long_double_argument(call ast.Call) ?ast.Expr {
-	for argument in call.args {
-		if e.long_double_of(argument) {
-			return argument
+// extended_parameter says whether a call's parameter at `position` is the
+// extended type, or none when no declaration answers for that position: a call
+// nothing prototypes, or an argument past the parameters a prototype names. The
+// argument's own type answers in that case, which is the same fallback
+// argument_is_double makes.
+fn (e Emitter) extended_parameter(call ast.Call, position int) ?bool {
+	if parameter := call_parameter(call, position) {
+		return abi.travels_on_the_x87_stack(parameter)
+	}
+	if extendeds := e.extended_params[call.name] {
+		if position < extendeds.len {
+			return extendeds[position]
 		}
 	}
 	return none
+}
+
+// extended_argument says whether the convention hands argument `position` over
+// in memory, which is a parameter of the extended type or, where nothing
+// declares it, an argument that is itself a long double. A long double travels
+// by the x87 convention and not in the argument register file, so the address
+// of its value is not what the callee expects to read and a call has to hand
+// over the sixteen bytes themselves.
+fn (e Emitter) extended_argument(call ast.Call, position int, arg ast.Expr) bool {
+	if known := e.extended_parameter(call, position) {
+		return known
+	}
+	return e.is_extended(arg)
+}
+
+// long_double_argument is argument `position` of a call when the convention
+// hands it over in memory, or none when it is a value the argument registers
+// carry. It is the seam the call's placement reads, so the address of a long
+// double's value is never handed over as though it were the value itself.
+fn (e Emitter) long_double_argument(call ast.Call, position int, arg ast.Expr) ?ast.Expr {
+	if e.extended_argument(call, position, arg) {
+		return arg
+	}
+	return none
+}
+
+// is_extended says whether an expression is worth a long double value, which is
+// the address of its sixteen bytes. A call whose signature returns one is one
+// even where the reader left the call expression's own type unresolved, so the
+// question is asked the way returns_a_long_double asks it.
+fn (e Emitter) is_extended(expr ast.Expr) bool {
+	if expr is ast.Call {
+		return e.returns_a_long_double(expr)
+	}
+	return e.long_double_of(expr)
+}
+
+// store_extended_result hands a call that returns a long double to the
+// expression around it. The convention leaves the value on the x87 stack and a
+// long double value in this back end is the address of its sixteen bytes, so
+// the value is written into a frame temporary and that address is what the call
+// expression is worth. A call that does not return one leaves the accumulator
+// as it found it.
+fn (mut e Emitter) store_extended_result(call ast.Call, line int, col int) !void {
+	if !e.returns_a_long_double(call) {
+		return
+	}
+	temporary := e.reserve(long_double_bytes)
+	base := e.frame_pointer(line, col)!
+	register := e.scratch(line, col)!
+	e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+	e.append(e.target.store_extended(register)!)
+	return e.leave_address(temporary, line, col)
+}
+
+// emit_extended_return leaves the value a function returns on the x87 stack,
+// which is where the convention hands a long double back. An expression of the
+// type is already the address of sixteen bytes, so it is loaded from there; any
+// other value is converted into a frame temporary first and loaded from that,
+// which is the conversion a return makes when the two classes differ.
+fn (mut e Emitter) emit_extended_return(expr ast.Expr, line int, col int) !void {
+	if e.is_extended(expr) {
+		e.emit_expr(expr)!
+		register := e.accumulator(line, col)!
+		e.append(e.target.load_extended(register)!)
+		e.append(e.target.frame_epilogue())
+		return
+	}
+	temporary := e.reserve(long_double_bytes)
+	base := e.frame_pointer(line, col)!
+	address := e.value_slot(0)
+	register := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+	e.store_accumulator(address, line, col)!
+	e.emit_expr(expr)!
+	e.convert_value_to_extended(address, expr, line, col)!
+	destination := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(base, i32(temporary.offset), destination))
+	e.append(e.target.load_extended(destination)!)
+	e.append(e.target.frame_epilogue())
 }
 
 // word_from_bytes reads eight bytes of an object representation as the machine
@@ -171,18 +256,15 @@ fn (mut e Emitter) store_long_double(slot Slot, expr ast.Expr, line int, col int
 }
 
 fn (mut e Emitter) store_long_double_at(address Slot, expr ast.Expr, line int, col int, depth int) !void {
-	if e.long_double_of(expr) {
+	if e.is_extended(expr) {
 		// A value of the same type is a copy of sixteen bytes, from wherever its
 		// address is: a literal materialized into a temporary, or an object the
-		// program named.
+		// program named, or a call whose sixteen bytes came back on the x87
+		// stack and were put in a temporary of their own.
 		e.emit_expr_at(expr, depth + 1)!
 		source := e.value_slot(depth + 1)
 		e.store_accumulator(source, line, col)!
 		return e.copy_address_object(source, address, long_double_bytes, line, col)
-	}
-	if expr is ast.Call {
-		e.diagnostics << problem(line, col, 'unsupported: the call to ${expr.name} is stored in a long double, and a function that hands one back needs the x87 return convention, which this compiler does not emit')
-		return error('long double return')
 	}
 	if e.is_a_pointer(expr) {
 		e.diagnostics << problem(line, col, 'unsupported: a pointer is stored in a long double, and there is no conversion between them')
@@ -291,11 +373,117 @@ fn (mut e Emitter) emit_extended_cast(cast ast.Cast, depth int) !void {
 	return e.leave_address(temporary, cast.line, cast.col)
 }
 
+// extended_step says whether a binary step is one the x87 stack computes with:
+// an arithmetic operation on two long doubles, or the order of them. The other
+// operators the language has are not operations the stack gives the type, and
+// each of them is refused at its own site by name.
+fn (e Emitter) extended_step(step ast.Binary) bool {
+	if step.op !in ['+', '-', '*', '/', '==', '!=', '<', '>', '<=', '>='] {
+		return false
+	}
+	return e.is_extended(step.left) || e.is_extended(step.right)
+}
+
+// extended_temp computes an expression of the extended type into a frame
+// temporary of its own and returns it. A value of the type is the address of its
+// sixteen bytes, so an expression that already is one is copied from that
+// address; anything else - an int, a float or a double - is converted into the
+// temporary, which is the conversion a mixed operation needs on either side.
+fn (mut e Emitter) extended_temp(expr ast.Expr, depth int) !Slot {
+	temporary := e.reserve(long_double_bytes)
+	line := expr_line(expr)
+	col := expr_col(expr)
+	base := e.frame_pointer(line, col)!
+	if e.is_extended(expr) {
+		e.emit_expr_at(expr, depth)!
+		source := e.reserve(e.target.word_size)
+		e.store_accumulator(source, line, col)!
+		destination := e.reserve(e.target.word_size)
+		register := e.accumulator(line, col)!
+		e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+		e.store_accumulator(destination, line, col)!
+		e.copy_address_object(source, destination, long_double_bytes, line, col)!
+		return temporary
+	}
+	destination := e.reserve(e.target.word_size)
+	register := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+	e.store_accumulator(destination, line, col)!
+	e.emit_expr_at(expr, depth + 1)!
+	e.convert_value_to_extended(destination, expr, line, col)!
+	return temporary
+}
+
+// emit_extended_binary writes an arithmetic step on long doubles. The two
+// operands are materialized into frame temporaries, left then right, and loaded
+// onto the x87 stack in that order, which leaves the right value on top and the
+// left one below it - the order gcc 16.2.1 uses at -O0, measured on
+// `long double a, b; a - b` as `fldt a; fldt b; fsubrp %st,%st(1)`. The x87
+// instruction replaces the pair with the result, which is stored into a
+// temporary of its own and left as the address of that.
+fn (mut e Emitter) emit_extended_binary(step ast.Binary, depth int) !void {
+	if step.op in ['==', '!=', '<', '>', '<=', '>='] {
+		return e.emit_extended_comparison(step, depth)
+	}
+	left := e.extended_temp(step.left, depth + 1)!
+	right := e.extended_temp(step.right, depth + 1)!
+	base := e.frame_pointer(step.line, step.col)!
+	register := e.accumulator(step.line, step.col)!
+	e.append(e.target.address_of_slot(base, i32(left.offset), register))
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.address_of_slot(base, i32(right.offset), register))
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.extended_arithmetic(step.op)!)
+	result := e.reserve(long_double_bytes)
+	address := e.accumulator(step.line, step.col)!
+	e.append(e.target.address_of_slot(base, i32(result.offset), address))
+	e.append(e.target.store_extended(address)!)
+	return e.leave_address(result, step.line, step.col)
+}
+
+// emit_extended_comparison reads the order of two long doubles off the x87 stack
+// into a register as zero or one, which is what a comparison of them is worth.
+// The encoder reads the flags as the value on top against the one below it, so
+// the right value is pushed first and the left second, leaving the left value on
+// top; `fcomip` then compares the left against the right and pops the left, and
+// `fstp` drops the right, so both are consumed.
+fn (mut e Emitter) emit_extended_comparison(step ast.Binary, depth int) !void {
+	left := e.extended_temp(step.left, depth + 1)!
+	right := e.extended_temp(step.right, depth + 1)!
+	base := e.frame_pointer(step.line, step.col)!
+	register := e.accumulator(step.line, step.col)!
+	e.append(e.target.address_of_slot(base, i32(right.offset), register))
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.address_of_slot(base, i32(left.offset), register))
+	e.append(e.target.load_extended(register)!)
+	scratch := e.scratch(step.line, step.col)!
+	e.append(e.target.extended_comparison(step.op, register, scratch)!)
+}
+
+// emit_extended_conditional writes `c ? a : b` where the arms have the extended
+// type. Each arm leaves the address of its sixteen bytes in the accumulator, so
+// the branch machinery carries an address the same way it carries a value in a
+// register: only the arm the condition selects is evaluated, and its address is
+// what the conditional is worth.
+fn (mut e Emitter) emit_extended_conditional(conditional ast.Conditional, depth int) !void {
+	e.emit_condition(conditional.cond, depth + 1, conditional.line, conditional.col)!
+	else_label := e.label()
+	end_label := e.label()
+	e.branch(.branch_zero, else_label, conditional.line, conditional.col)!
+	then_temp := e.extended_temp(conditional.then_expr, depth + 1)!
+	e.leave_address(then_temp, conditional.line, conditional.col)!
+	e.jump(end_label)!
+	e.place(else_label)
+	else_temp := e.extended_temp(conditional.else_expr, depth + 1)!
+	e.leave_address(else_temp, conditional.line, conditional.col)!
+	e.place(end_label)
+}
+
 // refuse_a_long_double_operation reports an operation on a value of the
 // extended type that this back end does not compute, naming the operation and
 // what is missing rather than answering with a double.
 fn (mut e Emitter) refuse_a_long_double_operation(op string, line int, col int) !void {
-	e.diagnostics << problem(line, col, 'unsupported: ${op} on a long double is not one this back end computes, and computing it in a double would round away the precision the type is for; arithmetic on a long double is not implemented')
+	e.diagnostics << problem(line, col, 'unsupported: ${op} on a long double is not one this back end computes; the x87 stack gives two long doubles the arithmetic +, -, *, / and the order comparisons ==, !=, <, >, <=, >= and nothing else, and computing it in a double would round away the precision the type is for')
 	return error('long double operation')
 }
 
