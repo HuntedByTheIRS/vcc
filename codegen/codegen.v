@@ -3772,6 +3772,27 @@ fn (mut e Emitter) normalize_a_bool_store(boolean bool, word bool, line int, col
 	e.narrow_register(.bool_, register, word)!
 }
 
+// normalize_a_bool_value makes the value just computed 0 or 1 in the
+// accumulator, which is what a conversion to `_Bool` is: 6.3.1.2 asks whether
+// the value compares equal to zero and not what its low byte holds. A value
+// eight bytes wide is tested as a whole word, so `_Bool b = 1ULL << 40` leaves 1
+// where a four-byte test of the low half answers zero, and an address whose low
+// four bytes are zero is not called null. A floating value is compared with zero
+// in the floating-point file, which is the comparison a condition already makes,
+// so `_Bool b = 0.5` leaves 1 where truncating to an integer leaves zero; a long
+// double is refused there by name, because a truth test on one is not a
+// comparison this back end writes.
+fn (mut e Emitter) normalize_a_bool_value(value ast.Expr, line int, col int) !void {
+	if e.floating_of(value) || e.long_double_of(value) {
+		// emit_test compares the value with zero and leaves 0 or 1 in the
+		// accumulator, and refuses a long double by name.
+		return e.emit_test(value, line, col)
+	}
+	register := e.accumulator(line, col)!
+	word := e.eight_byte_integer(value.typ) || e.is_a_pointer(value)
+	return e.narrow_register(.bool_, register, word)
+}
+
 // normalize_a_bool_constant is the value a `_Bool` object is defined with: 6.3.1.2
 // makes the object hold 0 or 1 whatever constant the declaration wrote, so
 // `_Bool g = 2;` holds 1 and not 2, which is what gcc 16.2.1 leaves in the image.
@@ -4811,8 +4832,24 @@ fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int,
 // different value of a different width rather than a wrong one, so the value is
 // converted first and the width it had no longer describes it. A pointer is one
 // of the two conversions that does not exist, and it is refused by name.
+//
+// A slot holding a `_Bool` is the other exception, and the reason it is answered
+// before the check: 6.3.1.2 makes every store into one hold 0 or 1 whatever the
+// width of the value, so the value is compared with zero in its own domain
+// instead of cut to the slot's byte. A long double is refused there by name, and
+// so is a shape this back end cannot test.
 fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !void {
 	floating := e.floating_of(expr)
+	if slot.boolean {
+		// Every store into a `_Bool` makes the value 0 or 1 (6.3.1.2), which is
+		// a comparison with zero and not a store at the slot's one byte: a wide
+		// value whose low byte is zero, a fraction, and a non-null address all
+		// leave 1. The comparison is made at the value's own width first, and
+		// the store then writes the 0 or 1 it leaves.
+		e.normalize_a_bool_value(expr, line, col)!
+		e.store_accumulator(slot, line, col)!
+		return
+	}
 	if e.long_double_of(expr) && !slot.single && !slot.floating {
 		// A value of the extended type stored in a slot of another type is a
 		// conversion out of it, and the only one this back end writes is the
@@ -6260,6 +6297,13 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		if target.kind == .pointer {
 			e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from a double to ${cast.spelling}, and a floating type is not a value an address is made of')
 			return error('double to a pointer')
+		}
+		if target.kind == .bool_ {
+			// A floating value converted to `_Bool` is the comparison with zero
+			// and not the truncation to an integer: 6.3.1.2 makes `(_Bool)-0.5`
+			// 1, where truncating -0.5 toward zero leaves 0 and the store then
+			// reports the value as zero. Measured on gcc 16.2.1.
+			return e.normalize_a_bool_value(cast.expr, cast.line, cast.col)
 		}
 		if e.eight_byte_integer(target) {
 			// The conversion is made at the destination's width, so a 64-bit
