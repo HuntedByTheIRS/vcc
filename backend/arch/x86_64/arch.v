@@ -36,6 +36,17 @@ pub const relocation_call = u32(4) // R_X86_64_PLT32
 // top level.
 pub const relocation_pc_relative = u32(2) // R_X86_64_PC32
 
+// relocation_got_pc_relative is a distance from the instruction to the global
+// offset table entry that holds a symbol's address, which the linker builds and
+// the loader fills. It is the reference a position-independent object uses for
+// an object another object may define: a direct reference to such a symbol is
+// one a shared link refuses, because the symbol can be interposed and a distance
+// computed at link time would be wrong. Measured on gcc 16.2.1, an object built
+// with -fPIC writes this relocation where one built without it writes
+// relocation_pc_relative; the X on the end lets a linker relax the load back to
+// a direct one when the symbol turns out not to be preemptible.
+pub const relocation_got_pc_relative = u32(42) // R_X86_64_REX_GOTPCRELX
+
 // syscall_number_reg is the register the kernel reads a syscall number from once
 // the trap is taken.
 pub const syscall_number_reg = 'eax'

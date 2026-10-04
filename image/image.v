@@ -32,10 +32,18 @@ pub enum FixupKind {
 	// of bytes can be a narrow literal in one program and a wide one in
 	// another and the two are different objects.
 	take_wide_address
-	jump_local       // a jump to a label inside the function being emitted
-	branch_zero      // the same jump, taken when the value last tested was zero
-	branch_nonzero   // and when it was not
-	global_address   // the address of an object defined at the top level
+	jump_local     // a jump to a label inside the function being emitted
+	branch_zero    // the same jump, taken when the value last tested was zero
+	branch_nonzero // and when it was not
+	global_address // the address of an object defined at the top level
+	// got_address is the same address reached the other way: the instruction
+	// loads the object's address out of the global offset table entry the
+	// linker builds for it, rather than computing a direct distance to the
+	// object. It is the reference a position-independent object writes for an
+	// object another object may define, because a direct distance to such a
+	// symbol is one a shared link refuses. A static object, whose name another
+	// object cannot define, keeps global_address.
+	got_address      // the address of an object, out of the global offset table
 	function_address // the address of a function defined in this translation unit
 	import_address   // the address of a function the loader resolves out of a library
 	float_constant   // a double the instruction reads out of the read-only data
@@ -139,6 +147,13 @@ pub mut:
 	// interned for the name it was defined with.
 	globals_blob []u8
 	globals      map[string]GlobalSlot
+	// internal is every top-level object this unit defines with internal
+	// linkage, which is `static` at file scope: the name is one no other object
+	// can define or refer to. The object's symbol is local rather than global
+	// for that reason, and a reference to it is a direct one under any
+	// addressing, because there is nothing for a global offset table to protect
+	// it from.
+	internal map[string]bool
 	// globals_alignment is the strictest alignment any top-level object asked
 	// for with `__attribute__((aligned(N)))`, and zero when none did. The
 	// storage of the objects has to start at it for an object whose

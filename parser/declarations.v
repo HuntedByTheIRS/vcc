@@ -1422,6 +1422,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				bytes:        bytes
 				alignment:    data_alignment
 				weak:         data_weak
+				internal:     spec.storage == .static_
 				init:         data_init
 				init_float:   data_init_float
 				address:      data_address
@@ -1513,6 +1514,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 			count:         data_count
 			alignment:     data_alignment
 			weak:          data_weak
+			internal:      spec.storage == .static_
 			init:          init
 			init_float:    init_float
 			init_long:     data_init_long

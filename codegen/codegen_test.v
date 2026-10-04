@@ -4171,3 +4171,36 @@ fn test_a_signed_operand_widens_into_the_atomic_word_with_its_sign() {
 	assert object.diagnostics.len == 0
 	assert run_image(object.bytes) == 11
 }
+
+// The flag decides the form of a reference to a top-level object another object
+// may define, and nothing else. The same program compiled for a shared object,
+// where the object is reached through the global offset table, has different
+// bytes from the one compiled for a plain object, where it is reached directly.
+// An object with internal linkage cannot be defined elsewhere, so its reference
+// is the same either way and the two objects are byte for byte the same. This
+// runs the compiler's emitter twice and compares the artifacts, so what is
+// checked is what the flag does and not what it was recorded as.
+fn test_the_flag_decides_the_form_of_a_reference_to_a_top_level_object() {
+	source := 'int counter = 10;\nint read(void) { return counter; }\n'
+	plain := emit(translation_unit(source), Options{
+		compile_only: true
+	})
+	pic := emit(translation_unit(source), Options{
+		compile_only: true
+		pic:          true
+	})
+	assert plain.diagnostics.len == 0
+	assert pic.diagnostics.len == 0
+	assert plain.bytes != pic.bytes
+	hidden := 'static int hidden = 11;\nint read(void) { return hidden; }\n'
+	hidden_plain := emit(translation_unit(hidden), Options{
+		compile_only: true
+	})
+	hidden_pic := emit(translation_unit(hidden), Options{
+		compile_only: true
+		pic:          true
+	})
+	assert hidden_plain.diagnostics.len == 0
+	assert hidden_pic.diagnostics.len == 0
+	assert hidden_plain.bytes == hidden_pic.bytes
+}

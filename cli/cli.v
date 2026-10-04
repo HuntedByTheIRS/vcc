@@ -66,6 +66,17 @@ pub mut:
 	// kind of compilation, so it says nothing about a run that stops before a
 	// link, which is what -c does.
 	shared bool
+	// pic is -fPIC/-fpic: the object a compile writes reaches every top-level
+	// object another object may define through the global offset table rather
+	// than through a direct reference, which is what lets the object be linked
+	// into a shared object. -fno-pic and -fno-PIC turn it off again. It is a
+	// fact about a relocatable object, so it says nothing about the program the
+	// path with no -c and no linker writes: that image has every address
+	// settled here and a direct reference is what it uses. -fPIE and -fpie are
+	// not read: PIE names an executable, which is not a shape this compiler
+	// writes, so those spellings stay in `ignored` like the rest of the -f
+	// family it cannot honor.
+	pic bool
 	// static_link is -static: the link resolves every library into the file
 	// rather than leaving the loader to map it, and the program that comes out
 	// names no loader and no library.
@@ -281,6 +292,15 @@ pub fn parse(args []string) !Options {
 			opts.vcc_extensions.accept(arg)!
 		} else if arg == '-g' {
 			opts.debug = true
+		} else if arg == '-fPIC' || arg == '-fpic' {
+			// The two spellings gcc offers for the same thing. Read rather than
+			// recorded: a build that passes -fPIC and gets an object a shared
+			// link refuses has been told nothing by a flag that landed in a
+			// list. -fno-pic and -fno-PIC are the other half of the pair, so a
+			// build can turn it back off.
+			opts.pic = true
+		} else if arg == '-fno-pic' || arg == '-fno-PIC' {
+			opts.pic = false
 		} else if arg == '-o' {
 			opts.output = cursor.value_of('')!
 		} else if arg.starts_with('-o') {
@@ -521,6 +541,10 @@ pub fn usage(all bool) string {
 	out << '  -O0 -O1 -O2 -O3 -Os   optimization level (default -O0)'
 	out << '  -fno-builtin  do not compute calls to library functions the compiler knows'
 	out << '  -fno-builtin-NAME  the same for one function'
+	out << '  -fPIC -fpic   position-independent code for a relocatable object: a'
+	out << '                top-level object another object may define is reached'
+	out << '                through the global offset table, so the object links into'
+	out << '                a shared object; -fno-pic turns it back off'
 	out << '  -Idir -Dname -Uname -Ldir -llib -x type -o outfile'
 	out << '  -nostdinc     do not search the standard directories for headers'
 	out << '  -M -MM        print a make rule for what the file needs instead of'
@@ -598,7 +622,16 @@ pub fn usage(all bool) string {
 		out << '  -fno-vcc-exts=NAME      turn one off again'
 		out << '  -fno-vcc-exts=all       or all of them'
 		out << '  the names are ${extensions.names().join(', ')}'
-		out << '  -fwrapv -fPIC -g       accepted and ignored'
+		out << '  -fPIC -fpic -fno-pic  the addressing of a relocatable object: a'
+		out << '                        top-level object another object may define is'
+		out << '                        reached through the global offset table when'
+		out << '                        this is on, and through a direct reference'
+		out << '                        when it is off. It is a fact about an object,'
+		out << '                        so the program this compiler writes itself is'
+		out << '                        unchanged. -fPIE and -fpie are accepted and'
+		out << '                        ignored: they name an executable, which is not'
+		out << '                        a shape this compiler writes'
+		out << '  -fwrapv -g            accepted and ignored'
 		out << '  -Werror=name          accepted and ignored, except the classes above'
 		out << '  -Btcc -Idir          accepted; -I directories are searched for headers,'
 		out << '                        -B is not used yet'

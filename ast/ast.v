@@ -143,7 +143,13 @@ pub:
 	alignment int
 	// weak says the declaration asked for the weak symbol binding, with
 	// `__attribute__((weak))`. The object says so in its symbol table.
-	weak       bool
+	weak bool
+	// internal says the declaration named the object `static`, so the name has
+	// internal linkage: no other object can define it or refer to it. The
+	// object is then a local symbol, and a reference to it is a direct one
+	// under any addressing, because there is nothing for the linker to
+	// interpose.
+	internal   bool
 	init       ?i64
 	init_float ?f64
 	// init_long is the constant of an object of a long double type, in the

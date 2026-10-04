@@ -75,6 +75,27 @@ fn test_what_v_passes_is_accepted_rather_than_refused() {
 	assert opts.ignored.contains('-B/opt/tcc/lib/tcc')
 }
 
+// -fPIC and -fpic are the two spellings gcc offers for one thing, and -fno-pic
+// takes the addressing back. The flag is read rather than recorded: it decides
+// the form of every reference to a top-level object another object may define,
+// and a build that passes it and is told nothing is a build that has been told
+// nothing. -fPIE names an executable, which is not a shape this compiler
+// writes, so it stays in the accepted-and-ignored list rather than being read
+// as -fPIC.
+fn test_the_position_independent_flag_is_read_from_either_spelling() {
+	upper := parse(['-fPIC', 'src.c'])!
+	assert upper.pic
+	lower := parse(['-fpic', 'src.c'])!
+	assert lower.pic
+	off := parse(['-fPIC', '-fno-pic', 'src.c'])!
+	assert !off.pic
+	absent := parse(['src.c'])!
+	assert !absent.pic
+	pie := parse(['-fPIE', 'src.c'])!
+	assert !pie.pic
+	assert pie.ignored.contains('-fPIE')
+}
+
 fn test_the_standard_is_recorded_from_either_spelling() {
 	// V passes -std=gnu11 and a person types -std gnu11. The second one has to
 	// be read as a value, or the version name becomes an input file and the

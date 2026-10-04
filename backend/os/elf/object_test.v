@@ -259,6 +259,71 @@ fn test_a_reference_with_no_symbol_behind_it_is_refused() {
 	}
 }
 
+// A position-independent object reaches an object another object may define
+// through the global offset table: the instruction loads the address out of a
+// table entry the linker builds rather than computing the distance to the
+// object itself, and that distance is the relocation a shared link refuses.
+// Measured on gcc 16.2.1 with -fPIC -c, which writes R_X86_64_REX_GOTPCRELX
+// (42) where a plain compile writes R_X86_64_PC32 (2) for the same source.
+fn test_a_reference_through_the_global_offset_table_is_its_own_relocation() {
+	mut program := image.Program{}
+	program.text = [u8(0x48), u8(0x8b), u8(0x05), u8(0), u8(0), u8(0), u8(0), u8(0xc3)]
+	program.globals['counter'] = image.GlobalSlot{
+		offset: 0
+		width:  4
+	}
+	program.fixups << image.Fixup{
+		start:    0
+		length:   7
+		kind:     .got_address
+		name:     'counter'
+		register: 'rax'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	assert relocation_count(bytes) == 1
+	// The field is the four bytes at the end of the instruction and the addend
+	// is what a linker expects for a displacement it writes into them.
+	assert relocation_offset(bytes, 0) == 3
+	assert u32(relocation_info(bytes, 0) & 0xffffffff) == x86_64().got_relocation()
+	// The object is defined here, so the entry before the first global is not
+	// where its symbol sits: the one object is the first global.
+	assert u32(relocation_info(bytes, 0) >> 32) == first_global_symbol
+	assert relocation_addend(bytes, 0) == -4
+	assert u16_at(bytes, symbol_entry_at(bytes, first_global_symbol) + 6) == section_data
+}
+
+// An object with internal linkage is a local symbol and keeps the direct
+// reference: no other object can define the name, so there is nothing for the
+// linker to interpose and the table would name a fact the code already has. The
+// table has to say where the locals stop, and it stops after this one.
+fn test_an_object_with_internal_linkage_is_a_local_symbol() {
+	mut program := image.Program{}
+	program.text = [u8(0x48), u8(0x8d), u8(0x05), u8(0), u8(0), u8(0), u8(0), u8(0xc3)]
+	program.globals['hidden'] = image.GlobalSlot{
+		offset: 0
+		width:  4
+	}
+	program.internal['hidden'] = true
+	program.fixups << image.Fixup{
+		start:    0
+		length:   7
+		kind:     .global_address
+		name:     'hidden'
+		register: 'rax'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	entry := symbol_entry_at(bytes, first_global_symbol)
+	assert bytes[entry + 4] == symbol_local_object
+	assert u16_at(bytes, entry + 6) == section_data
+	assert u32_at(bytes, section_header_at(bytes, section_symtab) + 44) == first_global_symbol + 1
+	assert relocation_count(bytes) == 1
+	assert u32(relocation_info(bytes, 0) & 0xffffffff) == x86_64().address_relocation()
+}
+
 // The relocations against the writable data live in a table of their own, and
 // these read one entry out of it the way a linker does.
 

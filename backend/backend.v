@@ -37,16 +37,20 @@ pub:
 	// the scratch and remainder registers, the register a shift count is read
 	// from, and the numbers the machine's relocations and frame instruction
 	// carry.
-	syscall_number_reg      string
-	float_return_reg        string
-	float_scratch_reg       string
-	frame_pointer_reg       string
-	scratch_reg             string
-	remainder_reg           string
-	shift_count_code        u8
-	relocation_call         u32
-	relocation_pc_relative  u32
-	frame_reserve_immediate int
+	syscall_number_reg     string
+	float_return_reg       string
+	float_scratch_reg      string
+	frame_pointer_reg      string
+	scratch_reg            string
+	remainder_reg          string
+	shift_count_code       u8
+	relocation_call        u32
+	relocation_pc_relative u32
+	// relocation_got_pc_relative is the number for a reference to an object
+	// through the global offset table, which is what a position-independent
+	// object uses for a symbol another object may define.
+	relocation_got_pc_relative u32
+	frame_reserve_immediate    int
 	// encoders is the machine's instruction set, composed into the target as a
 	// value: the emitter's instructions come from here and not from a module.
 	encoders x86_64.Encoders
@@ -107,22 +111,23 @@ pub fn targets() []Target {
 // goes through them rather than through the machine's or the system's module.
 fn x86_64_linux() Target {
 	machine := Machine{
-		registers:               x86_64.registers()
-		float_registers:         x86_64.float_registers()
-		word_size:               x86_64.word_size
-		elf_machine:             x86_64.machine
-		return_reg:              x86_64.return_reg
-		syscall_number_reg:      x86_64.syscall_number_reg
-		float_return_reg:        x86_64.float_return_reg
-		float_scratch_reg:       x86_64.float_scratch_reg
-		frame_pointer_reg:       x86_64.frame_pointer
-		scratch_reg:             x86_64.scratch_reg
-		remainder_reg:           x86_64.remainder_reg
-		shift_count_code:        x86_64.shift_count_code
-		relocation_call:         x86_64.relocation_call
-		relocation_pc_relative:  x86_64.relocation_pc_relative
-		frame_reserve_immediate: x86_64.frame_reserve_immediate
-		encoders:                x86_64.encoders()
+		registers:                  x86_64.registers()
+		float_registers:            x86_64.float_registers()
+		word_size:                  x86_64.word_size
+		elf_machine:                x86_64.machine
+		return_reg:                 x86_64.return_reg
+		syscall_number_reg:         x86_64.syscall_number_reg
+		float_return_reg:           x86_64.float_return_reg
+		float_scratch_reg:          x86_64.float_scratch_reg
+		frame_pointer_reg:          x86_64.frame_pointer
+		scratch_reg:                x86_64.scratch_reg
+		remainder_reg:              x86_64.remainder_reg
+		shift_count_code:           x86_64.shift_count_code
+		relocation_call:            x86_64.relocation_call
+		relocation_pc_relative:     x86_64.relocation_pc_relative
+		relocation_got_pc_relative: x86_64.relocation_got_pc_relative
+		frame_reserve_immediate:    x86_64.frame_reserve_immediate
+		encoders:                   x86_64.encoders()
 	}
 	system := System{
 		syscalls:          linux.syscalls(x86_64.name)
@@ -355,6 +360,15 @@ pub fn (t &Target) call_relocation() u32 {
 // computes rather than jumps to, which is every reference to data.
 pub fn (t &Target) address_relocation() u32 {
 	return t.relocation_pc_relative
+}
+
+// got_relocation is the number an object file gives a reference to an object
+// through the global offset table: the code names the symbol, and the distance
+// is to the table entry the linker builds rather than to the symbol itself. It
+// is what a position-independent object writes for a symbol another object may
+// define.
+pub fn (t &Target) got_relocation() u32 {
+	return t.relocation_got_pc_relative
 }
 
 // address_of computes the address of a byte string in the image and puts it in

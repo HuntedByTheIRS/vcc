@@ -45,6 +45,12 @@ const shf_execinstr = u64(4)
 // this object needs are a section no one refers to by name, an object anything
 // may refer to, and, from elf.v, the function those two sit beside.
 const symbol_local_section = u8(0x03) // binding local (0), type section (3)
+// A static object at file scope has internal linkage, so no other object can
+// define its name: it is a local symbol, and a reference to it needs no table
+// to protect it from interposition. It is the local counterpart of
+// symbol_global_object, and the two are the only difference between a `static`
+// object and one with external linkage in this table.
+const symbol_local_object = u8(0x01) // binding local (0), type object (1)
 const symbol_global_object = u8(0x11) // binding global (1), type object (1)
 // A weak definition is one a link may replace rather than one that collides with
 // a second: the same names with the weak binding (2) in the upper nibble. It is
@@ -136,36 +142,62 @@ struct PartOffsets {
 // ObjectRelocation is one hole the linker has to fill: where it is in .text,
 // which symbol it is against, and what the addend is. call says the reference is
 // a call, which a linker may route through a stub, rather than a distance the
-// code computes for itself.
+// code computes for itself. got says the reference is to the global offset table
+// entry for the symbol rather than to the symbol: the code that reads it is a
+// load of the symbol's address, which is what a position-independent object uses
+// for a symbol another object may define.
 struct ObjectRelocation {
 	offset int
 	symbol int
 	addend i64
 	call   bool
+	got    bool
 }
 
 // object wraps a program in an ELF64 relocatable object that a linker can take
 // as input.
 pub fn object(program image.Program, target backend.Target) ![]u8 {
-	// The symbols, in the order the table needs them: the functions this file
-	// defines and the objects it defines, each sorted so that the same input
-	// gives the same bytes every run, and then the imports in call order, which
-	// the emitter already fixed.
+	// The symbols, in the order the table needs them: the objects with internal
+	// linkage first, because a local symbol has to sit before the first global
+	// one, then the functions this file defines and the objects it defines, each
+	// sorted so that the same input gives the same bytes every run, and then
+	// the imports in call order, which the emitter already fixed.
 	mut functions := program.defined.keys()
 	functions.sort()
 	mut objects := program.globals.keys()
 	objects.sort()
+	// A `static` object at file scope has internal linkage, so its symbol is
+	// local and every reference to it is a direct one: the name cannot be
+	// interposed, which is what lets a position-independent object keep the
+	// same reference it writes without -fPIC.
+	mut internal_objects := []string{}
+	mut external_objects := []string{}
+	for name in objects {
+		if program.internal[name] {
+			internal_objects << name
+		} else {
+			external_objects << name
+		}
+	}
 	mut strtab := []u8{}
 	strtab << u8(0)
 	mut symbol_index := map[string]int{}
 	mut name_offset := map[string]int{}
 	mut symbol_count := first_global_symbol
+	for name in internal_objects {
+		symbol_index[name] = symbol_count
+		symbol_count++
+		name_offset[name] = intern_name(mut strtab, name)
+	}
+	// The first global symbol is where the locals stop, and the section header
+	// that says so reads this number rather than the count of built-in locals.
+	first_global := symbol_count
 	for name in functions {
 		symbol_index[name] = symbol_count
 		symbol_count++
 		name_offset[name] = intern_name(mut strtab, name)
 	}
-	for name in objects {
+	for name in external_objects {
 		symbol_index[name] = symbol_count
 		symbol_count++
 		name_offset[name] = intern_name(mut strtab, name)
@@ -252,6 +284,26 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 					call:   false
 				}
 			}
+			.got_address {
+				// The instruction loads the object's address out of the table
+				// entry the linker builds for it, so the reference is to the
+				// symbol through the table rather than to the symbol: the
+				// relocation names the symbol and says the distance is to its
+				// GOT entry. It is what a position-independent object writes
+				// for a name another object may define, and the linker refuses
+				// it only when the symbol turns out not to be preemptible at
+				// link time, where a direct reference is refused outright.
+				symbol := symbol_index[fixup.name] or {
+					return error('${fixup.name} is reached through the global offset table but this object defines no such name')
+				}
+				relocations << ObjectRelocation{
+					offset: field
+					symbol: symbol
+					addend: -4
+					call:   false
+					got:    true
+				}
+			}
 			.jump_local, .branch_zero, .branch_nonzero {
 				where := program.labels[fixup.name] or {
 					return error('no code for ${fixup.name}')
@@ -327,8 +379,8 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 	put(mut output, parts.data, program.globals_blob)
 	emit_object_relocations(mut output, parts, relocations, target)
 	emit_object_data_relocations(mut output, parts, data_relocations)
-	emit_object_symbols(mut output, parts, program, functions, objects, symbol_index,
-		name_offset)
+	emit_object_symbols(mut output, parts, program, functions, internal_objects, external_objects,
+		symbol_index, name_offset)
 	put(mut output, parts.strtab, strtab)
 	put(mut output, parts.shstrtab, shstrtab)
 	// An object whose declaration asked for a strict alignment has to have its
@@ -339,7 +391,7 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 	} else {
 		u64(8)
 	}
-	emit_object_section_headers(mut output, parts, sizes, names, data_alignment)
+	emit_object_section_headers(mut output, parts, sizes, names, data_alignment, first_global)
 	emit_object_header(mut output, target, parts)
 	return output
 }
@@ -424,7 +476,13 @@ fn place(sizes PartSizes) PartOffsets {
 fn emit_object_relocations(mut output []u8, parts PartOffsets, relocations []ObjectRelocation, target backend.Target) {
 	for i, relocation in relocations {
 		at := parts.rela + i * elf_relocation_size
-		kind := if relocation.call { target.call_relocation() } else { target.address_relocation() }
+		kind := if relocation.call {
+			target.call_relocation()
+		} else if relocation.got {
+			target.got_relocation()
+		} else {
+			target.address_relocation()
+		}
 		put_u64(mut output, at, u64(relocation.offset))
 		put_u64(mut output, at + 8, (u64(relocation.symbol) << 32) | u64(kind))
 		put_u64(mut output, at + 16, u64(relocation.addend))
@@ -452,13 +510,25 @@ fn emit_object_data_relocations(mut output []u8, parts PartOffsets, relocations 
 // begins in .text, an object's is where its storage begins in .data, and an
 // import has no value and no section, because its definition is somewhere this
 // object is not.
-fn emit_object_symbols(mut output []u8, parts PartOffsets, program image.Program, functions []string, objects []string, symbol_index map[string]int, name_offset map[string]int) {
+//
+// The objects with internal linkage are written before the functions, because a
+// local symbol has to sit before the first global one and a `static` object is
+// local: no other object can define its name, so a linker binds every reference
+// to it here and a position-independent object can reach it directly.
+fn emit_object_symbols(mut output []u8, parts PartOffsets, program image.Program, functions []string, internal_objects []string, external_objects []string, symbol_index map[string]int, name_offset map[string]int) {
 	put_symbol(mut output, parts.symtab + symbol_text_section * elf_symbol_size, 0,
 		symbol_local_section, section_text, 0, 0)
 	put_symbol(mut output, parts.symtab + symbol_rodata_section * elf_symbol_size, 0,
 		symbol_local_section, section_rodata, 0, 0)
 	put_symbol(mut output, parts.symtab + symbol_data_section * elf_symbol_size, 0,
 		symbol_local_section, section_data, 0, 0)
+	for name in internal_objects {
+		at := parts.symtab + symbol_index[name] * elf_symbol_size
+		slot := program.globals[name] or { image.GlobalSlot{} }
+		width := if slot.count > 0 { slot.width * slot.count } else { slot.width }
+		put_symbol(mut output, at, name_offset[name] or { 0 }, symbol_local_object,
+			section_data, u64(slot.offset), u64(width))
+	}
 	for name in functions {
 		at := parts.symtab + symbol_index[name] * elf_symbol_size
 		where := program.labels[name] or { 0 }
@@ -466,7 +536,7 @@ fn emit_object_symbols(mut output []u8, parts PartOffsets, program image.Program
 		put_symbol(mut output, at, name_offset[name] or { 0 }, info,
 			section_text, u64(where), 0)
 	}
-	for name in objects {
+	for name in external_objects {
 		at := parts.symtab + symbol_index[name] * elf_symbol_size
 		slot := program.globals[name] or { image.GlobalSlot{} }
 		// An object's size is one element wide, or as many elements as it was
@@ -496,7 +566,12 @@ fn put_symbol(mut output []u8, at int, name int, info u8, section u16, value u64
 // emit_object_section_headers writes the section header table, which a
 // relocatable file needs and a program does not: a linker reads the sections it
 // is told about, and there are no program headers to read instead.
-fn emit_object_section_headers(mut output []u8, parts PartOffsets, sizes PartSizes, names NameOffsets, data_alignment u64) {
+//
+// first_global is one greater than the index of the last local symbol, which is
+// what the symbol table's info field says and what a linker reads to split the
+// locals from the globals. It moves when the unit defines objects with internal
+// linkage, because those are locals too.
+fn emit_object_section_headers(mut output []u8, parts PartOffsets, sizes PartSizes, names NameOffsets, data_alignment u64, first_global int) {
 	// The null section is the whole of offset zero in the table, and the zeroes
 	// the file was made of are what belongs there, so nothing is written.
 	put_section_header(mut output, parts.headers + section_text * elf_section_header_size,
@@ -513,7 +588,7 @@ fn emit_object_section_headers(mut output []u8, parts PartOffsets, sizes PartSiz
 		0, 0, data_alignment, 0)
 	put_section_header(mut output, parts.headers + section_symtab * elf_section_header_size,
 		names.symtab, sht_symtab, 0, parts.symtab, sizes.symtab,
-		section_strtab, first_global_symbol, 8, elf_symbol_size)
+		section_strtab, u32(first_global), 8, elf_symbol_size)
 	put_section_header(mut output, parts.headers + section_strtab * elf_section_header_size,
 		names.strtab, sht_strtab, 0, parts.strtab, sizes.strtab,
 		0, 0, 1, 0)

@@ -22,6 +22,13 @@ pub:
 	// the last stage wraps the program in and nothing before it, which is why it
 	// is an option here rather than a second entry point.
 	compile_only bool
+	// pic is -fPIC: a relocatable object reaches every top-level object another
+	// object may define through the global offset table, so that a shared link
+	// has no direct reference to a symbol that can be interposed. It only means
+	// anything for a relocatable object: the program this compiler writes has
+	// every address settled here, so its addressing is unchanged whether the
+	// flag is given or not.
+	pic bool
 	// libraries are the -l names the command line gave, in the order they were
 	// written: a program that calls a function out of a shared library other
 	// than the C library has to name that library for the loader to map it.
@@ -202,7 +209,15 @@ struct Emitter {
 	entry          string
 	// compile_only says the container to build is an object and not a program.
 	compile_only bool
-	unit         ast.TranslationUnit
+	// pic says a relocatable object reaches a non-static top-level object
+	// through the global offset table rather than through a direct reference.
+	pic bool
+	// internal is every top-level object this unit defines with internal
+	// linkage: the names the declaration wrote `static`. A reference to one is
+	// direct under any addressing, because no other object can define the name
+	// and there is nothing for the global offset table to protect it from.
+	internal map[string]bool
+	unit     ast.TranslationUnit
 	// libraries are the -l names the command line gave, and library_dirs the
 	// -L directories they are looked for in. Both are resolved into the names
 	// the image carries before anything is emitted.
@@ -433,11 +448,23 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 			diagnostics: [problem(1, 1, 'no definition of ${entry} in this translation unit')]
 		}
 	}
+	// The names this unit defines with internal linkage, collected before the
+	// walk so that an address taken before the object is laid out still knows
+	// it is a local one. Only the names a definition gave, because a name
+	// `static` only declares cannot be the object of a reference.
+	mut internal := map[string]bool{}
+	for global in unit.globals {
+		if global.internal {
+			internal[global.name] = true
+		}
+	}
 	mut emitter := Emitter{
 		target:         target
 		representation: types.from_target(target).representation
 		entry:          entry
 		compile_only:   opts.compile_only
+		pic:            opts.pic
+		internal:       internal
 		unit:           unit
 		libraries:      opts.libraries
 		library_dirs:   opts.library_dirs
@@ -1881,7 +1908,7 @@ fn (mut e Emitter) assign_object_local(stmt ast.Stmt, target Slot, depth int) !v
 fn (mut e Emitter) assign_object_global(stmt ast.Stmt, object image.GlobalSlot, depth int) !void {
 	expr_value := stmt.expr or { return error('assignment without a value') }
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, e.target.name_of(register))
+	e.reference_object_address(register, stmt.target)
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	return e.assign_object(address, object.width, expr_value, stmt.line, stmt.col, depth)
@@ -2254,7 +2281,7 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 				return error('not an array')
 			}
 			stride = object.width
-			e.reference(e.target.address_of(base, 0), .global_address, name, e.target.name_of(base))
+			e.reference_object_address(base, name)
 		} else {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is read as an array, and no declaration of that name is in scope')
 			return error('unknown name')
@@ -2291,7 +2318,7 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 		// to point at.
 		if object := e.global_of(name) {
 			register := e.accumulator(line, col)!
-			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
+			e.reference_object_address(register, name)
 			if through_pointer {
 				// The name is a pointer at the top level, so what is in the
 				// image is the address of the object: read it out of the
@@ -2569,7 +2596,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			e.emit_subscript_index(subscript, depth)!
 			register := e.accumulator(stmt.line, stmt.col)!
 			base := e.scratch(stmt.line, stmt.col)!
-			e.reference(e.target.address_of(base, 0), .global_address, stmt.target, e.target.name_of(base))
+			e.reference_object_address(base, stmt.target)
 			is_wide := !object.object && object.width == wide_bytes
 			long_double := e.global_array_is_long_double(stmt.target)
 			e.element_address(base, register, object.width, 0, is_wide || long_double, false, stmt.target,
@@ -4836,7 +4863,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				// the same load an element of an array takes.
 				if object := e.global_of(expr.name) {
 					register := e.accumulator(expr.line, expr.col)!
-					e.reference(e.target.address_of(register, 0), .global_address, expr.name, e.target.name_of(register))
+					e.reference_object_address(register, expr.name)
 					if object.count > 0 {
 						// The name of an array is the address of its first
 						// element.
@@ -5181,7 +5208,7 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 	// The address of the object goes into the scratch register after the index
 	// is computed, so that the index expression cannot overwrite it on the way.
 	base := e.scratch(expr.line, expr.col)!
-	e.reference(e.target.address_of(base, 0), .global_address, name, e.target.name_of(base))
+	e.reference_object_address(base, name)
 	long_double := e.global_array_is_long_double(name)
 	// A 128-bit integer and a long double are both sixteen bytes, but only the
 	// integer has no value this back end reads: an element of a top-level array
@@ -5330,7 +5357,7 @@ fn (mut e Emitter) emit_base_address(base ast.Expr, depth int) !void {
 		} else if object := e.global_of(name) {
 			if object.count > 0 {
 				register := e.accumulator(base.line, base.col)!
-				e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
+				e.reference_object_address(register, name)
 				return
 			}
 		}
@@ -5370,7 +5397,7 @@ fn (mut e Emitter) emit_address(unary ast.Unary, depth int) !void {
 			return
 		}
 		if _ := e.global_of(name) {
-			e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
+			e.reference_object_address(register, name)
 			return
 		}
 		if e.is_function_name(name) {
@@ -5769,7 +5796,7 @@ fn (mut e Emitter) emit_inc_dec_name(expr ast.IncDec, name ast.Ident, step i32, 
 		// layout fills in and is parked while the step runs: the value is read
 		// through the address, stepped, and written back through it.
 		register := e.accumulator(expr.line, expr.col)!
-		e.reference(e.target.address_of(register, 0), .global_address, name.name, e.target.name_of(register))
+		e.reference_object_address(register, name.name)
 		address := e.value_slot(depth)
 		e.store_accumulator(address, expr.line, expr.col)!
 		address_register := e.scratch(expr.line, expr.col)!
@@ -5900,7 +5927,7 @@ fn (mut e Emitter) inc_dec_address(operand ast.Expr, depth int) !void {
 				return error('not a scalar object')
 			}
 			register := e.accumulator(operand.line, operand.col)!
-			e.reference(e.target.address_of(register, 0), .global_address, operand.name, e.target.name_of(register))
+			e.reference_object_address(register, operand.name)
 			return
 		}
 		e.diagnostics << problem(operand.line, operand.col, 'unsupported: ${operand.name} is stepped, and no declaration of that name is in scope')
@@ -9911,6 +9938,12 @@ fn (mut e Emitter) place_global(asked int) int {
 // afterwards - so every use of it is a reference the layout fills in, which is
 // the same mechanism a string literal is addressed by.
 fn (mut e Emitter) global_of(name string) ?image.GlobalSlot {
+	// An object with internal linkage is recorded as such as soon as its
+	// storage is asked for, because the object writer binds the name local and
+	// the symbol table has to know before it is written.
+	if e.internal[name] {
+		e.program.internal[name] = true
+	}
 	if slot := e.program.globals[name] {
 		return slot
 	}
@@ -10156,7 +10189,7 @@ fn (mut e Emitter) write_data_address(address ast.AddressInit, at int) {
 // written through the address.
 fn (mut e Emitter) assign_global(stmt ast.Stmt, object image.GlobalSlot, expr ast.Expr, depth int) !void {
 	register := e.accumulator(stmt.line, stmt.col)!
-	e.reference(e.target.address_of(register, 0), .global_address, stmt.target, e.target.name_of(register))
+	e.reference_object_address(register, stmt.target)
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	if e.global_is_long_double(stmt.target) {
@@ -10331,6 +10364,24 @@ fn (mut e Emitter) reference(bytes []u8, kind image.FixupKind, name string, regi
 		name:     name
 		register: register
 	}
+}
+
+// reference_object_address leaves the address of a top-level object in the
+// register. Under the in-house path the address is a distance from the
+// instruction that the layout settles, which is what every object reference has
+// always been. In a position-independent object an object another object may
+// define is reached through the global offset table instead: the instruction
+// loads the object's own address out of the table entry the linker builds,
+// because a direct distance to a symbol that can be interposed is what a shared
+// link refuses. An object with internal linkage cannot be defined elsewhere, so
+// it keeps the direct reference even there, which is what makes its relocation
+// unchanged whether -fPIC is given or not.
+fn (mut e Emitter) reference_object_address(register backend.Register, name string) {
+	if e.compile_only && e.pic && !e.internal[name] {
+		e.reference(e.target.load_slot_value(register, 0), .got_address, name, e.target.name_of(register))
+		return
+	}
+	e.reference(e.target.address_of(register, 0), .global_address, name, e.target.name_of(register))
 }
 
 // Wrapping arithmetic, spelled out rather than assumed. V 0.5.2 has no `+%`
