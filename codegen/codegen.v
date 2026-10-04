@@ -7322,6 +7322,9 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 	if binary.left.typ.kind.is_complex() || binary.right.typ.kind.is_complex() {
 		return e.emit_complex_comparison(binary, depth)
 	}
+	if e.extended_step(binary) {
+		return e.emit_extended_binary(binary, depth)
+	}
 	if binary.op == '&&' || binary.op == '||' {
 		return e.emit_short_circuit(binary, depth)
 	}
@@ -7891,11 +7894,10 @@ fn (mut e Emitter) emit_short_circuit(binary ast.Binary, depth int) !void {
 // to the type the conditional is worth before they meet.
 fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !void {
 	if conditional.typ.kind == .long_double {
-		// The two arms would each have to leave a sixteen-byte value, and there
-		// is no register for one to arrive in. Computing the arms as doubles
-		// would narrow whichever one ran.
-		return e.refuse_a_long_double_operation('a conditional expression', conditional.line,
-			conditional.col)
+		// The two arms are values of the extended type, and a value of that type
+		// is the address of its sixteen bytes, so the branch carries the address
+		// of whichever arm ran the way it carries a register elsewhere.
+		return e.emit_extended_conditional(conditional, depth)
 	}
 	if e.wide_value(ast.Expr(conditional)) {
 		// Two arms of a 128-bit type would each have to leave a pair of

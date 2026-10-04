@@ -373,11 +373,117 @@ fn (mut e Emitter) emit_extended_cast(cast ast.Cast, depth int) !void {
 	return e.leave_address(temporary, cast.line, cast.col)
 }
 
+// extended_step says whether a binary step is one the x87 stack computes with:
+// an arithmetic operation on two long doubles, or the order of them. The other
+// operators the language has are not operations the stack gives the type, and
+// each of them is refused at its own site by name.
+fn (e Emitter) extended_step(step ast.Binary) bool {
+	if step.op !in ['+', '-', '*', '/', '==', '!=', '<', '>', '<=', '>='] {
+		return false
+	}
+	return e.is_extended(step.left) || e.is_extended(step.right)
+}
+
+// extended_temp computes an expression of the extended type into a frame
+// temporary of its own and returns it. A value of the type is the address of its
+// sixteen bytes, so an expression that already is one is copied from that
+// address; anything else - an int, a float or a double - is converted into the
+// temporary, which is the conversion a mixed operation needs on either side.
+fn (mut e Emitter) extended_temp(expr ast.Expr, depth int) !Slot {
+	temporary := e.reserve(long_double_bytes)
+	line := expr_line(expr)
+	col := expr_col(expr)
+	base := e.frame_pointer(line, col)!
+	if e.is_extended(expr) {
+		e.emit_expr_at(expr, depth)!
+		source := e.reserve(e.target.word_size)
+		e.store_accumulator(source, line, col)!
+		destination := e.reserve(e.target.word_size)
+		register := e.accumulator(line, col)!
+		e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+		e.store_accumulator(destination, line, col)!
+		e.copy_address_object(source, destination, long_double_bytes, line, col)!
+		return temporary
+	}
+	destination := e.reserve(e.target.word_size)
+	register := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(base, i32(temporary.offset), register))
+	e.store_accumulator(destination, line, col)!
+	e.emit_expr_at(expr, depth + 1)!
+	e.convert_value_to_extended(destination, expr, line, col)!
+	return temporary
+}
+
+// emit_extended_binary writes an arithmetic step on long doubles. The two
+// operands are materialized into frame temporaries, left then right, and loaded
+// onto the x87 stack in that order, which leaves the right value on top and the
+// left one below it - the order gcc 16.2.1 uses at -O0, measured on
+// `long double a, b; a - b` as `fldt a; fldt b; fsubrp %st,%st(1)`. The x87
+// instruction replaces the pair with the result, which is stored into a
+// temporary of its own and left as the address of that.
+fn (mut e Emitter) emit_extended_binary(step ast.Binary, depth int) !void {
+	if step.op in ['==', '!=', '<', '>', '<=', '>='] {
+		return e.emit_extended_comparison(step, depth)
+	}
+	left := e.extended_temp(step.left, depth + 1)!
+	right := e.extended_temp(step.right, depth + 1)!
+	base := e.frame_pointer(step.line, step.col)!
+	register := e.accumulator(step.line, step.col)!
+	e.append(e.target.address_of_slot(base, i32(left.offset), register))
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.address_of_slot(base, i32(right.offset), register))
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.extended_arithmetic(step.op)!)
+	result := e.reserve(long_double_bytes)
+	address := e.accumulator(step.line, step.col)!
+	e.append(e.target.address_of_slot(base, i32(result.offset), address))
+	e.append(e.target.store_extended(address)!)
+	return e.leave_address(result, step.line, step.col)
+}
+
+// emit_extended_comparison reads the order of two long doubles off the x87 stack
+// into a register as zero or one, which is what a comparison of them is worth.
+// The encoder reads the flags as the value on top against the one below it, so
+// the right value is pushed first and the left second, leaving the left value on
+// top; `fcomip` then compares the left against the right and pops the left, and
+// `fstp` drops the right, so both are consumed.
+fn (mut e Emitter) emit_extended_comparison(step ast.Binary, depth int) !void {
+	left := e.extended_temp(step.left, depth + 1)!
+	right := e.extended_temp(step.right, depth + 1)!
+	base := e.frame_pointer(step.line, step.col)!
+	register := e.accumulator(step.line, step.col)!
+	e.append(e.target.address_of_slot(base, i32(right.offset), register))
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.address_of_slot(base, i32(left.offset), register))
+	e.append(e.target.load_extended(register)!)
+	scratch := e.scratch(step.line, step.col)!
+	e.append(e.target.extended_comparison(step.op, register, scratch)!)
+}
+
+// emit_extended_conditional writes `c ? a : b` where the arms have the extended
+// type. Each arm leaves the address of its sixteen bytes in the accumulator, so
+// the branch machinery carries an address the same way it carries a value in a
+// register: only the arm the condition selects is evaluated, and its address is
+// what the conditional is worth.
+fn (mut e Emitter) emit_extended_conditional(conditional ast.Conditional, depth int) !void {
+	e.emit_condition(conditional.cond, depth + 1, conditional.line, conditional.col)!
+	else_label := e.label()
+	end_label := e.label()
+	e.branch(.branch_zero, else_label, conditional.line, conditional.col)!
+	then_temp := e.extended_temp(conditional.then_expr, depth + 1)!
+	e.leave_address(then_temp, conditional.line, conditional.col)!
+	e.jump(end_label)!
+	e.place(else_label)
+	else_temp := e.extended_temp(conditional.else_expr, depth + 1)!
+	e.leave_address(else_temp, conditional.line, conditional.col)!
+	e.place(end_label)
+}
+
 // refuse_a_long_double_operation reports an operation on a value of the
 // extended type that this back end does not compute, naming the operation and
 // what is missing rather than answering with a double.
 fn (mut e Emitter) refuse_a_long_double_operation(op string, line int, col int) !void {
-	e.diagnostics << problem(line, col, 'unsupported: ${op} on a long double is not one this back end computes, and computing it in a double would round away the precision the type is for; arithmetic on a long double is not implemented')
+	e.diagnostics << problem(line, col, 'unsupported: ${op} on a long double is not one this back end computes; the x87 stack gives two long doubles the arithmetic +, -, *, / and the order comparisons ==, !=, <, >, <=, >= and nothing else, and computing it in a double would round away the precision the type is for')
 	return error('long double operation')
 }
 
