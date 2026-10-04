@@ -750,7 +750,129 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// with the attributes the specifiers carried, because both belong to the
 	// same declaration.
 	mut trailing := AttributeSet{}
-	mut data_seen := false
+	for {
+		d := p.parse_declarator(0) or {
+			p.skip_declaration()
+			return decls
+		}
+		trailing = p.skip_gnu_postfix(false) or {
+			p.skip_declaration()
+			return decls
+		}
+		if d.name.len > 0 {
+			names << d.name
+		}
+		if d.is_function() {
+			if p.at_punct('{') {
+				if spec.is_typedef {
+					p.error_at(d.name_at, 'unsupported: a typedef names a type, so it cannot have a function body')
+					p.skip_declaration()
+					return decls
+				}
+				p.check_definition(spec, d)
+				p.declare_name(d.name, p.declared_type(spec.clause, d), d.name_at, true)
+				// A parameter's scope is the body, so the parameters are
+				// declared in a scope around it: their declarators were read
+				// before the body existed, and a name is typed where it is
+				// read.
+				p.scopes.enter()
+				p.declare_parameters(d.function_params())
+				// The function-name spellings inside the body name this
+				// function, so its name is carried while the body is read and
+				// the one before it is given back after.
+				previous_function := p.current_function
+				p.current_function = d.name
+				body := p.parse_block()
+				p.current_function = previous_function
+				p.scopes.leave()
+				statements := body or { return decls }
+				// A definition with no name has been reported and has no
+				// identity to record; one whose signature was reported is kept
+				// anyway, because the tree is what the file said and the
+				// diagnostic is what stops it being compiled.
+				if d.name.len > 0 {
+					decls << ast.FnDecl{
+						name:     d.name
+						ret:      p.spelling_of(spec, d.pointer_count())
+						ret_type: p.return_type(spec.clause, d)
+						resolved: p.declared_type(spec.clause, d)
+						params:   d.function_params()
+						defined:  true
+						weak:     spec.attributes.weak || trailing.weak
+						static_:  spec.storage == .static_
+						body:     statements
+						line:     d.name_at.line
+						col:      d.name_at.col
+					}
+				}
+				return decls
+			}
+			// A prototype. It is kept with an empty body: the declaration is
+			// what names the function whether or not this file defines it, and
+			// the types in it are only a promise, since nothing is emitted for
+			// a declaration. The parameters are kept anyway — a name and a type
+			// as written are what the declaration said, and a later stage that
+			// wants to check a call against it would find them here. A typedef
+			// of a function type is not a function declaration, so it is not
+			// kept as one.
+			if !spec.is_typedef {
+				decls << ast.FnDecl{
+					name:     d.name
+					ret:      p.spelling_of(spec, d.pointer_count())
+					ret_type: p.return_type(spec.clause, d)
+					resolved: p.declared_type(spec.clause, d)
+					params:   d.function_params()
+					weak:     spec.attributes.weak || trailing.weak
+					static_:  spec.storage == .static_
+					body:     []ast.Stmt{}
+					line:     d.name_at.line
+					col:      d.name_at.col
+				}
+			}
+		} else {
+			if !p.parse_file_object_declarator(mut spec, d, trailing) {
+				p.skip_declaration()
+				return decls
+			}
+		}
+		if p.at_punct(',') {
+			if spec.auto_deduced {
+				// The deduced type belongs to one declarator; a second has its
+				// own initializer and its own type, which is not what the
+				// declaration says. Measured on gcc 16.2.1, `auto x = 1, y = 2;`
+				// is `'auto' may only be used with a single declarator`.
+				p.error_at(p.peek(), 'a constraint violation: auto may be used with only one declarator')
+				p.skip_declaration()
+				return decls
+			}
+			p.next()
+			continue
+		}
+		if p.at_punct(';') {
+			p.next()
+			break
+		}
+		p.error_at(p.peek(), 'unsupported: expected , or ; after a declarator, found ${describe(p.peek())}')
+		p.skip_declaration()
+		return decls
+	}
+	if spec.is_typedef {
+		for name in names {
+			p.register_typedef(name)
+		}
+		return decls
+	}
+	return decls
+}
+
+// parse_file_object_declarator reads one object declarator at file scope and
+// lays out the object it defines, or records the name it declares with no
+// storage here. It is called once for each declarator, so a declaration that
+// writes several names gives each one the type and the initializer written
+// for it, rather than letting the last declarator overwrite the first and
+// leaving the rest with no object at all. It answers false when the declarator
+// was refused, which is where the caller stops the declaration.
+fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, trailing AttributeSet) bool {
 	mut data_defined := false
 	mut data_name := ''
 	// data_weak and data_alignment are what the attributes on a top-level
@@ -847,717 +969,601 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 	// which is the same storage a definition with no initializer has, so the
 	// report for an initializer that wrote nothing does not apply to it.
 	mut empty_brace := false
-	for {
-		d := p.parse_declarator(0) or {
-			p.skip_declaration()
-			return decls
-		}
-		trailing = p.skip_gnu_postfix(false) or {
-			p.skip_declaration()
-			return decls
-		}
-		if d.name.len > 0 {
-			names << d.name
-		}
-		if d.is_function() {
-			if p.at_punct('{') {
-				if spec.is_typedef {
-					p.error_at(d.name_at, 'unsupported: a typedef names a type, so it cannot have a function body')
-					p.skip_declaration()
-					return decls
-				}
-				p.check_definition(spec, d)
-				p.declare_name(d.name, p.declared_type(spec.clause, d), d.name_at, true)
-				// A parameter's scope is the body, so the parameters are
-				// declared in a scope around it: their declarators were read
-				// before the body existed, and a name is typed where it is
-				// read.
-				p.scopes.enter()
-				p.declare_parameters(d.function_params())
-				// The function-name spellings inside the body name this
-				// function, so its name is carried while the body is read and
-				// the one before it is given back after.
-				previous_function := p.current_function
-				p.current_function = d.name
-				body := p.parse_block()
-				p.current_function = previous_function
-				p.scopes.leave()
-				statements := body or { return decls }
-				// A definition with no name has been reported and has no
-				// identity to record; one whose signature was reported is kept
-				// anyway, because the tree is what the file said and the
-				// diagnostic is what stops it being compiled.
-				if d.name.len > 0 {
-					decls << ast.FnDecl{
-						name:     d.name
-						ret:      p.spelling_of(spec, d.pointer_count())
-						ret_type: p.return_type(spec.clause, d)
-						resolved: p.declared_type(spec.clause, d)
-						params:   d.function_params()
-						defined:  true
-						weak:     spec.attributes.weak || trailing.weak
-						static_:  spec.storage == .static_
-						body:     statements
-						line:     d.name_at.line
-						col:      d.name_at.col
-					}
-				}
-				return decls
-			}
-			// A prototype. It is kept with an empty body: the declaration is
-			// what names the function whether or not this file defines it, and
-			// the types in it are only a promise, since nothing is emitted for
-			// a declaration. The parameters are kept anyway — a name and a type
-			// as written are what the declaration said, and a later stage that
-			// wants to check a call against it would find them here. A typedef
-			// of a function type is not a function declaration, so it is not
-			// kept as one.
-			if !spec.is_typedef {
-				decls << ast.FnDecl{
-					name:     d.name
-					ret:      p.spelling_of(spec, d.pointer_count())
-					ret_type: p.return_type(spec.clause, d)
-					resolved: p.declared_type(spec.clause, d)
-					params:   d.function_params()
-					weak:     spec.attributes.weak || trailing.weak
-					static_:  spec.storage == .static_
-					body:     []ast.Stmt{}
-					line:     d.name_at.line
-					col:      d.name_at.col
-				}
+	// An object at the top level is storage the image lays out, so its
+	// size has to be a fact by the time this file is read. A bound that
+	// is not an integer constant expression leaves the object without
+	// one, which 6.6 makes a constraint violation. Measured on gcc 16.2.1
+	// under `-std=c99`, `int a[1/0];` and `int n = 3;\nint a[n];` are both
+	// `variably modified 'a' at file scope` and exit 1. The check is here
+	// and not in the suffix reader because the same suffix is read for a
+	// struct member, whose bound may be one this compiler cannot fold.
+	if !spec.is_typedef && ((d.is_array() && d.array_bound_is_unreadable()) || p.declared_type(spec.clause, d).has_vla()) {
+		if ident := d.array_bound_ident() {
+			// The bound named something the scope did not have. Whether
+			// the file declares that name anywhere is a question only the
+			// end of the file answers, so the report waits: `int x[n];
+			// int n = 4;` names a variable declared later and its bound is
+			// not a constant expression, while `enum { N = 4 }; int x[N];`
+			// names nothing at all, and calling the second non-constant
+			// would name a cause the compiler cannot show.
+			p.pending_bounds << PendingBound{
+				object:    d.name
+				name:      ident.name
+				name_line: ident.line
+				name_col:  ident.col
+				at_line:   d.array_at().line
+				at_col:    d.array_at().col
 			}
 		} else {
-			// An object at the top level is storage the image lays out, so its
-			// size has to be a fact by the time this file is read. A bound that
-			// is not an integer constant expression leaves the object without
-			// one, which 6.6 makes a constraint violation. Measured on gcc 16.2.1
-			// under `-std=c99`, `int a[1/0];` and `int n = 3;\nint a[n];` are both
-			// `variably modified 'a' at file scope` and exit 1. The check is here
-			// and not in the suffix reader because the same suffix is read for a
-			// struct member, whose bound may be one this compiler cannot fold.
-			if !spec.is_typedef && ((d.is_array() && d.array_bound_is_unreadable()) || p.declared_type(spec.clause, d).has_vla()) {
-				if ident := d.array_bound_ident() {
-					// The bound named something the scope did not have. Whether
-					// the file declares that name anywhere is a question only the
-					// end of the file answers, so the report waits: `int x[n];
-					// int n = 4;` names a variable declared later and its bound is
-					// not a constant expression, while `enum { N = 4 }; int x[N];`
-					// names nothing at all, and calling the second non-constant
-					// would name a cause the compiler cannot show.
-					p.pending_bounds << PendingBound{
-						object:    d.name
-						name:      ident.name
-						name_line: ident.line
-						name_col:  ident.col
-						at_line:   d.array_at().line
-						at_col:    d.array_at().col
-					}
-				} else {
-					at := if d.is_array() { d.array_at() } else { d.name_at }
-					p.error_at(at, 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
+			at := if d.is_array() { d.array_at() } else { d.name_at }
+			p.error_at(at, 'a constraint violation: the bound of ${d.name} is not an integer constant expression, and an object at file scope needs a size that is one')
+		}
+		return false
+	}
+	data_name = d.name
+	data_at = if d.name.len > 0 { d.name_at } else { spec.start }
+	data_type = p.spelling_of(spec, d.pointer_count())
+	data_stars = d.pointer_count()
+	data_clause = p.declared_type(spec.clause, d)
+	data_count = d.array_count()
+	data_array = d.is_array()
+	// An attribute on the declaration belongs to the object,
+	// whether it was written in front of the specifiers or after
+	// the declarator, so the two lists are read together.
+	asked := merge_attributes(spec.attributes, trailing)
+	data_weak = asked.weak
+	data_alignment = asked.alignment
+	// A name that stands for an array type hides the brackets in
+	// the specifiers, so a file-scope object may be an array the
+	// declarator never wrote: `typedef int vec4[4]; vec4 g;` is an
+	// object of four elements. The count and the array-ness are the
+	// type's, and the image and an index both read them from here.
+	if data_count == 0 && data_clause.is_array() && !data_clause.has_vla()
+		&& data_clause.count > 0 {
+		data_count = data_clause.count
+		data_array = true
+	}
+	if spec.auto_deduced {
+		// C23's auto takes its type from the initializer, and measured
+		// on gcc 16.2.1 it takes it at file scope too: `auto x = 2.5;`
+		// defines a double. It is one declarator and a plain identifier,
+		// and the initializer has to be a constant because the object is
+		// storage the image lays out. The clause the specifiers left
+		// unresolved is filled here, once the type is a fact.
+		if d.pointer_count() > 0 || d.is_array() {
+			p.error_at(data_at, 'unsupported: the C23 auto type specifier needs a plain identifier, and ${data_name} is written with a pointer or an array')
+			return false
+		}
+		if !p.at_punct('=') {
+			p.error_at(data_at, 'unsupported: auto needs an initializer to take a type from, and ${data_name} has none')
+			return false
+		}
+		p.next()
+		data_defined = true
+		written := p.auto_file_initializer() or {
+			p.error_at(data_at, 'unsupported: auto takes the type of ${data_name} from its initializer, and this compiler read no type and no constant in it')
+			return false
+		}
+		spec.type_words = [written.typ.describe()]
+		spec.clause = written.typ
+		data_type = written.typ.describe()
+		data_clause = written.typ
+		data_init = written.constant.integer
+		data_init_float = written.constant.floating
+		data_init_long = written.constant.long_floating
+		p.skip_to_separator() or {
+			return false
+		}
+	} else if p.at_punct('=') {
+		// An initializer makes it a definition even when the
+		// declaration says extern: the object has to live somewhere.
+		data_defined = true
+		p.next()
+		before := p.diagnostics.len
+		if p.at_punct('{') && d.pointer_count() == 0 {
+			// A brace initializer, read here because a list is
+			// what gives an array with empty brackets its size.
+			// A pointer's list is read by the arm below, which
+			// knows the elements are addresses.
+			data_brace = true
+			if list := p.parse_brace_initializer(false) {
+				if list.elements.len == 0 {
+					empty_brace = true
 				}
-				p.skip_declaration()
-				return decls
-			}
-			if !data_seen {
-				data_seen = true
-				data_name = d.name
-				data_at = if d.name.len > 0 { d.name_at } else { spec.start }
-				data_type = p.spelling_of(spec, d.pointer_count())
-				data_stars = d.pointer_count()
-				data_clause = p.declared_type(spec.clause, d)
-				data_count = d.array_count()
-				data_array = d.is_array()
-				// An attribute on the declaration belongs to the object,
-				// whether it was written in front of the specifiers or after
-				// the declarator, so the two lists are read together.
-				asked := merge_attributes(spec.attributes, trailing)
-				data_weak = asked.weak
-				data_alignment = asked.alignment
-				// A name that stands for an array type hides the brackets in
-				// the specifiers, so a file-scope object may be an array the
-				// declarator never wrote: `typedef int vec4[4]; vec4 g;` is an
-				// object of four elements. The count and the array-ness are the
-				// type's, and the image and an index both read them from here.
-				if data_count == 0 && data_clause.is_array() && !data_clause.has_vla()
-					&& data_clause.count > 0 {
-					data_count = data_clause.count
-					data_array = true
-				}
-			}
-			if spec.auto_deduced {
-				// C23's auto takes its type from the initializer, and measured
-				// on gcc 16.2.1 it takes it at file scope too: `auto x = 2.5;`
-				// defines a double. It is one declarator and a plain identifier,
-				// and the initializer has to be a constant because the object is
-				// storage the image lays out. The clause the specifiers left
-				// unresolved is filled here, once the type is a fact.
-				if d.pointer_count() > 0 || d.is_array() {
-					p.error_at(data_at, 'unsupported: the C23 auto type specifier needs a plain identifier, and ${data_name} is written with a pointer or an array')
-					p.skip_declaration()
-					return decls
-				}
-				if !p.at_punct('=') {
-					p.error_at(data_at, 'unsupported: auto needs an initializer to take a type from, and ${data_name} has none')
-					p.skip_declaration()
-					return decls
-				}
-				p.next()
-				data_defined = true
-				written := p.auto_file_initializer() or {
-					p.error_at(data_at, 'unsupported: auto takes the type of ${data_name} from its initializer, and this compiler read no type and no constant in it')
-					p.skip_declaration()
-					return decls
-				}
-				spec.type_words = [written.typ.describe()]
-				spec.clause = written.typ
-				data_type = written.typ.describe()
-				data_clause = written.typ
-				data_init = written.constant.integer
-				data_init_float = written.constant.floating
-				data_init_long = written.constant.long_floating
-				p.skip_to_separator() or {
-					p.skip_declaration()
-					return decls
-				}
-			} else if p.at_punct('=') {
-				// An initializer makes it a definition even when the
-				// declaration says extern: the object has to live somewhere.
-				data_defined = true
-				p.next()
-				before := p.diagnostics.len
-				if p.at_punct('{') && d.pointer_count() == 0 {
-					// A brace initializer, read here because a list is
-					// what gives an array with empty brackets its size.
-					// A pointer's list is read by the arm below, which
-					// knows the elements are addresses.
-					data_brace = true
-					if list := p.parse_brace_initializer(false) {
-						if list.elements.len == 0 {
-							empty_brace = true
+				if !list.is_a_flat_list() || (!data_array
+					&& spec.clause.kind in [types.Kind.struct_, .union_]
+					&& (list.elements.len == 0 || has_aggregate_member(spec.clause))) {
+					// A nested list or a designator: the list is
+					// walked against the object's type and each write
+					// lands at the byte its subobject starts at.
+					//
+					// An object with an aggregate member is walked too:
+					// `{0}` on a struct whose member is an array or a
+					// struct elides the zero into the member's first
+					// scalar and leaves the rest of it to the implicit
+					// zero 6.7.8p21 gives it, which is a subobject no
+					// store of one member places. An empty list is a
+					// list of no written values, so every subobject is
+					// that implicit zero.
+					if general := p.file_scope_general_initializer(spec, d, list, data_name) {
+						data_member_inits = general.members
+						data_bytes = general.bytes
+						data_count = general.count
+						data_resolved = general.resolved
+						data_struct_brace = true
+						if general.count > 0 && !d.array_sized() && data_clause.is_array()
+							&& !data_clause.is_complete() {
+							// The walk against the list is what gave this array
+							// with empty brackets its size, and the type it
+							// walked is the array the name turned out to be.
+							// The completion below makes a later `sizeof`
+							// answer with that count.
+							data_complete = general.resolved
 						}
-						if !list.is_a_flat_list() || (!data_array
-							&& spec.clause.kind in [types.Kind.struct_, .union_]
-							&& (list.elements.len == 0 || has_aggregate_member(spec.clause))) {
-							// A nested list or a designator: the list is
-							// walked against the object's type and each write
-							// lands at the byte its subobject starts at.
-							//
-							// An object with an aggregate member is walked too:
-							// `{0}` on a struct whose member is an array or a
-							// struct elides the zero into the member's first
-							// scalar and leaves the rest of it to the implicit
-							// zero 6.7.8p21 gives it, which is a subobject no
-							// store of one member places. An empty list is a
-							// list of no written values, so every subobject is
-							// that implicit zero.
-							if general := p.file_scope_general_initializer(spec, d, list, data_name) {
-								data_member_inits = general.members
-								data_bytes = general.bytes
-								data_count = general.count
-								data_resolved = general.resolved
-								data_struct_brace = true
-								if general.count > 0 && !d.array_sized() && data_clause.is_array()
-									&& !data_clause.is_complete() {
-									// The walk against the list is what gave this array
-									// with empty brackets its size, and the type it
-									// walked is the array the name turned out to be.
-									// The completion below makes a later `sizeof`
-									// answer with that count.
-									data_complete = general.resolved
-								}
-							} else {
+					} else {
+						data_problem = true
+					}
+				} else if !data_array {
+					// A union takes one value for its first member
+					// and a struct one value per member; a scalar
+					// takes the one value in the braces.
+					if spec.clause.kind == .union_ {
+						// 6.7.8: a union's initializer initializes its
+						// first member, which sits at the beginning of
+						// the object. A first member that is itself an
+						// aggregate takes a list of its own, and a list of
+						// more than one value has no room in one object.
+						if list.elements.len > 1 {
+							p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.elements.len}')
+							data_problem = true
+						} else if spec.clause.members.len == 0 {
+							p.error_at(list.at, 'unsupported: ${spec.clause.describe()} has no first member to initialize')
+							data_problem = true
+						} else {
+							first := spec.clause.members[0]
+							if first.typ.kind in [types.Kind.struct_, .union_, .array] {
+								p.error_at(list.at, 'unsupported: the first member of ${spec.clause.describe()} is an object of the type ${first.typ.describe()}, and a brace initializer for one is not implemented')
 								data_problem = true
-							}
-						} else if !data_array {
-							// A union takes one value for its first member
-							// and a struct one value per member; a scalar
-							// takes the one value in the braces.
-							if spec.clause.kind == .union_ {
-								// 6.7.8: a union's initializer initializes its
-								// first member, which sits at the beginning of
-								// the object. A first member that is itself an
-								// aggregate takes a list of its own, and a list of
-								// more than one value has no room in one object.
-								if list.elements.len > 1 {
-									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.elements.len}')
-									data_problem = true
-								} else if spec.clause.members.len == 0 {
-									p.error_at(list.at, 'unsupported: ${spec.clause.describe()} has no first member to initialize')
-									data_problem = true
-								} else {
-									first := spec.clause.members[0]
-									if first.typ.kind in [types.Kind.struct_, .union_, .array] {
-										p.error_at(list.at, 'unsupported: the first member of ${spec.clause.describe()} is an object of the type ${first.typ.describe()}, and a brace initializer for one is not implemented')
+							} else {
+								element := list.elements[0]
+								if address := element.address {
+									if first.typ.kind != .pointer {
+										// The first member does not hold an
+										// address, and an address is not
+										// converted to another scalar: gcc
+										// 16.2.1 warns and the program reads
+										// a different value, so the shape is
+										// refused rather than written.
+										p.error_at(list.at, 'unsupported: the first member of ${spec.clause.describe()} is of the type ${first.typ.describe()}, and its initializer writes an address')
 										data_problem = true
 									} else {
-										element := list.elements[0]
-										if address := element.address {
-											if first.typ.kind != .pointer {
-												// The first member does not hold an
-												// address, and an address is not
-												// converted to another scalar: gcc
-												// 16.2.1 warns and the program reads
-												// a different value, so the shape is
-												// refused rather than written.
-												p.error_at(list.at, 'unsupported: the first member of ${spec.clause.describe()} is of the type ${first.typ.describe()}, and its initializer writes an address')
-												data_problem = true
-											} else {
-												// A union's first member sits at the
-												// beginning of the object, so an
-												// address initializing a pointer
-												// member is written at the union's
-												// own offset.
-												data_address = address
-												data_union_first = true
-											}
-										} else if number := element.number {
-											data_init, data_init_float = initializer_for(first.typ.describe(), number.number.integer,
-												number.number.floating)
-											data_init_long = number.number.long_floating
-											data_union_first = true
-										}
+										// A union's first member sits at the
+										// beginning of the object, so an
+										// address initializing a pointer
+										// member is written at the union's
+										// own offset.
+										data_address = address
+										data_union_first = true
 									}
-								}
-							} else if spec.clause.kind == .struct_ {
-								// A struct's brace initializer gives each
-								// value to a member in the order the members
-								// were written. A member that is itself an
-								// aggregate or a bitfield is refused by name
-								// in the helper, and the declaration is not
-								// laid out: there is nothing to write.
-								if layout := p.struct_brace_members(spec.clause, list, data_name) {
-									data_member_inits = p.struct_member_inits(spec.clause, list, layout)
-									data_struct_brace = true
-								} else {
-									data_problem = true
-								}
-							} else {
-								// One scalar in braces; a list of more
-								// values has no room in one object
-								// (6.7.8p2, measured on gcc 16.2.1:
-								// `int x = {1, 2};` is `excess elements
-								// in scalar initializer`).
-								if list.elements.len > 1 {
-									p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.elements.len}')
-									data_problem = true
-								}
-								// `{}` writes no value: the object keeps the
-								// zeros its storage starts with.
-								if list.elements.len > 0 {
-									element := list.elements[0]
-									if element.address != none {
-										// The object's type is not a pointer: a
-										// pointer's braces are read as a table
-										// before this arm, and an address has no
-										// conversion to another scalar.
-										p.error_at(list.at, 'unsupported: ${data_name} is not of pointer type, and its initializer writes an address')
-										data_problem = true
-									} else if number := element.number {
-										data_init, data_init_float = initializer_for(data_type, number.number.integer,
-											number.number.floating)
-										data_init_long = number.number.long_floating
-									}
+								} else if number := element.number {
+									data_init, data_init_float = initializer_for(first.typ.describe(), number.number.integer,
+										number.number.floating)
+									data_init_long = number.number.long_floating
+									data_union_first = true
 								}
 							}
-						} else {
-							// A written size smaller than the list is
-							// the same violation (measured,
-							// `int a[2] = {1, 2, 3};` is `excess
-							// elements in array initializer`), and a
-							// list for an array with empty brackets
-							// is what its size is.
-							if data_count > 0 && list.elements.len > data_count {
-								p.error_at(list.at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${list.elements.len}')
-								data_problem = true
-							}
-							if list.elements.len == 0 && !d.array_sized() {
-								// An array with empty brackets takes its size from the
-								// list, and an empty list writes no element to give it
-								// one. gcc 16.2.1 refuses the shape as `zero or
-								// negative size array`, so the refusal is by name
-								// rather than an object of no elements.
-								p.error_at(list.at, 'unsupported: ${data_name} is an array whose size an empty brace initializer does not write, and its brackets wrote none')
-								data_problem = true
-							}
-							if data_count == 0 {
-								data_count = list.elements.len
-							}
-							if data_count > 0 && !d.array_sized() && data_clause.is_array()
-								&& !data_clause.is_complete() {
-								// The declarator's brackets wrote no size and this flat
-								// list is what gives the array its count: `int a[] = {1, 2,
-								// 3};` is an int[3]. The name is completed with that type
-								// once it is declared, so a later `sizeof` is a question
-								// about the count the list fixed rather than about the
-								// brackets that wrote none.
-								element := data_clause.element() or { spec.clause }
-								data_complete = types.array_of(element, data_count)
-							}
-							data_inits, data_init_floats = p.initializer_list_for(data_type, list.elements,
-								data_name, list.at)
 						}
-					}
-					literal_refused = true
-				} else if d.pointer_count() > 0 {
-					// An object of pointer type takes an address: a
-					// function designator, the address of an object, or a
-					// string literal. A written number is a null pointer
-					// constant, which is the one value of an integer type
-					// a pointer takes, and it is written as the number it
-					// is. A brace list is a table of them, one per element,
-					// and it is read on its own path because an element
-					// that is an address is a reference the layout resolves
-					// rather than bytes written here.
-					if p.at_punct('{') {
-						if elements := p.parse_address_initializer() {
-							data_address_inits = elements.clone()
-							if data_count == 0 {
-								// Empty brackets are what the list sizes, the
-								// same as a list of numbers sizes an array.
-								data_count = elements.len
-							} else if elements.len > data_count {
-								p.error_at(data_at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${elements.len}')
-								data_problem = true
-							}
-						} else {
-							// The list was refused at its own element; there is
-							// nothing to lay out.
-							data_problem = true
-							literal_refused = true
-						}
-					} else if p.looks_like_compound_literal() {
-						// An unnamed object with static storage duration, defined
-						// in the image like any other top-level object, whose
-						// address initializes this pointer.
-						if address := p.file_scope_compound_literal() {
-							data_address = address
-						} else {
-							data_problem = true
-							literal_refused = true
-						}
-					} else if address := p.file_scope_address() {
-						data_address = address
-					} else {
-						// What is left is a constant: a written number is a null
-						// pointer constant, which is the one value of an integer
-						// type a pointer takes. A shape the constant reader does
-						// not read is reported at the literal itself.
-						constant := p.file_scope_constant()
-						data_init = constant.integer
-						data_init_float = constant.floating
-						data_init_long = constant.long_floating
-						literal_refused = p.diagnostics.len > before
-					}
-				} else if p.peek().kind == .string && data_array {
-					// 6.7.8p14: an array of character type may be
-					// initialized by a string literal. The elements become
-					// the same constants a brace list writes, so the image
-					// lays them out along the path a brace-initialized
-					// array already takes. A literal whose element type is
-					// not the array's is not this initializer, and the
-					// report below names the declaration.
-					if literal := p.read_array_string_literal() {
-						declared := p.declared_type(spec.clause, d)
-						if array_takes_string(declared, literal) {
-							written := p.file_scope_string_initializer(d, declared, data_name,
-								literal)
-							if written.ok {
-								data_inits = written.inits
-								data_count = written.count
-								data_complete = written.complete
-								data_string = true
-							} else {
-								// The literal was too long for the size that
-								// was written; it has been named at its own
-								// location and nothing is laid out.
-								data_problem = true
-								literal_refused = true
-							}
-						}
-					} else {
-						literal_refused = true
-					}
-				} else if !data_array && spec.clause.kind in [types.Kind.struct_, .union_]
-					&& p.looks_like_compound_literal() {
-					// An aggregate object initialized by a compound literal of
-					// its own type: `string s = (string){ ... }`. At file scope
-					// the literal names an object with static storage duration
-					// and its list holds constant expressions (6.7.8p4), so the
-					// bytes it writes are the bytes this object takes. The list
-					// is walked against the object's type the way a written brace
-					// list is, which is the same bytes with the braces missing.
-					if list := p.compound_literal_list(false) {
-						if general := p.file_scope_general_initializer(spec, d, list, data_name) {
-							data_member_inits = general.members
-							data_bytes = general.bytes
-							data_count = general.count
-							data_resolved = general.resolved
+					} else if spec.clause.kind == .struct_ {
+						// A struct's brace initializer gives each
+						// value to a member in the order the members
+						// were written. A member that is itself an
+						// aggregate or a bitfield is refused by name
+						// in the helper, and the declaration is not
+						// laid out: there is nothing to write.
+						if layout := p.struct_brace_members(spec.clause, list, data_name) {
+							data_member_inits = p.struct_member_inits(spec.clause, list, layout)
 							data_struct_brace = true
 						} else {
 							data_problem = true
 						}
 					} else {
-						data_problem = true
-						literal_refused = true
+						// One scalar in braces; a list of more
+						// values has no room in one object
+						// (6.7.8p2, measured on gcc 16.2.1:
+						// `int x = {1, 2};` is `excess elements
+						// in scalar initializer`).
+						if list.elements.len > 1 {
+							p.error_at(list.at, 'a constraint violation: ${data_name} holds one value and its initializer writes ${list.elements.len}')
+							data_problem = true
+						}
+						// `{}` writes no value: the object keeps the
+						// zeros its storage starts with.
+						if list.elements.len > 0 {
+							element := list.elements[0]
+							if element.address != none {
+								// The object's type is not a pointer: a
+								// pointer's braces are read as a table
+								// before this arm, and an address has no
+								// conversion to another scalar.
+								p.error_at(list.at, 'unsupported: ${data_name} is not of pointer type, and its initializer writes an address')
+								data_problem = true
+							} else if number := element.number {
+								data_init, data_init_float = initializer_for(data_type, number.number.integer,
+									number.number.floating)
+								data_init_long = number.number.long_floating
+							}
+						}
 					}
-				} else if address := p.file_scope_cast_address() {
-					// A cast of an address to an integer type is an address
-					// constant (6.6p9), and the layout writes it at the width
-					// of an address: an object narrower than one cannot hold
-					// it, which is what gcc 16.2.1 refuses (`int iv =
-					// (int)&x;` is `initializer element is not constant`).
-					if (p.representation.size_of(data_clause) or { 0 }) == 8 {
-						data_address = address
-					} else {
-						p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is an address cast to an integer type narrower than an address')
+				} else {
+					// A written size smaller than the list is
+					// the same violation (measured,
+					// `int a[2] = {1, 2, 3};` is `excess
+					// elements in array initializer`), and a
+					// list for an array with empty brackets
+					// is what its size is.
+					if data_count > 0 && list.elements.len > data_count {
+						p.error_at(list.at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${list.elements.len}')
+						data_problem = true
+					}
+					if list.elements.len == 0 && !d.array_sized() {
+						// An array with empty brackets takes its size from the
+						// list, and an empty list writes no element to give it
+						// one. gcc 16.2.1 refuses the shape as `zero or
+						// negative size array`, so the refusal is by name
+						// rather than an object of no elements.
+						p.error_at(list.at, 'unsupported: ${data_name} is an array whose size an empty brace initializer does not write, and its brackets wrote none')
+						data_problem = true
+					}
+					if data_count == 0 {
+						data_count = list.elements.len
+					}
+					if data_count > 0 && !d.array_sized() && data_clause.is_array()
+						&& !data_clause.is_complete() {
+						// The declarator's brackets wrote no size and this flat
+						// list is what gives the array its count: `int a[] = {1, 2,
+						// 3};` is an int[3]. The name is completed with that type
+						// once it is declared, so a later `sizeof` is a question
+						// about the count the list fixed rather than about the
+						// brackets that wrote none.
+						element := data_clause.element() or { spec.clause }
+						data_complete = types.array_of(element, data_count)
+					}
+					data_inits, data_init_floats = p.initializer_list_for(data_type, list.elements,
+						data_name, list.at)
+				}
+			}
+			literal_refused = true
+		} else if d.pointer_count() > 0 {
+			// An object of pointer type takes an address: a
+			// function designator, the address of an object, or a
+			// string literal. A written number is a null pointer
+			// constant, which is the one value of an integer type
+			// a pointer takes, and it is written as the number it
+			// is. A brace list is a table of them, one per element,
+			// and it is read on its own path because an element
+			// that is an address is a reference the layout resolves
+			// rather than bytes written here.
+			if p.at_punct('{') {
+				if elements := p.parse_address_initializer() {
+					data_address_inits = elements.clone()
+					if data_count == 0 {
+						// Empty brackets are what the list sizes, the
+						// same as a list of numbers sizes an array.
+						data_count = elements.len
+					} else if elements.len > data_count {
+						p.error_at(data_at, 'a constraint violation: ${data_name} holds ${data_count} elements and its initializer writes ${elements.len}')
 						data_problem = true
 					}
 				} else {
-					constant := p.file_scope_constant()
-					data_init = constant.integer
-					data_init_float = constant.floating
-					data_init_long = constant.long_floating
-					literal_refused = p.diagnostics.len > before
+					// The list was refused at its own element; there is
+					// nothing to lay out.
+					data_problem = true
+					literal_refused = true
 				}
-				p.skip_to_separator() or {
-					p.skip_declaration()
-					return decls
+			} else if p.looks_like_compound_literal() {
+				// An unnamed object with static storage duration, defined
+				// in the image like any other top-level object, whose
+				// address initializes this pointer.
+				if address := p.file_scope_compound_literal() {
+					data_address = address
+				} else {
+					data_problem = true
+					literal_refused = true
 				}
+			} else if address := p.file_scope_address() {
+				data_address = address
+			} else {
+				// What is left is a constant: a written number is a null
+				// pointer constant, which is the one value of an integer
+				// type a pointer takes. A shape the constant reader does
+				// not read is reported at the literal itself.
+				constant := p.file_scope_constant()
+				data_init = constant.integer
+				data_init_float = constant.floating
+				data_init_long = constant.long_floating
+				literal_refused = p.diagnostics.len > before
 			}
-		}
-		if p.at_punct(',') {
-			if spec.auto_deduced {
-				// The deduced type belongs to one declarator; a second has its
-				// own initializer and its own type, which is not what the
-				// declaration says. Measured on gcc 16.2.1, `auto x = 1, y = 2;`
-				// is `'auto' may only be used with a single declarator`.
-				p.error_at(p.peek(), 'a constraint violation: auto may be used with only one declarator')
-				p.skip_declaration()
-				return decls
+		} else if p.peek().kind == .string && data_array {
+			// 6.7.8p14: an array of character type may be
+			// initialized by a string literal. The elements become
+			// the same constants a brace list writes, so the image
+			// lays them out along the path a brace-initialized
+			// array already takes. A literal whose element type is
+			// not the array's is not this initializer, and the
+			// report below names the declaration.
+			if literal := p.read_array_string_literal() {
+				declared := p.declared_type(spec.clause, d)
+				if array_takes_string(declared, literal) {
+					written := p.file_scope_string_initializer(d, declared, data_name,
+						literal)
+					if written.ok {
+						data_inits = written.inits
+						data_count = written.count
+						data_complete = written.complete
+						data_string = true
+					} else {
+						// The literal was too long for the size that
+						// was written; it has been named at its own
+						// location and nothing is laid out.
+						data_problem = true
+						literal_refused = true
+					}
+				}
+			} else {
+				literal_refused = true
 			}
-			p.next()
-			continue
+		} else if !data_array && spec.clause.kind in [types.Kind.struct_, .union_]
+			&& p.looks_like_compound_literal() {
+			// An aggregate object initialized by a compound literal of
+			// its own type: `string s = (string){ ... }`. At file scope
+			// the literal names an object with static storage duration
+			// and its list holds constant expressions (6.7.8p4), so the
+			// bytes it writes are the bytes this object takes. The list
+			// is walked against the object's type the way a written brace
+			// list is, which is the same bytes with the braces missing.
+			if list := p.compound_literal_list(false) {
+				if general := p.file_scope_general_initializer(spec, d, list, data_name) {
+					data_member_inits = general.members
+					data_bytes = general.bytes
+					data_count = general.count
+					data_resolved = general.resolved
+					data_struct_brace = true
+				} else {
+					data_problem = true
+				}
+			} else {
+				data_problem = true
+				literal_refused = true
+			}
+		} else if address := p.file_scope_cast_address() {
+			// A cast of an address to an integer type is an address
+			// constant (6.6p9), and the layout writes it at the width
+			// of an address: an object narrower than one cannot hold
+			// it, which is what gcc 16.2.1 refuses (`int iv =
+			// (int)&x;` is `initializer element is not constant`).
+			if (p.representation.size_of(data_clause) or { 0 }) == 8 {
+				data_address = address
+			} else {
+				p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is an address cast to an integer type narrower than an address')
+				data_problem = true
+			}
+		} else {
+			constant := p.file_scope_constant()
+			data_init = constant.integer
+			data_init_float = constant.floating
+			data_init_long = constant.long_floating
+			literal_refused = p.diagnostics.len > before
 		}
-		if p.at_punct(';') {
-			p.next()
-			break
+		p.skip_to_separator() or {
+			return false
 		}
-		p.error_at(p.peek(), 'unsupported: expected , or ; after a declarator, found ${describe(p.peek())}')
-		p.skip_declaration()
-		return decls
 	}
 	if spec.is_typedef {
-		for name in names {
-			p.register_typedef(name)
-		}
-		return decls
+		// A typedef names a type and declares no object: the names are
+		// registered by the caller once the whole declaration has been read.
+		return true
 	}
-	if data_seen {
-		if spec.is_extern && !data_defined {
-			// An extern declaration adds no code of its own: it says the object
-			// exists somewhere else, and this file has no storage to give it.
-			// The name is still one a body may read, so it is recorded as an
-			// object this unit reaches and does not define; a reference to it
-			// is a reference to the symbol a linker resolves. A declaration of
-			// several names is left unrecorded: this reader keeps one type per
-			// declaration and could not carry the rest, and a name read at the
-			// wrong width is a wrong value rather than a missing feature.
-			if data_name.len > 0 && names.len == 1 {
-				p.extern_objects << ast.Global{
-					name:     data_name
-					typ:      data_type
-					resolved: data_clause
-					count:    data_count
-					external: true
-					line:     data_at.line
-					col:      data_at.col
-				}
+	if spec.is_extern && !data_defined {
+		// An extern declaration adds no code of its own: it says the object
+		// exists somewhere else, and this file has no storage to give it.
+		// The name is still one a body may read, so it is recorded as an
+		// object this unit reaches and does not define; a reference to it
+		// is a reference to the symbol a linker resolves. One declarator is
+		// read here, so a declaration of several names records each.
+		if data_name.len > 0 {
+			p.extern_objects << ast.Global{
+				name:     data_name
+				typ:      data_type
+				resolved: data_clause
+				count:    data_count
+				external: true
+				line:     data_at.line
+				col:      data_at.col
 			}
-			return decls
 		}
-		// A pointer object at the top level is one word of storage, and what it
-		// points at does not decide how wide it is: 6.2.5 lets a pointer name an
-		// incomplete type, and the back end sizes a pointer from its star rather
-		// than from the type under it. It takes the value path below rather than
-		// the aggregate one, whatever the type under the star is.
-		//
-		// The type of an object defined at the top level is the same question a
-		// definition's return type is: storage the program has to find room for,
-		// so the answer is the same helper. A prototype can promise anything; a
-		// definition cannot promise a type this back end has no width for.
-		if offender := p.unsupported_type_word(spec, data_stars) {
-			p.error_at(data_at, 'unsupported type ${offender}')
-			return decls
-		}
-		if data_stars == 0 && (spec.clause.kind in [types.Kind.struct_, .union_] || data_bytes > 0) {
-			if data_problem {
-				// The list was refused for its size and has already been
-				// named: there is nothing to lay out.
-				return decls
-			}
-			if data_brace && !data_union_first && !data_struct_brace {
-				// A brace initializer for an object of an aggregate type that
-				// the reader refused: a union's one value initializes its
-				// first member and a struct's values initialize its members,
-				// both written into the image below. Measured before the
-				// members were written, a file-scope `struct S s = {5, 6};`
-				// laid the object out as zeros and the program read 0 where
-				// gcc 16.2.1 reads 56.
-				p.error_at(data_at, 'unsupported: ${data_name} is an object of the type ${spec.clause.describe()}, and a brace initializer for one is not implemented')
-				return decls
-			}
-			// An object of an aggregate type at the top level is storage in the
-			// image, and how much of it is a fact about the layout: the model
-			// answers the size once, here, and the image writer reserves that
-			// many zeroed bytes. A union's first member is the one thing a
-			// definition writes into that storage; with no initializer it is
-			// the zeros the storage starts as.
-			//
-			// A list with a nested brace or a designator decided that size
-			// itself, because the type it was walked against may be an array
-			// whose element is an aggregate and has no width a spelling
-			// answers. `data_bytes` is that answer and is zero for a plain
-			// struct, which asks the layout the way it always did.
-			bytes := if data_bytes > 0 { data_bytes } else { p.aggregate_bytes(spec.clause) }
-			if bytes == 0 {
-				p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${spec.clause.describe()}, and its layout is not one this compiler knows')
-				return decls
-			}
-			// An array of aggregates is that many bytes per element and as many
-			// elements as the declarator wrote: the size travels here and the count
-			// travels beside it, which is what the image reserves and what an index
-			// scales by. A union's one value is the constant its first member
-			// holds, written at the beginning of the storage.
-			if spec.auto_deduced {
-				// The name was recorded by the declarator's reader with the
-				// word auto for a type. The type the initializer gives it is
-				// that same declaration's, so it completes the record rather
-				// than declaring the name a second time.
-				p.scopes.complete_type(data_name, data_clause)
-			} else {
-				p.declare_name(data_name, data_clause, data_at, true)
-			}
-			if completed := data_complete {
-				// The declarator wrote empty brackets and the list gave the
-				// array its count: the symbol is completed with the array the
-				// name turned out to be, so a later `sizeof` answers with that
-				// count rather than with the brackets that wrote none.
-				p.scopes.complete_type(data_name, completed)
-			}
-			p.globals << ast.Global{
-				name:         data_name
-				typ:          data_type
-				resolved:     data_resolved or { spec.clause }
-				count:        data_count
-				bytes:        bytes
-				alignment:    data_alignment
-				weak:         data_weak
-				static_:      spec.storage == .static_
-				init:         data_init
-				init_float:   data_init_float
-				address:      data_address
-				member_inits: data_member_inits
-				line:         data_at.line
-				col:          data_at.col
-			}
-			return decls
-		}
-		if data_defined && !empty_brace && data_init == none && data_init_float == none && data_inits.len == 0
-			&& data_init_floats.len == 0 && data_init_long == none && !data_string && data_address == none
-			&& data_address_inits.len == 0 {
-			// Either way the definition is refused. When the initializer was a
-			// shape the reader reported, it has already been named at its own
-			// location and this report would be a second message about the
-			// same construct.
-			if !literal_refused {
-				p.error_at(data_at, 'unsupported: ${data_name} is initialized with something this compiler cannot write into the image, and it is not a shape it reads')
-			}
-			return decls
-		}
+		return true
+	}
+	// A pointer object at the top level is one word of storage, and what it
+	// points at does not decide how wide it is: 6.2.5 lets a pointer name an
+	// incomplete type, and the back end sizes a pointer from its star rather
+	// than from the type under it. It takes the value path below rather than
+	// the aggregate one, whatever the type under the star is.
+	//
+	// The type of an object defined at the top level is the same question a
+	// definition's return type is: storage the program has to find room for,
+	// so the answer is the same helper. A prototype can promise anything; a
+	// definition cannot promise a type this back end has no width for.
+	if offender := p.unsupported_type_word(spec, data_stars) {
+		p.error_at(data_at, 'unsupported type ${offender}')
+		return false
+	}
+	if data_stars == 0 && (spec.clause.kind in [types.Kind.struct_, .union_] || data_bytes > 0) {
 		if data_problem {
-			// The list was refused for its size and has already been named:
-			// there is nothing to lay out, and the program does not compile.
-			return decls
+			// The list was refused for its size and has already been
+			// named: there is nothing to lay out.
+			return false
 		}
-		if data_name.len == 0 {
-			p.error_at(data_at, 'unsupported: a definition of an object at the top level needs a name')
-			return decls
+		if data_brace && !data_union_first && !data_struct_brace {
+			// A brace initializer for an object of an aggregate type that
+			// the reader refused: a union's one value initializes its
+			// first member and a struct's values initialize its members,
+			// both written into the image below. Measured before the
+			// members were written, a file-scope `struct S s = {5, 6};`
+			// laid the object out as zeros and the program read 0 where
+			// gcc 16.2.1 reads 56.
+			p.error_at(data_at, 'unsupported: ${data_name} is an object of the type ${spec.clause.describe()}, and a brace initializer for one is not implemented')
+			return false
 		}
-		// A definition of an object: storage the image holds, which every
-		// function reads and writes by name. Everything the back end needs to
-		// lay the bytes out is known here - the type, how many elements, and the
-		// constant the storage starts at - so no later stage has to ask.
+		// An object of an aggregate type at the top level is storage in the
+		// image, and how much of it is a fact about the layout: the model
+		// answers the size once, here, and the image writer reserves that
+		// many zeroed bytes. A union's first member is the one thing a
+		// definition writes into that storage; with no initializer it is
+		// the zeros the storage starts as.
 		//
-		// The initializer is made the class the object was declared with while
-		// the tree is built, because the two are one value of one type: an
-		// integer initializing a double object is that integer's value as a
-		// double, and a floating constant initializing an int or a char is
-		// truncated towards zero, which is the conversion an assignment makes
-		// and the reason neither of these needs a diagnostic of its own.
-		init, init_float := initializer_for(data_type, data_init, data_init_float)
-		if data_init_long != none && data_type != 'long double' {
-			p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is a long double constant')
-			return decls
+		// A list with a nested brace or a designator decided that size
+		// itself, because the type it was walked against may be an array
+		// whose element is an aggregate and has no width a spelling
+		// answers. `data_bytes` is that answer and is zero for a plain
+		// struct, which asks the layout the way it always did.
+		bytes := if data_bytes > 0 { data_bytes } else { p.aggregate_bytes(spec.clause) }
+		if bytes == 0 {
+			p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${spec.clause.describe()}, and its layout is not one this compiler knows')
+			return false
 		}
-		mut starts_at_zero := true
-		if value := data_init {
-			if value != 0 {
-				starts_at_zero = false
-			}
-		}
-		if value := data_init_float {
-			if value != 0.0 {
-				starts_at_zero = false
-			}
-		}
-		if data_type == 'long double' && data_init_long == none && !starts_at_zero {
-			// An object of the extended type at the top level starts at the
-			// constant its initializer names when that constant is one of the
-			// type, and at zero when there is nothing to start it at, which is
-			// what the unsized storage in the image already holds. A constant of
-			// another type is a conversion at load time, which this reader does
-			// not write into the image.
-			p.error_at(data_at, 'unsupported: ${data_name} is a long double, and its initializer is not a long double constant: converting a constant of another type to the extended format at load time is not written into the image')
-			return decls
-		}
+		// An array of aggregates is that many bytes per element and as many
+		// elements as the declarator wrote: the size travels here and the count
+		// travels beside it, which is what the image reserves and what an index
+		// scales by. A union's one value is the constant its first member
+		// holds, written at the beginning of the storage.
 		if spec.auto_deduced {
-			// The declarator's reader recorded the name with the word auto for
-			// a type. The type the initializer gives it is that same
-			// declaration's, so it completes the record rather than declaring
-			// the name a second time.
+			// The name was recorded by the declarator's reader with the
+			// word auto for a type. The type the initializer gives it is
+			// that same declaration's, so it completes the record rather
+			// than declaring the name a second time.
 			p.scopes.complete_type(data_name, data_clause)
 		} else {
 			p.declare_name(data_name, data_clause, data_at, true)
 		}
 		if completed := data_complete {
-			// The name was declared with the size-less array its declarator
-			// wrote, and the string literal that followed is what gives it a
-			// size: the symbol is completed here so a later `sizeof` answers
-			// with the size the initializer fixed rather than with the brackets
-			// that wrote none.
+			// The declarator wrote empty brackets and the list gave the
+			// array its count: the symbol is completed with the array the
+			// name turned out to be, so a later `sizeof` answers with that
+			// count rather than with the brackets that wrote none.
 			p.scopes.complete_type(data_name, completed)
 		}
 		p.globals << ast.Global{
-			name:          data_name
-			typ:           data_type
-			resolved:      if completed := data_complete { completed } else { data_clause }
-			count:         data_count
-			alignment:     data_alignment
-			weak:          data_weak
-			static_:       spec.storage == .static_
-			init:          init
-			init_float:    init_float
-			init_long:     data_init_long
-			address:       data_address
-			inits:         data_inits
-			init_floats:   data_init_floats
-			address_inits: data_address_inits
-			line:          data_at.line
-			col:           data_at.col
+			name:         data_name
+			typ:          data_type
+			resolved:     data_resolved or { spec.clause }
+			count:        data_count
+			bytes:        bytes
+			alignment:    data_alignment
+			weak:         data_weak
+			static_:      spec.storage == .static_
+			init:         data_init
+			init_float:   data_init_float
+			address:      data_address
+			member_inits: data_member_inits
+			line:         data_at.line
+			col:          data_at.col
+		}
+		return true
+	}
+	if data_defined && !empty_brace && data_init == none && data_init_float == none && data_inits.len == 0
+		&& data_init_floats.len == 0 && data_init_long == none && !data_string && data_address == none
+		&& data_address_inits.len == 0 {
+		// Either way the definition is refused. When the initializer was a
+		// shape the reader reported, it has already been named at its own
+		// location and this report would be a second message about the
+		// same construct.
+		if !literal_refused {
+			p.error_at(data_at, 'unsupported: ${data_name} is initialized with something this compiler cannot write into the image, and it is not a shape it reads')
+		}
+		return false
+	}
+	if data_problem {
+		// The list was refused for its size and has already been named:
+		// there is nothing to lay out, and the program does not compile.
+		return false
+	}
+	if data_name.len == 0 {
+		p.error_at(data_at, 'unsupported: a definition of an object at the top level needs a name')
+		return false
+	}
+	// A definition of an object: storage the image holds, which every
+	// function reads and writes by name. Everything the back end needs to
+	// lay the bytes out is known here - the type, how many elements, and the
+	// constant the storage starts at - so no later stage has to ask.
+	//
+	// The initializer is made the class the object was declared with while
+	// the tree is built, because the two are one value of one type: an
+	// integer initializing a double object is that integer's value as a
+	// double, and a floating constant initializing an int or a char is
+	// truncated towards zero, which is the conversion an assignment makes
+	// and the reason neither of these needs a diagnostic of its own.
+	init, init_float := initializer_for(data_type, data_init, data_init_float)
+	if data_init_long != none && data_type != 'long double' {
+		p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is a long double constant')
+		return false
+	}
+	mut starts_at_zero := true
+	if value := data_init {
+		if value != 0 {
+			starts_at_zero = false
 		}
 	}
-	return decls
+	if value := data_init_float {
+		if value != 0.0 {
+			starts_at_zero = false
+		}
+	}
+	if data_type == 'long double' && data_init_long == none && !starts_at_zero {
+		// An object of the extended type at the top level starts at the
+		// constant its initializer names when that constant is one of the
+		// type, and at zero when there is nothing to start it at, which is
+		// what the unsized storage in the image already holds. A constant of
+		// another type is a conversion at load time, which this reader does
+		// not write into the image.
+		p.error_at(data_at, 'unsupported: ${data_name} is a long double, and its initializer is not a long double constant: converting a constant of another type to the extended format at load time is not written into the image')
+		return false
+	}
+	if spec.auto_deduced {
+		// The declarator's reader recorded the name with the word auto for
+		// a type. The type the initializer gives it is that same
+		// declaration's, so it completes the record rather than declaring
+		// the name a second time.
+		p.scopes.complete_type(data_name, data_clause)
+	} else {
+		p.declare_name(data_name, data_clause, data_at, true)
+	}
+	if completed := data_complete {
+		// The name was declared with the size-less array its declarator
+		// wrote, and the string literal that followed is what gives it a
+		// size: the symbol is completed here so a later `sizeof` answers
+		// with the size the initializer fixed rather than with the brackets
+		// that wrote none.
+		p.scopes.complete_type(data_name, completed)
+	}
+	p.globals << ast.Global{
+		name:          data_name
+		typ:           data_type
+		resolved:      if completed := data_complete { completed } else { data_clause }
+		count:         data_count
+		alignment:     data_alignment
+		weak:          data_weak
+		static_:       spec.storage == .static_
+		init:          init
+		init_float:    init_float
+		init_long:     data_init_long
+		address:       data_address
+		inits:         data_inits
+		init_floats:   data_init_floats
+		address_inits: data_address_inits
+		line:          data_at.line
+		col:           data_at.col
+	}
+	return true
 }
 
 // parse_static_assertion reads a static assertion, the declaration C11 spells

@@ -181,6 +181,45 @@ fn test_a_file_scope_static_name_carries_internal_linkage() {
 	assert !objects.unit.globals[1].static_
 }
 
+// A file-scope declaration with several declarators defines one object per
+// declarator, each with the type and the initializer written for it. Only the
+// first used to reach the tree and the last initializer overwrote the first's,
+// so `static int a = 5, b = 7;` defined `a` as 7 and left `b` with no object:
+// measured, the program returned 7 where gcc 16.2.1 returns 5. The declarators
+// here are a scalar with its own value, a pointer to one of them, and an array,
+// so the group covers three derived types in one declaration. The pointers and
+// the arrays are written without addresses of names read later, because a
+// file-scope address initializer is a separate path and not what this checks.
+fn test_a_file_scope_declaration_registers_every_declarator() {
+	mixed := declarations_of('static int a = 5, *b = 0, c[3] = { 1, 2, 3 }, d = 9;')
+	assert mixed.diagnostics.len == 0
+	assert mixed.unit.globals.len == 4
+	assert mixed.unit.globals[0].name == 'a'
+	assert mixed.unit.globals[0].init or { -1 } == 5
+	assert mixed.unit.globals[1].name == 'b'
+	assert mixed.unit.globals[1].typ == 'int *'
+	assert mixed.unit.globals[2].name == 'c'
+	assert mixed.unit.globals[2].count == 3
+	assert mixed.unit.globals[2].inits[0] == 1 && mixed.unit.globals[2].inits[2] == 3
+	assert mixed.unit.globals[3].name == 'd'
+	assert mixed.unit.globals[3].init or { -1 } == 9
+	// A function-pointer declarator beside a scalar is the same question: each
+	// name is an object of the type its own declarator built.
+	pointers := declarations_of('int (*fp)(int) = 0, g = 9;')
+	assert pointers.diagnostics.len == 0
+	assert pointers.unit.globals.len == 2
+	assert pointers.unit.globals[0].name == 'fp'
+	assert pointers.unit.globals[0].resolved.describe() == 'int (int) *'
+	assert pointers.unit.globals[1].name == 'g'
+	assert pointers.unit.globals[1].init or { -1 } == 9
+	// No initializer is still one object per name, each zeroed.
+	plain := declarations_of('int a, b;')
+	assert plain.diagnostics.len == 0
+	assert plain.unit.globals.len == 2
+	assert plain.unit.globals[0].name == 'a'
+	assert plain.unit.globals[1].name == 'b'
+}
+
 // A brace initializer is a definition even when the declaration says extern:
 // the object has to live somewhere, and the values written are the ones the
 // image holds. Measured with gcc 16.2.1 and this compiler, `int x[2] = {1, 2};`
