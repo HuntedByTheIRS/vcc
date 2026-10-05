@@ -10,9 +10,14 @@ the speed target is the V self-build, a few megabytes of generated C per run, so
 a change is judged by whether it moves the compiler toward compiling V's
 generated C and does not make it slower.
 
-The tree is 72,068 lines of V that are not tests. `wc -l` over the non-test
-sources prints that total, and the counts in the module table below come from the
-same command, one directory at a time.
+The size of the tree is counted by `v run tools/lines.vsh`, which is what the
+lines badge in README.md reads: the `.v` files the tree tracks that are not
+tests, with `tools/` out and `linking/` in, so the linker counts itself the day
+it is written. The total is not repeated here, because a figure copied into prose
+goes stale without saying so, and the one that stood here had been counted by a
+walk that reached into the agent working state and counted its copies of the
+sources as the compiler. The module table below is a `wc -l` per directory, taken
+when it was written.
 
 ## The pipeline
 
