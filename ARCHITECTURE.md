@@ -117,9 +117,12 @@ both the resolved type clause and the spelling the declaration was written with,
 and an unresolved clause carries the zero value of `types.Type`, whose kind is
 `.unknown`, which is not a claim that the type is void.
 
-`linking/` is an empty directory. The in-house linker is not written, and
-`-shared`, `-static` and linking more than one input are refused by name in
-`main.v` unless `-external-linker=NAME` is given.
+`linking/` is the in-house linker: `symbols/` resolves names across units,
+`place/` lays the image out, `reloc/` fills the references in, `output/` wraps
+it, and `object/` and `archive/` read a relocatable file and an `ar` archive the
+command line names. `-external-linker=NAME` is the fallback for an input this
+linker cannot consume, and an object carrying a section or a relocation it does
+not model is refused by name rather than placed at a guessed address.
 
 ## The target description
 

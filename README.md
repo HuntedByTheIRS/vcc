@@ -109,11 +109,12 @@ subset of C and refuses the rest with a diagnostic naming the construct and its
 location, which is the right failure but still a failure: a program outside the
 subset does not compile, and the subset is smaller than GCC's. It is not
 self-hosting yet and cannot compile V's generated C. It links the translation
-units of one command line into a program, but a relocatable file or an archive
-handed to it, `-shared` and `-static` still need `-external-linker=NAME`: the
-reader for a file another compiler wrote is not written, and the in-house linker
-writes the one shape. It targets Linux x86-64 only; arm64, macOS and Windows are
-back ends that do not exist yet.
+units of one command line into a program, reads a relocatable object and an
+archive as link inputs, and writes a shared object or a static program. What a
+static link does not do is resolve a library into the file, so a static program
+that reaches one is refused by name: this compiler reads no C library to put
+there. It targets Linux x86-64 only; arm64, macOS and Windows are back ends that
+do not exist yet.
 It is slower than tcc, by a margin that grows with input size. And a compiler in
 the bootstrap chain is high-stakes: if vcc miscompiles a subtle thing, the V it
 builds is wrong in a way that is hard to attribute, which is why the chain is
@@ -232,11 +233,11 @@ Targets, in order:
 - The V self-build, meaning vcc compiling V's generated C and the result passing
   V's test suite (bootstrap step 3), by the end of Q4 2026 or early Q1 2027.
 
-Between here and there, the known gaps are the ones named above: the rest of the
-in-house linker (reading a relocatable file and an archive, `-shared`,
-`-static`) without `-external-linker`, V's generated C, and the streaming path
-that is meant to close the speed gap. `ROADMAP.md` lays out the milestones and
-what verifies each one.
+Between here and there, the known gaps are the ones named above: the `-external-linker=NAME`
+path for an object carrying a section or a relocation the reader does not model
+(thread-local storage, an initializer array) and for a static link that reaches
+the C library, V's generated C, and the streaming path that is meant to close the
+speed gap. `ROADMAP.md` lays out the milestones and what verifies each one.
 
 Speed is the number to watch, and it is not close yet. Measured with
 `v run tools/bench.vsh` against the tcc V vendors:

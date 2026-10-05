@@ -939,3 +939,22 @@ it owns the change, which is the same vocabulary the commits use.
 * linking: test that two units' private names do not collide (3e9239e)
 * linking: key a stub's call to another unit's entry by name (346aa95)
 * cli, main: link the units of a multi-input command line (985c5ef)
+* image, backend: carry a read object's relocations and the stubs they reach
+  (4185ad9)
+* linking: merge a read object's relocations into the program (a4d7eb4)
+* linking: a section-relative data reference gains its blob's base (010888a)
+* linking: read a relocatable object back into a unit (7603235)
+* linking: read the members and the symbol index of an ar archive (09358ff)
+* main, cli, backend: link the objects and archives the command line names
+  (5a3b8e9)
+* image, linking: a relocation says where its field lies and how it reaches a
+  name (906c68e)
+* backend/os/elf: a static program and a shared object are two more shapes to
+  write (73ef6e8)
+* linking: read every allocatable section of a relocatable object (9d7af28)
+* backend/os/linux, backend: a -l name that resolves to an archive is an input
+  (aa05e21)
+* cli, codegen, linking, main, backend: the kind of link the flag names reaches
+  the container (7fd1b7e)
+* main: a -l name that resolved to an archive is pulled as a link input
+  (059089b)
