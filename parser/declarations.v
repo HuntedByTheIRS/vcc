@@ -3219,6 +3219,21 @@ fn (mut p Parser) fill_brace(typ types.Type, items []BraceElement, start int, ba
 	match typ.kind {
 		.array {
 			element := typ.element() or { return start }
+			// 6.7.8p14: an array of character type may be initialized by a
+			// string literal, written bare or inside the braces a subobject's
+			// initializer may have. The literal is the array's own value and
+			// not its first element, so it is placed across the whole array
+			// here rather than walked element by element. A literal only
+			// reaches this arm as one element of the list, and the ones after
+			// it belong to the object's next subobject.
+			if start < items.len {
+				if char_element := character_array_element(typ) {
+					if bytes := p.string_item_bytes(items[start], false) {
+						p.write_string_array(typ, char_element, bytes, base, mut writes)
+						return start + 1
+					}
+				}
+			}
 			stride := p.representation.size_of(element) or { return start }
 			count := typ.count
 			mut index := 0
@@ -3318,6 +3333,17 @@ fn (mut p Parser) fill_brace(typ types.Type, items []BraceElement, start int, ba
 // first element left.
 fn (mut p Parser) fill_one(typ types.Type, items []BraceElement, start int, base int, mut writes []BraceWrite) int {
 	item := items[start]
+	// A string literal initializing an array of character type is the array's
+	// own value, whatever the braces around it: `p.s = { "ab" }` and
+	// `.s = "ab"` are the same initialization. The check is before the
+	// designator arm so a designator that named the array does not send the
+	// literal to the leaf writer as one element of it.
+	if element := character_array_element(typ) {
+		if bytes := p.string_item_bytes(item, true) {
+			p.write_string_array(typ, element, bytes, base, mut writes)
+			return start + 1
+		}
+	}
 	if list := item.list {
 		p.fill_brace(typ, list.elements, 0, base, mut writes)
 		return start + 1
@@ -3475,6 +3501,136 @@ fn (mut p Parser) write_brace_leaf(typ types.Type, base int, element BraceElemen
 		spelling: typ.storage_spelling()
 		typ:      typ
 		element:  element
+	}
+}
+
+// StringBytes is what a string literal writes into an array of character type:
+// the value of each character and, as the last of them, the terminator the
+// literal does not itself write. `at` is the token the literal was read from,
+// which is where a literal too long for the array is reported.
+struct StringBytes {
+	values []i64
+	at     tokenize.Token
+}
+
+// character_array_element answers the element type of an array of character
+// type, which is the one array 6.7.8p14 lets a string literal initialize, and
+// none for every other array.
+fn character_array_element(typ types.Type) ?types.Type {
+	if typ.kind != .array {
+		return none
+	}
+	element := typ.element() or { return none }
+	if element.kind in [types.Kind.char_, .signed_char, .unsigned_char] {
+		return element
+	}
+	return none
+}
+
+// string_item_bytes reads a brace element as a string literal initializing an
+// array of character type and answers the bytes it writes, or none when the
+// element is not one. 6.7.8p14 makes a string literal an initializer of an array
+// of character type, so the literal is the array's own value. A file-scope
+// element carries the literal as an address whose `name` holds its bytes; a
+// body's carries the expression the literal reads as. `unwrap` says the element
+// may be the list a subobject's own braces are - `struct P p = { {"ab"} }`, where
+// the braces after the struct's are the member's - and is false in an array's own
+// walk, where an element's braces are a brace around the element and not the
+// array. That difference is what makes `char s[4] = {"ab"}` a string and
+// `char s[4] = {{"ab"}}` an element gcc 16.2.1 refuses. A wide literal is not
+// read here: it initializes an array whose element is not a character, which is
+// the element test the caller has already failed.
+fn (p Parser) string_item_bytes(element BraceElement, unwrap bool) ?StringBytes {
+	mut literal := element
+	if list := element.list {
+		if !unwrap || list.elements.len != 1 {
+			return none
+		}
+		literal = list.elements[0]
+		if literal.list != none {
+			return none
+		}
+	}
+	if address := literal.address {
+		if !address.string || address.offset != 0 || address.number != none {
+			return none
+		}
+		return StringBytes{
+			values: bytes_and_terminator(address.name)
+			at:     tokenize.Token{
+				kind: .string
+				text: address.name
+				line: address.line
+				col:  address.col
+			}
+		}
+	}
+	if expr := literal.expr {
+		if expr is ast.StrLit {
+			lit := expr as ast.StrLit
+			return StringBytes{
+				values: bytes_and_terminator(lit.value)
+				at:     tokenize.Token{
+					kind: .string
+					text: lit.text
+					line: lit.line
+					col:  lit.col
+				}
+			}
+		}
+	}
+	return none
+}
+
+// bytes_and_terminator is the value of each byte of a narrow string literal, with
+// the zero the literal does not write as the element after them.
+fn bytes_and_terminator(value string) []i64 {
+	mut values := []i64{cap: value.len + 1}
+	for byte in value.bytes() {
+		values << i64(byte)
+	}
+	values << 0
+	return values
+}
+
+// write_string_array appends one write per element a string literal gives an
+// array of character type, at the byte each element starts at. A literal longer
+// than the array is a constraint violation (6.7.8p14) and is refused the way the
+// direct array case refuses it: measured on gcc 16.2.1, `char s[2] = "abc";` is
+// `initializer-string for array of 'char' is too long`, a warning gcc passes
+// through, and this compiler refuses the same shape at the direct declaration
+// rather than write an array the literal did not fit. A literal exactly filling
+// the array keeps no terminator, which gcc accepts and this accepts too, and the
+// elements the literal did not reach are the zeros the storage starts as. An
+// array whose size is not written has no room to measure the literal against, so
+// the shape is refused rather than written with a guessed size.
+fn (mut p Parser) write_string_array(typ types.Type, element types.Type, bytes StringBytes, base int, mut writes []BraceWrite) {
+	if typ.count <= 0 {
+		p.error_at(bytes.at, 'a constraint violation: a string literal initializes an array whose size is not written')
+		return
+	}
+	characters := bytes.values.len - 1
+	if characters > typ.count {
+		p.error_at(bytes.at, 'a constraint violation: an array of ${typ.count} elements is initialized by a string literal of ${bytes.values.len} characters')
+		return
+	}
+	stride := p.representation.size_of(element) or { return }
+	limit := if typ.count < bytes.values.len { typ.count } else { bytes.values.len }
+	for k in 0 .. limit {
+		writes << BraceWrite{
+			offset:   base + k * stride
+			width:    stride
+			spelling: element.storage_spelling()
+			typ:      element
+			element:  BraceElement{
+				number: NumberConstant{
+					number: FileConstant{
+						integer: bytes.values[k]
+					}
+					at:     bytes.at
+				}
+			}
+		}
 	}
 }
 
