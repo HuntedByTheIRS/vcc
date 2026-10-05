@@ -1,0 +1,24 @@
+# Only the compiler sources reach the build. Everything here is either
+# host state or content the compiler never reads.
+
+# Git history and host state: the Docker build must not depend on the working
+# copy's branch, refs or index.
+.git
+.gitignore
+.gitattributes
+
+# Agent working state; see AGENTS.md.
+.omh
+
+# CI definitions, not build inputs.
+.github
+
+# Test corpora and the gate/benchmark scripts. None of them is imported by the
+# compiler, so none of them belongs in the image.
+compliance
+regression
+goldens
+tools
+
+# A binary built on the host: the image builds its own.
+vcc
