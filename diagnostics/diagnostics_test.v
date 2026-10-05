@@ -184,3 +184,98 @@ fn test_the_class_the_standard_requires_is_reported_and_then_promoted() {
 	assert reading.accept('-pedantic-errors')
 	assert reading.without_promotion().severity(.required) == .warning
 }
+
+fn test_a_silent_severity_renders_without_a_label() {
+	// render is the one place a diagnostic becomes text, and a silent severity
+	// is written the same shape an error is: the label is what says how the
+	// command line decided the class, and neither of those two has one.
+	assert render('f.c', 3, 7, .silent, 'something') == 'f.c:3:7: something'
+	assert render('f.c', 3, 7, .error, 'something') == 'f.c:3:7: something'
+	assert render('f.c', 3, 7, .warning, 'something') == 'f.c:3:7: warning: something'
+}
+
+fn test_the_default_severity_of_every_class() {
+	// What a class is before the command line says anything: the three the
+	// compiler reports on its own account, and the one nobody asked for.
+	mut policy := Policy{}
+	assert policy.severity(.cpp) == .warning
+	assert policy.severity(.required) == .warning
+	assert policy.severity(.discarded_qualifiers) == .warning
+	assert policy.severity(.pedantic) == .silent
+	assert policy.mentions.len == 0
+	assert !policy.suppress
+}
+
+fn test_every_class_with_a_spelling_is_found_by_it_and_the_class_without_one_is_not() {
+	assert (class_of('cpp') or { Class.pedantic }) == .cpp
+	assert (class_of('pedantic') or { Class.cpp }) == .pedantic
+	assert (class_of('discarded-qualifiers') or { Class.cpp }) == .discarded_qualifiers
+	// The standard requiring a diagnostic does not give the class a -W
+	// spelling, so a name for it is a name of nothing.
+	assert class_of('required') == none
+	assert class_of('') == none
+}
+
+fn test_the_mentions_are_kept_in_the_order_they_were_written() {
+	mut policy := Policy{}
+	assert policy.accept('-Wcpp')
+	assert policy.accept('-Wno-discarded-qualifiers')
+	assert policy.accept('-pedantic')
+	assert policy.mentions.len == 3
+	assert policy.mentions[0].class == .cpp
+	assert policy.mentions[0].severity == .warning
+	assert policy.mentions[1].class == .discarded_qualifiers
+	assert policy.mentions[1].severity == .silent
+	assert policy.mentions[2].class == .pedantic
+	assert policy.mentions[2].severity == .warning
+	// A flag the command line keeps is not a mention: it names no class, so the
+	// list stays as it was.
+	mut others := Policy{}
+	assert !others.accept('-Wall')
+	assert others.mentions.len == 0
+}
+
+fn test_a_warning_flag_with_nothing_after_the_name_is_not_a_mention() {
+	// Each spelling slices a name out of the argument, and a name of nothing is
+	// a class of nothing rather than the first class in the table.
+	mut policy := Policy{}
+	assert !policy.accept('-W')
+	assert !policy.accept('-Wno-')
+	assert !policy.accept('-Werror=')
+	assert policy.mentions.len == 0
+}
+
+fn test_werror_names_one_class_and_promotes_only_it() {
+	mut policy := Policy{}
+	assert policy.accept('-Werror=discarded-qualifiers')
+	assert policy.severity(.discarded_qualifiers) == .error
+	assert policy.severity(.pedantic) == .silent
+	assert policy.severity(.cpp) == .warning
+	// The name the class has is the name -Werror= takes, and a later mention of
+	// it is what turns the promotion back off.
+	assert policy.accept('-Wno-discarded-qualifiers')
+	assert policy.severity(.discarded_qualifiers) == .silent
+}
+
+fn test_the_required_class_cannot_be_named_for_a_promotion() {
+	// required has no -W spelling, so the only flag that promotes it is
+	// -pedantic-errors; a name for it is left to the command line and the class
+	// keeps its default.
+	mut policy := Policy{}
+	assert !policy.accept('-Werror=required')
+	assert policy.severity(.required) == .warning
+	assert policy.mentions.len == 0
+}
+
+fn test_without_promotion_keeps_the_silenced_classes_and_takes_the_errors_back() {
+	mut policy := Policy{}
+	assert policy.accept('-Werror=cpp')
+	assert policy.accept('-Wno-pedantic')
+	assert policy.severity(.cpp) == .error
+	reading := policy.without_promotion()
+	assert reading.severity(.cpp) == .warning
+	assert reading.severity(.pedantic) == .silent
+	assert reading.mentions.len == 2
+	// The property that is not a mention travels as it is.
+	assert reading.suppress == policy.suppress
+}
