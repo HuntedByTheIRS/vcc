@@ -58,6 +58,31 @@ pub fn link(units []image.Program, options Options) !image.Program {
 	// is inside this image. It is built before the copy list is filtered, because
 	// a name both lists carry is one the filtering has to drop from the copies.
 	bound := bind(units, layout, names)!
+	// The references a unit carried as relocations are merged like its fixups,
+	// and the imported functions among them need a stub: a unit read back from
+	// a relocatable object reaches a library function with a direct branch, and
+	// a direct branch cannot read the value a slot holds, so the container gives
+	// each such name a stub and the call goes there instead.
+	merged_relocations := merge_relocations(units, layout)
+	mut plts := []string{}
+	for relocation in merged_relocations {
+		if is_section_key(relocation.name) {
+			continue
+		}
+		if relocation.name in names.definitions {
+			continue
+		}
+		if relocation.name in names.object_imports {
+			// A direct reference to an object in a shared library would have
+			// to read the object's address out of the table, which is a
+			// reference this linker does not build. It is named rather than
+			// pointed at a wrong address.
+			return error('${relocation.name} is an object a relocatable object reaches through the global offset table, and this linker builds no such reference: -external-linker links an input this compiler cannot place yet')
+		}
+		if relocation.name in names.imports && relocation.name !in plts {
+			plts << relocation.name
+		}
+	}
 	mut copies := []string{cap: names.copy_objects.len}
 	for name in names.copy_objects {
 		// A copy object a unit defines is not a copy any more: the image holds
@@ -86,6 +111,8 @@ pub fn link(units []image.Program, options Options) !image.Program {
 		bound:             bound
 		fixups:            merge_fixups(units, layout)
 		data_fixups:       merge_data_fixups(units, layout, names.definitions)
+		relocations:       merged_relocations
+		plts:              plts
 	}
 	// Every reference that is still external has to be answerable by a library
 	// the image names, or the program dies at load with nothing on the
@@ -272,6 +299,31 @@ fn merge_data_fixups(units []image.Program, layout place.Layout, definitions map
 		reloc.data_fixups(unit, i, layout.globals_bases[i], definitions, mut fixups)
 	}
 	return fixups
+}
+
+// merge_relocations sizes the merged relocation list once and has each unit
+// append its rewritten references, the way merge_fixups does for the references
+// the emitter left as fixups.
+fn merge_relocations(units []image.Program, layout place.Layout) []image.Relocation {
+	mut count := 0
+	for unit in units {
+		count += unit.relocations.len
+	}
+	mut relocations := []image.Relocation{cap: count}
+	for i, unit in units {
+		reloc.relocations(unit, i, layout.text_bases[i], layout.string_bases[i],
+			layout.globals_bases[i], mut relocations)
+	}
+	return relocations
+}
+
+// is_section_key says whether a relocation's name is one of a unit's own section
+// keys rather than a symbol. Such a name points at a place in a merged blob and
+// never at a symbol table entry, so it is not a name a stub or a library check
+// can be asked about.
+fn is_section_key(name string) bool {
+	return name == image.section_key_text || name == image.section_key_rodata
+		|| name == image.section_key_data
 }
 
 // bind answers, for each name the image needs and one of its units defines, where
