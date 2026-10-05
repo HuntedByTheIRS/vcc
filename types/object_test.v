@@ -619,3 +619,267 @@ fn test_a_name_an_unnamed_member_collides_with_is_not_found() {
 	assert member_named(s, 'x') == none
 	assert s.members.any(it.name.contains('ambiguous'))
 }
+
+// `layout` answers a scalar or a derived type by asking for its size and its
+// alignment, the same two numbers `size_of` and `align_of` give, with no members
+// to place. The aggregate branch above it is the one the other tests read.
+fn test_the_layout_of_a_scalar_or_an_array_is_its_size_and_alignment() {
+	i := layout_of(int_type())
+	assert i.size == 4 && i.align == 4
+	assert i.offsets.len == 0 && i.bits.len == 0
+	d := layout_of(double_type())
+	assert d.size == 8 && d.align == 8
+	c := layout_of(char_type())
+	assert c.size == 1 && c.align == 1
+	// An enumerated type is a scalar here too, sized by its underlying kind.
+	e := layout_of(enum_type('E', .int_))
+	assert e.size == 4 && e.align == 4
+	// An array is derived rather than scalar, and layout still answers the
+	// product of the element size and the element's alignment.
+	a := layout_of(array_of(int_type(), 3))
+	assert a.size == 12 && a.align == 4
+	assert a.offsets.len == 0
+}
+
+// A completed aggregate carries the layout it was worked out with, and every
+// question about its size, alignment or members is answered from that rather than
+// by walking the member list again. A struct of no members and no stored layout
+// is the contrast that tells the stored numbers from a fresh measurement.
+fn test_a_completed_aggregate_carries_the_layout_it_was_already_given() {
+	cached := Type{
+		kind:     .struct_
+		tag:      'cached'
+		complete: true
+		layout:   &Layout{
+			size:  24
+			align: 8
+		}
+	}
+	assert size_of(cached) == 24
+	assert align_of(cached) == 8
+	// The empty member list would otherwise answer zero and one, so the two
+	// numbers above are the stored layout and not something derived here.
+	fresh := struct_type('fresh', [])
+	assert size_of(fresh) == 0 && align_of(fresh) == 1
+}
+
+// A width wider than the storage unit of the declared type is a declaration gcc
+// refuses with `width of 'a' exceeds its type`, so there is no layout to answer.
+// The unit is the width of the declared type in bits: eight for a char,
+// thirty-two for an unsigned int.
+fn test_a_bitfield_wider_than_its_own_type_is_refused() {
+	representation := measured.representation()
+	assert representation.size_of(struct_type('bf_wide_char', [bitfield('a', char_type(), 9)])) == none
+	assert representation.size_of(struct_type('bf_wide_int', [bitfield('a', unsigned_int_type(),
+		33)])) == none
+	// The width equal to the unit is fine, which puts the boundary here rather
+	// than one bit below it.
+	exact := struct_type('bf_exact', [bitfield('a', char_type(), 8)])
+	assert size_of(exact) == 1
+}
+
+// Only an integer type has a width in bits to count, so a bitfield declared with
+// any other type has no layout. Measured: gcc 16.2.1 refuses
+// `struct { double d:1; }` with `error: bit-field 'd' has invalid type`.
+fn test_a_bitfield_of_a_type_with_no_width_is_refused() {
+	representation := measured.representation()
+	assert representation.size_of(struct_type('bf_double', [bitfield('d', double_type(), 1)])) == none
+	assert representation.size_of(struct_type('bf_float', [bitfield('f', float_type(), 2)])) == none
+	assert representation.size_of(struct_type('bf_pointer', [bitfield('p', pointer_to(int_type()),
+		1)])) == none
+}
+
+// 6.7.2.1p13: an unnamed struct inside a union contributes its members to the
+// union, and every member of a union starts at the beginning. Measured on gcc
+// 16.2.1: `union U { long x; struct { int a; char b; }; }` is 8 bytes, x and a at
+// 0 and b at 4, the offset b has inside the unnamed struct.
+fn test_an_unnamed_struct_inside_a_union_starts_its_members_at_the_union() {
+	inner := struct_type('', [member('a', int_type()), member('b', char_type())])
+	u := union_type('U', [member('x', long_type()), member('', inner)])
+	assert size_of(u) == 8 && align_of(u) == 8
+	assert member_offset(u, 'x') == 0
+	assert member_offset(u, 'a') == 0
+	assert member_offset(u, 'b') == 4
+}
+
+// An array steps by the size of its element, which for an aggregate is the
+// rounded-up size and not the sum of the member widths. Measured on gcc 16.2.1:
+// `struct p2 { char a; int b; }` is 8 bytes, so `struct p2[3]` is 24 and not 15,
+// and an array of arrays multiplies the inner size out too.
+fn test_an_array_of_aggregates_steps_by_the_rounded_element_size() {
+	p2 := struct_type('p2', [member('a', char_type()), member('b', int_type())])
+	assert size_of(p2) == 8
+	assert size_of(array_of(p2, 3)) == 24
+	assert align_of(array_of(p2, 3)) == 4
+	grid := array_of(array_of(int_type(), 3), 4)
+	assert size_of(grid) == 48 && align_of(grid) == 4
+}
+
+// A struct holding an array of structs leaves a place for every element, and the
+// array's alignment puts the first element on a four-byte boundary. Measured on
+// gcc 16.2.1 for `struct { char c; struct p2 elems[2]; char d; }`: 24 bytes, c at
+// 0, elems at 4, d at 20, and six bytes no member covers.
+fn test_a_struct_holding_an_array_of_structs_leaves_a_place_for_every_element() {
+	p2 := struct_type('p2', [member('a', char_type()), member('b', int_type())])
+	s := struct_type('holds_p2', [member('c', char_type()), member('elems', array_of(p2, 2)),
+		member('d', char_type())])
+	layout := layout_of(s)
+	assert layout.size == 24 && layout.align == 4
+	assert layout.offsets == [0, 4, 20]
+	assert layout.padding == 6
+}
+
+// A struct inside a struct inside a struct keeps every inner size: the middle
+// aggregate is one member of the outer one, and its own trailing padding travels
+// with it as part of that size. Measured on gcc 16.2.1 for the shape below: the
+// middle struct is 8 bytes with three bytes of padding and the outer one is 12.
+fn test_a_struct_inside_a_struct_inside_a_struct_keeps_every_inner_size() {
+	inner := struct_type('inner', [member('x', char_type())])
+	middle := struct_type('middle', [member('a', int_type()), member('i', inner)])
+	outer := struct_type('outer', [member('b', char_type()), member('m', middle)])
+	assert size_of(middle) == 8 && align_of(middle) == 4
+	middle_layout := layout_of(middle)
+	assert middle_layout.offsets == [0, 4] && middle_layout.padding == 3
+	outer_layout := layout_of(outer)
+	assert outer_layout.size == 12 && outer_layout.align == 4
+	assert outer_layout.offsets == [0, 4]
+	assert outer_layout.padding == 3
+}
+
+// An aggregate with no members has nothing to cover and nothing to align, so gcc
+// gives it size 0 and alignment 1, and a union is no different from a struct
+// here. A member of such a type takes no room and an array of it is zero bytes.
+fn test_an_empty_union_has_no_member_and_no_size() {
+	empty_union := union_type('empty_union', [])
+	assert size_of(empty_union) == 0 && align_of(empty_union) == 1
+	empty_struct := struct_type('empty_struct', [])
+	assert size_of(array_of(empty_struct, 4)) == 0
+	// struct S { char a; struct {} e; int b; }: the empty member sits at offset
+	// one and takes no byte, so b still lands on the four-byte boundary.
+	s := struct_type('S', [member('a', char_type()), member('e', empty_struct), member('b',
+		int_type())])
+	layout := layout_of(s)
+	assert layout.size == 8 && layout.align == 4
+	assert layout.offsets == [0, 1, 4]
+	assert layout.padding == 3
+}
+
+// A bitfield whose width runs past the end of its unit starts at the next unit
+// rather than straddling the boundary. Measured on gcc 16.2.1:
+// `struct { unsigned char a:6; unsigned char b:4; }` is two bytes, a at bit 0 of
+// byte 0 and b at bit 0 of byte 1, because six plus four does not fit an
+// eight-bit unit.
+fn test_a_bitfield_that_does_not_fit_its_unit_moves_to_the_next_one() {
+	s := struct_type('bf_cross', [bitfield('a', unsigned_char_type(), 6), bitfield('b',
+		unsigned_char_type(), 4)])
+	layout := layout_of(s)
+	assert layout.size == 2 && layout.align == 1
+	assert layout.offsets == [0, 1]
+	assert layout.bits == [0, 0]
+}
+
+// Three bitfields that do fit share one int unit: the offsets stay at zero and
+// the bit positions step by each width. Measured on gcc 16.2.1:
+// `struct { unsigned a:5; unsigned b:5; unsigned c:5; }` is four bytes with the
+// three bits at 0, 5 and 10, so a second unit is not opened for them.
+fn test_three_bitfields_fill_one_int_unit_without_a_second_one() {
+	s := struct_type('bf_three', [bitfield('a', unsigned_int_type(), 5), bitfield('b',
+		unsigned_int_type(), 5), bitfield('c', unsigned_int_type(), 5)])
+	layout := layout_of(s)
+	assert layout.size == 4 && layout.align == 4
+	assert layout.offsets == [0, 0, 0]
+	assert layout.bits == [0, 5, 10]
+}
+
+// A zero-width bitfield asks the next unit of its own type to start where it is,
+// and for a char that unit is one byte, so the byte after it is a fresh one.
+// Measured on gcc 16.2.1: `struct { char a:1; char :0; char b:1; }` is two bytes
+// with b in byte 1.
+fn test_a_zero_width_character_bitfield_starts_the_next_character_unit() {
+	s := struct_type('bf_zero_char', [bitfield('a', char_type(), 1), bitfield('', char_type(),
+		0), bitfield('b', char_type(), 1)])
+	layout := layout_of(s)
+	assert layout.size == 2 && layout.align == 1
+	assert layout.offsets == [0, 1, 1]
+	assert layout.bits == [0, 0, 0]
+}
+
+// `_Bool` is one byte wide in this description, so two one-bit fields fit in one
+// byte and each takes one bit. Measured on gcc 16.2.1: `struct { _Bool b:1;
+// _Bool c:1; }` is one byte, which is what the byte-wide unit gives it.
+fn test_a_bool_bitfield_takes_one_bit_of_a_byte() {
+	s := struct_type('bf_bool', [bitfield('b', bool_type(), 1), bitfield('c', bool_type(), 1)])
+	layout := layout_of(s)
+	assert layout.size == 1 && layout.align == 1
+	assert layout.offsets == [0, 0]
+	assert layout.bits == [0, 1]
+}
+
+// The unit is the declared type's width, so a long bitfield counts in a 64-bit
+// unit and does not share the one a pair of 33-bit fields fills. Measured on gcc
+// 16.2.1: `struct { unsigned long a:33; unsigned long b:33; }` is sixteen bytes,
+// a at bit 0 and b at bit 0 of the next eight-byte unit.
+fn test_a_long_bitfield_moves_to_the_next_eight_byte_unit() {
+	one := struct_type('bf_long_one', [bitfield('a', unsigned_long_type(), 33)])
+	assert size_of(one) == 8 && align_of(one) == 8
+	two := struct_type('bf_long_two', [bitfield('a', unsigned_long_type(), 33), bitfield('b',
+		unsigned_long_type(), 33)])
+	layout := layout_of(two)
+	assert layout.size == 16 && layout.align == 8
+	assert layout.offsets == [0, 8]
+	assert layout.bits == [0, 0]
+}
+
+// A union's size is its largest member rounded up to the union's own alignment,
+// so a strict member can make the object bigger than the member that decided it.
+// Measured on gcc 16.2.1: `union { char c[6]; int i; }` is eight bytes, the six
+// bytes of the array rounded up to the four-byte alignment the int brings.
+fn test_a_union_is_rounded_up_to_the_alignment_of_its_strictest_member() {
+	u := union_type('u_round', [member('c', array_of(char_type(), 6)), member('i', int_type())])
+	layout := layout_of(u)
+	assert layout.size == 8 && layout.align == 4
+	assert layout.offsets == [0, 0]
+	assert layout.bits == [-1, -1]
+}
+
+// A named union member in a struct is placed like any other member: the union is
+// sized and aligned as it is on its own, and the struct pads in front of it.
+// Measured on gcc 16.2.1 for `struct { char a; union { int i; char c; } u; }`:
+// eight bytes, a at 0, u at 4, three bytes no member covers.
+fn test_a_struct_holding_a_union_pads_the_union_to_its_alignment() {
+	u := union_type('u_named', [member('i', int_type()), member('c', char_type())])
+	s := struct_type('holds_union', [member('a', char_type()), member('u', u)])
+	layout := layout_of(s)
+	assert layout.size == 8 && layout.align == 4
+	assert layout.offsets == [0, 4]
+	assert layout.padding == 3
+}
+
+// A function type and an incomplete struct have no size, but a pointer to either
+// is one machine word: a pointer's size is a fact about the machine and not about
+// what it points at. Measured on gcc 16.2.1: `void (*)(int)` and `struct S *` are
+// each eight bytes.
+fn test_a_pointer_to_a_function_or_an_incomplete_struct_is_one_word() {
+	representation := measured.representation()
+	to_function := pointer_to(function_type(int_type(), [], false, true))
+	assert size_of(to_function) == 8 && align_of(to_function) == 8
+	incomplete := incomplete_tag(Kind.struct_, 'never_defined')
+	assert representation.size_of(incomplete) == none
+	to_incomplete := pointer_to(incomplete)
+	assert size_of(to_incomplete) == 8 && align_of(to_incomplete) == 8
+	assert size_of(array_of(to_incomplete, 4)) == 32
+}
+
+// An array is only as answerable as its element: an incomplete element leaves the
+// array with neither size nor alignment, and a zero count does not rescue it
+// because the element still cannot be sized. An array whose count was left out
+// still has the alignment of its element, which is the fact a flexible array
+// member is placed with.
+fn test_an_array_whose_element_is_incomplete_has_no_size() {
+	representation := measured.representation()
+	incomplete := incomplete_tag(Kind.struct_, 'never_defined')
+	assert representation.size_of(array_of(incomplete, 3)) == none
+	assert representation.align_of(array_of(incomplete, 3)) == none
+	assert representation.size_of(array_of(incomplete, 0)) == none
+	assert representation.align_of(array_of(int_type(), -1)) or { -1 } == 4
+}
