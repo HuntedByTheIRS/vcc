@@ -40,6 +40,7 @@ v run tools/compliance.vsh --compiler /tmp/vcc    # a compiler you already built
 v run tools/compliance.vsh --only 017 018         # the tests you name
 v run tools/compliance.vsh --define C99_TRIGRAPHS # include the gated tests too
 v run tools/compliance.vsh --list                 # print what would run
+v run tools/compliance.vsh --count                # print how many tests there are
 ```
 
 The corpus is one directory of small tests: `monolithic.c` is the file it

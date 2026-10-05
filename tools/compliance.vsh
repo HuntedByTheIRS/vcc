@@ -12,6 +12,7 @@
 //   v run tools/compliance.vsh --only 017 018         # the named tests only
 //   v run tools/compliance.vsh --define C99_TRIGRAPHS # include the gated tests
 //   v run tools/compliance.vsh --list                 # print what would run
+//   v run tools/compliance.vsh --count                # print how many tests there are
 //
 // A test carrying a `requires-define: NAME` line exercises a construct this
 // compiler accepts only when NAME is defined, so it is skipped unless --define
@@ -50,6 +51,7 @@ mut:
 	only     []string
 	jobs     int
 	list     bool
+	count    bool
 }
 
 struct Outcome {
@@ -74,6 +76,13 @@ fn main() {
 		exit(1)
 	}
 	tests := collect_tests(tests_dir, opts)
+	if opts.count {
+		// the number of tests in the corpus, whatever --only would narrow it to.
+		// The badge in README.md reads this number, so it is counted by the same
+		// code that decides what a test file is.
+		println(collect_tests(tests_dir, Options{}).len)
+		return
+	}
 	if tests.len == 0 {
 		eprintln('compliance: no test files in ${tests_dir}')
 		exit(1)
@@ -393,6 +402,10 @@ fn parse_options(args []string) Options {
 				opts.list = true
 				i++
 			}
+			'--count' {
+				opts.count = true
+				i++
+			}
 			'-h', '--help' {
 				usage()
 				exit(0)
@@ -409,7 +422,7 @@ fn parse_options(args []string) Options {
 
 fn usage() {
 	println('usage: v run tools/compliance.vsh [--compiler PATH] [--define NAME]...')
-	println('                                  [--only NNN]... [-j N] [--list]')
+	println('                                  [--only NNN]... [-j N] [--list] [--count]')
 }
 
 fn cleanup_paths(paths []string) {
