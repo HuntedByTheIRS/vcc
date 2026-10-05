@@ -20,7 +20,7 @@ line in that file instead of a line in a twelve thousand line unit.
 
 That builds the compiler from this tree, compiles and runs every test with it,
 runs `monolithic.c` as well, and fails when a test exits non-zero, prints
-something it should not, when the compiler refuses a test, when fewer than 933
+something it should not, when the compiler refuses a test, when fewer than 999
 test files are present, or when the monolith holds fewer than 906 checks.
 `tools/README.md` says what the script checks in more detail.
 

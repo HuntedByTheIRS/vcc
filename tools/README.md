@@ -53,7 +53,7 @@ It builds the tree under test first unless `--compiler` names a binary, so the r
 describes the current source rather than one from an earlier edit. It fails on a
 test that does not build, a test that exits non-zero, a test that prints
 something other than the two lines the corpus prints on purpose, a test file
-count below 933, and a `monolithic.c` run that holds fewer than 906 checks. Both
+count below 999, and a `monolithic.c` run that holds fewer than 906 checks. Both
 floors are floors and not equalities: adding tests needs no edit here, losing
 them is a failure.
 

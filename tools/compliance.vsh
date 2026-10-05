@@ -25,7 +25,7 @@
 import os
 import time
 
-const tests_floor = 933
+const tests_floor = 999
 const checks_floor = 906
 
 // gnu99 rather than the c99 the corpus documents for gcc, because several tests
