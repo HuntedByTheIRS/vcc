@@ -296,7 +296,8 @@ fn merge_data_fixups(units []image.Program, layout place.Layout, definitions map
 	}
 	mut fixups := []image.DataFixup{cap: count}
 	for i, unit in units {
-		reloc.data_fixups(unit, i, layout.globals_bases[i], definitions, mut fixups)
+		reloc.data_fixups(unit, i, layout.globals_bases[i], layout.text_bases[i],
+			layout.string_bases[i], definitions, mut fixups)
 	}
 	return fixups
 }

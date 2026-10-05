@@ -72,10 +72,11 @@ pub fn fixups(unit image.Program, unit_index int, text_base int, mut out []image
 // to find. A reference that already names a function or an object this unit
 // defines, and that definition is private, is renamed to the key the merged
 // table holds it under.
-pub fn data_fixups(unit image.Program, unit_index int, globals_base int, definitions map[string]symbols.Definition, mut out []image.DataFixup) {
+pub fn data_fixups(unit image.Program, unit_index int, globals_base int, text_base int, string_base int, definitions map[string]symbols.Definition, mut out []image.DataFixup) {
 	for fixup in unit.data_fixups {
 		mut kind := fixup.kind
 		mut name := fixup.name
+		mut addend := fixup.addend
 		if fixup.kind == .import_address {
 			if definition := definitions[fixup.name] {
 				kind = if definition.function { .function_address } else { .global_address }
@@ -84,12 +85,28 @@ pub fn data_fixups(unit image.Program, unit_index int, globals_base int, definit
 			name = label_key(unit, unit_index, fixup.name)
 		} else if fixup.kind == .global_address {
 			name = object_key(unit, unit_index, fixup.name)
+		} else if fixup.kind == .section_address {
+			// A section key names a place in one of the unit's own blobs, and
+			// the object measured the byte from its own copy of that blob. The
+			// merged copy starts elsewhere, so the byte gains its blob's base.
+			match name {
+				image.section_key_text {
+					addend += text_base
+				}
+				image.section_key_rodata {
+					addend += string_base
+				}
+				image.section_key_data {
+					addend += globals_base
+				}
+				else {}
+			}
 		}
 		out << image.DataFixup{
 			offset: fixup.offset + globals_base
 			kind:   kind
 			name:   name
-			addend: fixup.addend
+			addend: addend
 		}
 	}
 }
