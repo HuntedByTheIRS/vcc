@@ -303,6 +303,7 @@ the call and `-O2` folds it. `-fno-builtin` takes the fold back.
 | `backend/` | target description: `arch/` the machine, `os/` the system, `abi/` the calling convention, `backend.v` composes them |
 | `codegen/` | `ast` in, an emitted unit out |
 | `image/` | the emitted unit: machine code, the data it reads, the references between them |
+| `linking/` | the in-house linker: N units of one link in, one image out |
 | `extensions/` | the `-fvcc-exts=` interface, built on the rows in `standard/features.v` |
 | `tools/` | gate, benchmark and corpus scripts; not part of the compiler |
 | `compliance/` | the C99 conformance corpus: one C program per standard-library check, run by `tools/compliance.vsh` |
