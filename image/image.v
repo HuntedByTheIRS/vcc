@@ -72,6 +72,20 @@ pub:
 	addend int
 }
 
+// Definition is where a name that another translation unit of the same link
+// defines lives in the image being built: a function's offset in the code, or a
+// top-level object's offset in the writable data. The emitter cannot know it,
+// because one translation unit does not see another; a link knows it, and this
+// is the answer it hands back.
+pub struct Definition {
+pub:
+	offset int
+	// function says which of the two places the offset counts from: true for an
+	// offset into the code, false for an offset into the writable data of the
+	// top-level objects.
+	function bool
+}
+
 // GlobalSlot is where a top-level object lives in the image and how wide it is:
 // the offset of its first element in globals_blob, the width of one element, and
 // the count of elements it was defined with. floating says the object holds
@@ -178,6 +192,18 @@ pub mut:
 	// definitions of a name do. It is a different question from weak, which
 	// still leaves the name visible to the link.
 	internal map[string]bool
+	// bound is the imports whose definition is inside this image: names the
+	// emitter wrote as a reference to another translation unit, which a link
+	// resolved to a definition one of its own units provides. Such a name stays
+	// in `imports`, because a call to it still reaches it through a slot the way
+	// a call to a library function does, and the layout writes the definition's
+	// own address into that slot instead of leaving it to the loader. A name in
+	// here gets no dynamic symbol and no relocation, because nothing outside
+	// this image has to answer for it. A name not in here is what `imports`
+	// meant before a link existed: a symbol some library the image names has to
+	// provide. The map is empty for a program the emitter wrote in one piece,
+	// where every import is a library's.
+	bound map[string]Definition
 }
 
 // import_data_count is how many of the references inside the writable data name
