@@ -5,13 +5,18 @@
 //
 //   v run tools/gate.vsh
 //
-// Five steps: formatting, the pure-V rule, the build, the test suite, and the
-// links between the documents at the root. Each one reports on its own line, and
-// the exit status is zero only when all of them pass.
+// Six steps: formatting, the pure-V rule, the build, the test suite, the links
+// between the documents at the root, and the workflows. Each one reports on its
+// own line, and the exit status is zero only when all of them pass.
 
 import os
 
 const c_source_extensions = ['.c', '.h', '.cc', '.cpp', '.hpp', '.S', '.s']
+
+// The directories that may hold C, as input to the compiler rather than as part
+// of it: the C99 corpus under compliance/, one program per fixed bug under
+// regression/, and the recorded-output programs under goldens/.
+const test_c_directories = ['compliance/', 'regression/', 'goldens/']
 
 fn main() {
 	root := os.dir(os.dir(@FILE))
@@ -68,17 +73,20 @@ fn check_formatting(root string) []string {
 }
 
 // check_pure_v enforces the first constraint by looking for what breaks it: C
-// sources in the tree, and C interop in the compiler's own sources. The scripts
-// under tools/ are skipped, because they name these patterns on purpose, and the
-// compliance corpus is skipped, because it is C the compiler is handed rather
-// than C the compiler is built from. That is one directory and one file; a C
-// source anywhere else is still a failure.
+// sources in the tree, and C interop in the compiler's own sources. A test
+// directory holds C the compiler is handed rather than C the compiler is built
+// from, so a C source there is the directory's purpose and not a break in the
+// rule: compliance/ is the C99 corpus, regression/ one program per bug that must
+// not come back, goldens/ the programs whose output is compared against a
+// recording. Everywhere else a C source is a failure. The interop scan below has
+// no such exception for a test directory, because a .v file there is still this
+// compiler's source; tools/ and .omh/ are the only places skipped there, since
+// the scripts and the agent notes name these patterns on purpose.
 fn check_pure_v(root string) []string {
 	mut problems := []string{}
-	corpus := '${root}/compliance/'
 	for extension in c_source_extensions {
 		for file in os.walk_ext(root, extension) {
-			if file.starts_with(corpus) {
+			if is_c_input_directory(file, root) {
 				continue
 			}
 			problems << '${file.replace('${root}/', '')}: C source in a tree that is V only'
@@ -104,6 +112,19 @@ fn check_pure_v(root string) []string {
 		}
 	}
 	return problems
+}
+
+// is_c_input_directory reports whether a path sits under one of the directories
+// that hold C as input to the compiler rather than as part of it. The slash is
+// part of the prefix, so a file named goldens-old.c at the root is not mistaken
+// for one inside goldens/.
+fn is_c_input_directory(file string, root string) bool {
+	for directory in test_c_directories {
+		if file.starts_with('${root}/${directory}') {
+			return true
+		}
+	}
+	return false
 }
 
 fn check_build(root string) []string {
