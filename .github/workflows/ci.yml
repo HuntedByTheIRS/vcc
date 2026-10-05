@@ -83,9 +83,13 @@ jobs:
             exit 0
           fi
           git commit --quiet -m "docs: the badge reads ${count} tests"
-          # HEAD:main rather than a bare push, because checkout leaves a
-          # detached HEAD on some events and a branch name would not be there
-          git push origin HEAD:main
+          # The remote can move while this job runs: another push, or one of the
+          # other badge jobs finishing first. The two commands share a line so a
+          # rejected rebase cannot push a stale badge as though it were current.
+          # `origin main` is named rather than a bare pull because a detached
+          # HEAD has no branch to merge into, and HEAD:main rather than a bare
+          # push because checkout can leave a detached HEAD on some events.
+          git pull --rebase --quiet origin main && git push origin HEAD:main
 
       # The numbers are recorded, not gated. A shared runner's wall time is not
       # a budget anyone can hold a pull request to, and the workload that will
@@ -154,9 +158,13 @@ jobs:
             exit 0
           fi
           git commit --quiet -m "docs: the badge reads ${count} compliance tests"
-          # HEAD:main rather than a bare push, because checkout leaves a
-          # detached HEAD on some events and a branch name would not be there
-          git push origin HEAD:main
+          # The remote can move while this job runs: another push, or one of the
+          # other badge jobs finishing first. The two commands share a line so a
+          # rejected rebase cannot push a stale badge as though it were current.
+          # `origin main` is named rather than a bare pull because a detached
+          # HEAD has no branch to merge into, and HEAD:main rather than a bare
+          # push because checkout can leave a detached HEAD on some events.
+          git pull --rebase --quiet origin main && git push origin HEAD:main
 
   # The regression corpus: one C program per bug this compiler has already put
   # right, and one golden program per answer whose exact stdout must not move.
@@ -217,9 +225,13 @@ jobs:
             exit 0
           fi
           git commit --quiet -m "docs: the badge reads ${count} cases, ${failed:-0} failing"
-          # HEAD:main rather than a bare push, because checkout leaves a
-          # detached HEAD on some events and a branch name would not be there
-          git push origin HEAD:main
+          # The remote can move while this job runs: another push, or one of the
+          # other badge jobs finishing first. The two commands share a line so a
+          # rejected rebase cannot push a stale badge as though it were current.
+          # `origin main` is named rather than a bare pull because a detached
+          # HEAD has no branch to merge into, and HEAD:main rather than a bare
+          # push because checkout can leave a detached HEAD on some events.
+          git pull --rebase --quiet origin main && git push origin HEAD:main
 
   master:
     name: newer V (allowed to fail)
