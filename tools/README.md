@@ -65,6 +65,21 @@ thing under test.
 The mode is `-std=gnu99`; `compliance/README.md` says why, and why `-lm` is not
 optional.
 
+## tests.vsh
+
+The suite's inventory. `v test .` runs the tests; this says how many there are,
+which is the number the tests badge in `README.md` reads.
+
+```sh
+v run tools/tests.vsh            # the count in each file, then the total
+v run tools/tests.vsh --count    # the total alone, for the badge step
+```
+
+A test is a top-level `fn test_...`, which is the shape `v test` collects, so
+the badge cannot disagree with the run. The count has one home: the runner
+writes `.github/badges/tests.json` on a push to `main` and the badge reads it,
+the same arrangement `compliance.vsh` and the compliance badge use.
+
 ## bench.vsh
 
 Wall time and peak memory for a compile, with tcc on the same input as the
@@ -108,9 +123,12 @@ workload that matters.
 
 `.github/workflows/ci.yml` builds V from source at a pinned commit, runs
 `gate.vsh`, then runs the benchmark and writes the numbers into the run summary.
-A second job builds V master and runs the build and the tests without calling it
-a failure: master is not the version this tree promises to build with, and
-finding out early is cheaper than finding out from a bump.
+On a push to `main` the same job counts the suite with `tests.vsh` and writes
+`.github/badges/tests.json`, which the tests badge in `README.md` reads; the
+compliance job does the same for the compliance badge. A second job builds V
+master and runs the build and the tests without calling it a failure: master is
+not the version this tree promises to build with, and finding out early is
+cheaper than finding out from a bump.
 
 `.github/workflows/release.yml` runs on a `v*` tag: the gate, a check that the
 version inside the compiler matches the tag, a compiled program that is run, and

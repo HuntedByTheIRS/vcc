@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/HuntedByTheIRS/vcc?style=flat" alt="license"></a>
   <a href="https://github.com/HuntedByTheIRS/vcc"><img src="https://img.shields.io/github/languages/top/HuntedByTheIRS/vcc?style=flat&label=pure%20V" alt="pure V: 100%"></a>
   <a href="ROADMAP.md"><img src="https://img.shields.io/badge/platform-linux%20x86--64-2ea043?style=flat" alt="platform: Linux x86-64"></a>
-  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/tests-1300-2ea043?style=flat" alt="tests: 1300"></a>
+  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/HuntedByTheIRS/vcc/main/.github/badges/tests.json&query=$.tests&label=tests&color=2ea043&style=flat" alt="tests"></a>
   <a href="compliance/README.md"><img src="https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/HuntedByTheIRS/vcc/main/.github/badges/compliance-tests.json&query=$.tests&label=compliance%20tests&color=2ea043&style=flat" alt="compliance tests"></a>
   <a href="https://github.com/HuntedByTheIRS/vcc/commits/main"><img src="https://img.shields.io/github/last-commit/HuntedByTheIRS/vcc?style=flat" alt="last commit"></a>
 </p>
@@ -206,7 +206,8 @@ and the comment on the row records what was measured. For example, `-std=c99
 and exits non-zero, matching gcc's refusal; `-std=c11` accepts `_Generic`
 silently where `-std=c99 -pedantic` warns.
 
-The suite is 1300 tests, run with `v test .`.
+The suite is run with `v test .`, and `tools/tests.vsh` counts it for the badge
+above, so the number is written by the runner rather than kept by hand.
 
 ## Where it's going
 
