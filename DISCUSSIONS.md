@@ -6,20 +6,36 @@ still moving. Asking in Discussions costs nothing and often saves an issue.
 
 ## Which category
 
-| Category | Slug | What belongs there |
+| Category | What belongs there | Form |
 |---|---|---|
-| Q&A | `q-a` | How do I do this with vcc, why did it reject this, what does this diagnostic mean. Answers can be marked accepted, so the answer stays on top. |
-| Ideas | `ideas` | A direction for the project, or a piece of C support worth prioritizing. |
-| General | `general` | Anything that does not fit the others, including process questions. |
-| Show and tell | `show-and-tell` | Something you built with vcc, or a build you moved onto it. |
-| Polls | `polls` | Votes on questions with a small number of real options. Used sparingly. |
-| Announcements | `announcements` | Maintainer posts about milestones and releases. |
+| Announcements | Maintainer posts about a milestone, a release, an interface change, or a direction that moved. | `announcements.yml` |
+| Design Proposals | A change to how the compiler is put together, argued while the shape is still moving. | `design-proposals.yml` |
+| RFCs | The same change carried to a document: the command line, the C that is accepted, the diagnostics, the bytes written. Settled before the work lands. | `rfcs.yml` |
+| Questions | How do I do this with vcc, why did it refuse this, what does this diagnostic mean. | `questions.yml` |
+| Roadmap Discussion | The order of the milestones, and what a milestone should cover. | `roadmap-discussion.yml` |
+| Compatibility | Where this compiler's answer differs from tcc's, gcc's, clang's, the standard's, or V's build's. | `compatibility.yml` |
+| Off-topic/Extras | Anything that does not fit the others, including process questions and something you built with vcc. | none, deliberately |
 
-Q&A, Ideas, and Show and tell have forms in `.github/DISCUSSION_TEMPLATE/` that
-ask for the detail the answer needs: the input in question, the versions, what
-you already tried, or the numbers if the post is about speed. Starting from the
-form is faster than writing the post from an empty box. General, Announcements,
-and Polls are deliberately free-form.
+The forms are in `.github/DISCUSSION_TEMPLATE/`, and a form's file name is the
+live slug of its category, so `questions.yml` is the form for
+`/discussions/categories/questions`. A category whose name is changed in the
+repository's discussion settings needs the file renamed to match, or the form
+quietly stops being offered. The slugs in use:
+
+```sh
+gh api graphql \
+  -f query='query{repository(owner:"HuntedByTheIRS",name:"vcc"){discussionCategories(first:50){nodes{name slug isAnswerable}}}}'
+```
+
+Two of the categories are a format rather than only a topic. Questions is the
+question and answer format, which is what lets an answer be marked accepted and
+stay on top. Announcements is the announcement format, where only a maintainer
+can start a discussion and anyone can comment on one, which is what keeps the
+category to news from the project itself.
+
+Off-topic/Extras has no form on purpose. A post that fits nowhere in particular
+does not benefit from being asked for fields, and the category is the one place
+here where a blank box is the right box.
 
 ## Issue or discussion
 

@@ -1,0 +1,45 @@
+title: "Announcement: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Maintainer posts: a milestone reached, a release, a change to the command
+        line, or a direction that moved. One announcement per change, so the list
+        stays readable.
+
+        A number belongs here with the command that produced it. An announcement
+        that carries `v run tools/bench.vsh` and its output is worth more than one
+        that carries an adjective.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of announcement
+      options:
+        - A milestone reached
+        - A release
+        - An interface change
+        - A direction that changed
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: What changed
+      description: The change in the terms a user of the compiler sees, not in terms of the diff.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What says so
+      description: The command that produced the number, the run that passed, or the document that now reads differently.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: action
+    attributes:
+      label: What a reader has to do, if anything
+      description: A flag that moved, a behaviour that differs, or a rebuild.
+    validations:
+      required: false

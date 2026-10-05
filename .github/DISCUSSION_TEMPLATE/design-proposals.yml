@@ -1,0 +1,48 @@
+title: "[proposal] "
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A sketch of a change to how the compiler is put together, posted for
+        argument before anyone writes it. Post here while the shape is still
+        moving; an RFC is the same thing carried to a document.
+
+        Two things outrank convenience: the compiler stays pure V, and it stays at
+        TCC-class speed. A proposal that trades either away is still worth making,
+        with the trade named and the price written down.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What the compiler does now and what that costs, with the smallest input that shows it if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+      description: What changes, and where in the tree it lands (a module, a pass, a table, or a file under backend/).
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: What it does to the two constraints
+      description: Whether anything outside V is needed, and what it does to wall time and peak memory on a large input.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else could be done instead
+      description: Including doing nothing.
+    validations:
+      required: false
+  - type: textarea
+    id: verification
+    attributes:
+      label: How it would be shown to work
+      description: The case in compliance/ or regression/, the golden whose bytes must not move, or the measurement that settles it.
+    validations:
+      required: false

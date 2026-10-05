@@ -1,0 +1,56 @@
+title: "[compatibility] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Where this compiler's answer differs from another C compiler's, from the
+        standard, or from what V's build needs.
+
+        A difference from tcc, gcc or clang is not automatically a bug. This
+        compiler reads a subset of C on purpose and refuses the rest with a
+        diagnostic naming the construct and its location, so a refusal is often the
+        designed answer. Say what the difference is and which one it is measured
+        against, and a maintainer will say which of the two it is.
+  - type: dropdown
+    id: against
+    attributes:
+      label: Differs from
+      options:
+        - tcc
+        - gcc
+        - clang
+        - the C standard
+        - V's own build (the C V emits for itself)
+    validations:
+      required: true
+  - type: textarea
+    id: construct
+    attributes:
+      label: The construct or program
+      description: The smallest input that shows the difference.
+      render: c
+    validations:
+      required: true
+  - type: textarea
+    id: difference
+    attributes:
+      label: What each one does
+      description: The other compiler's answer with the command that produced it, then this compiler's answer.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: standard
+    attributes:
+      label: What the standard says, if you know
+      description: The clause, if you have it to hand. Leave it blank rather than guessing.
+    validations:
+      required: false
+  - type: textarea
+    id: command
+    attributes:
+      label: The command line
+      description: The whole line, including any -std= and -W flags, since the mode decides part of the answer.
+      render: text
+    validations:
+      required: true

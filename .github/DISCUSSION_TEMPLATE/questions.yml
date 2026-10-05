@@ -1,15 +1,15 @@
-title: "[Q&A] "
+title: "[question] "
 labels: ['question']
 body:
   - type: markdown
     attributes:
       value: |
-        Ask the question in the title and the detail here. Answers can be marked, so
-        the one that works stays on top.
+        How do I do this with vcc, why did it refuse this, what does this
+        diagnostic mean. Answers can be marked, so the one that works stays on top.
 
-        Confirmed bugs belong in the issue tracker: an error saying a construct is
-        not implemented yet is the compiler working as designed. Security problems go
-        through SECURITY.md, never a discussion.
+        A confirmed bug belongs in the tracker, and an error saying a construct is
+        not implemented yet is the compiler working as designed rather than a bug.
+        Security problems go through SECURITY.md, never a discussion.
   - type: textarea
     id: question
     attributes:

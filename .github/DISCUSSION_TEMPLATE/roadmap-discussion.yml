@@ -1,0 +1,40 @@
+title: "[roadmap] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The order things get done in, and what a milestone should cover.
+        ROADMAP.md holds the current list, so quote the milestone you would move
+        rather than restating the list.
+
+        This is about the order and the scope, not about a single piece of work.
+        For the work itself, an idea fits the same category as this one and an
+        issue fits the tracker.
+  - type: textarea
+    id: milestone
+    attributes:
+      label: Which milestone, and what it says today
+      description: Its name in ROADMAP.md, and the scope it currently carries.
+    validations:
+      required: true
+  - type: textarea
+    id: argument
+    attributes:
+      label: What you would move, and why
+      description: The change to scope or order in one paragraph.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What the argument rests on
+      description: A measurement, a failure you hit, or a step of the bootstrap chain that now passes or no longer does.
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it costs
+      description: What slips behind it, or what it makes more expensive later.
+    validations:
+      required: false

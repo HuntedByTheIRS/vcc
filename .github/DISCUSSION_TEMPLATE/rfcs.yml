@@ -1,0 +1,70 @@
+title: "[RFC] "
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A complete document for a change that other code and other people will have
+        to live with: the command line, the C the compiler accepts, the diagnostics
+        it prints, the gate, or the bytes it writes. An RFC is expected to be
+        settled before the change lands, and it names what moves with it, whether
+        that is a row in `standard/features.v`, a flag in `cli/`, or a document.
+
+        If the document is longer than the form, put it in the first comment and
+        use the form for the summary a reader starts from.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: The change in one paragraph, for someone who has not read the thread.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why this, now, and what stays broken if it is not done.
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Design
+      description: What a user sees (flags, spellings, diagnostics), and what moves in the tree.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility
+      description: What a program that compiles today does afterwards, and what the C standards say about the construct.
+    validations:
+      required: true
+  - type: textarea
+    id: drawbacks
+    attributes:
+      label: Drawbacks
+      description: The cost, the complexity, and the work it creates elsewhere.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: The designs that were considered and why they lost.
+    validations:
+      required: false
+  - type: textarea
+    id: questions
+    attributes:
+      label: Unresolved questions
+      description: What has to be answered before this can land.
+    validations:
+      required: false
+  - type: textarea
+    id: verification
+    attributes:
+      label: How it would be verified
+      description: The case in compliance/ or regression/, the golden whose bytes must not move, or the measurement.
+    validations:
+      required: false
