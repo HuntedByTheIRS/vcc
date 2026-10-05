@@ -57,6 +57,15 @@ pub mut:
 	globals_alignment int
 }
 
+// private_key is the name a unit's own private definition is recorded under. A
+// local label and a name with internal linkage belong to one unit and to no
+// other, so two units may hold one each and neither may answer for the other. A
+// C identifier cannot hold a colon, so a key built this way cannot meet a name
+// a program wrote.
+pub fn private_key(unit int, name string) string {
+	return '${unit}:${name}'
+}
+
 // collect builds the union of the units' symbol tables and resolves each name a
 // unit defines to the one definition a reference binds to. A name two units
 // define is an error unless one definition is weak, which is the rule a link
@@ -72,7 +81,15 @@ pub fn collect(units []image.Program) !Names {
 	for i, unit in units {
 		for name, _ in unit.defined {
 			names.defined[name] = true
-			record(mut names.definitions, name, i, true, unit.weak[name])!
+			// A function with internal linkage belongs to its unit and to no
+			// other, so it is recorded under a key no other unit can name. Two
+			// units may each hold a `static` function of one name, and that is
+			// two definitions rather than the multiple definition a link
+			// refuses. Recording it under the bare name would also let it
+			// satisfy another unit's import of the same name, which internal
+			// linkage does not do (6.2.2p2).
+			key := if name in unit.internal { private_key(i, name) } else { name }
+			record(mut names.definitions, key, i, true, unit.weak[name])!
 		}
 		// A name in `globals` is a definition only when this unit holds its
 		// storage. A unit that merely names an `extern` object puts a slot in
@@ -84,7 +101,11 @@ pub fn collect(units []image.Program) !Names {
 			if name in unit.copy_objects {
 				continue
 			}
-			record(mut names.definitions, name, i, false, unit.weak[name])!
+			// An object with internal linkage is private for the same reason
+			// the function above is: two units may each hold a `static` object
+			// of one name, and they are two objects with storage of their own.
+			key := if name in unit.internal { private_key(i, name) } else { name }
+			record(mut names.definitions, key, i, false, unit.weak[name])!
 		}
 		for name, _ in unit.internal {
 			names.internal[name] = true

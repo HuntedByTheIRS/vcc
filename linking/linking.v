@@ -126,15 +126,25 @@ fn merge_text(units []image.Program, layout place.Layout) []u8 {
 
 // merge_labels unions the units' labels, each moved by its unit's text base, so
 // that a reference in the merged code finds the same place it named inside its
-// unit. The first unit to name a label keeps it: a label is an offset, and two
-// units naming one is the emitter's to prevent rather than something a link can
-// reconcile after the fact.
+// unit. A label is public when it names a function the unit defines with
+// external linkage; everything else is private to the unit, which is a `static`
+// function's entry and every jump label the emitter made. The emitter numbers
+// its jump labels from zero in each unit, so two units can both hold a `.L0`
+// naming a different place, and a private label is keyed by its unit for that
+// reason. A public key is the name itself and the first unit to name it keeps
+// it, because two units naming one public function is the emitter's to prevent
+// rather than something a link can reconcile after the fact.
 fn merge_labels(units []image.Program, layout place.Layout) map[string]int {
 	mut labels := map[string]int{}
 	for i, unit in units {
 		for name, offset in unit.labels {
-			if name !in labels {
-				labels[name] = offset + layout.text_bases[i]
+			key := if name in unit.defined && name !in unit.internal {
+				name
+			} else {
+				symbols.private_key(i, name)
+			}
+			if key !in labels {
+				labels[key] = offset + layout.text_bases[i]
 			}
 		}
 	}
@@ -205,18 +215,23 @@ fn merge_globals_blob(units []image.Program, layout place.Layout) []u8 {
 // its storage. Reading the defining unit's slot matters: a unit that only names
 // an `extern` object has a slot of its own, and binding a reference to that
 // storage instead of the object's is a wrong address rather than a loud failure.
+// An object with internal linkage is private to its unit, so two units may each
+// hold a `static` object of one name; such a slot is keyed by its unit, the same
+// key symbols.collect recorded its definition under, and the definition lookup
+// uses that key or it would read another unit's answer.
 fn merge_globals(units []image.Program, layout place.Layout, definitions map[string]symbols.Definition) map[string]image.GlobalSlot {
 	mut globals := map[string]image.GlobalSlot{}
 	for i, unit in units {
 		for name, slot in unit.globals {
-			if definition := definitions[name] {
+			key := if name in unit.internal { symbols.private_key(i, name) } else { name }
+			if definition := definitions[key] {
 				if definition.function || definition.unit != i {
 					continue
 				}
-			} else if name in globals {
+			} else if key in globals {
 				continue
 			}
-			globals[name] = image.GlobalSlot{
+			globals[key] = image.GlobalSlot{
 				offset:   slot.offset + layout.globals_bases[i]
 				width:    slot.width
 				count:    slot.count
@@ -239,7 +254,7 @@ fn merge_fixups(units []image.Program, layout place.Layout) []image.Fixup {
 	}
 	mut fixups := []image.Fixup{cap: count}
 	for i, unit in units {
-		reloc.fixups(unit, layout.text_bases[i], mut fixups)
+		reloc.fixups(unit, i, layout.text_bases[i], mut fixups)
 	}
 	return fixups
 }
@@ -254,7 +269,7 @@ fn merge_data_fixups(units []image.Program, layout place.Layout, definitions map
 	}
 	mut fixups := []image.DataFixup{cap: count}
 	for i, unit in units {
-		reloc.data_fixups(unit, layout.globals_bases[i], definitions, mut fixups)
+		reloc.data_fixups(unit, i, layout.globals_bases[i], definitions, mut fixups)
 	}
 	return fixups
 }

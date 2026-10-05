@@ -5,19 +5,22 @@ import linking.symbols
 
 // Rewriting one unit's references for the merged image. A unit wrote every
 // reference as an offset inside the one blob it was building, so the merge moves
-// it by the base the unit was placed at. The names stay as they were, because
-// the merged tables are keyed by name; only a kind changes, and only where a
-// link turns a reference into one the container writes itself.
+// it by the base the unit was placed at. A reference that names a unit's own
+// private definition also changes its name: the merged tables key a private
+// label or object by its unit, so the reference has to be written the same way
+// or it answers against another unit's entry. Everything else keeps its name,
+// because the merged tables are keyed by name; only a kind changes, and only
+// where a link turns a reference into one the container writes itself.
 
 // fixups appends one unit's rewritten code references to the merged list. The
 // caller sizes that list once so no intermediate array is built per unit.
-pub fn fixups(unit image.Program, text_base int, mut out []image.Fixup) {
+pub fn fixups(unit image.Program, unit_index int, text_base int, mut out []image.Fixup) {
 	for fixup in unit.fixups {
 		out << image.Fixup{
 			start:    fixup.start + text_base
 			length:   fixup.length
 			kind:     fixup.kind
-			name:     fixup.name
+			name:     reference_name(unit, unit_index, fixup.kind, fixup.name)
 			register: fixup.register
 		}
 	}
@@ -30,19 +33,71 @@ pub fn fixups(unit image.Program, text_base int, mut out []image.Fixup) {
 // an address inside the image, so a data reference to a bound name becomes the
 // one of those its definition calls for, a function address for a function and a
 // global address for an object. Every other kind is carried across unchanged.
-pub fn data_fixups(unit image.Program, globals_base int, definitions map[string]symbols.Definition, mut out []image.DataFixup) {
+//
+// A bound name keeps its bare name on purpose: its definition is external, so
+// the merged table holds it under that name and the rewrite would have nothing
+// to find. A reference that already names a function or an object this unit
+// defines, and that definition is private, is renamed to the key the merged
+// table holds it under.
+pub fn data_fixups(unit image.Program, unit_index int, globals_base int, definitions map[string]symbols.Definition, mut out []image.DataFixup) {
 	for fixup in unit.data_fixups {
 		mut kind := fixup.kind
+		mut name := fixup.name
 		if fixup.kind == .import_address {
 			if definition := definitions[fixup.name] {
 				kind = if definition.function { .function_address } else { .global_address }
 			}
+		} else if fixup.kind == .function_address {
+			name = label_key(unit, unit_index, fixup.name)
+		} else if fixup.kind == .global_address {
+			name = object_key(unit, unit_index, fixup.name)
 		}
 		out << image.DataFixup{
 			offset: fixup.offset + globals_base
 			kind:   kind
-			name:   fixup.name
+			name:   name
 			addend: fixup.addend
 		}
 	}
+}
+
+// reference_name is the name a code reference is written under in the merged
+// program. The kinds that name a label take label_key, the one that names a
+// top-level object takes object_key, and every other kind names string content
+// or a bit pattern rather than a unit symbol, so it is left alone. A call or an
+// address of an import is left alone too: an import is never private.
+fn reference_name(unit image.Program, unit_index int, kind image.FixupKind, name string) string {
+	match kind {
+		.call_local, .jump_local, .branch_zero, .branch_nonzero, .function_address {
+			return label_key(unit, unit_index, name)
+		}
+		.global_address {
+			return object_key(unit, unit_index, name)
+		}
+		else {
+			return name
+		}
+	}
+}
+
+// label_key is the key a label reference is written under. A name that is a
+// function the unit defines with external linkage is public and keeps the
+// merged table's own name for it; everything else is private to the unit, the
+// `static` function's entry and every local label the emitter made, and takes
+// the unit's key, which is the same key the merge's label table holds it under.
+fn label_key(unit image.Program, unit_index int, name string) string {
+	if name in unit.defined && name !in unit.internal {
+		return name
+	}
+	return symbols.private_key(unit_index, name)
+}
+
+// object_key is the same for a reference to a top-level object: internal
+// linkage makes the storage private to the unit and the reference takes the
+// unit's key, and anything else keeps the merged table's own name.
+fn object_key(unit image.Program, unit_index int, name string) string {
+	if name in unit.internal {
+		return symbols.private_key(unit_index, name)
+	}
+	return name
 }
