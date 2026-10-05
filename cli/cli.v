@@ -6,11 +6,28 @@ import optimizer
 import os
 import preprocess
 import standard
+import v.vmod
 
-// version is the compiler's own version. The output of `--version` is not
-// decoration: V asks a C compiler for its version to decide what it is talking
-// to and keys cached build artifacts on the answer.
-pub const version = '0.0.1'
+// version is the compiler's own version, the one v.mod names. v.mod is the
+// single source: this constant is what --version prints, what __VCC_VERSION__
+// carries into a program, and what the release workflow names a release after.
+// The text is embedded in the binary when this module is compiled (`@VMOD_FILE`),
+// so nothing reads v.mod when the compiler runs and a binary copied somewhere
+// without its source still answers. The answer is not decoration: V asks a C
+// compiler for its version to decide what it is talking to and keys cached build
+// artifacts on it.
+pub const version = vmod_version()
+
+// vmod_version picks the version out of the v.mod text the build embedded. A
+// v.mod that does not parse, or one that names no version, stops the run rather
+// than answering with an empty string.
+fn vmod_version() string {
+	manifest := vmod.decode(@VMOD_FILE) or { panic('v.mod is not readable: ${err}') }
+	if manifest.version == '' {
+		panic('v.mod names no version')
+	}
+	return manifest.version
+}
 
 pub fn version_line() string {
 	return 'vcc ${version} (pure V)'

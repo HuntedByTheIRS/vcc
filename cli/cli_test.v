@@ -1,6 +1,7 @@
 module cli
 
 import os
+import v.vmod
 
 fn test_an_input_and_an_output() {
 	opts := parse(['seven.c', '-o', 'seven'])!
@@ -712,6 +713,14 @@ fn test_the_version_line_and_the_usage_name_the_binary() {
 	text := usage(false)
 	assert text.starts_with('Usage: vcc')
 	assert text.contains('vcc')
+}
+
+// version is not written in cli.v: it is the version field v.mod names, and this
+// pins the two together so a bump to v.mod cannot leave a stale number behind.
+fn test_the_version_is_the_one_vmod_names() {
+	manifest := vmod.decode(@VMOD_FILE) or { panic(err) }
+	assert manifest.version != ''
+	assert version == manifest.version
 }
 
 // The short usage and the full help differ by the section on what a drop-in
