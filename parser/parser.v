@@ -1154,6 +1154,24 @@ fn (mut p Parser) parse_member_path(base string, base_at tokenize.Token, through
 		// the member is looked up in is the element's type, not the array's. The
 		// stride between elements is the size of that type, which the field's
 		// declaration carried and the back end scales an index by.
+		//
+		// `e[i].a` where `e` is a pointer is the same member of an element, but
+		// the element is `*(e + i)`: an object addressed from the pointer's
+		// value rather than a place in the frame. Reading that subscript
+		// resolves it this way, through the general reader, which holds the
+		// element in the Field's base and looks the member up in what the
+		// pointer points at, so the assignment target asks the same reader
+		// instead of being read as an element of the pointer's declaration.
+		if aggregate.is_pointer() {
+			element_base := ast.Expr(ast.Ident{
+				name: base
+				typ:  aggregate
+				line: base_at.line
+				col:  base_at.col
+			})
+			element := p.element(element_base, index, base_at)!
+			return p.parse_general_member_path(element, through_pointer, base_at)
+		}
 		aggregate = aggregate.element() or {
 			p.error_at(base_at, 'unsupported: ${base} is read as an array, and its declaration is not one')
 			return error('not an array')
