@@ -13,6 +13,7 @@
   <a href="ROADMAP.md"><img src="https://img.shields.io/badge/platform-linux%20x86--64-2ea043?style=flat" alt="platform: Linux x86-64"></a>
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/HuntedByTheIRS/vcc/main/.github/badges/tests.json&query=$.tests&label=tests&color=2ea043&style=flat" alt="tests"></a>
   <a href="compliance/README.md"><img src="https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/HuntedByTheIRS/vcc/main/.github/badges/compliance-tests.json&query=$.tests&label=compliance%20tests&color=2ea043&style=flat" alt="compliance tests"></a>
+  <a href="regression/README.md"><img src="https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/HuntedByTheIRS/vcc/main/.github/badges/regressions.json&query=$.failed&label=regressions&color=critical&style=flat" alt="regressions"></a>
   <a href="https://github.com/HuntedByTheIRS/vcc/commits/main"><img src="https://img.shields.io/github/last-commit/HuntedByTheIRS/vcc?style=flat" alt="last commit"></a>
 </p>
 
@@ -207,7 +208,12 @@ and exits non-zero, matching gcc's refusal; `-std=c11` accepts `_Generic`
 silently where `-std=c99 -pedantic` warns.
 
 The suite is run with `v test .`, and `tools/tests.vsh` counts it for the badge
-above, so the number is written by the runner rather than kept by hand.
+above, so the number is written by the runner rather than kept by hand. The cases
+in `regression/` and `goldens/` are counted the same way and move that number
+too. `tools/regress.vsh` runs `regression/`, one program per bug that must not
+come back, and `goldens/`, whose recorded output is compared byte for byte, and
+`tools/compliance.vsh` runs the C99 corpus under `compliance/`, which checks the
+compiler against the standard rather than against its own tests.
 
 ## Where it's going
 
@@ -297,7 +303,13 @@ the call and `-O2` folds it. `-fno-builtin` takes the fold back.
 | `codegen/` | `ast` in, an emitted unit out |
 | `image/` | the emitted unit: machine code, the data it reads, the references between them |
 | `extensions/` | the `-fvcc-exts=` interface, built on the rows in `standard/features.v` |
-| `tools/` | gate and benchmark scripts; not part of the compiler |
+| `tools/` | gate, benchmark and corpus scripts; not part of the compiler |
+| `compliance/` | the C99 conformance corpus: one C program per standard-library check, run by `tools/compliance.vsh` |
+| `regression/` | one C program per bug that must not come back, run by `tools/regress.vsh` |
+| `goldens/` | C programs whose recorded output is compared byte for byte, so a change in behavior shows as a diff |
+
+The C in `compliance/`, `regression/` and `goldens/` is the only C in the tree,
+and it is input the compiler is handed rather than part of the compiler itself.
 
 A new machine, a new system, or a new calling convention is a module of its own
 under `backend/`, and `codegen/` never learns about it.
@@ -323,8 +335,9 @@ Notes for whoever touches interoperability, all read off the V tree:
 
 - `CONTRIBUTING.md` for the build, test and commit workflow.
 - `AGENTS.md` for coding-agent rules in this repository.
+- `ARCHITECTURE.md` for how the compiler is put together.
 - `ROADMAP.md` for the milestones between the stub and a usable compiler.
-- `tools/README.md` for the gate and the benchmark harness.
+- `tools/README.md` for the gate, the corpora and the benchmark harness.
 - `ISSUES.md` and `DISCUSSIONS.md` for where reports and questions go.
 - `SECURITY.md` for what counts as a vulnerability in a compiler.
 - `CODE_OF_CONDUCT.md` for how people are expected to treat each other.

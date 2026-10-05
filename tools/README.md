@@ -16,8 +16,9 @@ v run tools/gate.vsh
 Six steps, each reporting on its own line, exit status zero only when all pass:
 
 - **formatting** — `v fmt -verify .`
-- **pure V** — no C sources in the tree, apart from the compliance corpus, and
-  no `#include`, `#flag`, or `C.` interop in the compiler's own sources
+- **pure V** — no C sources in the tree apart from the test directories
+  (`compliance/`, `regression/`, `goldens/`), and no `#include`, `#flag`, or `C.`
+  interop in the compiler's own sources, including inside a test directory
 - **build** — `v -o <temp> .`
 - **tests** — `v test .`
 - **documents** — every relative link between the markdown files resolves
@@ -26,6 +27,10 @@ Six steps, each reporting on its own line, exit status zero only when all pass:
 
 The pure-V step is the machine-checked half of the first constraint. It cannot
 prove the compiler is written in V, only that it has not started importing C.
+What it lets through is C the compiler is handed: the corpus directories and
+nothing else. The interop patterns are skipped under `tools/` and `.omh/`, where
+the scripts and the agent notes name them on purpose; a `.v` file inside a test
+directory is still this compiler's source and gets no such pass.
 
 ## compliance.vsh
 
@@ -64,6 +69,44 @@ thing under test.
 
 The mode is `-std=gnu99`; `compliance/README.md` says why, and why `-lm` is not
 optional.
+
+## regress.vsh
+
+Two corpora with one contract each, run by one runner: `regression/` is a program
+per bug the compiler has already fixed, and `goldens/` is a program per behaviour
+whose output is recorded. A regression case is held to silence and an exit
+status; a golden is held to the bytes in a `.expected` file.
+
+```sh
+v run tools/regress.vsh                        # build the tree, then run every case
+v run tools/regress.vsh --compiler /tmp/vcc    # a compiler you already built
+v run tools/regress.vsh --only 0001 0002       # the cases you name
+v run tools/regress.vsh --define NAME          # include the gated cases
+v run tools/regress.vsh --root /tmp/tree       # read the corpora from another tree
+v run tools/regress.vsh --list                 # print what would run
+v run tools/regress.vsh --count                # print how many cases there are
+```
+
+A regression case is named `NNNN-group-individual.c` and has `int main(void)`. It
+prints nothing and exits zero while the compiler behaves; a line of output or a
+non-zero exit is the regression the file was added for. A golden case has the
+same name shape and a `.expected` file beside it: the program prints to stdout
+and exits zero, and its stdout has to equal the expected bytes, line for line and
+byte for byte.
+
+Both corpora compile with the flags `compliance.vsh` uses, for the same reasons:
+`-std=gnu99` because a case may reach a system header that refuses the `c99`
+spelling, `-w` because a case is not required to be warning-clean, `-lm` for the
+math a case may touch, and `-x c` so the compiler reads the file as C rather than
+guessing from a name it did not write. Cases run in parallel, eight at a time by
+default (`-j N`).
+
+Each directory has a floor on its case count: losing a case is a failure and
+adding one is not, so the floor is a floor and not an equality, the same
+arrangement `compliance.vsh` uses. `--root` points the runner at corpora in
+another tree, which is how it was exercised before its corpus landed here.
+`--count` prints the case count, and that number is what the regressions badge in
+`README.md` reads.
 
 ## tests.vsh
 
@@ -125,7 +168,8 @@ workload that matters.
 `gate.vsh`, then runs the benchmark and writes the numbers into the run summary.
 On a push to `main` the same job counts the suite with `tests.vsh` and writes
 `.github/badges/tests.json`, which the tests badge in `README.md` reads; the
-compliance job does the same for the compliance badge. A second job builds V
+compliance job and the regression job do the same for the compliance and
+regressions badges, each counting with its own runner. A second job builds V
 master and runs the build and the tests without calling it a failure: master is
 not the version this tree promises to build with, and finding out early is
 cheaper than finding out from a bump.
