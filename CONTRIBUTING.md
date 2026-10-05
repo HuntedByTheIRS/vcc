@@ -156,6 +156,28 @@ make sure the gate passes on the commit you are tagging. The workflow stops on
 either one, which is the intent: a compiler that reports a version it is not is
 a compiler V will key its cached build artifacts against incorrectly.
 
+## The wiki
+
+The pages at <https://github.com/HuntedByTheIRS/vcc/wiki> are built from `wiki/`
+in this repository, and nothing else writes them.
+`.github/workflows/wiki.yml` copies the directory into the wiki's own repository
+on a push to main, so a page edited in the browser is overwritten by the next
+push; change it here instead.
+
+Two things follow from the wiki being another repository. A link to a file in
+this tree is an absolute URL, because a relative markdown link resolves here and
+404s there. A link between two wiki pages is `[[Page Name]]`, which is what the
+wiki understands.
+
+The wiki has no directory tree: a file's name is its page's name, and `Home.md`
+is the page the wiki opens on. `_Sidebar.md` and `_Footer.md` are the two names
+GitHub renders around every page.
+
+GitHub does not create the wiki's repository until somebody has saved a page in
+the Wiki tab once. Until that has happened, this job fails and says so on the
+first push that touches `wiki/`; saving any page by hand is the whole bootstrap,
+and the job overwrites it on the next push.
+
 ## Where to ask
 
 - Questions, design discussion, and half-formed ideas: `DISCUSSIONS.md`.

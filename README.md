@@ -308,6 +308,7 @@ the call and `-O2` folds it. `-fno-builtin` takes the fold back.
 | `compliance/` | the C99 conformance corpus: one C program per standard-library check, run by `tools/compliance.vsh` |
 | `regression/` | one C program per bug that must not come back, run by `tools/regress.vsh` |
 | `goldens/` | C programs whose recorded output is compared byte for byte, so a change in behavior shows as a diff |
+| `wiki/` | the pages of the GitHub wiki, copied there by the wiki workflow on a push to main |
 
 The C in `compliance/`, `regression/` and `goldens/` is the only C in the tree,
 and it is input the compiler is handed rather than part of the compiler itself.
@@ -342,6 +343,8 @@ Notes for whoever touches interoperability, all read off the V tree:
 - `ISSUES.md` and `DISCUSSIONS.md` for where reports and questions go.
 - `SECURITY.md` for what counts as a vulnerability in a compiler.
 - `CODE_OF_CONDUCT.md` for how people are expected to treat each other.
+- The [wiki](https://github.com/HuntedByTheIRS/vcc/wiki) for the same material
+  arranged by task, built from `wiki/` on a push to main.
 
 ## License
 
