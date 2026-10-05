@@ -42,6 +42,12 @@ jobs:
     name: gate
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # The tests badge in README.md reads a number this job computes, so this job
+    # needs to write. Everything else in the workflow is read-only, and a pull
+    # request from a fork gets a read-only token whatever this says, which is why
+    # the step that writes is guarded to a push on main.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -57,6 +63,28 @@ jobs:
         run: |
           v version
           v run tools/gate.vsh
+
+      # The tests badge in README.md reads a number this job computes, from the
+      # tool that counts the suite rather than a second glob that can drift from
+      # it. A push made with GITHUB_TOKEN does not start another workflow run, so
+      # this cannot loop.
+      - name: keep the tests badge current
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          count=$(v run tools/tests.vsh --count)
+          file=.github/badges/tests.json
+          printf '{"tests": %s}\n' "$count" > "$file"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$file"
+          if git diff --cached --quiet; then
+            echo "the badge already reads ${count} tests"
+            exit 0
+          fi
+          git commit --quiet -m "docs: the badge reads ${count} tests"
+          # HEAD:main rather than a bare push, because checkout leaves a
+          # detached HEAD on some events and a branch name would not be there
+          git push origin HEAD:main
 
       # The numbers are recorded, not gated. A shared runner's wall time is not
       # a budget anyone can hold a pull request to, and the workload that will
