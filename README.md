@@ -12,7 +12,7 @@
   <a href="https://github.com/HuntedByTheIRS/vcc"><img src="https://img.shields.io/github/languages/top/HuntedByTheIRS/vcc?style=flat&label=pure%20V" alt="pure V: 100%"></a>
   <a href="ROADMAP.md"><img src="https://img.shields.io/badge/platform-linux%20x86--64-2ea043?style=flat" alt="platform: Linux x86-64"></a>
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/tests-1300-2ea043?style=flat" alt="tests: 1300"></a>
-  <a href="compliance/README.md"><img src="https://img.shields.io/badge/compliance%20tests-933-2ea043?style=flat" alt="compliance tests: 933"></a>
+  <a href="compliance/README.md"><img src="https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/HuntedByTheIRS/vcc/main/.github/badges/compliance-tests.json&query=$.tests&label=compliance%20tests&color=2ea043&style=flat" alt="compliance tests"></a>
   <a href="https://github.com/HuntedByTheIRS/vcc/commits/main"><img src="https://img.shields.io/github/last-commit/HuntedByTheIRS/vcc?style=flat" alt="last commit"></a>
 </p>
 

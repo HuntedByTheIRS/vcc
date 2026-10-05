@@ -84,6 +84,12 @@ jobs:
     name: compliance
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # The badge in README.md reads a number this job computes, so this job needs
+    # to write. Everything else in the workflow is read-only, and a pull request
+    # from a fork gets a read-only token whatever this says, which is why the step
+    # that writes is guarded to a push on main.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -99,6 +105,29 @@ jobs:
       # this job has to get right is which `v` is on PATH.
       - name: compliance corpus
         run: v run tools/compliance.vsh
+
+      # The one thing a run can write back: the number of tests in the corpus,
+      # read by the badge in README.md. It comes from the runner's own file
+      # collection rather than from a second glob, so the badge cannot disagree
+      # with what actually runs. A push made with GITHUB_TOKEN does not start
+      # another workflow run, so this cannot loop.
+      - name: keep the badge count current
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          count=$(v run tools/compliance.vsh --count)
+          file=.github/badges/compliance-tests.json
+          printf '{"tests": %s}\n' "$count" > "$file"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$file"
+          if git diff --cached --quiet; then
+            echo "the badge already reads ${count} tests"
+            exit 0
+          fi
+          git commit --quiet -m "docs: the badge reads ${count} compliance tests"
+          # HEAD:main rather than a bare push, because checkout leaves a
+          # detached HEAD on some events and a branch name would not be there
+          git push origin HEAD:main
 
   master:
     name: newer V (allowed to fail)
