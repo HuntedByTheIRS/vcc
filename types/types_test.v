@@ -510,3 +510,467 @@ fn test_a_parameters_own_qualifiers_do_not_tell_two_function_types_apart() {
 	assert !to_const.compatible(plain)
 	assert !plain.same(to_const)
 }
+
+// The qualifier set answers three questions the rest of the model asks of it:
+// whether it says anything at all, how a declaration spells it, and whether one
+// set contains another.
+fn test_an_empty_qualifier_set_says_nothing() {
+	assert Qualifiers{}.is_empty()
+	assert !Qualifiers{
+		const_: true
+	}.is_empty()
+	assert !Qualifiers{
+		volatile_: true
+	}.is_empty()
+	assert !Qualifiers{
+		restrict_: true
+	}.is_empty()
+}
+
+fn test_restrict_is_a_qualifier_a_declaration_can_write() {
+	// The three are spelled in the order a declaration may write them, and
+	// restrict is one of them rather than a word this model drops.
+	assert Qualifiers{
+		restrict_: true
+	}.describe() == 'restrict'
+	assert Qualifiers{
+		const_:    true
+		volatile_: true
+		restrict_: true
+	}.describe() == 'const volatile restrict'
+	// A restrict pointer is a different type from a plain one, so the qualifier
+	// is carried on the type and not written into the pointer's own shape.
+	plain := pointer_to(int_type())
+	restricted := qualified(plain, Qualifiers{
+		restrict_: true
+	})
+	assert restricted.describe() == 'int * restrict'
+	assert !restricted.same(plain)
+}
+
+fn test_restrict_participates_in_the_containment_question() {
+	plain := Qualifiers{}
+	restrict_q := Qualifiers{
+		restrict_: true
+	}
+	assert restrict_q.contains(plain)
+	assert !plain.contains(restrict_q)
+	assert restrict_q.contains(restrict_q)
+	// Every qualifier the other set names has to be present, so a set asking for
+	// const alone does not contain one that also asks for restrict.
+	assert !Qualifiers{
+		const_: true
+	}.contains(restrict_q)
+	assert !restrict_q.contains(Qualifiers{
+		const_: true
+	})
+}
+
+// is_unsigned names the kinds a value of which is never negative, which is asked
+// where a widened value fills the word above it with a sign or with zero and
+// where two 128-bit values pick between the signed and the unsigned order.
+fn test_the_unsigned_kinds_are_the_ones_a_value_of_which_is_never_negative() {
+	assert Kind.bool_.is_unsigned()
+	assert Kind.unsigned_char.is_unsigned()
+	assert Kind.unsigned_short.is_unsigned()
+	assert Kind.unsigned_int.is_unsigned()
+	assert Kind.unsigned_long.is_unsigned()
+	assert Kind.unsigned_long_long.is_unsigned()
+	assert Kind.unsigned_int128.is_unsigned()
+	for k in [Kind.char_, .signed_char, .short, .int_, .long, .long_long, .int128, .enum_, .float,
+		.double, .long_double, .complex_double, .pointer, .array, .struct_, .void_, .unknown] {
+		assert !k.is_unsigned(), '${k}'
+	}
+}
+
+fn test_a_complex_kind_names_its_real_component() {
+	assert (Kind.complex_float.complex_component() or { Kind.void_ }) == Kind.float
+	assert (Kind.complex_double.complex_component() or { Kind.void_ }) == Kind.double
+	assert (Kind.complex_long_double.complex_component() or { Kind.void_ }) == Kind.long_double
+	// A real kind has no component, and neither has anything else: the answer
+	// is none rather than the kind itself.
+	assert Kind.double.complex_component() == none
+	assert Kind.int_.complex_component() == none
+	assert Kind.void_.complex_component() == none
+}
+
+fn test_a_real_kind_names_the_complex_type_it_completes() {
+	assert (Kind.float.complex_of() or { Kind.void_ }) == Kind.complex_float
+	assert (Kind.double.complex_of() or { Kind.void_ }) == Kind.complex_double
+	assert (Kind.long_double.complex_of() or { Kind.void_ }) == Kind.complex_long_double
+	// A complex kind is not its own component, and an integer has no complex
+	// type of its own: the conversions convert it to the component's real type
+	// first and then to the complex type the component names.
+	assert Kind.complex_double.complex_of() == none
+	assert Kind.int_.complex_of() == none
+	// The two directions are inverses on the three kinds both of them carry.
+	for real in [Kind.float, .double, .long_double] {
+		complex := real.complex_of() or {
+			assert false, '${real} has a complex type'
+			return
+		}
+		assert (complex.complex_component() or { Kind.void_ }) == real
+	}
+}
+
+fn test_the_complex_kinds_rank_above_the_floating_ones() {
+	assert Kind.long_double.rank() < Kind.complex_float.rank()
+	assert Kind.complex_float.rank() < Kind.complex_double.rank()
+	assert Kind.complex_double.rank() < Kind.complex_long_double.rank()
+	// A kind with no place in the conversion order has no rank, which is what
+	// keeps an arithmetic question from being asked of it.
+	for k in [Kind.void_, .pointer, .array, .function, .struct_, .union_, .opaque, .unknown] {
+		assert k.rank() == -1, '${k}'
+	}
+}
+
+fn test_every_arithmetic_kind_is_a_form_of_number() {
+	for k in [Kind.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short, .int_,
+		.unsigned_int, .long, .unsigned_long, .long_long, .unsigned_long_long, .int128,
+		.unsigned_int128, .enum_, .float, .double, .long_double, .complex_float, .complex_double,
+		.complex_long_double] {
+		assert k.is_arithmetic(), '${k}'
+	}
+	for k in [Kind.void_, .pointer, .array, .function, .struct_, .union_, .opaque, .unknown] {
+		assert !k.is_arithmetic(), '${k}'
+	}
+}
+
+// The type-level predicates are the same questions asked through a value, which
+// is the shape a caller with a type rather than a kind has to ask them in.
+fn test_a_type_answers_the_kind_questions_it_carries() {
+	assert int_type().is_integer() && !int_type().is_floating() && !int_type().is_complex()
+	assert float_type().is_floating() && !float_type().is_integer()
+	assert complex_double_type().is_complex() && !complex_double_type().is_floating()
+	assert int_type().is_arithmetic() && complex_double_type().is_arithmetic()
+	assert pointer_to(int_type()).is_scalar() && !pointer_to(int_type()).is_arithmetic()
+	assert struct_type('S', []).is_aggregate() && !struct_type('S', []).is_scalar()
+	assert array_of(int_type(), 2).is_array() && !array_of(int_type(), 2).is_pointer()
+	assert function_type(void_type(), [], false, true).is_function()
+	assert void_type().is_void() && !int_type().is_void()
+	assert pointer_to(int_type()).is_pointer() && !int_type().is_pointer()
+}
+
+fn test_an_unresolved_type_is_not_an_object() {
+	// is_object is asked before a declaration is laid out, and a type the model
+	// never resolved describes no object to lay out.
+	assert !Type{}.is_object()
+	assert !Type{}.is_complete()
+	assert Type{}.describe() == 'unresolved'
+	assert int_type().is_object()
+	assert !function_type(void_type(), [], false, true).is_object()
+}
+
+fn test_a_pointer_is_complete_whatever_it_points_at() {
+	// `struct S *p;` is storage whose size is known, which is what lets a
+	// pointer to a type that is not yet complete be declared at all.
+	pointer := pointer_to(incomplete_tag(Kind.struct_, 'S'))
+	assert pointer.is_pointer() && pointer.is_complete()
+	pointed := pointer.pointee() or {
+		assert false
+		return
+	}
+	assert !pointed.is_complete()
+	// A function type is complete too, and an array of an incomplete element
+	// type is not complete however many elements it names.
+	assert function_type(void_type(), [], false, true).is_complete()
+	assert !array_of(incomplete_tag(Kind.struct_, 'S'), 4).is_complete()
+}
+
+fn test_an_opaque_type_describes_the_name_it_was_never_defined_by() {
+	assert opaque_type('size_t').describe() == 'size_t'
+	assert !opaque_type('size_t').is_complete()
+	// A name no declaration carried describes as the empty string rather than as
+	// the word for the kind, because the description is the name and there is
+	// none to write.
+	assert opaque_type('').kind == .opaque
+	assert opaque_type('').describe() == ''
+}
+
+fn test_a_derived_description_shows_what_each_level_is_derived_from() {
+	// An array of pointers and a pointer to an array are two shapes, and the
+	// description has to say which brackets belong to which level.
+	assert array_of(pointer_to(int_type()), 3).describe() == 'int *[3]'
+	assert pointer_to(array_of(int_type(), 3)).describe() == 'int[3]*'
+	assert array_of(array_of(char_type(), 2), 3).describe() == 'char[2][3]'
+	// A pointer that was never given a base is written as a pointer to void,
+	// which is the shape an undeclared `void *` has.
+	assert Type{
+		kind: .pointer
+	}.describe() == 'void *'
+	// An array with no base is written with the count it holds, and a count of
+	// -1 is the one that means the size was not written.
+	assert Type{
+		kind: .array
+	}.describe() == 'void[0]'
+	assert Type{
+		kind:  .array
+		count: -1
+	}.describe() == 'void[]'
+}
+
+fn test_a_function_description_names_its_parameters_and_its_sentinel() {
+	two := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  int_type()
+		},
+		Param{
+			name: 'b'
+			typ:  char_type()
+		},
+	], false, true)
+	assert two.describe() == 'int (int, char)'
+	variadic := function_type(int_type(), [
+		Param{
+			name: 'n'
+			typ:  int_type()
+		},
+	], true, true)
+	assert variadic.describe() == 'int (int, ...)'
+	// A variadic list written with no named parameter is still a prototype, and
+	// the ellipsis is still written.
+	assert function_type(int_type(), [], true, true).describe() == 'int (...)'
+	// An array parameter is adjusted to a pointer before it is described, which
+	// is what makes two declarations written differently one type.
+	adjusting := function_type(void_type(), [
+		Param{
+			name: 'a'
+			typ:  array_of(char_type(), -1)
+		},
+	], false, true)
+	assert adjusting.describe() == 'void (char *)'
+	// A list that was not written as a prototype names no parameters and says
+	// nothing about a call, which is the difference `()` and `(void)` write.
+	assert function_type(void_type(), [], false, true).describe() == 'void (void)'
+	// A return type the model never settled reads as unresolved rather than as
+	// the void the empty name would look like.
+	assert Type{
+		kind: .function
+	}.describe() == 'void ()'
+}
+
+fn test_two_types_differ_in_a_qualifier_or_in_a_shape() {
+	assert !qualified(int_type(), Qualifiers{
+		const_: true
+	}).same(int_type())
+	assert !int_type().same(qualified(int_type(), Qualifiers{
+		const_: true
+	}))
+	// The count of an array and the vla flag are part of the type.
+	assert !array_of(int_type(), 3).same(array_of(int_type(), 4))
+	assert !array_of(int_type(), 3).same(vla_array_of(int_type(), 3))
+	// Two function types differ when the list is a prototype in one and not in
+	// the other, and when one is variadic and the other is not.
+	assert !function_type(int_type(), [], false, true).same(function_type(int_type(), [], false,
+		false))
+	assert !function_type(int_type(), [], false, true).same(function_type(int_type(), [], true,
+		true))
+	// The list itself is part of the type, so a different count of parameters is
+	// a different type and a different parameter name is not: 6.7.6.3p15 reads
+	// only the types.
+	one := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  int_type()
+		},
+	], false, true)
+	two := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  int_type()
+		},
+		Param{
+			name: 'b'
+			typ:  int_type()
+		},
+	], false, true)
+	assert !one.same(two)
+	assert one.same(function_type(int_type(), [
+		Param{
+			name: 'another_name'
+			typ:  int_type()
+		},
+	], false, true))
+}
+
+fn test_two_untagged_aggregates_differ_by_their_members() {
+	// An aggregate with no tag has no name to be identified by, so the members
+	// are what tells it from another: a different name or a different type is a
+	// different type, and the members are compared in order.
+	a := struct_type('', [
+		Member{
+			name: 'x'
+			typ:  int_type()
+		},
+	])
+	assert a.same(struct_type('', [
+		Member{
+			name: 'x'
+			typ:  int_type()
+		},
+	]))
+	assert !a.same(struct_type('', [
+		Member{
+			name: 'y'
+			typ:  int_type()
+		},
+	]))
+	assert !a.same(struct_type('', [
+		Member{
+			name: 'x'
+			typ:  char_type()
+		},
+	]))
+	// A bitfield width is part of a member's identity, so two bitfields of one
+	// type at two widths are two members.
+	one_bit := struct_type('', [
+		Member{
+			name:     'b'
+			typ:      unsigned_int_type()
+			bitfield: true
+			bits:     1
+		},
+	])
+	two_bits := struct_type('', [
+		Member{
+			name:     'b'
+			typ:      unsigned_int_type()
+			bitfield: true
+			bits:     2
+		},
+	])
+	assert !one_bit.same(two_bits)
+	// The kind is compared first, so an untagged struct is not an untagged
+	// union that happens to have the same member.
+	assert !a.same(union_type('', [
+		Member{
+			name: 'x'
+			typ:  int_type()
+		},
+	]))
+}
+
+fn test_the_same_tag_is_one_type_whatever_was_written_under_it() {
+	// A tag is the identity: two member lists written under one tag are one
+	// type, which is the reading a pointer assigned across an incomplete
+	// declaration and a later definition needs.
+	assert struct_type('S', [
+		Member{
+			name: 'a'
+			typ:  int_type()
+		},
+	]).same(struct_type('S', [
+		Member{
+			name: 'b'
+			typ:  char_type()
+		},
+	]))
+	// A named struct and a named union are not one type even with the same tag,
+	// and an enum is identified by its tag the same way.
+	assert !struct_type('S', []).same(union_type('S', []))
+	assert enum_type('E', .int_).same(enum_type('E', .int_))
+	assert !enum_type('E', .int_).same(enum_type('F', .int_))
+}
+
+fn test_scalar_answers_for_every_kind_that_has_a_name() {
+	for kind in basic_kinds() {
+		typ := scalar(kind) or {
+			assert false, '${kind} has a scalar type'
+			return
+		}
+		assert typ.kind == kind
+		assert typ.is_complete()
+	}
+	// The derived and unresolved kinds have no scalar: asking for one is not the
+	// same question as talking about a pointer, which is a shape.
+	for kind in [Kind.pointer, .array, .function, .struct_, .union_, .opaque, .unknown] {
+		assert scalar(kind) == none, '${kind}'
+	}
+}
+
+fn test_has_vla_reaches_through_the_array_levels() {
+	// A variable-length array is one whose size the program computes at run
+	// time, and an array of one is the same question one level down. A pointer
+	// never is, whatever it addresses.
+	assert vla_array_of(int_type(), 1).has_vla()
+	assert array_of(vla_array_of(int_type(), 1), 2).has_vla()
+	assert !array_of(int_type(), 2).has_vla()
+	assert !int_type().has_vla()
+	assert !pointer_to(vla_array_of(int_type(), 1)).has_vla()
+}
+
+fn test_an_array_parameter_with_no_element_type_becomes_a_void_pointer() {
+	// The adjustment reads the element type off the base, and a base the reader
+	// never settled leaves a pointer to void rather than a pointer to nothing.
+	adjusted := adjust_parameter(Type{
+		kind: .array
+	})
+	assert adjusted.is_pointer()
+	assert adjusted.describe() == 'void *'
+}
+
+fn test_the_enum_rule_reads_the_bounds_it_is_written_against() {
+	// The four answers turn at UINT_MAX, INT_MIN and INT_MAX exactly: one at a
+	// boundary stays in the narrower kind and one past it moves out.
+	assert enum_underlying_kind(0, 4294967295) == .unsigned_int
+	assert enum_underlying_kind(0, 4294967296) == .unsigned_long
+	assert enum_underlying_kind(-1, 4294967295) == .long
+	assert enum_underlying_kind(-2147483648, 2147483647) == .int_
+	assert enum_underlying_kind(-2147483649, 2147483647) == .long
+	// A minimum of zero is what makes the enum unsigned, whatever its maximum:
+	// an enum with no negative enumerator is never signed.
+	assert enum_underlying_kind(0, 0) == .unsigned_int
+	assert enum_underlying_kind(-1, 0) == .int_
+}
+
+fn test_an_enumerator_is_int_until_its_value_leaves_int() {
+	// The rule reads the enum's underlying kind first: every enumerator of a
+	// long or unsigned long enum is that kind, and one of a 4-byte enum is int
+	// while the value fits and the underlying kind after that.
+	assert enum_constant_kind(.int_, 0) == .int_
+	assert enum_constant_kind(.int_, -2147483648) == .int_
+	assert enum_constant_kind(.int_, 2147483647) == .int_
+	assert enum_constant_kind(.unsigned_int, -2147483648) == .int_
+	assert enum_constant_kind(.unsigned_int, 2147483648) == .unsigned_int
+	assert enum_constant_kind(.long, 0) == .long
+	assert enum_constant_kind(.unsigned_long, 0) == .unsigned_long
+}
+
+fn test_a_long_double_reports_its_unbiased_exponent() {
+	// The value is mantissa * 2^(exponent - 63), so 1.5 is exponent zero, 2.0 is
+	// one and 0.5 is minus one.
+	assert long_double_from_double(1.5).exponent() == 0
+	assert long_double_from_double(2.0).exponent() == 1
+	assert long_double_from_double(0.5).exponent() == -1
+	// A zero has an exponent field of zero, so the method answers the field
+	// minus the bias even though there is no power of two for it to name.
+	assert long_double_from_double(0.0).is_zero()
+	assert long_double_from_double(0.0).exponent() == -16383
+	// A negative zero is a zero too, which is what makes the check read the
+	// sign apart from the magnitude.
+	assert long_double_from_double(-0.0).is_zero()
+}
+
+fn test_a_long_double_round_trips_through_its_object_bytes() {
+	for value in [0.0, -0.0, 1.5, -1.5, 2.0, 0.1] {
+		original := long_double_from_double(value)
+		restored := long_double_from_bytes(original.bytes())
+		assert restored.mantissa == original.mantissa
+		assert restored.sign_exp == original.sign_exp
+	}
+	// The ten significant bytes are the significand least significant first and
+	// then the sign-and-exponent word; the six above them hold no part of the
+	// value. For 1.5 the significand is c000000000000000 and the field 3fff.
+	bytes := long_double_from_double(1.5).bytes()
+	assert bytes[0] == u8(0) && bytes[6] == u8(0)
+	assert bytes[7] == u8(0xc0)
+	assert bytes[8] == u8(0xff) && bytes[9] == u8(0x3f)
+	assert bytes[10] == u8(0) && bytes[15] == u8(0)
+	// A NaN's quiet bit and payload survive the store and the read, which is what
+	// a copy of one and a conversion out of one start from.
+	nan := long_double_from_double(math.nan())
+	read_back := long_double_from_bytes(nan.bytes())
+	assert read_back.sign_exp == nan.sign_exp
+	assert read_back.mantissa == nan.mantissa
+}
