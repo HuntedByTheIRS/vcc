@@ -1012,22 +1012,24 @@ fn test_adjacency_is_the_token_stream_and_not_a_line() {
 
 fn test_an_escape_belongs_to_the_literal_it_was_written_in() {
 	// Each literal's escapes are interpreted before the literals are joined,
-	// which is what gcc does: `sizeof("\1" "2")` is three bytes and the first of
-	// them is 1, and `sizeof("\x41" "b")` is three whose first byte is 65 and
-	// second is 98. Joined as spellings they would be `"\12"` and `"\x41b"`,
-	// and `"\x41b"` is one byte of value 27 with a warning from gcc about a hex
-	// escape out of range, which is a value the program did not write. So that
-	// join is not made and the diagnostic names both literals.
+	// which is what gcc does: `sizeof("\1" "2")` is three bytes and the first
+	// two are 1 and 50 (measured), and `"\x41" "b"` is three whose first two are
+	// 65 and 98. A trailing escape that is still taking characters when the left
+	// literal's text ends is written back in a form that stops, so the right
+	// literal's first character cannot fall into it and change the bytes.
 	assert processed('char s[] = "\\101" "b";') == ['char', 's', '[', ']', '=', '"\\101b"', ';']
 	assert processed('char s[] = "a" "\\nb";') == ['char', 's', '[', ']', '=', '"a\\nb"', ';']
-	by_hex := diagnostics_of('char s[] = "\\x41" "b";')
-	assert by_hex.len == 1
-	assert by_hex[0].contains('"\\x41"')
-	assert by_hex[0].contains('"b"')
-	by_octal := diagnostics_of('char s[] = "\\1" "2";')
-	assert by_octal.len == 1
-	assert by_octal[0].contains('"\\1"')
-	assert by_octal[0].contains('"2"')
+	assert processed('char s[] = "\\1" "2";') == ['char', 's', '[', ']', '=', '"\\0012"', ';']
+	assert processed('char s[] = "\\x41" "b";') == ['char', 's', '[', ']', '=', '"\\101b"', ';']
+	assert processed('char s[] = "x\\x41" "y";') == ['char', 's', '[', ']', '=', '"x\\101y"', ';']
+	// A complete escape at the end of the left literal is left as it stands: the
+	// right literal's first character cannot be read as part of it.
+	assert processed('char s[] = "a" "\\1";') == ['char', 's', '[', ']', '=', '"a\\1"', ';']
+	// An escape with no value to keep is refused rather than guessed at, which
+	// is a front-end error under gcc too (`\x used with no following hex
+	// digits`).
+	no_digit := diagnostics_of('char s[] = "\\x" "1";')
+	assert no_digit.len == 1
 }
 
 fn test_a_pair_of_literals_c99_has_no_rule_for_is_named() {

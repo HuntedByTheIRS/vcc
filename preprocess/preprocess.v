@@ -1031,15 +1031,20 @@ fn (mut p Processor) append(tok tokenize.Token, where string) {
 // rather than joining them into a type the program did not ask for. That is
 // wider than gcc's refusal by the `u8` pair, and joining it is C11 work.
 //
-// One join is not made, and the reason is the order of the phases. Each
-// literal's escapes are its own before the literals are joined, which is what
-// gcc does: `"\1" "2"` is three bytes and the first of them is 1 (measured),
-// and so is `"\x41" "b"`, whose first byte is 65 and whose second is 98. Joined
-// as spellings they would be `"\12"` and `"\x41b"`, and `"\x41b"` is one byte
-// with the value 27 and a warning from gcc about a hex escape out of range,
-// which is a value the program did not write. This compiler's literal reader
-// interprets the escapes of one token, so the join stops there and the
-// diagnostic names the two literals and the escape between them.
+// The join concatenates the literals' decoded contents, which is not the same
+// as copying their spellings. Each literal's escapes are its own before the
+// literals are joined, which is what gcc does: `sizeof("\1" "2")` is three bytes
+// and the bytes are 1 and 50 (measured), and `"\x41" "b"` is three whose first
+// two are 65 and 98. Copying the spellings would give `"\12"`, one byte of value
+// 10, and `"\x41b"`, one byte of value 27 with a hex escape out of range, so an
+// escape that is still taking characters when the left literal's text runs out
+// is re-spelled with the value it already has before the two texts are put
+// together. `"\1"` becomes `"\001"` and `"\x41"` becomes `"\101"`, both read as
+// the byte they read before, and the right literal's first character stays its
+// own. A trailing escape that cannot be finished inside the left text, a
+// universal character name short of its digits or a backslash with nothing after
+// it, keeps the refusal: neither literal can be read as it stands, so naming the
+// construct is honest where a guessed value would not be.
 fn (mut p Processor) join_string(tok tokenize.Token, where string) {
 	last := p.out.last()
 	left_prefix, left_inner, left_readable := literal_parts(last.text)
@@ -1053,14 +1058,14 @@ fn (mut p Processor) join_string(tok tokenize.Token, where string) {
 		p.append(tok, where)
 		return
 	}
-	if ends_in_open_escape(left_inner) {
+	joined_left := close_trailing_escape(left_inner, prefix == 'L') or {
 		p.problem(tok, 'adjacent string literals joined across an escape are not implemented: the escape at the end of ${last.text} would take characters from ${tok.text}')
 		p.append(tok, where)
 		return
 	}
 	p.out[p.out.len - 1] = tokenize.Token{
 		kind: .string
-		text: prefix + '"' + left_inner + right_inner + '"'
+		text: prefix + '"' + joined_left + right_inner + '"'
 		line: last.line
 		col:  last.col
 		file: where
@@ -1107,15 +1112,18 @@ fn prefix_name(prefix string) string {
 	}
 }
 
-// ends_in_open_escape reports whether the text before a literal's closing quote
-// ends inside an escape that is still taking characters, which is the case
-// where joining two literals as spellings would change their value: `\x` reads
-// every hexadecimal digit that follows it, an octal escape reads three, and a
-// universal character name reads four or eight. A backslash with nothing after
-// it is the same kind of thing, an escape that has not been finished. Every
-// other escape is complete when its one character is read, so `"\\" "n"` joins
-// into `"\\n"` and reads the same two characters it read before.
-fn ends_in_open_escape(inner string) bool {
+// close_trailing_escape rewrites the escape a literal's text ends inside so that
+// the last character of that text finishes it. A hex escape reads every
+// hexadecimal digit after it and an octal one reads three, so copying spellings
+// would let the right literal's first characters become part of the left
+// literal's last escape and change the bytes. The value is computed from the
+// left text alone, the way reading the left literal on its own would, and
+// written back in a spelling that stops: three octal digits for a byte, and a
+// universal character name for a wide character too large for one. `wide` says
+// whether the joined literal is wide, which decides whether a value past 255 can
+// be kept. The text comes back unchanged when nothing is open at the end, and an
+// error names the case that cannot be finished, which the caller refuses.
+fn close_trailing_escape(inner string, wide bool) !string {
 	mut i := 0
 	for i < inner.len {
 		if inner[i] != `\\` {
@@ -1123,19 +1131,23 @@ fn ends_in_open_escape(inner string) bool {
 			continue
 		}
 		if i + 1 >= inner.len {
-			return true
+			return error('a backslash ends the literal')
 		}
 		c := inner[i + 1]
-		if c == `x` {
+		if c == `x` || c == `X` {
 			mut j := i + 2
 			for j < inner.len && is_hex_digit(inner[j]) {
 				j++
 			}
-			if j >= inner.len {
-				return true
+			if j < inner.len {
+				i = j
+				continue
 			}
-			i = j
-			continue
+			if j == i + 2 {
+				return error('a hexadecimal escape ends the literal without a digit')
+			}
+			value := digits_value(inner[i + 2..j], 16)
+			return inner[..i] + escape_spelling(value, wide)!
 		}
 		if c >= `0` && c <= `7` {
 			mut j := i + 1
@@ -1145,7 +1157,8 @@ fn ends_in_open_escape(inner string) bool {
 				read++
 			}
 			if j >= inner.len && read < 3 {
-				return true
+				value := digits_value(inner[i + 1..j], 8)
+				return inner[..i] + three_digit_octal(int(value))
 			}
 			i = j
 			continue
@@ -1159,14 +1172,52 @@ fn ends_in_open_escape(inner string) bool {
 				read++
 			}
 			if j >= inner.len && read < width {
-				return true
+				return error('a universal character name ends the literal short of its digits')
 			}
 			i = j
 			continue
 		}
 		i += 2
 	}
-	return false
+	return inner
+}
+
+// escape_spelling writes a value a finished escape named in a form that stops
+// where it stops: three octal digits for a byte, and a universal character name
+// of eight digits for a wide character too large for one. A value this cannot
+// write honestly is an error rather than a spelling that reads as some other
+// byte.
+fn escape_spelling(value i64, wide bool) !string {
+	if value >= 0 && value <= 255 {
+		return three_digit_octal(int(value))
+	}
+	if wide && value > 0 && value <= 0x7FFFFFFF && !(value >= 0xD800 && value <= 0xDFFF) {
+		return '\\U${u32(value):08X}'
+	}
+	return error('the escape names a value that cannot be written as one finished escape')
+}
+
+// three_digit_octal writes a byte as the three octal digits an escape reads, so
+// that the escape is over at the third one whatever follows it.
+fn three_digit_octal(value int) string {
+	return '\\' + ((value >> 6) & 7).str() + ((value >> 3) & 7).str() + (value & 7).str()
+}
+
+// digits_value reads a run of digits in `base`, which is the value an escape
+// already names in the text it was written with.
+fn digits_value(text string, base int) i64 {
+	mut value := i64(0)
+	for c in text {
+		digit := if c >= `0` && c <= `9` {
+			int(c - `0`)
+		} else if c >= `a` && c <= `f` {
+			int(c - `a`) + 10
+		} else {
+			int(c - `A`) + 10
+		}
+		value = value * base + i64(digit)
+	}
+	return value
 }
 
 fn is_hex_digit(c u8) bool {
