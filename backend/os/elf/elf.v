@@ -250,11 +250,16 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	// the count that sizes the table; the entries themselves are written where
 	// the addresses they cover are.
 	loader_data := loader_data_count(program, kind)
-	relative := relative_count(program, kind)
+	// The names this image defines and something reaches through the global
+	// offset table. Each needs a slot of its own, after the imports' slots,
+	// which is what a position-independent object asks for when it reaches a
+	// top-level object through the table.
+	extra := got_extra_names(program)
+	relative := relative_count(program, kind, extra)
 	relocation_total := external + program.copy_objects.len + loader_data + relative
 	header_count := program_header_count(kind)
 	sections := layout(program, target, interp.len, dynstr.len, libraries.len, external,
-		exports.len, relocation_total, header_count)
+		exports.len, extra.len, relocation_total, header_count)
 	// The image a Linux kernel starts is built here. The name is not `image`,
 	// because that is the module whose Program this function was handed.
 	mut output := []u8{len: sections.total, init: u8(0)}
@@ -264,10 +269,11 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	put(mut output, sections.strings, program.string_blob)
 	put(mut output, sections.globals, program.globals_blob)
 	emit_bound_slots(mut output, program, sections, base)
+	emit_extra_slots(mut output, program, sections, extra, base)!
 	emit_symbols(mut output, program, sections, symbol_names, indices, external, base, exports)
 	emit_hash(mut output, program, sections, external, exports.len)
 	emit_relocations(mut output, program, sections, indices, external, base, loader_data,
-		shared)!
+		extra, shared)!
 	// A static program writes no table here, and no header points at one.
 	if header_count > 2 {
 		emit_dynamic(mut output, sections, dynstr.len, needed, base, relocation_total)
@@ -279,7 +285,7 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	e_type := if shared { elf_type_dyn } else { elf_type_exec }
 	emit_header(mut output, target, entry, e_type, header_count)
 	emit_program_headers(mut output, target, sections, interp.len, libraries.len, header_count, base)
-	patch(mut output, program, target, sections, base)!
+	patch(mut output, program, target, sections, base, extra)!
 	return output
 }
 
@@ -359,14 +365,15 @@ fn loader_data_count(program image.Program, kind linux.LinkKind) int {
 
 // relative_count is how many addresses a shared object carries as offsets beside
 // the relocation that adds the load base to them: the slot of every import whose
-// definition is inside the image, and the address every data fixup writes for a
-// name the image defines. Every other kind of image settles those addresses
-// itself and needs none.
-fn relative_count(program image.Program, kind linux.LinkKind) int {
+// definition is inside the image, the slot of every name the image defines that
+// something reaches through the table, and the address every data fixup writes
+// for a name the image defines. Every other kind of image settles those
+// addresses itself and needs none.
+fn relative_count(program image.Program, kind linux.LinkKind, extra []string) int {
 	if kind != .shared {
 		return 0
 	}
-	mut count := 0
+	mut count := extra.len
 	for name in program.imports {
 		if name in program.bound {
 			count++
@@ -427,17 +434,51 @@ fn symbol_indices(program image.Program) []int {
 	return indices
 }
 
-// got_slot is the address of the global offset table slot for a name, which is
-// at the import's own position in `imports`. It is where a call fixup written
-// against the position reads, and the place a position-independent reference to
-// an imported object points at.
-fn got_slot(program image.Program, sections Sections, name string) !int {
+// got_extra_names is the names reached through the global offset table that this
+// image defines rather than imports, in the order the relocations carry them and
+// without a repeat. A position-independent object reaches every top-level object
+// through the table, its own included, so a link of such objects asks for a slot
+// for a name one of its own units defines. The slot holds that definition's
+// address, which is what a linker would have resolved from the object the name
+// came from. A section key stands for a place rather than for a name a slot can
+// hold, and it is not one of these.
+fn got_extra_names(program image.Program) []string {
+	mut names := []string{}
+	for relocation in program.relocations {
+		if relocation.kind != .got {
+			continue
+		}
+		if relocation.name in program.imports || relocation.name in names {
+			continue
+		}
+		if relocation.name == image.section_key_text
+			|| relocation.name == image.section_key_rodata
+			|| relocation.name == image.section_key_data {
+			continue
+		}
+		names << relocation.name
+	}
+	return names
+}
+
+// got_slot is the address of the global offset table slot for a name: the
+// import's own position in `imports` for a name a library answers, and a slot
+// after those for a name this image defines and something reaches through the
+// table. The first is where a call fixup written against the position reads and
+// where a position-independent reference to an imported object points; the
+// second is the same place for an object the image settled itself.
+fn got_slot(program image.Program, sections Sections, name string, extra []string) !int {
 	for i, symbol in program.imports {
 		if symbol == name {
 			return sections.got + i * 8
 		}
 	}
-	return error('${name} is reached through the global offset table and no import of this image names it')
+	for i, symbol in extra {
+		if symbol == name {
+			return sections.got + (program.imports.len + i) * 8
+		}
+	}
+	return error('${name} is reached through the global offset table and neither an import of this image nor a definition in it stands for it')
 }
 
 // layout places every part of the image: one part after another, each at an
@@ -445,7 +486,7 @@ fn got_slot(program image.Program, sections Sections, name string) !int {
 // is how many entries the relocation table holds, because it is not the symbol
 // count: a shared object carries entries that name no symbol, and a program
 // carries entries for addresses in its data.
-fn layout(program image.Program, target backend.Target, interp_len int, dynstr_len int, library_count int, external int, export_count int, relocation_total int, header_count int) Sections {
+fn layout(program image.Program, target backend.Target, interp_len int, dynstr_len int, library_count int, external int, export_count int, got_extra int, relocation_total int, header_count int) Sections {
 	mut offset := int(elf_header_size) + header_count * int(elf_program_header_size)
 	interp := offset
 	offset = align(offset + interp_len, 8)
@@ -482,8 +523,10 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	// A slot for every import, the bound ones included: a call to a bound name
 	// still goes through its slot, so the slot index is the import's position
 	// in `imports`, which is what the call's fixup was written against, and the
-	// layout must not compact the slots the way it compacts the symbols.
-	offset = align(offset + program.imports.len * 8, 8)
+	// layout must not compact the slots the way it compacts the symbols. The
+	// slots of the names this image defines and something reaches through the
+	// table follow them, at the positions `got_slot` gives them.
+	offset = align(offset + (program.imports.len + got_extra) * 8, 8)
 	rela := offset
 	// One relocation per external import, one copy relocation per object this
 	// image holds a copy of, one per address in the writable data that names a
@@ -540,6 +583,20 @@ fn emit_bound_slots(mut output []u8, program image.Program, sections Sections, b
 			sections.globals + definition.offset
 		}
 		put_u64(mut output, sections.got + i * 8, base + u64(at))
+	}
+}
+
+// emit_extra_slots writes the slots of the names this image defines and
+// something reaches through the global offset table, after the imports' slots.
+// The address is the definition's own, which is what a slot holds: the same
+// treatment the bound imports' slots get, and for the same reason, since a name
+// the image settled needs no library to answer for it. A shared object's base is
+// zero here, so the slot holds the file offset and the R_X86_64_RELATIVE entry
+// emit_relocations writes beside it adds the base the loader chose.
+fn emit_extra_slots(mut output []u8, program image.Program, sections Sections, extra []string, base u64) ! {
+	for i, name in extra {
+		at := relocation_referent_of(program, sections, name)!
+		put_u64(mut output, sections.got + (program.imports.len + i) * 8, base + u64(at))
 	}
 }
 
@@ -660,7 +717,7 @@ fn emit_hash(mut output []u8, program image.Program, sections Sections, external
 // `imports`, which is where its slot is, and the symbol it names is the import's
 // index in the dynamic table, which is a different number as soon as one import
 // is bound.
-fn emit_relocations(mut output []u8, program image.Program, sections Sections, indices []int, external int, base u64, loader_data int, shared bool) ! {
+fn emit_relocations(mut output []u8, program image.Program, sections Sections, indices []int, external int, base u64, loader_data int, extra []string, shared bool) ! {
 	mut entry := 0
 	for i, name in program.imports {
 		if name in program.bound {
@@ -739,11 +796,22 @@ fn emit_relocations(mut output []u8, program image.Program, sections Sections, i
 			if fixup.kind == .import_address {
 				continue
 			}
-			referent := referent_of(program, sections, fixup.kind, fixup.name)!
+			referent := referent_of(program, sections, fixup.kind, fixup.name, extra)!
 			where := sections.rela + entry * elf_relocation_size
 			put_u64(mut output, where, u64(sections.globals + fixup.offset))
 			put_u64(mut output, where + 8, relocation_relative)
 			put_u64(mut output, where + 16, u64(referent + fixup.addend))
+			entry++
+		}
+		// The slots of the names the image defines and something reaches
+		// through the table hold an address inside the object the same way, so
+		// they are carried as offsets too.
+		for i, name in extra {
+			at := relocation_referent_of(program, sections, name)!
+			where := sections.rela + entry * elf_relocation_size
+			put_u64(mut output, where, u64(sections.got + (program.imports.len + i) * 8))
+			put_u64(mut output, where + 8, relocation_relative)
+			put_u64(mut output, where + 16, u64(at))
 			entry++
 		}
 	}
@@ -858,9 +926,9 @@ fn emit_program_headers(mut output []u8, target backend.Target, sections Section
 // `base` is the number an address that points into the image is written at: the
 // target's load base for a program, static or dynamic, and zero for a shared
 // object, whose addresses are offsets until a loader places it.
-fn patch(mut output []u8, program image.Program, target backend.Target, sections Sections, base u64) ! {
+fn patch(mut output []u8, program image.Program, target backend.Target, sections Sections, base u64, extra []string) ! {
 	for fixup in program.fixups {
-		referent := referent_of(program, sections, fixup.kind, fixup.name)!
+		referent := referent_of(program, sections, fixup.kind, fixup.name, extra)!
 		instruction := sections.text + fixup.start
 		disp := i32(referent - (instruction + fixup.length))
 		mut replacement := []u8{}
@@ -956,7 +1024,7 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 		if fixup.kind == .import_address {
 			continue
 		}
-		referent := referent_of(program, sections, fixup.kind, fixup.name)!
+		referent := referent_of(program, sections, fixup.kind, fixup.name, extra)!
 		put_u64(mut output, sections.globals + fixup.offset, base + u64(referent + fixup.addend))
 	}
 	// The references a unit carried as relocations are four-byte fields the unit
@@ -972,7 +1040,7 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 		field := relocation_section(sections, relocation.place) + relocation.offset
 		referent := match relocation.kind {
 			.direct { relocation_referent_of(program, sections, relocation.name)! }
-			.got { got_slot(program, sections, relocation.name)! }
+			.got { got_slot(program, sections, relocation.name, extra)! }
 		}
 		put_u32(mut output, field, u32(i32(referent + relocation.addend - field)))
 	}
@@ -1031,7 +1099,7 @@ fn relocation_referent_of(program image.Program, sections Sections, name string)
 // referent_of is where one reference points, as an offset into the image. It is
 // asked with a kind and a name rather than a reference, because the same
 // question is asked of a reference in the code and of one in the writable data.
-fn referent_of(program image.Program, sections Sections, kind image.FixupKind, name string) !int {
+fn referent_of(program image.Program, sections Sections, kind image.FixupKind, name string, extra []string) !int {
 	match kind {
 		.call_local, .jump_local, .branch_zero, .branch_nonzero, .function_address {
 			return sections.text + (program.labels[name] or {
@@ -1085,10 +1153,10 @@ fn referent_of(program image.Program, sections Sections, kind image.FixupKind, n
 			}).offset
 		}
 		.got_address {
-			// A reference to an imported object through the global offset table:
-			// the place is the import's slot, which this image lays out, and not
-			// the object's own address, which the loader settles.
-			return got_slot(program, sections, name)!
+			// A reference to an object through the global offset table: the
+			// place is the slot, which this image lays out, and not the
+			// object's own address when a loader is the one that settles it.
+			return got_slot(program, sections, name, extra)!
 		}
 	}
 }

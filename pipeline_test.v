@@ -3840,6 +3840,41 @@ fn test_a_shared_link_writes_an_object_for_a_loader_to_map() {
 	assert !program_header_types(binary).contains(int(elf.elf_ph_type_interp))
 }
 
+// object_with_flags compiles one source to the bytes of a relocatable object with
+// a flag the command line would carry, which is how a test asks for the
+// position-independent form: `-fPIC` reaches every top-level object through the
+// global offset table, its own included.
+fn object_with_flags(name string, source string, flag string) []u8 {
+	opts := cli.parse(['-c', flag, name, '-o', scratch(name)]) or { panic(err) }
+	return compile_source_object(name, source, opts) or {
+		panic('${name} did not compile: ${err.msg()}')
+	}
+}
+
+// An object compiled position independently reaches a top-level object through
+// the global offset table, its own file's object included: the unit that defines
+// `counter` still reads it through a slot rather than directly. The link gives
+// that name a slot of its own, after the imports' slots, and fills it with the
+// definition's address, so the program runs with no library answering for a name
+// the image itself holds.
+fn test_an_object_compiled_position_independently_links_and_runs() {
+	counter := scratch('pic_counter.o')
+	caller := scratch('pic_caller.o')
+	binary := scratch('pic_link')
+	writer := 'int counter = 5;\nint get(void) { return counter; }\n'
+	os.write_file_array(counter, object_with_flags('pic_counter.c', writer, '-fPIC')) or {
+		panic(err)
+	}
+	os.write_file_array(caller, object_of('pic_caller.c', 'int get(void);\nint main(void) { return get(); }\n')) or {
+		panic(err)
+	}
+	opts := cli.parse([caller, counter, '-o', binary]) or { panic(err) }
+	link_inputs(opts)
+	assert os.exists(binary)
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 5
+}
+
 // program_header_types is the p_type of every program header a written file
 // carries, in the order they were written: what a kernel and a loader read
 // before any code runs, and how a test asks which headers the container left out
