@@ -3,6 +3,11 @@ name: ci
 # The gate this repository runs locally, run again where it cannot be skipped:
 # formatting, the pure-V rule, the build, the test suite, and the links between
 # the documents. `tools/README.md` says what each step checks.
+#
+# Three jobs: the gate, the compliance corpus on a runner of its own, and a run
+# against whatever V master is today, which is allowed to fail. The last two each
+# build the pinned V, because a job is one machine and the pin is the only thing
+# they must share; see the comment on each for why it is worth the build.
 
 on:
   push:
@@ -53,14 +58,6 @@ jobs:
           v version
           v run tools/gate.vsh
 
-      # The one check that measures this compiler against a C library rather
-      # than against its own tests: the corpus under compliance/ is one small
-      # test per C99 answer, about nine hundred of them, and each is compiled
-      # and run on its own. It needs the same V build and the same tree as the
-      # gate, so it runs in the same job; the script builds the compiler itself.
-      - name: compliance corpus
-        run: v run tools/compliance.vsh
-
       # The numbers are recorded, not gated. A shared runner's wall time is not
       # a budget anyone can hold a pull request to, and the workload that will
       # decide this project is the V self-build, which no milestone reaches yet
@@ -75,6 +72,33 @@ jobs:
             v run tools/bench.vsh --terms 20000 --runs 3 2>&1 || echo 'the harness could not run'
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The one check that measures this compiler against a C library rather than
+  # against its own tests: the corpus under compliance/ is one small test per C99
+  # answer, about nine hundred of them, and each one is compiled and run on its
+  # own. It has a runner to itself because its cost is a thousand compiles rather
+  # than one test suite, and because a corpus that fails and a gate that fails are
+  # two different answers to two different questions. The price is a second build
+  # of the same pinned V; the pin itself is in one place, above.
+  compliance:
+    name: compliance
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: build V at the pinned commit
+        run: |
+          git clone --quiet https://github.com/vlang/v "$V_DIR"
+          git -C "$V_DIR" checkout --quiet "$V_COMMIT"
+          make -C "$V_DIR"
+          echo "$V_DIR" >> "$GITHUB_PATH"
+          "$V_DIR/v" version
+
+      # The script builds the compiler from this tree itself, so the only thing
+      # this job has to get right is which `v` is on PATH.
+      - name: compliance corpus
+        run: v run tools/compliance.vsh
 
   master:
     name: newer V (allowed to fail)
