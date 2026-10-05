@@ -35,16 +35,31 @@ wrote for it, one that checks about nine hundred of its own answers against the
 standard library.
 
 ```sh
-v run tools/compliance.vsh                       # build the tree, then run the corpus
-v run tools/compliance.vsh --compiler /tmp/vcc   # a compiler you already built
+v run tools/compliance.vsh                        # build the tree, then run everything
+v run tools/compliance.vsh --compiler /tmp/vcc    # a compiler you already built
+v run tools/compliance.vsh --only 017 018         # the tests you name
+v run tools/compliance.vsh --define C99_TRIGRAPHS # include the gated tests too
+v run tools/compliance.vsh --list                 # print what would run
 ```
 
+The corpus is one directory of small tests: `monolithic.c` is the file it
+arrived as, and `NNN-name.c` beside it is one of its checks with the
+declarations and statements that check needs. Each test is a program, so the
+runner is a work queue: it compiles and runs all of them in parallel (`-j`,
+eight by default) and reports the test file and the line in it that failed.
+
 It builds the tree under test first unless `--compiler` names a binary, so the run
-describes the current source rather than one from an earlier edit. It fails on
-four things rather than one: a corpus that does not build, a compiler that prints
-anything at all while compiling it, a run that exits non-zero, and a count below
-the floor of 906 the corpus reached when it landed. The floor is a floor and not
-an equality, so adding checks needs no edit here and losing them is a failure.
+describes the current source rather than one from an earlier edit. It fails on a
+test that does not build, a test that exits non-zero, a test that prints
+something other than the two lines the corpus prints on purpose, a test file
+count below 933, and a `monolithic.c` run that holds fewer than 906 checks. Both
+floors are floors and not equalities: adding tests needs no edit here, losing
+them is a failure.
+
+A test carrying a `requires-define: NAME` line exercises a construct this
+compiler accepts only when `NAME` is defined, and is skipped unless `--define`
+names it. Running it with the construct off would pass by not compiling the
+thing under test.
 
 The mode is `-std=gnu99`; `compliance/README.md` says why, and why `-lm` is not
 optional.
