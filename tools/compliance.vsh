@@ -1,8 +1,9 @@
 #!/usr/bin/env -S v run
 
 // The compliance corpus: the one check here that measures this compiler against
-// a C library rather than against its own tests. `compliance/main.c` makes about
-// nine hundred assertions, checks each at run time, and prints how many held.
+// a C library rather than against its own tests. `compliance/monolithic.c` makes
+// about nine hundred assertions, checks each at run time, and prints how many
+// held.
 //
 //   v run tools/compliance.vsh                       # build the tree, then run it
 //   v run tools/compliance.vsh --compiler /tmp/vcc   # a compiler you already built
@@ -26,7 +27,7 @@ const checks_floor = 906
 // under this compiler, and -lm because it calls cabsl, csqrtl and cpowl.
 const compile_flags = '-std=gnu99 -w -lm'
 
-const corpus_source = 'compliance/main.c'
+const corpus_source = 'compliance/monolithic.c'
 
 struct Options {
 mut:

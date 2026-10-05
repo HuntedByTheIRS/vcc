@@ -663,7 +663,7 @@ fn test_a_file_scope_floating_constant_expression_element_is_folded() {
 // 0.0 into every such object: measured with this compiler, `static long double
 // g = 12.0L;` read 0 where gcc 16.2.1 reads 12. 12.0L is 1.5 * 2^3, whose
 // extended form is the significand 0xc000000000000000 and the exponent 0x4002,
-// and 0x1.8p+3L is the same value the corpus writes at main.c:266.
+// and 0x1.8p+3L is the same value the corpus writes at monolithic.c:266.
 fn test_a_file_scope_long_double_keeps_the_value_of_its_initializer() {
 	decimal := declarations_of('static long double g = 12.0L;')
 	assert decimal.diagnostics.len == 0

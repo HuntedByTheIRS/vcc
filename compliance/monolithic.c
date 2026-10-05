@@ -1,5 +1,5 @@
 /* ==========================================================================
- * main.c -- exhaustive C99 coverage corpus (ISO/IEC 9899:1999)
+ * monolithic.c -- exhaustive C99 coverage corpus (ISO/IEC 9899:1999)
  *
  * One translation unit that exercises every C99 language construct, every
  * library added or changed by C99, the C99 translation limits, and the
@@ -8,8 +8,8 @@
  *
  * Build clean with (run from the directory holding this file, so that the
  * __FILE__ checks see the bare name):
- *     gcc   -std=c99 -pedantic-errors -Wall -Wextra -Wno-trigraphs main.c -lm
- *     clang -std=c99 -pedantic-errors -Wall -Wextra -Wno-trigraphs main.c -lm
+ *     gcc   -std=c99 -pedantic-errors -Wall -Wextra -Wno-trigraphs monolithic.c -lm
+ *     clang -std=c99 -pedantic-errors -Wall -Wextra -Wno-trigraphs monolithic.c -lm
  *
  * -Wno-trigraphs is needed because section 18 contains real trigraphs, which
  * GCC and Clang translate (and warn about) in phase 1 of translation no matter
@@ -82,7 +82,7 @@
 
 /* C99 6.10.3.2: an implementation claiming C99 defines __STDC_VERSION__. */
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 199901L
-#error "main.c requires a C99 implementation (build with -std=c99)"
+#error "monolithic.c requires a C99 implementation (build with -std=c99)"
 #endif
 
 #ifdef C99_TEST_SELF_INCLUDE
@@ -239,7 +239,7 @@ static int sec_01_preprocessor(void)
     /* Predefined macros. */
     CHECK(__STDC_VERSION__ >= 199901L);
     CHECK(__STDC__ == 1);
-    CHECK(strcmp(__FILE__, "main.c") == 0);
+    CHECK(strcmp(__FILE__, "monolithic.c") == 0);
     CHECK(__LINE__ > 0);
     CHECK(strlen(__DATE__) >= 11);
     CHECK(strlen(__TIME__) >= 8);
@@ -12330,9 +12330,9 @@ static void sec_19_line_directive(void)
 #line 7
     CHECK(__LINE__ == 7);                    /* the file name is kept */
     CHECK(strcmp(__FILE__, "c99-line-directive.h") == 0);
-#line 1 "main.c"
+#line 1 "monolithic.c"
     CHECK(__LINE__ == 1);
-    CHECK(strcmp(__FILE__, "main.c") == 0);
+    CHECK(strcmp(__FILE__, "monolithic.c") == 0);
 }
 
 #endif /* C99_MAIN_C */
