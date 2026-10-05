@@ -3,6 +3,7 @@ module printer
 import ast
 import parser
 import tokenize
+import types
 
 // `-print-ast` is the surface this milestone is read from: one line per node, and
 // after the location it came from, the type the model resolved it to. These tests
@@ -183,4 +184,89 @@ fn test_a_clause_is_the_models_answer_and_not_the_spelling() {
 	// where they differ, and a typedef has no declarator of its own to print.
 	printed := printed_lines(parsed('struct point { int x; int y; };\nint f(struct point p);'))
 	assert clause_of_declaration(printed, 'fn f() int') == 'int (struct point)'
+}
+
+// The clause of a node the model could not answer for is the word unresolved
+// and not an empty string. Printing nothing would read the same as a node this
+// printer has no clause for, which is the difference the clause exists to draw.
+fn test_the_clause_of_an_unresolved_type_says_so() {
+	assert typed(types.Type{}) == ' : unresolved'
+	assert types.Type{}.describe() == 'unresolved'
+}
+
+// A resolved basic type is spelled the way a declaration writes it, so the
+// clause after the location is the model's answer and not the source spelling.
+fn test_the_clause_of_a_resolved_basic_type() {
+	assert typed(types.int_type()) == ' : int'
+	assert typed(types.bool_type()) == ' : _Bool'
+	assert typed(types.double_type()) == ' : double'
+	assert typed(types.long_double_type()) == ' : long double'
+}
+
+// Qualifiers are part of the type and are written in the clause. A qualified
+// scalar puts them before the type; a qualified pointer puts them after, since
+// the const on a pointer is the pointer's own and the const on its base is
+// already in the base's description.
+fn test_the_clause_carries_the_qualifiers() {
+	const_int := types.Type{
+		kind:  .int_
+		quals: types.Qualifiers{
+			const_: true
+		}
+	}
+	assert typed(const_int) == ' : const int'
+	mut pointer := types.pointer_to(types.int_type())
+	pointer.quals = types.Qualifiers{
+		const_: true
+	}
+	assert typed(pointer) == ' : int * const'
+	volatile_char := types.Type{
+		kind:  .char_
+		quals: types.Qualifiers{
+			volatile_: true
+		}
+	}
+	assert typed(types.pointer_to(volatile_char)) == ' : volatile char *'
+}
+
+// A pointer type in the clause is the base description and a star, with a space
+// before the star for a scalar base and no space for one that is itself a
+// pointer or an array.
+fn test_the_clause_of_a_pointer_type() {
+	assert typed(types.pointer_to(types.int_type())) == ' : int *'
+	assert typed(types.pointer_to(types.pointer_to(types.char_type()))) == ' : char **'
+}
+
+// An array and a function in the clause spell their element or return type and
+// then their own shape: the count in brackets, or the parameter list. A
+// prototype with no parameters is (void); one written without a prototype is
+// ().
+fn test_the_clause_of_an_array_and_a_function_type() {
+	assert typed(types.array_of(types.int_type(), 4)) == ' : int[4]'
+	assert typed(types.array_of(types.char_type(), 8)) == ' : char[8]'
+	two_params := [
+		types.Param{
+			typ: types.int_type()
+		},
+		types.Param{
+			typ: types.int_type()
+		},
+	]
+	assert typed(types.function_type(types.int_type(), two_params, false, true)) == ' : int (int, int)'
+	assert typed(types.function_type(types.int_type(), []types.Param{}, false, true)) == ' : int (void)'
+	assert typed(types.function_type(types.int_type(), []types.Param{}, false, false)) == ' : int ()'
+}
+
+// The printer writes one of two clauses: the word unresolved for a node the
+// model had no answer for, and the description of the type for one it did. Both
+// carry the same leading space and colon, so a reader splits a line on it the
+// same way whichever it is.
+fn test_the_two_clauses_the_printer_can_write() {
+	unresolved := typed(types.Type{})
+	resolved := typed(types.int_type())
+	assert unresolved == ' : unresolved'
+	assert resolved == ' : int'
+	assert unresolved.starts_with(' : ')
+	assert resolved.starts_with(' : ')
+	assert unresolved[3..] == 'unresolved'
 }
