@@ -42,20 +42,88 @@ fn test_a_library_script_names_the_library_behind_it() {
 	assert resolved == ['libm.so.6']
 }
 
-// An archive is a file a link would take and this compiler cannot: saying so by
-// name is what keeps a program from being built without the code it asked for.
-fn test_an_archive_is_refused_by_name() {
+// An archive is a library a link reads members out of, not one the loader maps:
+// a `-l` name that resolves to one comes back marked as an archive with its own
+// file name, it is left out of the names the image carries, and
+// archive_libraries answers the file so the link can read its members.
+fn test_an_archive_resolves_and_is_left_out_of_the_loader_names() {
 	dir := library_dir('archive')
 	defer {
 		os.rmdir_all(dir) or {}
 	}
-	os.write_file(os.join_path(dir, 'libprobe.a'), '!<arch>\n') or { panic(err) }
-	if _ := resolve_libraries(['probe'], [dir]) {
-		assert false, 'an archive is not a library this compiler can link'
-	} else {
-		assert err.msg().contains('libprobe.a')
-		assert err.msg().contains('archive')
+	path := os.join_path(dir, 'libprobe.a')
+	os.write_file(path, '!<arch>\n') or { panic(err) }
+	resolved := resolve_library('probe', [dir]) or { panic(err) }
+	assert resolved.archive
+	assert resolved.path == path
+	assert resolved.soname == 'libprobe.a'
+	// A static archive is not a file the loader maps, so the image carries no
+	// name for it.
+	assert resolve_libraries(['probe'], [dir]) or { panic(err) } == []string{}
+	archives := archive_libraries(['probe'], [dir]) or { panic(err) }
+	assert archives.len == 1
+	assert archives[0].path == path
+	assert archives[0].soname == 'libprobe.a'
+	assert archives[0].archive
+	// A path is not repeated when a name resolves to the same archive twice.
+	assert archive_libraries(['probe', 'probe'], [dir]) or { panic(err) }.len == 1
+}
+
+// A shared library and an archive under the same stem: find_library prefers the
+// shared one, and it is the one the image carries a name for. The archive beside
+// it is still reachable by its own name and is what `-lprobe` does not resolve
+// to.
+fn test_a_shared_library_beside_an_archive_is_the_one_the_search_finds() {
+	dir := library_dir('prefer_shared')
+	defer {
+		os.rmdir_all(dir) or {}
 	}
+	system_dirs := backend.host() or { panic('this test needs the host target') }.library_dirs
+	shared := find_system_library(system_dirs, 'libm.so.6') or { return }
+	copy_bytes(shared, os.join_path(dir, 'libprobe.so'))
+	os.write_file(os.join_path(dir, 'libprobe.a'), '!<arch>\n') or { panic(err) }
+	found := resolve_library('probe', [dir]) or { panic(err) }
+	assert !found.archive
+	assert found.soname == 'libm.so.6'
+	assert resolve_libraries(['probe'], [dir]) or { panic(err) } == ['libm.so.6']
+	// The name resolved to the shared library, so no archive is reported for it.
+	assert archive_libraries(['probe'], [dir]) or { panic(err) }.len == 0
+	// The archive is reachable by the `-l:` form, which names the file itself.
+	named := resolve_library(':libprobe.a', [dir]) or { panic(err) }
+	assert named.archive
+	assert named.path == os.join_path(dir, 'libprobe.a')
+	assert named.soname == 'libprobe.a'
+}
+
+// A name that resolved to nothing is the search's own refusal, and
+// archive_libraries propagates it rather than answering an empty list.
+fn test_archive_libraries_propagates_a_name_the_search_does_not_have() {
+	dir := library_dir('archive_missing')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	if _ := archive_libraries(['nosuch'], [dir]) {
+		assert false, 'a name the search does not have has to be an error'
+	} else {
+		assert err.msg().contains('nosuch')
+		assert err.msg().contains(dir)
+	}
+}
+
+// The import check reads every resolved library's dynamic symbol table, and an
+// archive is not an object it can read. It has to contribute no symbols rather
+// than crash or error, which it does by answering none for a file that is not
+// an ELF object, the same answer it gives a library it cannot read.
+fn test_an_archive_without_an_object_beside_it_does_not_break_the_import_check() {
+	dir := library_dir('archive_imports')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	os.write_file(os.join_path(dir, 'libprobe.a'), '!<arch>\n') or { panic(err) }
+	system_dirs := backend.host() or { panic('this test needs the host target') }.library_dirs
+	// `exit` is in the C library the check always reads, so the only question
+	// here is whether the archive beside the -L directory stops the check.
+	assert unresolved_imports(['exit'], ['probe'], search_dirs([dir], system_dirs)) == []string{}
 }
 
 // A library with no unversioned name is still found: glibc 2.44 ships

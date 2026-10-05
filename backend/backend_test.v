@@ -114,6 +114,27 @@ fn test_the_library_file_query_is_the_linkers_search() {
 	assert resolved[0].soname == 'libm.so.6'
 }
 
+// A `-l` name that resolves to a static archive is not a name the loader is
+// asked for, so the target's resolved list leaves it out and answers the file
+// through archive_libraries instead. Both go through the target's own search,
+// so the two agree about which file a name is.
+fn test_the_target_keeps_a_static_archive_out_of_the_loader_names() {
+	target := lookup('x86_64-linux') or { panic('the target description has no such name') }
+	dir := os.join_path(os.temp_dir(), 'vcc_backend_archive_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	path := os.join_path(dir, 'libprobe.a')
+	os.write_file(path, '!<arch>\n') or { panic(err) }
+	resolved := target.resolve_libraries(['probe'], [dir]) or { panic(err) }
+	assert resolved.len == 0
+	archives := target.archive_libraries(['probe'], [dir]) or { panic(err) }
+	assert archives.len == 1
+	assert archives[0].path == path
+	assert archives[0].archive
+}
+
 fn test_the_encoder_refuses_a_register_it_cannot_name() {
 	wide := x86_64.Register{
 		name:      'rax'

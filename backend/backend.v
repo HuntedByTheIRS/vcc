@@ -1363,11 +1363,14 @@ pub fn (t &Target) widen_byte(reg Register) ![]u8 {
 // Library is one -l name resolved to a file: the file the search found and the
 // name the image carries for it. The two are not the same string, which is why
 // both are kept, and it is the system's own answer rather than a shape invented
-// here.
+// here. An archive carries its own file name where a shared library carries a
+// SONAME, and `archive` says the file is read as members rather than mapped by
+// the loader.
 pub struct Library {
 pub:
-	path   string
-	soname string
+	path    string
+	soname  string
+	archive bool
 }
 
 // library_dirs_for is where a -l name is searched for: the -L directories in the
@@ -1387,15 +1390,37 @@ pub fn (t &Target) library_file(name string, given []string) ?string {
 
 // resolve_libraries is the linker's own resolution of the -l names: the file
 // behind each one and the name the image carries, in the order they were given
-// and without repeating one. A query that reports what the link would do asks
-// this rather than resolving again.
+// and without repeating one. A name that resolved to an archive is left out,
+// because the image asks the loader for no name for a static archive; the file
+// itself comes back from archive_libraries. A query that reports what the link
+// would do asks this rather than resolving again.
 pub fn (t &Target) resolve_libraries(names []string, given []string) ![]Library {
 	files := linux.resolve_library_files(names, t.library_dirs_for(given))!
 	mut out := []Library{}
 	for file in files {
+		if file.archive {
+			continue
+		}
 		out << Library{
 			path:   file.path
 			soname: file.soname
+		}
+	}
+	return out
+}
+
+// archive_libraries is the -l names that resolved to a static archive: the files
+// a link reads members from and pulls the ones that answer names the link still
+// needs. They go through the same search as resolve_libraries, so the two agree
+// about which file a name is.
+pub fn (t &Target) archive_libraries(names []string, given []string) ![]Library {
+	archives := linux.archive_libraries(names, t.library_dirs_for(given))!
+	mut out := []Library{}
+	for archive in archives {
+		out << Library{
+			path:    archive.path
+			soname:  archive.soname
+			archive: true
 		}
 	}
 	return out

@@ -67,19 +67,57 @@ struct LibrarySegment {
 // image carries for it. The two are not the same string, which is the reason
 // both are kept: `-lm` is `/usr/lib/libm.so` on this machine and `libm.so.6` in
 // the image, and a caller that has to read the library needs the file.
+//
+// An archive is the third shape the search answers with. It has no SONAME for
+// the image to carry, so `soname` holds its own file name, and `archive` says
+// the file is an ar container a link reads members out of rather than a library
+// the loader maps.
 pub struct Library {
 pub:
-	path   string
-	soname string
+	path    string
+	soname  string
+	archive bool // the file is an ar archive, so the link reads its members
 }
 
 // resolve_libraries turns the `-l` names the command line gave into the names
 // the image carries, in the order they were written and without repeating one.
+// An archive is left out: a static archive is not a file the loader maps, so
+// naming it would put a DT_NEEDED entry in the image for a file the loader
+// cannot open. archive_libraries is where those names go instead.
 pub fn resolve_libraries(names []string, dirs []string) ![]string {
 	mut out := []string{}
 	for library in resolve_library_files(names, dirs)! {
+		if library.archive {
+			continue
+		}
 		if library.soname !in out {
 			out << library.soname
+		}
+	}
+	return out
+}
+
+// archive_libraries is the `-l` names that resolved to a static archive: the
+// files a link reads members from and pulls the ones that answer the names the
+// link still needs. The names come back in the order they were given, a path is
+// not repeated, and a name that resolves to nothing is the same error the
+// search answers elsewhere.
+pub fn archive_libraries(names []string, dirs []string) ![]Library {
+	mut out := []Library{}
+	for given in names {
+		library := resolve_library(given, dirs)!
+		if !library.archive {
+			continue
+		}
+		mut seen := false
+		for existing in out {
+			if existing.path == library.path {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out << library
 		}
 	}
 	return out
@@ -123,7 +161,7 @@ pub fn search_dirs(given []string, system []string) []string {
 // const `name` for the system it describes, and V will not let a function in the
 // module have a local of the same name. The name a caller passed is the one the
 // flag wrote; the name that comes back is the library's own.
-fn resolve_library(given string, dirs []string) !Library {
+pub fn resolve_library(given string, dirs []string) !Library {
 	if given == '' {
 		return error('-l with no library name')
 	}
@@ -134,6 +172,9 @@ fn resolve_library(given string, dirs []string) !Library {
 		path := find_file(wanted, dirs) or {
 			return error('cannot find ${wanted}: searched ${describe_dirs(dirs)}')
 		}
+		if path.ends_with('.a') {
+			return archive_library(path)
+		}
 		return Library{
 			path:   path
 			soname: library_name_of(path)!
@@ -143,11 +184,24 @@ fn resolve_library(given string, dirs []string) !Library {
 		return error('cannot find -l${given}: searched ${describe_dirs(dirs)}')
 	}
 	if path.ends_with('.a') {
-		return error('-l${given} is ${path}: this linker reads an archive named as an input file, and a -l name resolves to a library the image asks the loader for')
+		return archive_library(path)
 	}
 	return Library{
 		path:   path
 		soname: library_name_of(path)!
+	}
+}
+
+// archive_library is the Library a static archive comes to. The name is the
+// file's own, because an archive carries no SONAME and the image asks the loader
+// for nothing; `archive` says the file is read as members rather than as an
+// object. library_name_of is not called, because it reads an ELF object and
+// cannot read an ar container.
+fn archive_library(path string) Library {
+	return Library{
+		path:    path
+		soname:  os.base(path)
+		archive: true
 	}
 }
 
