@@ -143,7 +143,7 @@ fn resolve_library(given string, dirs []string) !Library {
 		return error('cannot find -l${given}: searched ${describe_dirs(dirs)}')
 	}
 	if path.ends_with('.a') {
-		return error('-l${given} is ${path}, an archive, and linking an archive is not implemented yet')
+		return error('-l${given} is ${path}: this linker reads an archive named as an input file, and a -l name resolves to a library the image asks the loader for')
 	}
 	return Library{
 		path:   path
@@ -257,7 +257,7 @@ fn library_name_of(path string) !string {
 		return if soname == '' { os.base(path) } else { soname }
 	}
 	if bytes.len > 7 && bytes[0] == `!` && bytes[1] == `<` {
-		return error('${path} is an archive, and linking an archive is not implemented yet')
+		return error('${path} is an archive: this linker reads an archive named as an input file, and a -l name resolves to a library the image asks the loader for')
 	}
 	return script_library_name(text, path)
 }

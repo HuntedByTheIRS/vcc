@@ -3682,6 +3682,136 @@ fn test_two_inputs_on_one_command_line_link_and_run() {
 	assert result.exit_code == 42
 }
 
+// object_of compiles one source to the bytes of the relocatable object -c would
+// write. It is how a test links an object the compiler wrote earlier rather than
+// a source it compiles in the same run, which is the form a build hands a
+// compiler when it keeps its objects.
+fn object_of(name string, source string) []u8 {
+	opts := cli.parse(['-c', name, '-o', scratch(name)]) or { panic(err) }
+	return compile_source_object(name, source, opts) or {
+		panic('${name} did not compile: ${err.msg()}')
+	}
+}
+
+// An object the compiler wrote is a link input: the reader turns the file back
+// into a unit, the merge places that unit beside the process stub, and the
+// container writes a program that runs. Two objects are the smallest case where
+// the call between them is a reference the object left for the link to fill.
+fn test_two_objects_the_compiler_wrote_link_and_run() {
+	first := scratch('obj_a.o')
+	second := scratch('obj_b.o')
+	binary := scratch('obj_link')
+	os.write_file_array(first, object_of('obj_a.c', 'int helper(int n) { return n * 3; }\n')) or {
+		panic(err)
+	}
+	os.write_file_array(second, object_of('obj_b.c', 'int helper(int n);\nint main(void) { return helper(4); }\n')) or {
+		panic(err)
+	}
+	opts := cli.parse([first, second, '-o', binary]) or { panic(err) }
+	link_inputs(opts)
+	assert os.exists(binary)
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 12
+}
+
+// An object reaches a function the C library holds with a direct branch, and a
+// direct branch cannot reach the value a slot holds: the container gives the
+// name a stub and the branch goes there instead. `atoi` is a library function
+// whose answer is the status, so the program running through the stub is the
+// check.
+fn test_an_object_that_calls_the_c_library_links_and_runs() {
+	object := scratch('obj_lib.o')
+	binary := scratch('obj_lib_link')
+	source := 'int atoi(const char *s);\nint main(void) { return atoi("21"); }\n'
+	os.write_file_array(object, object_of('obj_lib.c', source)) or { panic(err) }
+	opts := cli.parse([object, '-o', binary]) or { panic(err) }
+	link_inputs(opts)
+	assert os.exists(binary)
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 21
+}
+
+// A static library is an ar file of objects, and a link reads the members that
+// answer a name it still needs and no others. The caller's object reaches into
+// the archive for the one function it calls, and the program runs.
+fn test_an_archive_is_read_for_the_member_the_link_needs() {
+	caller := scratch('caller.o')
+	library := scratch('libholder.a')
+	binary := scratch('archive_link')
+	holder := object_of('holder.c', 'int other(void) { return 4; }\n')
+	os.write_file_array(caller, object_of('caller.c', 'int other(void);\nint main(void) { return other() + 3; }\n')) or {
+		panic(err)
+	}
+	os.write_file_array(library, archive_of('holder.o', holder, ['other'])) or { panic(err) }
+	opts := cli.parse([caller, library, '-o', binary]) or { panic(err) }
+	link_inputs(opts)
+	assert os.exists(binary)
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 7
+}
+
+// ar_header is one 60-byte member header: the name left-justified in its sixteen
+// bytes, the size as the decimal text a reader trims, and the two magic bytes
+// every header ends in.
+fn ar_header(name string, size int) []u8 {
+	mut header := []u8{len: 60, init: u8(` `)}
+	for i in 0 .. name.len {
+		header[i] = name[i]
+	}
+	size_text := '${size}'
+	for i in 0 .. size_text.len {
+		header[48 + i] = size_text[i]
+	}
+	header[58] = u8(0x60)
+	header[59] = u8(0x0a)
+	return header
+}
+
+// put_be32 writes a big-endian four-byte field, which is the order an ar index
+// carries its counts and offsets in.
+fn put_be32(mut out []u8, at int, value u32) {
+	out[at] = u8(value >> 24)
+	out[at + 1] = u8(value >> 16)
+	out[at + 2] = u8(value >> 8)
+	out[at + 3] = u8(value)
+}
+
+// archive_of wraps one object in the container a static library is, with the
+// symbol index that names it. The container is built here rather than by running
+// `ar`, because a test that needs a tool on PATH fails on a machine without it.
+// The index stands first, so the offset it carries for the member is the
+// archive's own arithmetic and not a guess: the magic, the index header, the
+// index data and the padding that brings that data to an even length.
+fn archive_of(name string, body []u8, symbols []string) []u8 {
+	mut names := []u8{}
+	for symbol in symbols {
+		names << symbol.bytes()
+		names << u8(0)
+	}
+	index_size := 4 + 4 * symbols.len + names.len
+	member_at := 8 + 60 + index_size + (index_size & 1)
+	mut index := []u8{len: 4}
+	put_be32(mut index, 0, u32(symbols.len))
+	for _ in symbols {
+		mut field := []u8{len: 4}
+		put_be32(mut field, 0, u32(member_at))
+		index << field
+	}
+	index << names
+	mut out := '!<arch>\n'.bytes()
+	out << ar_header('/', index.len)
+	out << index
+	for out.len % 2 == 1 {
+		out << u8(0)
+	}
+	out << ar_header('${name}/', body.len)
+	out << body
+	for out.len % 2 == 1 {
+		out << u8(0)
+	}
+	return out
+}
+
 // Two files that each keep a `static` function and a loop label of one name. Both
 // are private to their file, so the link has two of each and neither may answer
 // for the other; the emitter numbers its local labels from zero in each file, so

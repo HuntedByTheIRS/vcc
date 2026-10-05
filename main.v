@@ -8,6 +8,8 @@ import diagnostics
 import extensions
 import image as unit
 import linking
+import linking.archive
+import linking.object
 import linking.output
 import optimizer
 import os
@@ -135,14 +137,28 @@ fn main() {
 		return
 	}
 	// What the input is decides whether it is read as source at all. An object
-	// or an archive is an input to a link, which this compiler does not have
-	// yet, and reading one as source answers a wrong input kind with a parse
-	// error raised from inside a binary file. The bytes are classified rather
-	// than the path so that standard input, which cannot be read twice, is
-	// decided by the same rule.
+	// or an archive is an input to a link rather than a file to parse, and
+	// reading one as source answers a wrong input kind with a parse error
+	// raised from inside a binary file. The bytes are classified rather than the
+	// path so that standard input, which cannot be read twice, is decided by the
+	// same rule.
+	//
+	// A single object or archive is a link with one input, so a run that writes
+	// a program hands it to the linker's path, which reads it as the unit it
+	// holds. The options that read one file stop before a link and are refused
+	// by name. A program or a shared object is a link input this compiler does
+	// not read at all.
 	kind := cli.classify_input(source, path, opts.input_type)
 	if kind != .source {
-		abort(cli.input_refusal(path, kind))
+		if !opts.links() || (kind != .object && kind != .archive) {
+			abort(cli.input_refusal(path, kind))
+			return
+		}
+		if path == '-' {
+			abort('standard input holds ${kind.describe()}, and a link reads its inputs from files')
+			return
+		}
+		link_inputs(opts)
 		return
 	}
 	mut phases := []cli.Phase{}
@@ -318,6 +334,66 @@ fn dialect_messages(processed preprocess.Result, opts cli.Options) []tokenize.Di
 	})
 }
 
+// link_needs is the names a link still has to find outside its units: the
+// imports of its units that no unit in the link defines. An archive is asked
+// for these and for nothing else, so a name one unit defines is never a reason
+// to pull a member that also defines it.
+fn link_needs(units []unit.Program) map[string]bool {
+	mut provided := map[string]bool{}
+	for entry in units {
+		for name, _ in entry.defined {
+			provided[name] = true
+		}
+		for name, _ in entry.globals {
+			provided[name] = true
+		}
+	}
+	mut needed := map[string]bool{}
+	for entry in units {
+		for symbol in entry.imports {
+			if symbol !in provided {
+				needed[symbol] = true
+			}
+		}
+	}
+	return needed
+}
+
+// archive_members pulls the members of one archive that answer a name the link
+// still needs, and keeps pulling while a member it pulled asks for a name
+// another member provides. The names are walked in order rather than off the
+// map, so one archive and one set of needs always pull the same members in the
+// same order and the same link writes the same bytes. A member nothing refers
+// to stays out, which is what makes a library of many objects cost only the
+// parts the program asks for.
+fn archive_members(parts archive.Archive, target backend.Target, mut needed map[string]bool) ![]unit.Program {
+	mut pulled := map[int]bool{}
+	mut out := []unit.Program{}
+	mut names := parts.index.keys()
+	names.sort()
+	mut again := true
+	for again {
+		again = false
+		for name in names {
+			index := parts.index[name]
+			if !needed[name] || index in pulled {
+				continue
+			}
+			pulled[index] = true
+			member := parts.members[index]
+			entry := object.read(member.bytes, target) or {
+				return error('${member.name}: ${err.msg()}')
+			}
+			for symbol in entry.imports {
+				needed[symbol] = true
+			}
+			out << entry
+			again = true
+		}
+	}
+	return out
+}
+
 // link_inputs is the multi-input path. Every input is compiled as one unit of a
 // link, the units are merged with the process stub, and the one program the link
 // calls for is written. The stub is built here and placed first, because text
@@ -346,17 +422,34 @@ fn link_inputs(opts cli.Options) {
 	mut parsing := i64(0)
 	mut optimizing := i64(0)
 	mut emitting := i64(0)
+	mut archives := []archive.Archive{}
 	for path in opts.inputs {
 		source := read_source(path) or {
 			abort('cannot read ${path}: ${err.msg()}')
 			return
 		}
-		// What the input is decides whether it is read as source at all, by the
-		// rule the single-input path uses and for its reason: an object or an
-		// archive is an input to a link this linker cannot read yet, and reading
-		// one as source answers a wrong input kind with a parse error raised
-		// from inside a binary file.
+		// What the input is decides how it is read, by the rule the single-input
+		// path uses: source is compiled into a unit, an object is read back into
+		// the unit it holds, and an archive is held until the names the link
+		// needs are known. A program or a shared object is an input this
+		// compiler does not read, and reading one as source would answer a wrong
+		// input kind with a parse error raised from inside a binary file.
 		kind := cli.classify_input(source, path, opts.input_type)
+		if kind == .object {
+			read := object.read(source.bytes(), target) or {
+				abort('${path}: ${err.msg()}')
+				return
+			}
+			units << read
+			continue
+		}
+		if kind == .archive {
+			archives << archive.read(source.bytes()) or {
+				abort('${path}: ${err.msg()}')
+				return
+			}
+			continue
+		}
 		if kind != .source {
 			abort(cli.input_refusal(path, kind))
 			return
@@ -394,6 +487,22 @@ fn link_inputs(opts cli.Options) {
 			exit(1)
 		}
 		units << emitted.program
+	}
+	// An archive is pulled apart only for the names the link still needs. A
+	// member whose symbols nothing refers to stays where it is, the way a linker
+	// leaves it, so a library of many objects adds the ones the program asks
+	// for. The names already defined by a unit in the link are not needs, and
+	// the first unit is the stub, whose one import is the entry, so `main` is
+	// wanted from the start.
+	if archives.len > 0 {
+		mut needed := link_needs(units)
+		for parts in archives {
+			pulled := archive_members(parts, target, mut needed) or {
+				abort(err.msg())
+				return
+			}
+			units << pulled
+		}
 	}
 	mut started := time.now()
 	merged := linking.link(units, linking.Options{
@@ -794,12 +903,12 @@ fn external_link(opts cli.Options) {
 					abort('${input}: ${err.msg()}')
 					return
 				}
-				object := link_object_path(index)
-				write_object(object, bytes) or {
-					abort('cannot write ${object}: ${err.msg()}')
+				object_path := link_object_path(index)
+				write_object(object_path, bytes) or {
+					abort('cannot write ${object_path}: ${err.msg()}')
 					return
 				}
-				objects << object
+				objects << object_path
 			}
 			.object, .shared_object, .archive {
 				all_source = false
