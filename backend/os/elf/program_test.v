@@ -2,6 +2,7 @@ module elf
 
 import backend
 import image
+import os
 
 // The executable container is checked the way the relocatable one is: a program
 // built by hand and read back through the headers, because the questions worth
@@ -242,4 +243,104 @@ fn test_a_program_that_defines_its_own_objects_has_no_copy_relocation() {
 	// A program that copies nothing asks the loader for nothing, so there is no
 	// copy relocation in it.
 	assert relocation_of(bytes, tables, relocation_copy).kind == 0
+}
+
+// slot_at reads the eight bytes of an import's global offset table slot. The
+// slot is at the import's position in `imports`, and the table sits just before
+// the relocation section: every slot is eight bytes and both sections are
+// eight-byte aligned, so the section begins one slot past the last import. The
+// index here is a position in `imports`, which is the number a call's fixup was
+// written against and not a dynamic symbol index.
+fn slot_at(bytes []u8, tables ProgramTables, import_count int, index int) u64 {
+	return elf64_at(bytes, tables.rela - import_count * 8 + index * 8)
+}
+
+// A name whose definition the link resolved inside this image is called through
+// a slot like a library function, but nothing outside the image answers for it.
+// The slot has to hold the definition's own address and the name has to be
+// absent from the dynamic table, while the library import beside it keeps both
+// its entry and its relocation. The library's symbol index is the one thing this
+// test is here to pin: with the bound name gone from the table, the library's
+// index is one and its position in `imports` is two, so a relocation that named
+// the position would point at the wrong place.
+fn test_a_bound_name_gets_no_symbol_and_its_slot_holds_the_definition() {
+	mut program := image.Program{}
+	program.text = []u8{len: 16, init: u8(0x90)}
+	program.imports << 'bound_fn'
+	program.imports << 'library_fn'
+	program.bound['bound_fn'] = image.Definition{
+		offset:   0
+		function: true
+	}
+	target := host()
+	bytes := executable(program, target) or { panic('the program was not written: ${err.msg()}') }
+	tables := program_tables(bytes, target.load_base)
+	// The dynamic table holds the null symbol and the one library import: the
+	// bound name is not in it and is not counted by the hash chain.
+	assert elf32_at(bytes, tables.hash + 4) == 2
+	assert symbol_of(bytes, tables, 'bound_fn').index == 0
+	// The library name keeps its entry, and its index is one rather than its
+	// position in `imports`, which is two.
+	library := symbol_of(bytes, tables, 'library_fn')
+	assert library.name == 'library_fn'
+	assert library.index == 1
+	assert library.info & 0xf == 0x2
+	// The relocation still names that entry, and it is the only relocation.
+	relocation := relocation_of(bytes, tables, relocation_glob_dat)
+	assert relocation.kind == relocation_glob_dat
+	assert relocation.symbol == library.index
+	assert tables.relasz == elf_relocation_size
+	// The bound name's slot holds the definition's address, which is the entry
+	// point plus the definition's offset into the code. The entry point is the
+	// start of the text at the load base.
+	assert slot_at(bytes, tables, program.imports.len, 0) == elf64_at(bytes, 24)
+	// The library's slot is left at zero for the loader to fill.
+	assert slot_at(bytes, tables, program.imports.len, 1) == 0
+}
+
+// A program whose every import the link resolved inside this image asks the
+// loader for nothing: no dynamic symbol beyond the null one, no relocation at
+// all, and a relocation section the dynamic table declares as empty. The slot
+// still exists, because a call reads it, and it holds the definition's address.
+fn test_a_program_whose_only_import_is_bound_has_no_relocation() {
+	mut program := image.Program{}
+	program.text = []u8{len: 16, init: u8(0x90)}
+	program.imports << 'bound_fn'
+	program.bound['bound_fn'] = image.Definition{
+		offset:   4
+		function: true
+	}
+	target := host()
+	bytes := executable(program, target) or { panic('the program was not written: ${err.msg()}') }
+	tables := program_tables(bytes, target.load_base)
+	assert elf32_at(bytes, tables.hash + 4) == 1
+	assert symbol_of(bytes, tables, 'bound_fn').index == 0
+	assert tables.relasz == 0
+	assert relocation_of(bytes, tables, relocation_glob_dat).kind == 0
+	// The slot exists and holds the code's start plus the definition's offset.
+	assert slot_at(bytes, tables, program.imports.len, 0) == elf64_at(bytes, 24) + 4
+}
+
+// The layout with a bound name has to produce an image the kernel starts, not
+// only one whose bytes read correctly. The text comes from the target's own
+// encoders, the way the emitter composes it, and the bound name is one whose
+// code is never called: laying its slot out must not disturb the program that
+// runs. The exit status is the code the sequence was asked for.
+fn test_a_program_with_a_bound_name_runs() {
+	target := host()
+	code := target.exit_sequence(42) or { panic('the target has no exit sequence: ${err.msg()}') }
+	mut program := image.Program{}
+	program.text = code
+	program.imports << 'never_called'
+	program.bound['never_called'] = image.Definition{
+		offset:   0
+		function: true
+	}
+	bytes := executable(program, target) or { panic('the program was not written: ${err.msg()}') }
+	path := os.join_path(os.temp_dir(), 'vcc_elf_bound_${os.getpid()}')
+	os.write_file_array(path, bytes) or { panic(err) }
+	os.chmod(path, 0o755) or { panic(err) }
+	result := os.execute(os.quoted_path(path))
+	os.rm(path) or {}
+	assert result.exit_code == 42
 }

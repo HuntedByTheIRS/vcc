@@ -162,7 +162,14 @@ pub fn executable(program image.Program, target backend.Target) ![]u8 {
 		dynstr << name.bytes()
 		dynstr << u8(0)
 	}
-	sections := layout(program, target, interp.len, dynstr.len, libraries.len)
+	// How many of the imports a library has to answer for, and each import's
+	// index in the dynamic symbol table. Both skip a name whose definition is
+	// inside this image, and they are computed once here rather than a name at a
+	// time in the emitters, so that every part of the image numbers the symbols
+	// the same way.
+	external := external_imports(program)
+	indices := symbol_indices(program)
+	sections := layout(program, target, interp.len, dynstr.len, libraries.len, external)
 	// The image a Linux kernel starts is built here. The name is not `image`,
 	// because that is the module whose Program this function was handed.
 	mut output := []u8{len: sections.total, init: u8(0)}
@@ -171,19 +178,55 @@ pub fn executable(program image.Program, target backend.Target) ![]u8 {
 	put(mut output, sections.dynstr, dynstr)
 	put(mut output, sections.strings, program.string_blob)
 	put(mut output, sections.globals, program.globals_blob)
-	emit_symbols(mut output, program, sections, symbol_names, base)
-	emit_hash(mut output, program, sections)
-	emit_relocations(mut output, program, sections, base)
-	emit_dynamic(mut output, program, sections, dynstr.len, needed, base)
+	emit_bound_slots(mut output, program, sections, base)
+	emit_symbols(mut output, program, sections, symbol_names, indices, external, base)
+	emit_hash(mut output, program, sections, external)
+	emit_relocations(mut output, program, sections, indices, external, base)
+	emit_dynamic(mut output, program, sections, dynstr.len, needed, external, base)
 	emit_header(mut output, target, base + u64(sections.text))
 	emit_program_headers(mut output, target, sections, interp.len, libraries.len)
 	patch(mut output, program, target, sections)!
 	return output
 }
 
+// external_imports is how many of the program's names in `imports` a library
+// has to answer for: every name that is not in `bound`. It is the count of
+// symbols the dynamic table carries and of relocations the image emits, so the
+// parts that size those tables ask it rather than `program.imports.len`, which
+// counts the bound names too.
+fn external_imports(program image.Program) int {
+	mut count := 0
+	for name in program.imports {
+		if name !in program.bound {
+			count++
+		}
+	}
+	return count
+}
+
+// symbol_indices is each import's index in the dynamic symbol table, position
+// for position with `program.imports`. The null symbol is index 0 and a name
+// whose definition is inside this image is not in the table at all, so a name's
+// index is one plus the number of external imports before it, which is not its
+// position in `imports`. The two stop agreeing as soon as one import is bound.
+// A call reads its slot by the position and a relocation names its symbol by
+// this index, so the two are different numbers and must not be confused.
+fn symbol_indices(program image.Program) []int {
+	mut indices := []int{len: program.imports.len}
+	mut next := 1
+	for i, name in program.imports {
+		if name in program.bound {
+			continue
+		}
+		indices[i] = next
+		next++
+	}
+	return indices
+}
+
 // layout places every part of the image: one part after another, each at an
 // eight-byte boundary, with the whole image rounded up to a page.
-fn layout(program image.Program, target backend.Target, interp_len int, dynstr_len int, library_count int) Sections {
+fn layout(program image.Program, target backend.Target, interp_len int, dynstr_len int, library_count int, external int) Sections {
 	mut offset := int(elf_header_size) + int(elf_program_header_count) * int(elf_program_header_size)
 	interp := offset
 	offset = align(offset + interp_len, 8)
@@ -203,18 +246,24 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	globals := offset
 	offset = align(offset + program.globals_blob.len, 8)
 	dynsym := offset
-	// One null entry the container requires, then one per imported function and
-	// one per object this image holds a copy of.
-	offset = align(offset + (program.imports.len + program.copy_objects.len + 1) * elf_symbol_size, 8)
+	// One null entry the container requires, then one per external imported
+	// function and one per object this image holds a copy of. A name whose
+	// definition is inside this image gets no entry, because nothing outside
+	// the image has to answer for it.
+	offset = align(offset + (external + program.copy_objects.len + 1) * elf_symbol_size, 8)
 	hash := offset
-	offset = align(offset + hash_size(program.imports.len + program.copy_objects.len + 1), 8)
+	offset = align(offset + hash_size(external + program.copy_objects.len + 1), 8)
 	got := offset
+	// A slot for every import, the bound ones included: a call to a bound name
+	// still goes through its slot, so the slot index is the import's position
+	// in `imports`, which is what the call's fixup was written against, and the
+	// layout must not compact the slots the way it compacts the symbols.
 	offset = align(offset + program.imports.len * 8, 8)
 	rela := offset
-	// One relocation per import, one copy relocation per object this image
-	// holds a copy of, plus one per address in the writable data that names a
-	// symbol the loader resolves.
-	offset = align(offset + (program.imports.len + program.copy_objects.len +
+	// One relocation per external import, one copy relocation per object this
+	// image holds a copy of, plus one per address in the writable data that
+	// names a symbol the loader resolves.
+	offset = align(offset + (external + program.copy_objects.len +
 		program.import_data_count()) * elf_relocation_size, 8)
 	dynamic := offset
 	offset = align(offset + dynamic_entry_count(library_count) * elf_dynamic_entry_size, 8)
@@ -240,9 +289,31 @@ fn hash_size(symbol_count int) int {
 	return 8 + 4 * (1 + symbol_count)
 }
 
+// emit_bound_slots writes the slot of every import whose definition is inside
+// this image. A bound name is called through a slot the same way a library
+// function is, so the slot still exists and the call still reads it, but the
+// address it must hold is known here rather than to a loader. The definition
+// says whether it is an offset into the code or into the writable data, and the
+// slot gets that address at the load base, which is the address the loader would
+// have written had the symbol come from outside.
+fn emit_bound_slots(mut output []u8, program image.Program, sections Sections, base u64) {
+	for i, name in program.imports {
+		definition := program.bound[name] or { continue }
+		at := if definition.function {
+			sections.text + definition.offset
+		} else {
+			sections.globals + definition.offset
+		}
+		put_u64(mut output, sections.got + i * 8, base + u64(at))
+	}
+}
+
 // emit_symbols writes the dynamic symbol table: a null entry the container
-// requires, then one entry per imported function and one per object this image
-// holds a copy of. An imported function is a name in the string table, marked
+// requires, then one entry per external imported function and one per object
+// this image holds a copy of. A bound name gets no entry, because its
+// definition is inside this image and nothing outside has to answer for it; its
+// slot is filled by emit_bound_slots instead. An imported function is a name in
+// the string table, marked
 // global and of function type, with no value and no section, because its
 // definition is somewhere this image is not. An object this image copies is the
 // other way round: the definition the loader copies from is the library's, and
@@ -252,14 +323,17 @@ fn hash_size(symbol_count int) int {
 // same width the object writer gives a definition. The section index is left
 // undefined because this image has no section header table to name one in, and
 // the loader's copy path reads the size and the place, not the section.
-fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbol_names map[string]int, base u64) {
+fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbol_names map[string]int, indices []int, external int, base u64) {
 	for i, name in program.imports {
-		at := sections.dynsym + (i + 1) * elf_symbol_size
+		if name in program.bound {
+			continue
+		}
+		at := sections.dynsym + indices[i] * elf_symbol_size
 		put_u32(mut output, at, u32(symbol_names[name]))
 		output[at + 4] = symbol_global_function
 	}
 	for i, name in program.copy_objects {
-		at := sections.dynsym + (program.imports.len + i + 1) * elf_symbol_size
+		at := sections.dynsym + (external + i + 1) * elf_symbol_size
 		slot := program.globals[name] or { image.GlobalSlot{} }
 		width := if slot.count > 0 { slot.width * slot.count } else { slot.width }
 		put_u32(mut output, at, u32(symbol_names[name]))
@@ -278,15 +352,21 @@ fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbo
 // the library resolves never needs to be searched by name, which is why the chain
 // used to be empty, but an image that holds a copy of a library object does: the
 // library's own references to that object have to find this image's copy, and
-// they find it through this chain. The symbols are the imports and the copies, in
-// the order their entries stand in the dynamic table, starting at one because the
-// null symbol is never in a chain.
-fn emit_hash(mut output []u8, program image.Program, sections Sections) {
+// they find it through this chain. The symbols are the external imports and the
+// copies, in the order their entries stand in the dynamic table, starting at one
+// because the null symbol is never in a chain. A bound name is in neither set.
+fn emit_hash(mut output []u8, program image.Program, sections Sections, external int) {
 	put_u32(mut output, sections.hash, 1) // one bucket
-	put_u32(mut output, sections.hash + 4, u32(program.imports.len + program.copy_objects.len + 1))
+	put_u32(mut output, sections.hash + 4, u32(external + program.copy_objects.len + 1))
 	mut head := u32(0)
 	mut index := 1
-	for _ in program.imports {
+	// A bound name has no entry in the dynamic table, so it is in no chain
+	// either; only the external imports are, and they number the chain the way
+	// they number the symbol table.
+	for name in program.imports {
+		if name in program.bound {
+			continue
+		}
 		put_u32(mut output, sections.hash + 8 + 4 * (1 + index), head)
 		head = u32(index)
 		index++
@@ -299,15 +379,24 @@ fn emit_hash(mut output []u8, program image.Program, sections Sections) {
 	put_u32(mut output, sections.hash + 8, head)
 }
 
-// emit_relocations writes one relocation per import: the loader resolves the
-// symbol and writes its address into the slot named here, which is where every
-// call to that function reads it from.
-fn emit_relocations(mut output []u8, program image.Program, sections Sections, base u64) {
-	for i, _ in program.imports {
-		at := sections.rela + i * elf_relocation_size
+// emit_relocations writes one relocation per external import: the loader
+// resolves the symbol and writes its address into the slot named here, which is
+// where every call to that function reads it from. A bound name gets none: its
+// slot is filled by the layout, not by the loader. The relocation's place is the
+// import's own position in `imports`, which is where its slot is, and the symbol
+// it names is the import's index in the dynamic table, which is a different
+// number as soon as one import is bound.
+fn emit_relocations(mut output []u8, program image.Program, sections Sections, indices []int, external int, base u64) {
+	mut entry := 0
+	for i, name in program.imports {
+		if name in program.bound {
+			continue
+		}
+		at := sections.rela + entry * elf_relocation_size
 		put_u64(mut output, at, base + u64(sections.got + i * 8))
-		put_u64(mut output, at + 8, (u64(i + 1) << 32) | relocation_glob_dat)
+		put_u64(mut output, at + 8, (u64(indices[i]) << 32) | relocation_glob_dat)
 		// The addend is zero, which says the address itself is the value.
+		entry++
 	}
 	// One copy relocation per object this image holds a copy of: the place is
 	// the storage in this image, and the symbol is the one the entry in the
@@ -315,15 +404,17 @@ fn emit_relocations(mut output []u8, program image.Program, sections Sections, b
 	// storage itself rather than an offset into it.
 	for i, name in program.copy_objects {
 		slot := program.globals[name] or { image.GlobalSlot{} }
-		at := sections.rela + (program.imports.len + i) * elf_relocation_size
+		at := sections.rela + (entry + i) * elf_relocation_size
 		put_u64(mut output, at, base + u64(sections.globals + slot.offset))
 		put_u64(mut output, at + 8,
-			(u64(program.imports.len + i + 1) << 32) | relocation_copy)
+			(u64(external + i + 1) << 32) | relocation_copy)
 	}
+	entry += program.copy_objects.len
 	// One more relocation per address in the writable data that names a symbol
 	// the loader resolves: the address goes into the eight bytes the data fixup
-	// points at, and the symbol is the same one its calls go through.
-	mut entry := program.imports.len + program.copy_objects.len
+	// points at, and the symbol is the same one its calls go through. Such a
+	// fixup is never bound, because the link rewrites a bound one to a direct
+	// address before this module sees the program.
 	for fixup in program.data_fixups {
 		if fixup.kind != .import_address {
 			continue
@@ -339,7 +430,7 @@ fn emit_relocations(mut output []u8, program image.Program, sections Sections, b
 		}
 		at := sections.rela + entry * elf_relocation_size
 		put_u64(mut output, at, base + u64(sections.globals + fixup.offset))
-		put_u64(mut output, at + 8, (u64(index + 1) << 32) | relocation_absolute)
+		put_u64(mut output, at + 8, (u64(indices[index]) << 32) | relocation_absolute)
 		// The addend is the byte a part of the symbol starts at, so an address
 		// of a part of an imported object points at the part and not at the
 		// whole object.
@@ -352,7 +443,7 @@ fn emit_relocations(mut output []u8, program image.Program, sections Sections, b
 // library it runs against, where the tables are, and how big each record in them
 // is. The DT_NEEDED entries come first and are the only part of the table whose
 // length depends on the command line.
-fn emit_dynamic(mut output []u8, program image.Program, sections Sections, dynstr_len int, needed []int, base u64) {
+fn emit_dynamic(mut output []u8, program image.Program, sections Sections, dynstr_len int, needed []int, external int, base u64) {
 	mut entries := [][]u64{}
 	for offset in needed {
 		entries << [dt_needed, u64(offset)]
@@ -362,7 +453,7 @@ fn emit_dynamic(mut output []u8, program image.Program, sections Sections, dynst
 	entries << [dt_symtab, base + u64(sections.dynsym)]
 	entries << [dt_rela, base + u64(sections.rela)]
 	entries << [dt_relasz,
-		u64((program.imports.len + program.copy_objects.len + program.import_data_count()) * elf_relocation_size)]
+		u64((external + program.copy_objects.len + program.import_data_count()) * elf_relocation_size)]
 	entries << [dt_relaent, u64(elf_relocation_size)]
 	entries << [dt_strsz, u64(dynstr_len)]
 	entries << [dt_syment, u64(elf_symbol_size)]
