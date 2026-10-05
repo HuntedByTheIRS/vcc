@@ -6,18 +6,21 @@ import image
 // The reader for a relocatable object: an ELF64 ET_REL file in, the one unit
 // the in-house linker merges out.
 //
-// `backend/os/elf/object.v` writes this shape, so this file is its inverse: it
-// walks the same section order, reads the same symbol table layout, and turns
-// each relocation back into the reference the writer left for the link. Every
-// field is bounds-checked before it is used, because a linker input is a file
-// this compiler did not write and a malformed one has to be refused rather than
-// crash the compiler.
+// `backend/os/elf/object.v` writes this shape, so this file is its inverse, but
+// it is not written for that writer alone. A unit is three blobs: the code, the
+// read-only data and the writable data. Every allocatable section a file holds
+// is copied into the blob its other flags name, in section order and at the
+// alignment the section asks for, and where it landed is what a reference to a
+// place inside it names. The four names this reader used to look for, `.text`,
+// `.rodata`, `.data` and `.bss`, are what an object this compiler writes happens
+// to call its sections, and each still lands where it did before.
 //
-// What it can carry is what the writer can put in an object: the code, the
-// read-only data, the writable data with its address-valued slots, and the
-// references between them. A construct outside that set is named in an error
-// rather than guessed at, because a unit that is wrong is worse than a link
-// that stops.
+// Every field is bounds-checked before it is used, because a linker input is a
+// file this compiler did not write and a malformed one has to be refused rather
+// than crash the compiler. What it can carry is the code, the read-only data,
+// the writable data with its address-valued slots, and the references between
+// them. A construct outside that set is named in an error rather than guessed
+// at, because a unit that is wrong is worse than a link that stops.
 
 // The constants an ELF64 relocatable file is read with. They are the reader's
 // own copies rather than the writer's, because a reader that shared the
@@ -31,10 +34,29 @@ const elf_section_header_size = u16(64)
 const elf_symbol_size = 24
 const elf_relocation_size = 24
 
+// The section flags. SHF_ALLOC is what makes a section part of the unit;
+// SHF_EXECINSTR sends it to the code blob and SHF_WRITE to the writable one, and
+// a section with neither goes to the read-only blob. SHF_TLS is refused rather
+// than carried, because a thread-local's storage is not a place this unit lays
+// out.
+const shf_write = u64(0x1)
+const shf_alloc = u64(0x2)
+const shf_execinstr = u64(0x4)
+const shf_tls = u64(0x400)
+
+// The section types this reader carries: a section with bytes in the file, the
+// zero-filled storage with none, and a note. A constructor table is a type of
+// its own and is refused by name, because running one needs an INIT_ARRAY tag
+// this container does not write yet.
+const sht_progbits = u32(1)
 const sht_symtab = u32(2)
 const sht_strtab = u32(3)
 const sht_rela = u32(4)
+const sht_note = u32(7)
 const sht_nobits = u32(8)
+const sht_init_array = u32(14)
+const sht_fini_array = u32(15)
+const sht_preinit_array = u32(16)
 
 // The two special section indexes a symbol can name instead of a section. A
 // symbol whose value is a constant, or one whose storage the linker has to
@@ -44,16 +66,34 @@ const shn_common = u16(0xfff2)
 
 // The st_type low nibble and the st_bind high nibble the reader looks at.
 const stt_object = u8(1)
-const stt_func = u8(2)
 const stt_section = u8(3)
 const stb_local = u8(0)
 const stb_weak = u8(2)
 
-// relocation_absolute is R_X86_64_64: the eight bytes hold the symbol's value
-// plus the addend, which is the one relocation kind a top-level pointer
-// initializer needs. It is a machine number the psABI fixes, so it is written
-// here rather than asked of the target, which answers only the code kinds.
-const relocation_absolute = u32(1)
+// The relocation kinds this reader accepts, by the psABI numbers an ELF64
+// x86-64 object carries. The ones with four-byte pc-relative fields come in two
+// spellings: a direct reference to a place, and a reference that reaches an
+// object through the global offset table so that a position-independent object
+// can name one another object may define. They are machine numbers the psABI
+// fixes, so they are written here rather than asked of the target, which
+// answers only the code kinds and knows two of these six.
+const relocation_absolute = u32(1) // R_X86_64_64
+const relocation_pc_relative = u32(2) // R_X86_64_PC32
+const relocation_plt = u32(4) // R_X86_64_PLT32
+const relocation_got_pc_relative = u32(9) // R_X86_64_GOTPCREL
+const relocation_got_pc_relative_x = u32(41) // R_X86_64_GOTPCRELX
+const relocation_rex_got_pc_relative_x = u32(42) // R_X86_64_REX_GOTPCRELX
+
+// Blob is which of a unit's three parts a section belongs to. A section that is
+// not SHF_ALLOC, or one that is not a type this reader carries, has `none`. The
+// three blobs are the shape the link merges: it rebases each one with a base of
+// its own, so a field has to know which one moves it.
+enum Blob {
+	none
+	code
+	read_only
+	writable
+}
 
 // Header is the little of the ELF header that decides where the rest of the
 // file is: the section header table, its record size and count, and which
@@ -72,6 +112,7 @@ mut:
 	name_off  int
 	name      string
 	kind      u32
+	flags     u64
 	offset    int
 	size      int
 	link      u32
@@ -90,24 +131,39 @@ struct Symbol {
 	size  u64
 }
 
-// Indices is where each section this reader cares about landed, or minus one
-// when the file has none. `.bss` has no bytes in the file, but a symbol can be
-// defined there and its storage is the zeroes the reader appends after `.data`.
-struct Indices {
-mut:
-	text   int = -1
-	rodata int = -1
-	data   int = -1
-	bss    int = -1
-	symtab int = -1
+// Layout is what the reader decided about a file after walking its section
+// header table once: which blob each section belongs to, where each one landed
+// inside its blob, the three blobs themselves, and where the symbol table is.
+// The blobs are built in section order, so the same file gives the same bytes
+// every run.
+struct Layout {
+	// blob_of and base_of are indexed by section number. A section outside the
+	// unit has `none` and a base of zero that is never read.
+	blob_of   []Blob
+	base_of   []int
+	text      []u8
+	read_only []u8
+	writable  []u8
+	// alignment is the strictest alignment any writable section asked for,
+	// floored at a word, which is where the merged writable data has to start.
+	alignment int
+	symtab    int
+}
+
+// Resolution is what a relocation's symbol stands for: the name the link
+// resolves, and the byte inside one of the unit's blobs when the name is a
+// section key rather than a symbol. A reference to a place in a blob is written
+// as the blob's key and a byte, so the byte is added to the relocation's own
+// addend; a reference to a named symbol is the name alone.
+struct Resolution {
+	name   string
+	offset int
 }
 
 // Reader carries the parsed file and the imports seen so far, so that resolving
 // a relocation can add to the import list without a second walk.
 struct Reader {
-	bytes    []u8
-	sections []Section
-	indices  Indices
+	bytes []u8
 mut:
 	imports        []string
 	object_imports map[string]bool
@@ -120,46 +176,12 @@ mut:
 pub fn read(bytes []u8, target backend.Target) !image.Program {
 	header := parse_header(bytes, target)!
 	sections := parse_sections(bytes, header)!
-	indices := locate(sections)
-	// The code, the read-only data and the writable data are each one section
-	// copied out of the file. `.bss` has no bytes: its storage is the zeroes
-	// appended after `.data`, which is what the writer's single `.data` section
-	// already looks like.
-	mut text := []u8{}
-	if indices.text >= 0 {
-		text = section_bytes(bytes, sections[indices.text]).clone()
-	}
-	mut string_blob := []u8{}
-	if indices.rodata >= 0 {
-		string_blob = section_bytes(bytes, sections[indices.rodata]).clone()
-	}
-	mut data_blob := []u8{}
-	if indices.data >= 0 {
-		data_blob = section_bytes(bytes, sections[indices.data]).clone()
-	}
-	data_end := align_up(data_blob.len, 8)
-	bss_size := if indices.bss >= 0 { sections[indices.bss].size } else { 0 }
-	mut globals_blob := data_blob.clone()
-	if bss_size > 0 {
-		for globals_blob.len < data_end {
-			globals_blob << u8(0)
-		}
-		for _ in 0 .. bss_size {
-			globals_blob << u8(0)
-		}
-	}
-	mut globals_alignment := 8
-	if indices.data >= 0 && sections[indices.data].addralign > globals_alignment {
-		globals_alignment = sections[indices.data].addralign
-	}
-	if indices.bss >= 0 && sections[indices.bss].addralign > globals_alignment {
-		globals_alignment = sections[indices.bss].addralign
-	}
+	layout := lay_out(bytes, sections)!
 	mut program := image.Program{
-		text:              text
-		string_blob:       string_blob
-		globals_blob:      globals_blob
-		globals_alignment: globals_alignment
+		text:              layout.text
+		string_blob:       layout.read_only
+		globals_blob:      layout.writable
+		globals_alignment: layout.alignment
 		labels:            map[string]int{}
 		defined:           map[string]bool{}
 		globals:           map[string]image.GlobalSlot{}
@@ -174,31 +196,134 @@ pub fn read(bytes []u8, target backend.Target) !image.Program {
 		libraries:         []string{}
 		bound:             map[string]image.Definition{}
 	}
-	read_definitions(bytes, sections, indices, data_end, mut program)!
+	read_definitions(bytes, sections, layout, mut program)!
 	mut reader := Reader{
 		bytes:          bytes
-		sections:       sections
-		indices:        indices
 		imports:        []string{}
 		object_imports: map[string]bool{}
 		seen:           map[string]bool{}
 	}
-	read_relocations(bytes, sections, indices, target, mut program, mut reader)!
+	read_relocations(bytes, sections, layout, mut program, mut reader)!
 	program.imports = reader.imports
 	program.object_imports = reader.object_imports
 	return program
 }
 
-// read_definitions walks the symbol table and records what this object defines:
-// a function whose section is `.text` becomes a label, an object whose section
-// is `.data` or `.bss` becomes a global slot, and either one carries its
-// linkage and its weak binding with it. A section symbol and an unnamed symbol
-// are the file's own scaffolding and are skipped.
-fn read_definitions(bytes []u8, sections []Section, indices Indices, data_end int, mut program image.Program) ! {
-	if indices.symtab < 0 {
+// lay_out walks the section header table once and copies every allocatable
+// section into the blob its flags name, at the alignment it asks for, recording
+// where each landed. The four names an object this compiler writes still land
+// first in their blob, so such an object reads as it always did. A TLS section,
+// a constructor table, or an allocatable section of a type this reader does not
+// carry is refused here, by name and type.
+fn lay_out(bytes []u8, sections []Section) !Layout {
+	mut blob_of := []Blob{len: sections.len, init: .none}
+	mut base_of := []int{len: sections.len, init: 0}
+	mut text := []u8{}
+	mut read_only := []u8{}
+	mut writable := []u8{}
+	mut alignment := 8
+	mut symtab := -1
+	for i, s in sections {
+		if s.kind == sht_symtab && symtab < 0 {
+			symtab = i
+		}
+		if (s.flags & shf_alloc) == 0 {
+			// A section that is not allocatable is not part of the unit: the
+			// section header table, the symbol table, the string tables, a
+			// comment, and the debug sections all fall out here without a
+			// name being written down for any of them.
+			continue
+		}
+		if (s.flags & shf_tls) != 0 {
+			return error('section ${i} (${s.name}) is SHF_TLS, and this reader does not carry thread-local storage')
+		}
+		if s.kind == sht_init_array || s.kind == sht_fini_array || s.kind == sht_preinit_array {
+			return error('section ${i} (${s.name}) is type ${s.kind} (SHT_INIT_ARRAY, SHT_FINI_ARRAY or SHT_PREINIT_ARRAY), and running a constructor needs a constructor table this container does not write')
+		}
+		if s.kind != sht_progbits && s.kind != sht_nobits && s.kind != sht_note {
+			return error('section ${i} (${s.name}) is type ${s.kind}, and this reader carries SHT_PROGBITS (${sht_progbits}), SHT_NOBITS (${sht_nobits}) and SHT_NOTE (${sht_note})')
+		}
+		blob := classify(s.flags)
+		gap := if s.addralign > 1 { s.addralign } else { 1 }
+		match blob {
+			.code {
+				pad(mut text, gap)
+				base_of[i] = text.len
+				copy_section(mut text, bytes, s)
+			}
+			.read_only {
+				pad(mut read_only, gap)
+				base_of[i] = read_only.len
+				copy_section(mut read_only, bytes, s)
+			}
+			.writable {
+				pad(mut writable, gap)
+				base_of[i] = writable.len
+				copy_section(mut writable, bytes, s)
+				if gap > alignment {
+					alignment = gap
+				}
+			}
+			.none {}
+		}
+		blob_of[i] = blob
+	}
+	return Layout{
+		blob_of:   blob_of
+		base_of:   base_of
+		text:      text
+		read_only: read_only
+		writable:  writable
+		alignment: alignment
+		symtab:    symtab
+	}
+}
+
+// classify is which blob a section's other flags send it to. It is asked only
+// of an allocatable section, so every answer is one of the three.
+fn classify(flags u64) Blob {
+	if (flags & shf_execinstr) != 0 {
+		return .code
+	}
+	if (flags & shf_write) != 0 {
+		return .writable
+	}
+	return .read_only
+}
+
+// pad appends the zeroes that bring a blob up to the next multiple of the
+// alignment a section asks for, which is where that section has to start for
+// its own alignment to be true in the merged image.
+fn pad(mut blob []u8, alignment int) {
+	for blob.len % alignment != 0 {
+		blob << u8(0)
+	}
+}
+
+// copy_section appends one section to its blob: its file bytes when it has
+// them, and as many zeroes as its size says when it is SHT_NOBITS, which is the
+// storage a file carries no bytes for.
+fn copy_section(mut blob []u8, bytes []u8, section Section) {
+	if section.kind == sht_nobits {
+		for _ in 0 .. section.size {
+			blob << u8(0)
+		}
 		return
 	}
-	symtab := sections[indices.symtab]
+	blob << section_bytes(bytes, section)
+}
+
+// read_definitions walks the symbol table and records what this object defines.
+// A symbol defined in the code blob becomes a label, an object in the writable
+// blob becomes a global slot, and either one carries its linkage and its weak
+// binding with it. A symbol defined in the read-only blob gets no table entry:
+// its place is named by the section key when a reference reaches it. A section
+// symbol and an unnamed symbol are the file's own scaffolding and are skipped.
+fn read_definitions(bytes []u8, sections []Section, layout Layout, mut program image.Program) ! {
+	if layout.symtab < 0 {
+		return
+	}
+	symtab := sections[layout.symtab]
 	if symtab.link >= u32(sections.len) {
 		return error('the symbol table names section ${symtab.link} as its string table and the file has ${sections.len} sections')
 	}
@@ -211,23 +336,28 @@ fn read_definitions(bytes []u8, sections []Section, indices Indices, data_end in
 		if sym.shndx == shn_abs || sym.shndx == shn_common || kind == stt_section {
 			continue
 		}
+		if int(sym.shndx) >= layout.blob_of.len {
+			continue
+		}
 		name := symbol_name(bytes, symtab, strtab, i)!
 		if name == '' {
 			continue
 		}
-		if indices.text >= 0 && sym.shndx == u16(indices.text) && kind == stt_func {
-			program.labels[name] = int(sym.value)
-			program.defined[name] = true
-			record_linkage(mut program, name, bind)
-		} else if (indices.data >= 0 && sym.shndx == u16(indices.data))
-			|| (indices.bss >= 0 && sym.shndx == u16(indices.bss)) {
-			base := if indices.bss >= 0 && sym.shndx == u16(indices.bss) { data_end } else { 0 }
-			width := if sym.size > 0 { int(sym.size) } else { 8 }
-			program.globals[name] = image.GlobalSlot{
-				offset: int(sym.value) + base
-				width:  width
+		match layout.blob_of[int(sym.shndx)] {
+			.code {
+				program.labels[name] = layout.base_of[int(sym.shndx)] + int(sym.value)
+				program.defined[name] = true
+				record_linkage(mut program, name, bind)
 			}
-			record_linkage(mut program, name, bind)
+			.writable {
+				width := if sym.size > 0 { int(sym.size) } else { 8 }
+				program.globals[name] = image.GlobalSlot{
+					offset: layout.base_of[int(sym.shndx)] + int(sym.value)
+					width:  width
+				}
+				record_linkage(mut program, name, bind)
+			}
+			.read_only, .none {}
 		}
 	}
 }
@@ -244,65 +374,98 @@ fn record_linkage(mut program image.Program, name string, bind u8) {
 	}
 }
 
-// read_relocations walks every SHT_RELA section whose target is `.text` or
-// `.data` and reads one reference out of each entry. The code references are
-// read first, then the writable data's, so the imports they name keep a
+// read_relocations walks every SHT_RELA section whose target lies in one of the
+// three blobs and reads one reference out of each entry. A reference in the code
+// or in read-only data is a four-byte pc-relative field, direct or through the
+// global offset table; a reference in writable data is an eight-byte address and
+// becomes a data fixup. Anything else is refused with its number. The section
+// header table is walked in order, so the imports a file names keep a
 // deterministic first-seen order.
-fn read_relocations(bytes []u8, sections []Section, indices Indices, target backend.Target, mut program image.Program, mut reader Reader) ! {
-	for code in [true, false] {
-		for reloca in sections {
-			if reloca.kind != sht_rela {
-				continue
-			}
-			is_text := code && indices.text >= 0 && reloca.info == u32(indices.text)
-			is_data := !code && indices.data >= 0 && reloca.info == u32(indices.data)
-			if !is_text && !is_data {
-				continue
-			}
-			symtab := referenced_symtab(sections, reloca)!
-			if symtab.link >= u32(sections.len) {
-				return error('the symbol table names section ${symtab.link} as its string table and the file has ${sections.len} sections')
-			}
-			strtab := section_bytes(bytes, sections[int(symtab.link)])
-			count := reloca.size / elf_relocation_size
-			for entry in 0 .. count {
-				at := reloca.offset + entry * elf_relocation_size
-				r_offset := read_u64(bytes, at)!
-				r_info := read_u64(bytes, at + 8)!
-				r_addend := i64(read_u64(bytes, at + 16)!)
-				kind := u32(r_info & 0xffffffff)
-				sym_index := int(r_info >> 32)
-				sym := parse_symbol(bytes, symtab, sym_index)!
-				if is_text {
-					if kind != target.call_relocation() && kind != target.address_relocation() {
-						return error('unknown relocation type ${kind} at offset ${r_offset}: this reader accepts ${target.call_relocation()} (call) and ${target.address_relocation()} (address) in the code')
-					}
-					name := reader.resolve(symtab, strtab, sym_index, sym)!
-					program.relocations << image.Relocation{
-						offset: int(r_offset)
-						name:   name
-						addend: int(r_addend)
-					}
+fn read_relocations(bytes []u8, sections []Section, layout Layout, mut program image.Program, mut reader Reader) ! {
+	for reloca in sections {
+		if reloca.kind != sht_rela {
+			continue
+		}
+		if int(reloca.info) >= sections.len {
+			continue
+		}
+		place := relocation_place(layout.blob_of[int(reloca.info)]) or { continue }
+		symtab := referenced_symtab(sections, reloca)!
+		if symtab.link >= u32(sections.len) {
+			return error('the symbol table names section ${symtab.link} as its string table and the file has ${sections.len} sections')
+		}
+		strtab := section_bytes(bytes, sections[int(symtab.link)])
+		base := layout.base_of[int(reloca.info)]
+		count := reloca.size / elf_relocation_size
+		for entry in 0 .. count {
+			at := reloca.offset + entry * elf_relocation_size
+			r_offset := read_u64(bytes, at)!
+			r_info := read_u64(bytes, at + 8)!
+			r_addend := i64(read_u64(bytes, at + 16)!)
+			kind := u32(r_info & 0xffffffff)
+			sym_index := int(r_info >> 32)
+			sym := parse_symbol(bytes, symtab, sym_index)!
+			if place == .data {
+				if kind != relocation_absolute {
+					return error('unknown relocation type ${kind} at offset ${r_offset}: this reader accepts ${relocation_absolute} (R_X86_64_64) in the writable data')
+				}
+				resolution := reader.resolve(symtab, strtab, sym_index, sym, layout)!
+				fixup_kind := if (sym.info & 0xf) == stt_section {
+					image.FixupKind.section_address
 				} else {
-					if kind != relocation_absolute {
-						return error('unknown relocation type ${kind} at offset ${r_offset}: this reader accepts ${relocation_absolute} (R_X86_64_64) in the writable data')
-					}
-					name := reader.resolve(symtab, strtab, sym_index, sym)!
-					fixup_kind := if (sym.info & 0xf) == stt_section {
-						image.FixupKind.section_address
-					} else {
-						image.FixupKind.import_address
-					}
-					program.data_fixups << image.DataFixup{
-						offset: int(r_offset)
-						kind:   fixup_kind
-						name:   name
-						addend: int(r_addend)
-					}
+					image.FixupKind.import_address
+				}
+				program.data_fixups << image.DataFixup{
+					offset: base + int(r_offset)
+					kind:   fixup_kind
+					name:   resolution.name
+					addend: int(r_addend) + resolution.offset
+				}
+			} else {
+				reference := reference_kind(kind) or {
+					return error('unknown relocation type ${kind} at offset ${r_offset}: this reader accepts ${relocation_pc_relative} (R_X86_64_PC32), ${relocation_plt} (R_X86_64_PLT32), ${relocation_got_pc_relative} (R_X86_64_GOTPCREL), ${relocation_got_pc_relative_x} (R_X86_64_GOTPCRELX) and ${relocation_rex_got_pc_relative_x} (R_X86_64_REX_GOTPCRELX) in the code and read-only data')
+				}
+				resolution := reader.resolve(symtab, strtab, sym_index, sym, layout)!
+				program.relocations << image.Relocation{
+					offset: base + int(r_offset)
+					place:  place
+					kind:   reference
+					name:   resolution.name
+					addend: int(r_addend) + resolution.offset
 				}
 			}
 		}
 	}
+}
+
+// relocation_place is which of a unit's three blobs a section's field lies in,
+// as the image names it, or none when the section is not part of the unit.
+fn relocation_place(blob Blob) ?image.RelocationPlace {
+	if blob == .code {
+		return image.RelocationPlace.text
+	}
+	if blob == .read_only {
+		return image.RelocationPlace.read_only
+	}
+	if blob == .writable {
+		return image.RelocationPlace.data
+	}
+	return none
+}
+
+// reference_kind is how a four-byte pc-relative reference reaches what it names:
+// the name itself for a direct reference, or the global offset table's slot for
+// it for the three GOTPCREL spellings. None means a kind this reader does not
+// carry.
+fn reference_kind(kind u32) ?image.RelocationKind {
+	if kind == relocation_pc_relative || kind == relocation_plt {
+		return .direct
+	}
+	if kind == relocation_got_pc_relative || kind == relocation_got_pc_relative_x
+		|| kind == relocation_rex_got_pc_relative_x {
+		return .got
+	}
+	return none
 }
 
 // referenced_symtab is the symbol table a relocation section reads its symbols
@@ -318,12 +481,15 @@ fn referenced_symtab(sections []Section, reloca Section) !Section {
 	return symtab
 }
 
-// resolve is the name a relocation is written under. A section symbol becomes
-// the key of the section it names, so a string or a place in the data is a
-// reference to `.rodata` or `.data` rather than to a symbol. A named symbol
-// keeps its name. An undefined one is an import, and its type says whether the
-// link is looking for a function or an object.
-fn (mut r Reader) resolve(symtab Section, strtab []u8, index int, sym Symbol) !string {
+// resolve is the name a relocation is written under and the byte the name
+// stands at inside the unit. A section symbol becomes the key of the blob its
+// section was copied into, with the section's own base; a named symbol defined
+// in the read-only blob becomes the read-only key, with its section's base and
+// its value; a named symbol defined in the code or writable blob keeps its
+// name, because it is a label or a global slot the link already holds. An
+// undefined symbol is an import, and its type says whether the link is looking
+// for a function or an object.
+fn (mut r Reader) resolve(symtab Section, strtab []u8, index int, sym Symbol, layout Layout) !Resolution {
 	kind := sym.info & 0xf
 	if sym.shndx == shn_abs {
 		return error('the relocation names symbol ${index}, which is SHN_ABS and lives at no offset in any section')
@@ -332,10 +498,13 @@ fn (mut r Reader) resolve(symtab Section, strtab []u8, index int, sym Symbol) !s
 		return error('the relocation names symbol ${index}, which is SHN_COMMON and this reader does not lay out common storage')
 	}
 	if kind == stt_section {
-		key := section_key_of(sym.shndx, r.indices) or {
-			return error('the relocation names section symbol ${index} of section ${sym.shndx}, and this reader knows .text, .rodata and .data')
+		key := section_key_of(sym.shndx, layout) or {
+			return error('the relocation names section symbol ${index} of section ${sym.shndx}, and this reader carries no such section')
 		}
-		return key
+		return Resolution{
+			name:   key
+			offset: layout.base_of[int(sym.shndx)] + int(sym.value)
+		}
 	}
 	name := symbol_name(r.bytes, symtab, strtab, index)!
 	if sym.shndx == 0 {
@@ -349,32 +518,50 @@ fn (mut r Reader) resolve(symtab Section, strtab []u8, index int, sym Symbol) !s
 			r.seen[name] = true
 			r.imports << name
 		}
-		return name
+		return Resolution{
+			name:   name
+			offset: 0
+		}
 	}
-	_ := section_key_of(sym.shndx, r.indices) or {
+	blob := if int(sym.shndx) < layout.blob_of.len {
+		layout.blob_of[int(sym.shndx)]
+	} else {
+		Blob.none
+	}
+	if blob == .none {
 		return error('the relocation names symbol ${index} (${name}) defined in section ${sym.shndx}, which this reader does not handle')
 	}
 	if name == '' {
 		return error('the relocation names defined symbol ${index} in section ${sym.shndx}, which has no name')
 	}
-	return name
+	if blob == .read_only {
+		return Resolution{
+			name:   image.section_key_rodata
+			offset: layout.base_of[int(sym.shndx)] + int(sym.value)
+		}
+	}
+	return Resolution{
+		name:   name
+		offset: 0
+	}
 }
 
-// section_key_of is the image's name for one of a unit's own sections, or none
-// when the section is one this reader does not carry. `.bss` answers `.data`
-// because the reader merges the two: the empty storage becomes the zeroes
-// appended after the writable data.
-fn section_key_of(shndx u16, indices Indices) ?string {
-	if indices.text >= 0 && shndx == u16(indices.text) {
+// section_key_of is the image's name for the blob a section was copied into, or
+// none when the section is not part of the unit. Both a section symbol and a
+// named symbol the reader keeps no table entry for resolve through it, so a
+// reference to a place is a key and a byte rather than a name.
+fn section_key_of(shndx u16, layout Layout) ?string {
+	if int(shndx) >= layout.blob_of.len {
+		return none
+	}
+	blob := layout.blob_of[int(shndx)]
+	if blob == .code {
 		return image.section_key_text
 	}
-	if indices.rodata >= 0 && shndx == u16(indices.rodata) {
+	if blob == .read_only {
 		return image.section_key_rodata
 	}
-	if indices.data >= 0 && shndx == u16(indices.data) {
-		return image.section_key_data
-	}
-	if indices.bss >= 0 && shndx == u16(indices.bss) {
+	if blob == .writable {
 		return image.section_key_data
 	}
 	return none
@@ -455,6 +642,7 @@ fn raw_section(bytes []u8, header Header, index int) !Section {
 	base := header.shoff + index * header.shentsize
 	name_off := read_u32(bytes, base)!
 	kind := read_u32(bytes, base + 4)!
+	flags := read_u64(bytes, base + 8)!
 	offset := field_int(read_u64(bytes, base + 24)!, 'the offset of section ${index}', bytes.len)!
 	size := field_int(read_u64(bytes, base + 32)!, 'the size of section ${index}', bytes.len)!
 	link := read_u32(bytes, base + 40)!
@@ -467,6 +655,7 @@ fn raw_section(bytes []u8, header Header, index int) !Section {
 	return Section{
 		name_off:  int(name_off)
 		kind:      kind
+		flags:     flags
 		offset:    offset
 		size:      size
 		link:      link
@@ -502,43 +691,6 @@ fn symbol_name(bytes []u8, symtab Section, strtab []u8, index int) !string {
 	at := symtab.offset + index * elf_symbol_size
 	offset := read_u32(bytes, at)!
 	return cstr(strtab, int(offset))
-}
-
-// locate is where each section this reader cares about landed. The first
-// section of a name wins, so a file with two `.text` sections keeps the one a
-// linker would read first.
-fn locate(sections []Section) Indices {
-	mut indices := Indices{}
-	for i, s in sections {
-		match s.name {
-			'.text' {
-				if indices.text < 0 {
-					indices.text = i
-				}
-			}
-			'.rodata' {
-				if indices.rodata < 0 {
-					indices.rodata = i
-				}
-			}
-			'.data' {
-				if indices.data < 0 {
-					indices.data = i
-				}
-			}
-			'.bss' {
-				if indices.bss < 0 {
-					indices.bss = i
-				}
-			}
-			else {
-				if s.kind == sht_symtab && indices.symtab < 0 {
-					indices.symtab = i
-				}
-			}
-		}
-	}
-	return indices
 }
 
 // section_bytes is one section's bytes in the file, which were checked to lie
@@ -602,9 +754,4 @@ fn read_u64(bytes []u8, at int) !u64 {
 		value |= u64(bytes[at + i]) << (8 * i)
 	}
 	return value
-}
-
-// align_up rounds a size up to the next multiple of the alignment.
-fn align_up(value int, to int) int {
-	return (value + to - 1) / to * to
 }

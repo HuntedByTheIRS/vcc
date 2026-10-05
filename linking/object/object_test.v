@@ -229,3 +229,464 @@ fn field_u64(bytes []u8, at int) u64 {
 	}
 	return value
 }
+
+// The reader is also checked against an object it did not write. `gcc` puts an
+// ordinary C translation unit in sections of its own names, more than the four
+// this compiler uses, and a test that only round-trips the tree's own writer
+// would never see them. Below is a small object built byte by byte, because the
+// section header table is the only way to control the flags that decide which
+// blob a section lands in.
+
+// BuildSection is one allocatable section of a hand-built object. `data` is the
+// bytes a PROGBITS section holds, or the length of the zero-filled storage a
+// NOBITS one asks for.
+struct BuildSection {
+	name  string
+	kind  u32
+	flags u64
+	align int
+	data  []u8
+}
+
+// BuildSymbol is one symbol table entry. `shndx` is the section number it is
+// defined in, or zero when it is undefined.
+struct BuildSymbol {
+	name  string
+	info  u8
+	shndx u16
+	value u64
+	size  u64
+}
+
+// BuildRelocation is one relocation. `target` is the section number the
+// relocation applies to, which is what its section header's sh_info names.
+struct BuildRelocation {
+	target u16
+	offset u64
+	symbol u32
+	kind   u32
+	addend i64
+}
+
+// sample_sections is six allocatable sections with names of their own: one code
+// section, two read-only, three writable, one of them with no bytes in the file.
+fn sample_sections() []BuildSection {
+	return [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 20, init: u8(0x90)} },
+		BuildSection{
+			name:  '.myro'
+			kind:  1
+			flags: 0x2
+			align: 8
+			data:  [u8(0x11), u8(0x12), u8(0x13), u8(0x14), u8(0x15), u8(0x16), u8(0x17), u8(0x18)]
+		},
+		BuildSection{
+			name:  '.myro2'
+			kind:  1
+			flags: 0x2
+			align: 8
+			data:  [u8(0x21), u8(0x22), u8(0x23), u8(0x24)]
+		},
+		BuildSection{
+			name:  '.myrw'
+			kind:  1
+			flags: 0x3
+			align: 8
+			data:  [u8(0x31), u8(0x32), u8(0x33), u8(0x34), u8(0x35), u8(0x36), u8(0x37), u8(0x38)]
+		},
+		BuildSection{ name: '.mybss', kind: 8, flags: 0x3, align: 8, data: []u8{len: 4, init: u8(0)} },
+		BuildSection{
+			name:  '.myrw2'
+			kind:  1
+			flags: 0x3
+			align: 16
+			data:  [u8(0x41), u8(0x42), u8(0x43), u8(0x44)]
+		},
+	]
+}
+
+// sample_symbols are the definitions and the one import a reference reaches in
+// the hand-built object.
+fn sample_symbols() []BuildSymbol {
+	return [
+		BuildSymbol{ name: '.myro2', info: 0x03, shndx: 3, value: 0, size: 0 },
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'f', info: 0x12, shndx: 1, value: 4, size: 4 },
+		BuildSymbol{ name: 'g', info: 0x11, shndx: 4, value: 2, size: 4 },
+		BuildSymbol{ name: 'b', info: 0x11, shndx: 5, value: 0, size: 4 },
+		BuildSymbol{ name: 'g2', info: 0x11, shndx: 6, value: 1, size: 4 },
+		BuildSymbol{ name: 'ro', info: 0x11, shndx: 2, value: 1, size: 2 },
+		BuildSymbol{ name: 'ext', info: 0x10, shndx: 0, value: 0, size: 0 },
+	]
+}
+
+// sample_relocations holds one of each shape: a direct reference to a code
+// symbol, a reference to a section symbol of the read-only blob, a GOTPCREL and
+// a REX_GOTPCRELX to an import, a reference to a named read-only symbol, a
+// pc-relative reference living in the read-only blob, and one absolute address
+// in the writable blob.
+fn sample_relocations() []BuildRelocation {
+	return [
+		BuildRelocation{ target: 1, offset: 0, symbol: 3, kind: 4, addend: -4 },
+		BuildRelocation{ target: 1, offset: 4, symbol: 1, kind: 2, addend: 1 },
+		BuildRelocation{ target: 1, offset: 8, symbol: 8, kind: 9, addend: -4 },
+		BuildRelocation{ target: 1, offset: 12, symbol: 8, kind: 42, addend: -4 },
+		BuildRelocation{ target: 1, offset: 16, symbol: 7, kind: 2, addend: -4 },
+		BuildRelocation{ target: 2, offset: 4, symbol: 2, kind: 2, addend: 0 },
+		BuildRelocation{ target: 4, offset: 0, symbol: 1, kind: 1, addend: 2 },
+	]
+}
+
+// test_an_object_of_its_own_names_reads_into_the_three_blobs checks the general
+// rule: every allocatable section is copied into the blob its flags name, in
+// section order and at its alignment, and each base is what a reference inside
+// it counts from.
+fn test_an_object_of_its_own_names_reads_into_the_three_blobs() {
+	obj := build_object(sample_sections(), sample_symbols(), sample_relocations())
+	got := read(obj, host()) or { panic('the reader refused a hand-built object: ${err.msg()}') }
+	assert got.text == []u8{len: 20, init: u8(0x90)}
+	// The two read-only sections land at 0 and 8, so .myro2's base is 8.
+	assert got.string_blob == [u8(0x11), u8(0x12), u8(0x13), u8(0x14), u8(0x15), u8(0x16), u8(0x17),
+		u8(0x18), u8(0x21), u8(0x22), u8(0x23), u8(0x24)]
+	// .myrw at 0, .mybss at 8 (four zeroes with no bytes in the file), and
+	// .myrw2 at 16 after the padding that brings it to its alignment.
+	assert got.globals_blob == [u8(0x31), u8(0x32), u8(0x33), u8(0x34), u8(0x35), u8(0x36), u8(0x37),
+		u8(0x38), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0x41), u8(0x42), u8(0x43),
+		u8(0x44)]
+	assert got.globals_alignment == 16
+	// A symbol's offset is its section's base plus its value.
+	assert got.labels['f'] == 4
+	assert got.defined['f']
+	assert got.globals['g'].offset == 2
+	assert got.globals['g'].width == 4
+	assert got.globals['b'].offset == 8
+	assert got.globals['b'].width == 4
+	assert got.globals['g2'].offset == 17
+	assert got.globals['g2'].width == 4
+	// A symbol defined in the read-only blob has no table entry.
+	assert !('ro' in got.labels)
+	assert !('ro' in got.globals)
+	assert got.imports == ['ext']
+	// A direct reference to a named code symbol keeps its name.
+	assert got.relocations.len == 6
+	assert got.relocations[0].place == .text
+	assert got.relocations[0].kind == .direct
+	assert got.relocations[0].name == 'f'
+	assert got.relocations[0].offset == 0
+	assert got.relocations[0].addend == -4
+	// A section symbol becomes the key of the blob its section landed in, and
+	// the byte it stands at rides in the addend: .myro2's base is 8.
+	assert got.relocations[1].name == image.section_key_rodata
+	assert got.relocations[1].offset == 4
+	assert got.relocations[1].addend == 9
+	// A reference reached through the global offset table says so, and keeps
+	// the name of the import it reaches.
+	assert got.relocations[2].kind == .got
+	assert got.relocations[2].name == 'ext'
+	assert got.relocations[2].offset == 8
+	assert got.relocations[2].addend == -4
+	assert got.relocations[3].kind == .got
+	assert got.relocations[3].name == 'ext'
+	assert got.relocations[3].offset == 12
+	// A named symbol defined in the read-only blob is resolved as the read-only
+	// key with its byte, not as a name.
+	assert got.relocations[4].name == image.section_key_rodata
+	assert got.relocations[4].offset == 16
+	assert got.relocations[4].addend == -3
+	// A pc-relative reference living in the read-only blob is the .eh_frame
+	// shape: the field is in read-only data and the name is the code's key.
+	assert got.relocations[5].place == .read_only
+	assert got.relocations[5].kind == .direct
+	assert got.relocations[5].name == image.section_key_text
+	assert got.relocations[5].offset == 4
+	assert got.relocations[5].addend == 0
+	// R_X86_64_64 in the writable blob is an eight-byte address, offset into
+	// the writable blob, against the read-only section it names.
+	assert got.data_fixups.len == 1
+	assert got.data_fixups[0].kind == .section_address
+	assert got.data_fixups[0].name == image.section_key_rodata
+	assert got.data_fixups[0].offset == 0
+	assert got.data_fixups[0].addend == 10
+}
+
+// A section that asks for thread-local storage is outside what this unit lays
+// out, and is refused by its flag rather than read as ordinary data.
+fn test_a_thread_local_section_is_refused() {
+	mut obj := build_object(sample_sections(), sample_symbols(), []BuildRelocation{})
+	off := section_header_offset(obj, '.myrw')
+	set_u64(mut obj, off + 8, field_u64(obj, off + 8) | 0x400)
+	read(obj, host()) or {
+		assert err.msg().contains('SHF_TLS')
+		return
+	}
+	assert false, 'the reader accepted a thread-local section'
+}
+
+// A constructor table is refused by name: running a constructor needs an
+// INIT_ARRAY tag this container does not write yet.
+fn test_a_constructor_table_is_refused() {
+	mut obj := build_object(sample_sections(), sample_symbols(), []BuildRelocation{})
+	off := section_header_offset(obj, '.myro')
+	set_u32(mut obj, off + 4, 14) // SHT_INIT_ARRAY
+	read(obj, host()) or {
+		assert err.msg().contains('SHT_INIT_ARRAY')
+		return
+	}
+	assert false, 'the reader accepted a constructor table'
+}
+
+// A reference to a symbol defined in a section that is not part of the unit is
+// refused by name, the same way the reader refused it before it carried
+// sections of its own.
+fn test_a_symbol_outside_the_unit_is_refused() {
+	mut sections := sample_sections()
+	sections << BuildSection{
+		name:  '.dead'
+		kind:  1
+		flags: 0
+		align: 1
+		data:  [u8(0xde), u8(0xad)]
+	}
+	mut symbols := sample_symbols()
+	symbols << BuildSymbol{ name: 'dead', info: 0x11, shndx: 7, value: 0, size: 2 }
+	mut relocs := []BuildRelocation{}
+	relocs << BuildRelocation{
+		target: 1
+		offset: 0
+		symbol: u32(symbols.len)
+		kind:   2
+		addend: -4
+	}
+	obj := build_object(sections, symbols, relocs)
+	read(obj, host()) or {
+		assert err.msg().contains('does not handle')
+		return
+	}
+	assert false, 'the reader accepted a reference to a section outside the unit'
+}
+
+// An unknown relocation type in a foreign object is refused with the number,
+// the same way it is for an object this compiler wrote.
+fn test_an_unknown_relocation_in_a_foreign_object_is_refused() {
+	mut obj := build_object(sample_sections(), sample_symbols(), sample_relocations())
+	at := section_data_offset(obj, '.rela.mycode')
+	set_u32(mut obj, at + 8, 0x7f) // the first entry's relocation type
+	read(obj, host()) or {
+		assert err.msg().contains('unknown relocation type')
+		return
+	}
+	assert false, 'the reader accepted an unknown relocation type'
+}
+
+// build_object writes an ELF64 relocatable object byte by byte, because the
+// section header table is the only place the flags that decide a section's blob
+// are set, and a test that only round-trips the tree's own writer would never
+// exercise them. The section order is the given sections, then .shstrtab,
+// .strtab, .symtab, and one .rela section per target.
+fn build_object(sections []BuildSection, symbols []BuildSymbol, relocations []BuildRelocation) []u8 {
+	mut shstr := []u8{}
+	shstr << u8(0)
+	mut section_name := []int{}
+	section_name << 0
+	for s in sections {
+		section_name << intern(mut shstr, s.name)
+	}
+	mut targets := []u16{}
+	for r in relocations {
+		if r.target !in targets {
+			targets << r.target
+		}
+	}
+	mut rela_name := []int{}
+	for t in targets {
+		rela_name << intern(mut shstr, '.rela' + sections[int(t) - 1].name)
+	}
+	shstrtab_name := intern(mut shstr, '.shstrtab')
+	strtab_name := intern(mut shstr, '.strtab')
+	symtab_name := intern(mut shstr, '.symtab')
+	shstrtab_index := 1 + sections.len
+	strtab_index := shstrtab_index + 1
+	symtab_index := strtab_index + 1
+	first_rela := symtab_index + 1
+	section_count := first_rela + targets.len
+	mut strtab := []u8{}
+	strtab << u8(0)
+	mut symbol_name := []int{}
+	symbol_name << 0
+	for s in symbols {
+		symbol_name << intern(mut strtab, s.name)
+	}
+	mut symtab := []u8{len: (symbols.len + 1) * 24, init: u8(0)}
+	for i, s in symbols {
+		at := (i + 1) * 24
+		set_u32(mut symtab, at, u32(symbol_name[i + 1]))
+		symtab[at + 4] = s.info
+		set_u16(mut symtab, at + 6, s.shndx)
+		set_u64(mut symtab, at + 8, s.value)
+		set_u64(mut symtab, at + 16, s.size)
+	}
+	mut rela_bytes := [][]u8{}
+	for t in targets {
+		mut count := 0
+		for r in relocations {
+			if r.target == t {
+				count++
+			}
+		}
+		mut buf := []u8{len: count * 24, init: u8(0)}
+		mut at := 0
+		for r in relocations {
+			if r.target != t {
+				continue
+			}
+			set_u64(mut buf, at, r.offset)
+			set_u64(mut buf, at + 8, (u64(r.symbol) << 32) | u64(r.kind))
+			set_u64(mut buf, at + 16, u64(r.addend))
+			at += 24
+		}
+		rela_bytes << buf
+	}
+	mut out := []u8{len: 64, init: u8(0)}
+	mut data_offset := []int{len: section_count, init: 0}
+	mut data_size := []int{len: section_count, init: 0}
+	for i, s in sections {
+		if s.kind == 8 {
+			// NOBITS holds no bytes in the file, only a size.
+			for out.len % 8 != 0 {
+				out << u8(0)
+			}
+			data_offset[i + 1] = out.len
+			data_size[i + 1] = s.data.len
+			continue
+		}
+		data_offset[i + 1] = place_block(mut out, 8, s.data)
+		data_size[i + 1] = s.data.len
+	}
+	data_offset[shstrtab_index] = place_block(mut out, 8, shstr)
+	data_size[shstrtab_index] = shstr.len
+	data_offset[strtab_index] = place_block(mut out, 8, strtab)
+	data_size[strtab_index] = strtab.len
+	data_offset[symtab_index] = place_block(mut out, 8, symtab)
+	data_size[symtab_index] = symtab.len
+	for i, buf in rela_bytes {
+		index := first_rela + i
+		data_offset[index] = place_block(mut out, 8, buf)
+		data_size[index] = buf.len
+	}
+	for out.len % 8 != 0 {
+		out << u8(0)
+	}
+	shoff := out.len
+	out << []u8{len: section_count * 64, init: u8(0)}
+	out[0] = 0x7f
+	out[1] = 0x45
+	out[2] = 0x4c
+	out[3] = 0x46
+	out[4] = 2 // ELFCLASS64
+	out[5] = 1 // ELFDATA2LSB
+	out[6] = 1 // EV_CURRENT
+	set_u16(mut out, 16, 1) // ET_REL
+	set_u16(mut out, 18, 62) // EM_X86_64
+	set_u32(mut out, 20, 1)
+	set_u64(mut out, 40, u64(shoff))
+	set_u16(mut out, 52, 64)
+	set_u16(mut out, 58, 64)
+	set_u16(mut out, 60, u16(section_count))
+	set_u16(mut out, 62, u16(shstrtab_index))
+	put_header(mut out, shoff, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	for i, s in sections {
+		put_header(mut out, shoff + (i + 1) * 64, u32(section_name[i + 1]), s.kind, s.flags,
+			data_offset[i + 1], data_size[i + 1], 0, 0, u64(s.align), 0)
+	}
+	put_header(mut out, shoff + shstrtab_index * 64, u32(shstrtab_name), 3, 0,
+		data_offset[shstrtab_index], data_size[shstrtab_index], 0, 0, 1, 0)
+	put_header(mut out, shoff + strtab_index * 64, u32(strtab_name), 3, 0,
+		data_offset[strtab_index], data_size[strtab_index], 0, 0, 1, 0)
+	put_header(mut out, shoff + symtab_index * 64, u32(symtab_name), 2, 0,
+		data_offset[symtab_index], data_size[symtab_index], u32(strtab_index), 1, 8, 24)
+	for i, t in targets {
+		index := first_rela + i
+		put_header(mut out, shoff + index * 64, u32(rela_name[i]), 4, 0, data_offset[index],
+			data_size[index], u32(symtab_index), u32(t), 8, 24)
+	}
+	return out
+}
+
+// section_header_offset finds the file offset of one named section's header,
+// read straight out of the object so the refusal tests can corrupt a field
+// without leaning on the reader they check.
+fn section_header_offset(obj []u8, name string) int {
+	shoff := int(field_u64(obj, 40))
+	shentsize := int(field_u16(obj, 58))
+	shnum := int(field_u16(obj, 60))
+	shstrndx := int(field_u16(obj, 62))
+	shstr := int(field_u64(obj, shoff + shstrndx * shentsize + 24))
+	for i in 0 .. shnum {
+		base := shoff + i * shentsize
+		name_off := int(field_u32(obj, base))
+		mut end := shstr + name_off
+		for end < obj.len && obj[end] != u8(0) {
+			end++
+		}
+		if obj[shstr + name_off..end].bytestr() == name {
+			return base
+		}
+	}
+	panic('the object has no section named ${name}')
+}
+
+// section_data_offset is where one named section's bytes start.
+fn section_data_offset(obj []u8, name string) int {
+	return int(field_u64(obj, section_header_offset(obj, name) + 24))
+}
+
+// place_block pads the object to an eight-byte boundary and appends one block,
+// answering where it landed.
+fn place_block(mut out []u8, alignment int, data []u8) int {
+	for out.len % alignment != 0 {
+		out << u8(0)
+	}
+	at := out.len
+	out << data
+	return at
+}
+
+// intern adds a NUL-terminated name to a string table and answers where it
+// starts.
+fn intern(mut table []u8, name string) int {
+	at := table.len
+	table << name.bytes()
+	table << u8(0)
+	return at
+}
+
+// put_header writes one 64-byte section header.
+fn put_header(mut out []u8, at int, name u32, kind u32, flags u64, offset int, size int, link u32, info u32, alignment u64, entsize u64) {
+	set_u32(mut out, at, name)
+	set_u32(mut out, at + 4, kind)
+	set_u64(mut out, at + 8, flags)
+	set_u64(mut out, at + 16, 0)
+	set_u64(mut out, at + 24, u64(offset))
+	set_u64(mut out, at + 32, u64(size))
+	set_u32(mut out, at + 40, link)
+	set_u32(mut out, at + 44, info)
+	set_u64(mut out, at + 48, alignment)
+	set_u64(mut out, at + 56, entsize)
+}
+
+fn set_u16(mut bytes []u8, at int, value u16) {
+	bytes[at] = u8(value & 0xff)
+	bytes[at + 1] = u8((value >> 8) & 0xff)
+}
+
+fn set_u32(mut bytes []u8, at int, value u32) {
+	for i in 0 .. 4 {
+		bytes[at + i] = u8((value >> (8 * i)) & 0xff)
+	}
+}
+
+fn set_u64(mut bytes []u8, at int, value u64) {
+	for i in 0 .. 8 {
+		bytes[at + i] = u8((value >> (8 * i)) & 0xff)
+	}
+}
