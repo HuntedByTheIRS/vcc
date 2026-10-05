@@ -249,3 +249,233 @@ fn test_the_128_bit_type_and_the_words_that_combine_with_it() {
 	// one anyway is not a run of type words, and is refused.
 	assert from_specifiers(['const', '__int128']) == none
 }
+
+// from_specifiers answers a kind, and the kind carries the properties the
+// clauses after 6.7.2.2 read off it: whether it is an integer, which of its
+// signs the words chose, whether it is floating, and its conversion rank from
+// 6.3.1.1. This is the table row by row, so a spelling that starts naming a
+// different kind than the standard's fails here.
+struct SpecifierRow {
+	words       []string
+	kind        Kind
+	is_integer  bool
+	is_signed   bool
+	is_unsigned bool
+	is_floating bool
+	rank        int
+}
+
+fn test_every_specifier_names_a_kind_with_its_signedness_and_rank() {
+	rows := [
+		SpecifierRow{ words: ['void'], kind: .void_, rank: -1 },
+		SpecifierRow{ words: ['_Bool'], kind: .bool_, is_integer: true, is_unsigned: true, rank: 0 },
+		SpecifierRow{ words: ['char'], kind: .char_, is_integer: true, is_signed: true, rank: 1 },
+		SpecifierRow{ words: ['signed', 'char'], kind: .signed_char, is_integer: true, is_signed: true, rank: 1 },
+		SpecifierRow{ words: ['unsigned', 'char'], kind: .unsigned_char, is_integer: true, is_unsigned: true, rank: 1 },
+		SpecifierRow{ words: ['short'], kind: .short, is_integer: true, is_signed: true, rank: 2 },
+		SpecifierRow{ words: ['unsigned', 'short'], kind: .unsigned_short, is_integer: true, is_unsigned: true, rank: 2 },
+		SpecifierRow{ words: ['int'], kind: .int_, is_integer: true, is_signed: true, rank: 3 },
+		SpecifierRow{ words: ['unsigned'], kind: .unsigned_int, is_integer: true, is_unsigned: true, rank: 3 },
+		SpecifierRow{ words: ['long'], kind: .long, is_integer: true, is_signed: true, rank: 4 },
+		SpecifierRow{ words: ['unsigned', 'long'], kind: .unsigned_long, is_integer: true, is_unsigned: true, rank: 4 },
+		SpecifierRow{ words: ['long', 'long'], kind: .long_long, is_integer: true, is_signed: true, rank: 5 },
+		SpecifierRow{ words: ['unsigned', 'long', 'long'], kind: .unsigned_long_long, is_integer: true, is_unsigned: true, rank: 5 },
+		SpecifierRow{ words: ['float'], kind: .float, is_floating: true, rank: 7 },
+		SpecifierRow{ words: ['double'], kind: .double, is_floating: true, rank: 8 },
+		SpecifierRow{ words: ['long', 'double'], kind: .long_double, is_floating: true, rank: 9 },
+	]
+	for row in rows {
+		kind := kind_of(row.words)
+		assert kind == row.kind, row.words.join(' ')
+		assert kind.is_integer() == row.is_integer, row.words.join(' ')
+		assert kind.is_signed_integer() == row.is_signed, row.words.join(' ')
+		assert kind.is_unsigned_integer() == row.is_unsigned, row.words.join(' ')
+		assert kind.is_floating() == row.is_floating, row.words.join(' ')
+		assert kind.rank() == row.rank, row.words.join(' ')
+	}
+}
+
+// is_unsigned is the question a widened value's sign is read from, and the
+// unsigned spellings are exactly the words that name a kind a value of which is
+// never negative. `_Bool` is one of them, and the integer words without the
+// keyword are not.
+fn test_the_unsigned_specifiers_are_the_ones_a_value_of_which_is_never_negative() {
+	for words in [
+		['_Bool'],
+		['unsigned', 'char'],
+		['unsigned', 'short'],
+		['unsigned'],
+		['unsigned', 'int'],
+		['unsigned', 'long'],
+		['unsigned', 'long', 'long'],
+	] {
+		assert kind_of(words).is_unsigned(), words.join(' ')
+	}
+	for words in [
+		['char'],
+		['signed', 'char'],
+		['short'],
+		['signed'],
+		['int'],
+		['long'],
+		['long', 'long'],
+	] {
+		assert !kind_of(words).is_unsigned(), words.join(' ')
+	}
+	// A floating type and void have no sign here to read.
+	assert !kind_of(['float']).is_unsigned()
+	assert !kind_of(['void']).is_unsigned()
+}
+
+fn test_signed_and_unsigned_written_alone_name_int_and_unsigned_int() {
+	signed_kind := kind_of(['signed'])
+	assert signed_kind == .int_
+	assert signed_kind.is_signed_integer()
+	assert signed_kind.rank() == 3
+	unsigned_kind := kind_of(['unsigned'])
+	assert unsigned_kind == .unsigned_int
+	assert unsigned_kind.is_unsigned_integer()
+	assert unsigned_kind.rank() == 3
+	// The word alone names one type, and the type is the one the description
+	// and the scalar table spell.
+	assert (from_words(['signed']) or { void_type() }).describe() == 'int'
+	assert (from_words(['unsigned']) or { void_type() }).describe() == 'unsigned int'
+}
+
+// `long long` names a type of its own and not two longs written twice for
+// emphasis: it ranks above long, which is what makes `long + long long`
+// convert to long long rather than stopping at the first type either of them
+// could be read as.
+fn test_long_long_ranks_above_long_and_below_the_128_bit_types() {
+	long_kind := kind_of(['long'])
+	long_long_kind := kind_of(['long', 'long'])
+	unsigned_long_long_kind := kind_of(['unsigned', 'long', 'long'])
+	assert long_long_kind == .long_long
+	assert unsigned_long_long_kind == .unsigned_long_long
+	assert long_kind.rank() == 4
+	assert long_long_kind.rank() == 5
+	assert unsigned_long_long_kind.rank() == 5
+	assert long_kind.rank() < long_long_kind.rank()
+	// The 128-bit types rank above it, which is where gcc's conversion rank
+	// puts `__int128` and what the conversions in convert_test.v follow.
+	assert long_long_kind.rank() < Kind.int128.rank()
+	assert (from_words(['long', 'long']) or { void_type() }).describe() == 'long long'
+}
+
+fn test_bool_is_one_word_the_other_widths_refuse() {
+	kind := kind_of(['_Bool'])
+	assert kind == .bool_
+	assert kind.is_integer()
+	assert kind.is_unsigned_integer()
+	assert kind.rank() == 0
+	assert (from_words(['_Bool']) or { void_type() }).describe() == '_Bool'
+	// `_Bool` is a type of its own and takes no width word beside it, and it is
+	// not a word the repeat rule lets through.
+	assert from_specifiers(['unsigned', '_Bool']) == none
+	assert from_specifiers(['signed', '_Bool']) == none
+	assert from_specifiers(['long', '_Bool']) == none
+	assert from_specifiers(['short', '_Bool']) == none
+	assert from_specifiers(['_Bool', '_Bool']) == none
+}
+
+// A typedef name is an ordinary identifier, and an ordinary identifier is not
+// one of the type words: the parser resolves `size_t` to the type its
+// declaration gave it and never hands the name to this table, so a name that
+// arrives here is refused rather than read as its letters happen to suggest.
+fn test_a_typedef_name_is_not_read_as_a_type_word() {
+	for words in [
+		['size_t'],
+		['ssize_t'],
+		['int32_t'],
+		['FILE'],
+		['my_type'],
+		['size_t', 'int'],
+	] {
+		assert from_specifiers(words) == none, words.join(' ')
+		assert from_words(words) == none, words.join(' ')
+	}
+}
+
+// A tag is not a run of type words. `struct S` is a keyword and a name, and the
+// name is answered by the scope's tag table (scope.v's declare_tag and
+// lookup_tag), so the three tag keywords on their own are refused here rather
+// than read as some type; the parser resolves the tag and hands the type it
+// found, which is the only place a tag becomes a specifier.
+fn test_a_tag_keyword_is_not_read_as_a_type_word() {
+	for words in [
+		['struct'],
+		['union'],
+		['enum'],
+		['struct', 'S'],
+		['union', 'U'],
+		['enum', 'E'],
+		['struct', 'S', 'int'],
+	] {
+		assert from_specifiers(words) == none, words.join(' ')
+		assert from_words(words) == none, words.join(' ')
+	}
+}
+
+// The words may be written in any order, which is what a declaration's freedom
+// to spell `unsigned long` and `long unsigned` both means.
+fn test_the_type_words_may_be_written_in_any_order() {
+	assert kind_of(['int', 'unsigned']) == .unsigned_int
+	assert kind_of(['int', 'long']) == .long
+	assert kind_of(['int', 'short']) == .short
+	assert kind_of(['char', 'unsigned']) == .unsigned_char
+	assert kind_of(['char', 'signed']) == .signed_char
+	assert kind_of(['double', 'long']) == .long_double
+	assert kind_of(['int', 'signed', 'long']) == .long
+	assert kind_of(['int', 'unsigned', 'long']) == .unsigned_long
+	assert kind_of(['int', 'long', 'long', 'unsigned']) == .unsigned_long_long
+}
+
+// A word written twice is not a type, and only `long` and `int` may repeat:
+// 6.7.2.2 lists `long long` and lets `int` be written or left out, and every
+// other word said twice is two data types in one declaration, which gcc 16.2.1
+// refuses for each row of the first loop.
+fn test_a_word_written_twice_is_refused_except_long_and_int() {
+	for words in [
+		['void', 'void'],
+		['char', 'char'],
+		['signed', 'char', 'signed'],
+		['short', 'short'],
+		['float', 'float'],
+		['double', 'double'],
+		['int', 'int'],
+		['long', 'long', 'long', 'long'],
+		['long', 'long', 'int', 'int'],
+	] {
+		assert from_specifiers(words) == none, words.join(' ')
+	}
+	// `long` may be written twice and `int` may accompany it once, which is
+	// what makes `long long int` one type; a third `long` is one too many.
+	assert kind_of(['long', 'long']) == .long_long
+	assert kind_of(['long', 'long', 'int']) == .long_long
+	assert kind_of(['int']) == .int_
+	assert from_specifiers(['long', 'long', 'long']) == none
+}
+
+// 6.2.5p15: `char`, `signed char` and `unsigned char` are three distinct types,
+// so the plain word and the two signed ones name three kinds and not one kind
+// under two spellings. They share one rank, which is what makes a sum of two of
+// them convert rather than letting one rank win.
+fn test_char_signed_and_unsigned_are_three_distinct_types() {
+	plain := kind_of(['char'])
+	signed_kind := kind_of(['signed', 'char'])
+	unsigned_kind := kind_of(['unsigned', 'char'])
+	assert plain == .char_
+	assert signed_kind == .signed_char
+	assert unsigned_kind == .unsigned_char
+	assert plain != signed_kind
+	assert plain != unsigned_kind
+	assert signed_kind != unsigned_kind
+	assert plain.rank() == signed_kind.rank()
+	assert signed_kind.rank() == unsigned_kind.rank()
+	assert plain.is_signed_integer()
+	assert signed_kind.is_signed_integer()
+	assert unsigned_kind.is_unsigned_integer()
+	assert (from_words(['char']) or { void_type() }).describe() == 'char'
+	assert (from_words(['signed', 'char']) or { void_type() }).describe() == 'signed char'
+	assert (from_words(['unsigned', 'char']) or { void_type() }).describe() == 'unsigned char'
+}

@@ -594,3 +594,346 @@ fn test_an_object_that_may_not_be_written_is_refused_as_the_target() {
 	})
 	assert (assignment_target_problem(volatile_object) or { '' }) == ''
 }
+
+// sum_with is sum with the object representation the caller names, for the
+// cases where the widths are the thing under test rather than this target's.
+fn sum_with(a Type, b Type, rep Representation) string {
+	return usual_arithmetic_conversions(a, b, rep) or {
+		return 'refused: ${err.msg()}'
+	}.describe()
+}
+
+// 6.7.6.3p15: two function types are compatible when they return compatible
+// types and take compatible parameter types, and the parameter names are not
+// part of either. The parameter adjustment of 6.7.5.3 has already happened when
+// the type is built, so two declarations written differently but meaning one
+// function come out equal here.
+fn test_two_function_types_are_compatible_when_return_and_parameters_match() {
+	one := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  char_type()
+		},
+	], false, true)
+	// The same signature under another parameter name is the same type.
+	other_name := function_type(int_type(), [
+		Param{
+			name: 'value'
+			typ:  char_type()
+		},
+	], false, true)
+	assert one.compatible(other_name)
+	assert other_name.compatible(one)
+	// A pointer to a function compares through the pointer.
+	assert pointer_to(one).compatible(pointer_to(other_name))
+	// A prototype that names no parameters is `(void)`, and two of those are one
+	// type.
+	no_parameters := function_type(int_type(), [], false, true)
+	assert no_parameters.compatible(function_type(int_type(), [], false, true))
+	// A function that returns nothing has a return type, and it is part of the
+	// comparison like any other.
+	no_return := function_type(void_type(), [], false, true)
+	assert no_return.compatible(function_type(void_type(), [], false, true))
+}
+
+// The return type is compared as well as the parameters, so two functions that
+// take the same arguments and return different types are two types. void is a
+// return type of its own and not the absence of one.
+fn test_two_function_types_differ_in_the_return_type() {
+	int_return := function_type(int_type(), [], false, true)
+	char_return := function_type(char_type(), [], false, true)
+	assert !int_return.compatible(char_return)
+	assert !char_return.compatible(int_return)
+	assert !int_return.compatible(function_type(void_type(), [], false, true))
+	assert !function_type(void_type(), [], false, true).compatible(int_return)
+}
+
+// 6.7.6.3: the parameter type list is part of the type, so a different count of
+// parameters is a different function type.
+fn test_two_function_types_differ_in_the_parameter_count() {
+	none_taken := function_type(int_type(), [], false, true)
+	one_taken := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  int_type()
+		},
+	], false, true)
+	two_taken := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  int_type()
+		},
+		Param{
+			name: 'b'
+			typ:  int_type()
+		},
+	], false, true)
+	assert !none_taken.compatible(one_taken)
+	assert !one_taken.compatible(none_taken)
+	assert !one_taken.compatible(two_taken)
+	assert !two_taken.compatible(one_taken)
+}
+
+// The types of the parameters are compared in order, so a different type in one
+// position is a different function type.
+fn test_two_function_types_differ_in_a_parameter_type() {
+	takes_int := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  int_type()
+		},
+	], false, true)
+	takes_char := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  char_type()
+		},
+	], false, true)
+	assert !takes_int.compatible(takes_char)
+	assert !takes_char.compatible(takes_int)
+	takes_int_char := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  int_type()
+		},
+		Param{
+			name: 'b'
+			typ:  char_type()
+		},
+	], false, true)
+	takes_char_int := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  char_type()
+		},
+		Param{
+			name: 'b'
+			typ:  int_type()
+		},
+	], false, true)
+	assert !takes_int_char.compatible(takes_char_int)
+}
+
+// 6.7.6.3: a function type written with no parameter list says nothing about the
+// arguments a call may pass and is not a prototype; a prototype that names no
+// parameters says the function takes none. The two are different types, so two
+// declarations of one function may not mix them.
+fn test_a_function_without_a_parameter_list_is_not_compatible_with_a_prototype() {
+	no_list := function_type(int_type(), [], false, false)
+	prototype_none := function_type(int_type(), [], false, true)
+	prototype_one := function_type(int_type(), [
+		Param{
+			name: 'a'
+			typ:  int_type()
+		},
+	], false, true)
+	assert !no_list.compatible(prototype_none)
+	assert !prototype_none.compatible(no_list)
+	assert !no_list.compatible(prototype_one)
+	assert !prototype_one.compatible(no_list)
+	// Two functions that both wrote no list are one type.
+	assert no_list.compatible(function_type(int_type(), [], false, false))
+	// The type itself says which of the two spellings it was.
+	assert prototype_none.prototyped
+	assert !no_list.prototyped
+}
+
+// The variadic flag is part of the type: `int f(int)` and `int f(int, ...)` do
+// not declare one function.
+fn test_two_function_types_differ_when_one_is_variadic() {
+	fixed := function_type(int_type(), [
+		Param{
+			name: 'n'
+			typ:  int_type()
+		},
+	], false, true)
+	variadic := function_type(int_type(), [
+		Param{
+			name: 'n'
+			typ:  int_type()
+		},
+	], true, true)
+	assert !fixed.compatible(variadic)
+	assert !variadic.compatible(fixed)
+	assert variadic.compatible(function_type(int_type(), [
+		Param{
+			name: 'n'
+			typ:  int_type()
+		},
+	], true, true))
+}
+
+// 6.7.5.3: a parameter written with an array type is written as a pointer and
+// one written with a function type as a pointer to a function, so a definition
+// written `void f(char a[])` and a prototype written `void f(char *a)` declare
+// one function and not two.
+fn test_a_parameter_written_as_an_array_or_a_function_is_adjusted_before_the_comparison() {
+	as_array := function_type(void_type(), [
+		Param{
+			name: 'a'
+			typ:  array_of(char_type(), -1)
+		},
+	], false, true)
+	as_pointer := function_type(void_type(), [
+		Param{
+			name: 'a'
+			typ:  pointer_to(char_type())
+		},
+	], false, true)
+	assert as_array.compatible(as_pointer)
+	assert as_pointer.compatible(as_array)
+	// A pointer to an array is not the same parameter type as the array: only
+	// the array spelling is adjusted, and the pointer spelling is left alone.
+	assert !as_array.compatible(function_type(void_type(), [
+		Param{
+			name: 'a'
+			typ:  pointer_to(array_of(char_type(), -1))
+		},
+	], false, true))
+	// A function type as a parameter becomes a pointer to one.
+	callback := function_type(int_type(), [], false, true)
+	as_function := function_type(void_type(), [
+		Param{
+			name: 'cb'
+			typ:  callback
+		},
+	], false, true)
+	as_function_pointer := function_type(void_type(), [
+		Param{
+			name: 'cb'
+			typ:  pointer_to(callback)
+		},
+	], false, true)
+	assert as_function.compatible(as_function_pointer)
+	assert as_function_pointer.compatible(as_function)
+}
+
+// 6.3.1.3: two integer types of the same width are decided by signedness and not
+// by rank, so the same width reads as preserving a value only when no value can
+// be lost. `long` and `long long` are both eight bytes on this target and both
+// signed, so each holds every value of the other, while an unsigned type of one
+// width cannot hold a signed one's.
+fn test_value_preserving_at_the_same_width_reads_the_signedness() {
+	rep := measured.representation()
+	assert value_preserving(long_type(), long_long_type(), rep) or {
+		assert false
+		return
+	}
+	assert value_preserving(long_long_type(), long_type(), rep) or {
+		assert false
+		return
+	}
+	assert !value_preserving(unsigned_long_type(), long_long_type(), rep) or {
+		assert false
+		return
+	}
+	assert !value_preserving(long_long_type(), unsigned_long_type(), rep) or {
+		assert false
+		return
+	}
+	// A wider target holds every value of a narrower source, and a narrower one
+	// does not, whether or not a sign is involved.
+	assert value_preserving(unsigned_long_type(), unsigned_int_type(), rep) or {
+		assert false
+		return
+	}
+	assert !value_preserving(unsigned_int_type(), unsigned_long_type(), rep) or {
+		assert false
+		return
+	}
+	assert value_preserving(int_type(), bool_type(), rep) or {
+		assert false
+		return
+	}
+	// An enumerated type is asked about the integer type its enumerators
+	// require, so it preserves an int in both directions.
+	assert value_preserving(enum_type('E', .int_), int_type(), rep) or {
+		assert false
+		return
+	}
+	assert value_preserving(int_type(), enum_type('E', .int_), rep) or {
+		assert false
+		return
+	}
+}
+
+// The promotion is asked of any operand of an arithmetic expression, and a type
+// this compiler never resolved has no promotion: the refusal names the missing
+// answer rather than reading an unresolved type as int.
+fn test_the_promotion_of_a_type_the_compiler_never_resolved_is_refused() {
+	unknown_refused := integer_promotion(Type{}, measured.representation()) or {
+		assert err.msg().contains('promotion')
+		return
+	}
+	assert unknown_refused.kind == .unknown
+	opaque_refused := integer_promotion(opaque_type('size_t'), measured.representation()) or {
+		assert err.msg().contains('promotion')
+		return
+	}
+	assert opaque_refused.kind == .unknown
+}
+
+// 6.3.1.8: when a signed and an unsigned operand have ranks that would hand the
+// result to the unsigned one, the two widths are compared first, and a signed
+// type no wider than the unsigned one gives way to the unsigned type of the
+// signed side's own rank. On widths a target may have, where `long` and
+// `unsigned int` are both four bytes, `long` cannot hold every unsigned int
+// value, so the conversion lands on `unsigned long` and not on `long`.
+fn test_the_usual_arithmetic_conversions_fall_back_to_the_unsigned_counterpart() {
+	narrow := Representation{
+		sizes:  {
+			Kind.long:         4
+			Kind.unsigned_int: 4
+		}
+		aligns: {
+			Kind.long:         4
+			Kind.unsigned_int: 4
+		}
+	}
+	assert sum_with(long_type(), unsigned_int_type(), narrow) == 'unsigned long'
+	assert sum_with(unsigned_int_type(), long_type(), narrow) == 'unsigned long'
+	// With the widths this target has, the eight-byte long holds every value of
+	// the four-byte unsigned int, so the signed side wins instead.
+	assert sum(long_type(), unsigned_int_type()) == 'long'
+}
+
+// 6.5.16.1: a pointer to void converts to and from a pointer to any object or
+// incomplete type, and a struct declared but never defined is exactly such an
+// incomplete type. Two pointers to the same incomplete tag are compatible, and a
+// pointer to an incomplete struct does not point to a type compatible with int.
+fn test_a_pointer_to_an_incomplete_type_converts_to_and_from_a_void_pointer() {
+	incomplete := incomplete_tag(Kind.struct_, 'S')
+	to_incomplete := pointer_to(incomplete)
+	void_pointer := pointer_to(void_type())
+	assert reason(to_incomplete, void_pointer, false) == ''
+	assert reason(void_pointer, to_incomplete, false) == ''
+	// The same tag names the same type whether or not the body was read.
+	assert reason(to_incomplete, pointer_to(incomplete_tag(Kind.struct_, 'S')), false) == ''
+	// An object pointer of another type is not compatible with it.
+	assert only_reason(pointer_to(int_type()), to_incomplete, false, 'compatible')
+	assert only_reason(to_incomplete, pointer_to(int_type()), false, 'compatible')
+}
+
+// 6.5.16.1: a pointer to void converts to and from a pointer to any object type,
+// and the qualifier on the type it points at survives the conversion. Adding a
+// qualifier on the way to void is allowed; dropping one is the reason the
+// standard requires a diagnostic for, and the reason carries `warning` because
+// gcc still compiles the program.
+fn test_a_void_pointer_conversion_that_drops_a_pointee_qualifier_is_a_warning() {
+	const_int := qualified(int_type(), Qualifiers{
+		const_: true
+	})
+	dropped := assignment_problem(pointer_to(void_type()), pointer_to(const_int), false) or {
+		panic('dropping const through a void pointer is a problem')
+	}
+	assert dropped.warning
+	assert dropped.class == .discarded_qualifiers
+	assert dropped.msg.contains('drops a qualifier')
+	// Adding the same qualifier on the way to void is allowed, and a void
+	// pointer from a plain int pointer has no qualifier to drop.
+	const_void := pointer_to(qualified(void_type(), Qualifiers{
+		const_: true
+	}))
+	assert reason(const_void, pointer_to(int_type()), false) == ''
+	assert reason(pointer_to(void_type()), pointer_to(int_type()), false) == ''
+}
