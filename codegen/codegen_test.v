@@ -4825,3 +4825,364 @@ fn test_the_flag_decides_the_form_of_a_reference_to_a_top_level_object() {
 	assert text_pic.diagnostics.len == 0
 	assert text_plain.bytes == text_pic.bytes
 }
+
+// A relocatable object is read back through its section header table, so a test
+// can ask about the code and the relocations the emitter wrote rather than only
+// about the answer the program computes. The helpers below find a section by the
+// name its own string table gives it.
+struct ObjectSection {
+	offset int
+	size   int
+}
+
+fn object_section(image []u8, name string) ObjectSection {
+	headers := int(u64_at(image, 40))
+	count := int(u16_at(image, 60))
+	shstrndx := int(u16_at(image, 62))
+	table := headers + shstrndx * 64
+	names := int(u64_at(image, table + 24))
+	for i in 0 .. count {
+		at := headers + i * 64
+		if read_string(image, names + int(u32_at(image, at))) == name {
+			return ObjectSection{
+				offset: int(u64_at(image, at + 24))
+				size:   int(u64_at(image, at + 32))
+			}
+		}
+	}
+	return ObjectSection{}
+}
+
+// object_text is the code section, which is where a test reads the encodings the
+// emitter chose.
+fn object_text(image []u8) []u8 {
+	section := object_section(image, '.text')
+	return image[section.offset..section.offset + section.size]
+}
+
+// RelocationEntry is one entry of a relocation table, read the way a linker
+// reads it: where it writes, which symbol it names, what kind of reference it is,
+// and the addend.
+struct RelocationEntry {
+	offset int
+	symbol int
+	kind   u32
+	addend i64
+}
+
+fn object_relocations(image []u8, name string) []RelocationEntry {
+	section := object_section(image, name)
+	mut entries := []RelocationEntry{}
+	for i in 0 .. section.size / 24 {
+		at := section.offset + i * 24
+		info := u64_at(image, at + 8)
+		entries << RelocationEntry{
+			offset: int(u64_at(image, at))
+			symbol: int(info >> 32)
+			kind:   u32(info & 0xffffffff)
+			addend: i64(u64_at(image, at + 16))
+		}
+	}
+	return entries
+}
+
+// object_symbol_name is the string a symbol table entry names, read out of the
+// string table the symbol table points at.
+fn object_symbol_name(image []u8, index int) string {
+	symtab := object_section(image, '.symtab')
+	strtab := object_section(image, '.strtab')
+	offset := int(u32_at(image, symtab.offset + index * 24))
+	return read_string(image, strtab.offset + offset)
+}
+
+// signed_disp32 reads a four-byte displacement as the distance the machine reads
+// it, a signed offset from the end of the field.
+fn signed_disp32(bytes []u8, at int) i32 {
+	return i32(u32_at(bytes, at))
+}
+
+// A signed comparison and an unsigned one ask different flags: the machine reads
+// the sign flag for the signed order and the carry flag for the unsigned one, so
+// a compiler that wrote the same condition for both would answer `-1 < 1u`
+// wrongly. The signed order ends in a setl (0F 9C) and the unsigned one in a
+// setb (0F 92).
+fn test_a_signed_comparison_and_an_unsigned_one_choose_different_conditions() {
+	signed := emit(translation_unit('int lt(int a, int b) { return a < b; }'), Options{
+		compile_only: true
+	})
+	assert signed.diagnostics.len == 0
+	signed_text := object_text(signed.bytes)
+	assert holds(signed_text, [u8(0x0f), u8(0x9c)])
+	assert !holds(signed_text, [u8(0x0f), u8(0x92)])
+	unsigned := emit(translation_unit('int lt(unsigned int a, unsigned int b) { return a < b; }'),
+		Options{
+			compile_only: true
+		})
+	assert unsigned.diagnostics.len == 0
+	unsigned_text := object_text(unsigned.bytes)
+	assert holds(unsigned_text, [u8(0x0f), u8(0x92)])
+	assert !holds(unsigned_text, [u8(0x0f), u8(0x9c)])
+}
+
+// A signed division spreads the sign over the register above the quotient before
+// it divides, and an unsigned one clears that register instead: cdq then idiv
+// ecx for the signed case (99, F7 /7) and xor edx, edx then div ecx for the
+// unsigned one (31 D2, F7 /6).
+fn test_a_signed_division_spreads_the_sign_and_an_unsigned_one_clears_it() {
+	signed := emit(translation_unit('int d(int a, int b) { return a / b; }'), Options{
+		compile_only: true
+	})
+	assert signed.diagnostics.len == 0
+	signed_text := object_text(signed.bytes)
+	assert holds(signed_text, [u8(0x99)]) // cdq
+	assert holds(signed_text, [u8(0xf7), u8(0xf9)]) // idiv ecx
+	unsigned := emit(translation_unit('unsigned int d(unsigned int a, unsigned int b) { return a / b; }'),
+		Options{
+			compile_only: true
+		})
+	assert unsigned.diagnostics.len == 0
+	unsigned_text := object_text(unsigned.bytes)
+	assert holds(unsigned_text, [u8(0x31), u8(0xd2)]) // xor edx, edx
+	assert holds(unsigned_text, [u8(0xf7), u8(0xf1)]) // div ecx
+	assert !holds(unsigned_text, [u8(0x99)])
+}
+
+// A shift by a constant writes the count into the instruction: shl rax, 3 is
+// 48 C1 E0 03, sar rax, 2 is 48 C1 F8 02, and shr rax, 2 is 48 C1 E8 02. The
+// operation lives in the reg field of the shift group, which is what tells the
+// three of them apart at the same count.
+fn test_a_constant_shift_writes_its_count_into_the_instruction() {
+	left := emit(translation_unit('int s(int a) { return a << 3; }'), Options{
+		compile_only: true
+	})
+	assert left.diagnostics.len == 0
+	assert holds(object_text(left.bytes), [u8(0x48), u8(0xc1), u8(0xe0), u8(0x03)])
+	arithmetic := emit(translation_unit('int s(int a) { return a >> 2; }'), Options{
+		compile_only: true
+	})
+	assert arithmetic.diagnostics.len == 0
+	assert holds(object_text(arithmetic.bytes), [u8(0x48), u8(0xc1), u8(0xf8), u8(0x02)])
+	logical := emit(translation_unit('unsigned int s(unsigned int a) { return a >> 2; }'), Options{
+		compile_only: true
+	})
+	assert logical.diagnostics.len == 0
+	assert holds(object_text(logical.bytes), [u8(0x48), u8(0xc1), u8(0xe8), u8(0x02)])
+}
+
+// A shift by a count the program works out reads the count from cl: shl eax, cl
+// is D3 E0 and shl rax, cl is 48 D3 E0. The four-byte form is what a value
+// narrower than a word uses, so the machine reads its count as a narrow one's
+// count is read.
+fn test_a_shift_by_a_computed_count_reads_the_count_from_cl() {
+	narrow := emit(translation_unit('int s(int a, int n) { return a << n; }'), Options{
+		compile_only: true
+	})
+	assert narrow.diagnostics.len == 0
+	narrow_text := object_text(narrow.bytes)
+	assert holds(narrow_text, [u8(0xd3), u8(0xe0)])
+	assert !holds(narrow_text, [u8(0x48), u8(0xd3), u8(0xe0)])
+	wide := emit(translation_unit('long s(long a, int n) { return a << n; }'), Options{
+		compile_only: true
+	})
+	assert wide.diagnostics.len == 0
+	assert holds(object_text(wide.bytes), [u8(0x48), u8(0xd3), u8(0xe0)])
+}
+
+// A byte on the way into a register is widened the way its type asks: a signed
+// char with its sign (movsx, 0F BE) and an unsigned char with zero above the
+// value (movzx, 0F B6). The two differ in the opcode and nothing else.
+fn test_a_byte_load_widens_the_way_its_type_asks() {
+	signed := emit(translation_unit('int f(char *p) { return *p; }'), Options{
+		compile_only: true
+	})
+	assert signed.diagnostics.len == 0
+	signed_text := object_text(signed.bytes)
+	assert holds(signed_text, [u8(0x0f), u8(0xbe)])
+	assert !holds(signed_text, [u8(0x0f), u8(0xb6)])
+	unsigned := emit(translation_unit('int f(unsigned char *p) { return *p; }'), Options{
+		compile_only: true
+	})
+	assert unsigned.diagnostics.len == 0
+	unsigned_text := object_text(unsigned.bytes)
+	assert holds(unsigned_text, [u8(0x0f), u8(0xb6)])
+	assert !holds(unsigned_text, [u8(0x0f), u8(0xbe)])
+}
+
+// A two-byte value is widened at its own width: movsx for a short (0F BF) and
+// movzx for an unsigned short (0F B7), which are the two-byte shapes of the byte
+// loads beside them.
+fn test_a_halfword_load_widens_at_the_width_of_its_type() {
+	signed := emit(translation_unit('int f(short *p) { return *p; }'), Options{
+		compile_only: true
+	})
+	assert signed.diagnostics.len == 0
+	signed_text := object_text(signed.bytes)
+	assert holds(signed_text, [u8(0x0f), u8(0xbf)])
+	assert !holds(signed_text, [u8(0x0f), u8(0xb7)])
+	unsigned := emit(translation_unit('int f(unsigned short *p) { return *p; }'), Options{
+		compile_only: true
+	})
+	assert unsigned.diagnostics.len == 0
+	unsigned_text := object_text(unsigned.bytes)
+	assert holds(unsigned_text, [u8(0x0f), u8(0xb7)])
+	assert !holds(unsigned_text, [u8(0x0f), u8(0xbf)])
+}
+
+// A store writes the number of bytes its width names: a byte store is the 88
+// form of the move with the REX prefix that names a byte register, and a
+// two-byte store carries the 66 operand-size prefix before the 89.
+fn test_a_narrow_store_writes_the_bytes_of_its_width() {
+	byte_store := emit(translation_unit('void f(char *p, char v) { *p = v; }'), Options{
+		compile_only: true
+	})
+	assert byte_store.diagnostics.len == 0
+	assert holds(object_text(byte_store.bytes), [u8(0x40), u8(0x88)])
+	word_store := emit(translation_unit('void f(short *p, short v) { *p = v; }'), Options{
+		compile_only: true
+	})
+	assert word_store.diagnostics.len == 0
+	assert holds(object_text(word_store.bytes), [u8(0x66), u8(0x89)])
+}
+
+// An element of an array is reached by a scaled address, and the scale is the
+// size of an element: scale 2 is four bytes and scale 0 is one. lea rax, [rcx +
+// rax*4] is 48 8D 84 81 and lea rax, [rcx + rax*1] is 48 8D 84 01, so the SIB
+// byte says which element width the address was built for.
+fn test_an_element_address_scales_by_the_size_of_the_element() {
+	ints := emit(translation_unit('int f(int *p, int n) { return p[n]; }'), Options{
+		compile_only: true
+	})
+	assert ints.diagnostics.len == 0
+	assert holds(object_text(ints.bytes), [u8(0x48), u8(0x8d), u8(0x84), u8(0x81)])
+	chars := emit(translation_unit('int f(char *p, int n) { return p[n]; }'), Options{
+		compile_only: true
+	})
+	assert chars.diagnostics.len == 0
+	assert holds(object_text(chars.bytes), [u8(0x48), u8(0x8d), u8(0x84), u8(0x01)])
+}
+
+// A scaled address can name only one, two, four or eight bytes, so an element
+// three bytes wide is reached by multiplying the index: imul rax, rax, 3 is
+// 48 69 C0 03 00 00 00, and the product is added to the base with 48 01 C8.
+fn test_a_stride_the_machine_cannot_scale_is_a_multiply() {
+	struct_three := emit(translation_unit('struct S { char c[3]; }; int f(struct S *p, int n) { return p[n].c[0]; }'),
+		Options{
+			compile_only: true
+		})
+	assert struct_three.diagnostics.len == 0
+	text := object_text(struct_three.bytes)
+	assert holds(text, [u8(0x48), u8(0x69), u8(0xc0), u8(0x03), u8(0x00), u8(0x00), u8(0x00)])
+	assert holds(text, [u8(0x48), u8(0x01), u8(0xc8)])
+}
+
+// The distance a branch carries is filled in once the whole function is laid
+// out, so a conditional branch over a long block reaches forward past many
+// instructions and the jump that closes a loop carries a negative distance back
+// to the top label. A placeholder left in either one would send the code to the
+// wrong place, and the two signs are what tells the directions apart.
+fn test_a_branch_over_a_long_block_and_a_jump_back_both_reach_their_target() {
+	far := emit(translation_unit('int f(int a) { if (a) { a = a + 1; a = a + 2; a = a + 3; a = a + 4; a = a + 5; a = a + 6; a = a + 7; a = a + 8; } return a; }'),
+		Options{
+			compile_only: true
+		})
+	assert far.diagnostics.len == 0
+	far_text := object_text(far.bytes)
+	mut branch := -1
+	for i in 0 .. far_text.len - 5 {
+		if far_text[i] == 0x0f && far_text[i + 1] == 0x84 {
+			branch = i
+			break
+		}
+	}
+	assert branch >= 0
+	forward := signed_disp32(far_text, branch + 2)
+	assert forward > 100
+	assert branch + 6 + int(forward) < far_text.len
+	loop := emit(translation_unit('int f(int n) { int s = 0; while (n > 0) { s = s + n; n = n - 1; } return s; }'),
+		Options{
+			compile_only: true
+		})
+	assert loop.diagnostics.len == 0
+	loop_text := object_text(loop.bytes)
+	mut back := -1
+	for i in 0 .. loop_text.len - 4 {
+		if loop_text[i] == 0xe9 && signed_disp32(loop_text, i + 1) < 0 {
+			back = i
+			break
+		}
+	}
+	assert back >= 0
+	distance := signed_disp32(loop_text, back + 1)
+	assert back + 5 + int(distance) >= 0
+}
+
+// A call inside the text is a relocation against the function it calls, and it
+// is the kind a linker may route through a stub. The field the linker writes is
+// the four bytes after the E8 opcode, not the opcode itself, and the symbol is
+// the one whose code begins at the label the call names.
+fn test_a_call_inside_the_text_is_a_relocation_against_its_definition() {
+	emitted := emit(translation_unit('int g() { return 1; }\nint f() { return g(); }\n'), Options{
+		compile_only: true
+	})
+	assert emitted.diagnostics.len == 0
+	entries := object_relocations(emitted.bytes, '.rela.text')
+	assert entries.len == 1
+	assert entries[0].kind == emitted.target.call_relocation()
+	assert entries[0].addend == -4
+	assert object_symbol_name(emitted.bytes, entries[0].symbol) == 'g'
+	text := object_text(emitted.bytes)
+	assert text[entries[0].offset - 1] == 0xe8
+}
+
+// A reference to the address of an object in the same link is a distance the
+// linker fills in, which is the target's direct address kind rather than its
+// call kind, and the addend is the four bytes the field is measured past.
+fn test_an_address_of_a_top_level_object_is_a_direct_relocation() {
+	emitted := emit(translation_unit('int counter = 10;\nint *f() { return &counter; }\n'), Options{
+		compile_only: true
+	})
+	assert emitted.diagnostics.len == 0
+	entries := object_relocations(emitted.bytes, '.rela.text')
+	assert entries.len == 1
+	assert entries[0].kind == emitted.target.address_relocation()
+	assert entries[0].addend == -4
+	assert object_symbol_name(emitted.bytes, entries[0].symbol) == 'counter'
+}
+
+// A position-independent reference to an object another object may define is
+// made through the global offset table, which is a relocation kind of its own.
+// The same source compiled without the flag writes a direct reference, so the
+// flag is what chose this kind.
+fn test_a_pic_reference_to_a_top_level_object_is_a_got_relocation() {
+	emitted := emit(translation_unit('int counter = 10;\nint f() { return counter; }\n'), Options{
+		compile_only: true
+		pic:          true
+	})
+	assert emitted.diagnostics.len == 0
+	entries := object_relocations(emitted.bytes, '.rela.text')
+	assert entries.len == 1
+	assert entries[0].kind == emitted.target.got_relocation()
+	assert entries[0].addend == -4
+	assert object_symbol_name(emitted.bytes, entries[0].symbol) == 'counter'
+}
+
+// A pointer is eight bytes and an int is four, so converting an int to a pointer
+// widens it into the whole register: a signed one with movsxd (48 63 C0) and an
+// unsigned one by writing the four-byte register, which clears the bits above
+// the value. The two extensions are the difference between an address of
+// 0xffffffff and one of 0x00000000ffffffff.
+fn test_an_int_converted_to_a_pointer_is_extended_by_its_sign() {
+	signed := emit(translation_unit('char *f(int i) { return (char *)i; }'), Options{
+		compile_only: true
+	})
+	assert signed.diagnostics.len == 0
+	signed_text := object_text(signed.bytes)
+	assert holds(signed_text, [u8(0x48), u8(0x63), u8(0xc0)])
+	unsigned := emit(translation_unit('char *f(unsigned int i) { return (char *)i; }'), Options{
+		compile_only: true
+	})
+	assert unsigned.diagnostics.len == 0
+	unsigned_text := object_text(unsigned.bytes)
+	assert holds(unsigned_text, [u8(0x89), u8(0xc0)])
+	assert !holds(unsigned_text, [u8(0x48), u8(0x63)])
+}
