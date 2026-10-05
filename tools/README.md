@@ -155,6 +155,23 @@ the badge cannot disagree with the run. The count has one home: the runner
 writes `.github/badges/tests.json` on a push to `main` and the badge reads it,
 the same arrangement `compliance.vsh` and the compliance badge use.
 
+## lines.vsh
+
+The compiler's size in lines: the `.v` files the tree tracks that are not tests,
+`tools/` out and `linking/` in, so the linker counts itself the day it is
+written. Lines are physical, the way `wc -l` counts them. The files come from
+`git ls-files` rather than a walk of the tree, because a walk reaches into
+`.omh/` and counts the agent working state's copies of the sources as compiler;
+that leak is where ARCHITECTURE.md's old total of 72,068 came from.
+
+```sh
+v run tools/lines.vsh            # the lines in each module, then the total
+v run tools/lines.vsh --count    # the total alone, for the badge step
+```
+
+The count has one home: the gate job writes `.github/badges/lines.json` on a push
+to `main` and the lines badge reads it, the same arrangement the tests badge uses.
+
 ## bench.vsh
 
 Wall time and peak memory for a compile, with tcc on the same input as the
@@ -198,8 +215,9 @@ workload that matters.
 
 `.github/workflows/ci.yml` builds V from source at a pinned commit, runs
 `gate.vsh`, then runs the benchmark and writes the numbers into the run summary.
-On a push to `main` the same job counts the suite with `tests.vsh` and writes
-`.github/badges/tests.json`, which the tests badge in `README.md` reads; the
+On a push to `main` the same job counts the suite with `tests.vsh`, and the
+compiler's lines with `lines.vsh`, writing `.github/badges/tests.json` and
+`.github/badges/lines.json` for the badges in `README.md`; the
 compliance job and the regression job do the same for the compliance and
 regressions badges, each counting with its own runner. A second job builds V
 master and runs the build and the tests without calling it a failure: master is
