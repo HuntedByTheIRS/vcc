@@ -112,10 +112,26 @@ pub:
 	// kind is how the name is reached. A direct reference uses the address of
 	// what the name stands for. A `.got` one uses the address of the global
 	// offset table's slot for the name, which is what a position-independent
-	// reference to an object the image may not hold a copy of goes through.
+	// reference to an object the image may not hold a copy of goes through. An
+	// `.absolute` one writes the address itself, for a field that holds an
+	// address rather than a distance. A `.tpoff` one writes how far a
+	// thread-local lies below the thread pointer, which measures from the end of
+	// the thread-local block rather than from the end of the field.
 	kind   RelocationKind = .direct
 	name   string
 	addend int
+	// width is how many bytes the field occupies: four, which is what an
+	// instruction's displacement and this compiler's own references are, or
+	// eight, which is what an unwind table's entries and an eight-byte
+	// address are. The bytes are already written; only the field is filled
+	// in, so how wide it is has to be carried.
+	width RelocationWidth = .narrow
+}
+
+// RelocationWidth is how many bytes of the field a reference occupies.
+pub enum RelocationWidth {
+	narrow
+	wide
 }
 
 // RelocationPlace is which of a unit's blobs a relocatable field lies in. The
@@ -128,10 +144,13 @@ pub enum RelocationPlace {
 }
 
 // RelocationKind is how a relocatable reference reaches what it names: the
-// address itself, or the address of the global offset table's slot for it.
+// address itself, the address of the global offset table's slot for it, the
+// address written down, or how far below the thread pointer a thread-local is.
 pub enum RelocationKind {
 	direct
 	got
+	absolute
+	tpoff
 }
 
 // Definition is where a name that another translation unit of the same link
@@ -146,6 +165,11 @@ pub:
 	// offset into the code, false for an offset into the writable data of the
 	// top-level objects.
 	function bool
+	// tls says the offset counts from the start of the image's thread-local
+	// block instead, which is where a local-exec reference measures from. A
+	// thread-local is the one place a name lives that is neither code nor the
+	// storage of an object: every thread gets its own copy of it.
+	tls bool
 }
 
 // GlobalSlot is where a top-level object lives in the image and how wide it is:
@@ -284,6 +308,40 @@ pub mut:
 	// provide. The map is empty for a program the emitter wrote in one piece,
 	// where every import is a library's.
 	bound map[string]Definition
+	// tls_blob is the initialized image of the thread-local storage this unit
+	// defines - the contents of `.tdata` - and tls_size is how much storage it
+	// asks for in all, which is longer when a zero-filled part (`.tbss`)
+	// follows the image. tls_alignment is the strictest alignment any member
+	// asked for. A thread-local's offset in this storage is what a `tpoff`
+	// reference measures from the end of the image's whole block.
+	tls_blob      []u8
+	tls_size      int
+	tls_alignment int
+	// init_array and fini_array are the two tables of function addresses the
+	// container has to tell the runtime about: the entries to run before the
+	// program's own code and those to run after it. They lie in the writable
+	// data, which is why the offsets are into that blob; the entries
+	// themselves are eight-byte addresses a relocation names.
+	init_array ConstructorTable
+	fini_array ConstructorTable
+	// ifuncs is every name this unit defines whose definition is a function
+	// that answers with the address of the function to use instead, which is
+	// what `__attribute__((ifunc("resolver")))` makes a name into and what the
+	// C library uses to pick a memcpy for the machine it is running on. A
+	// reference to one goes through the global offset table like an import's,
+	// and whoever starts the image has to ask the resolver and write the
+	// answer into the slot.
+	ifuncs map[string]bool
+}
+
+// ConstructorTable is where one of a unit's two constructor tables lies in its
+// writable data and how many eight-byte entries it holds. A table with no
+// entries is the zero value, which is what a unit with a constructor in it
+// leaves behind when it has one of the other kind.
+pub struct ConstructorTable {
+pub:
+	offset int
+	count  int
 }
 
 // import_data_count is how many of the references inside the writable data name
