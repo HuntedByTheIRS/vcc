@@ -168,3 +168,61 @@ fn test_the_command_line_refuses_a_name_it_does_not_have() {
 		assert err.msg().contains('aotu')
 	}
 }
+
+fn test_one_flag_may_name_several_extensions_to_turn_off() {
+	// The off flag takes a list like the on flag, which is what lets a build
+	// say -fno-vcc-exts=auto,typeof over a tree that had both on.
+	o := flags(['-fvcc-exts=all', '-fno-vcc-exts=auto,typeof'])
+	assert !o.enabled('auto')
+	assert !o.enabled('typeof')
+	assert o.enabled('generic')
+	assert o.enabled('static-assert')
+	assert o.enabled_names() == ['generic', 'static-assert']
+	assert o.recorded == ['-fvcc-exts=all', '-fno-vcc-exts=auto,typeof']
+}
+
+fn test_a_name_named_twice_in_one_flag_is_mentioned_twice() {
+	// A mention is what a flag said and not what a run decided, so a name
+	// written twice leaves two of them; what is on is one name, because the
+	// list a run reports carries no name twice.
+	o := flags(['-fvcc-exts=auto,auto'])
+	assert o.mentions.len == 2
+	assert o.mentions[0].name == 'auto'
+	assert o.mentions[0].on
+	assert o.mentions[1].name == 'auto'
+	assert o.mentions[1].on
+	assert o.enabled('auto')
+	assert o.enabled_names() == ['auto']
+}
+
+fn test_all_beside_a_name_leaves_that_name_on() {
+	o := flags(['-fvcc-exts=all,auto'])
+	assert o.enabled_names() == names()
+	// all writes one mention per name, so the list is longer than the line.
+	assert o.mentions.len == names().len + 1
+	assert o.recorded == ['-fvcc-exts=all,auto']
+}
+
+fn test_every_name_the_flag_offers_can_be_named_and_turned_off() {
+	// One name at a time, both directions: a name the table carries is a name
+	// the flag takes on its own line, and turning it back off leaves nothing on.
+	for name in names() {
+		on := flags(['-fvcc-exts=${name}'])
+		assert on.enabled(name), name
+		assert on.enabled_names() == [name], name
+		off := flags(['-fvcc-exts=${name}', '-fno-vcc-exts=${name}'])
+		assert !off.enabled(name), name
+		assert off.enabled_names() == [], name
+	}
+}
+
+fn test_the_mentions_keep_the_order_the_flags_were_written_in() {
+	// The order is the whole reason the list exists: the last mention of a name
+	// is the one that counts, so a later flag has to come later in the list.
+	o := flags(['-fno-vcc-exts=auto', '-fvcc-exts=auto', '-fno-vcc-exts=auto'])
+	assert o.mentions.len == 3
+	assert o.mentions.map(it.name) == ['auto', 'auto', 'auto']
+	assert o.mentions.map(it.on) == [false, true, false]
+	assert !o.enabled('auto')
+	assert o.recorded == ['-fno-vcc-exts=auto', '-fvcc-exts=auto', '-fno-vcc-exts=auto']
+}
