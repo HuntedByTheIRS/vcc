@@ -15,9 +15,17 @@ Linux x86-64.
 
 1. **Pure V.** No C source, no `#include`, no `cc` invocation, no C library
    binding added to make something work. If V cannot express a piece yet, that
-   piece stays unimplemented and the failure is reported, not worked around.
-   One exception, named and off by default. `-external-linker=NAME` hands the
-   link to a linker the system already has, for the inputs this compiler
+   piece stays unimplemented and the failure is reported, not worked around. The
+   compiler and the linker stay pure V. A test directory is the one place C
+   lives, and there it is input to the compiler rather than part of it:
+   `compliance/` is the C99 conformance corpus, `regression/` one program per
+   bug that must not come back, `goldens/` the programs whose output is compared
+   against a recording. That C is what the compiler is handed, so it does not
+   break the rule, and a C source anywhere else is a failure. A `.v` file inside
+   a test directory is still this compiler's source, so `#include`, `#flag` and
+   `C.` stay out of it there too. One exception to the linking rule, named and
+   off by default. `-external-linker=NAME` hands the link to a linker the
+   system already has, for the inputs this compiler
    cannot consume yet: a relocatable object, an archive. It exists so that
    linking behaviour is available before an in-house linker is written, not so
    that a missing piece can be papered over. `NAME` must not be a C compiler:
@@ -80,6 +88,7 @@ so the cap turns a frozen desktop into a clean OOM with the peak reported.
 | `image/` | the emitted unit: machine code, the data it reads, and the references between them. `codegen/` builds one, and the system in `backend/os/` decides what wrapping it gets. |
 | `codegen/` | `ast` in, an emitted unit out. Same input, same bytes, every run. Asks `backend/` for every machine fact. |
 | `tools/` | gate and benchmark scripts. Not part of the compiler and not imported by it. |
+| `compliance/`, `regression/`, `goldens/` | C the compiler is handed, not C it is built from, so these are the only directories where C source is allowed. `compliance/` is the C99 conformance corpus, `regression/` one program per bug that must not come back, `goldens/` the programs whose output is compared against a recording. Compiled by `tools/compliance.vsh` and `tools/regress.vsh`. |
 | `extensions/` | the vendor extensions the `-fvcc-exts=` family names. The names are read off the rows in `standard/features.v` rather than kept in a list here, and naming one turns the construct its row describes on for the selected mode: `-fvcc-exts=typeof` under `-std=c99` stops the mode forbidding `typeof`. |
 
 Tests sit beside their module as `*_test.v`.

@@ -7,7 +7,9 @@
 v.mod linguist-language=V
 .vdocignore linguist-language=ignore
 
-# The compliance corpus is C on purpose, and it is the only C here. Counting it
+# The test corpora are C on purpose, and they are the only C here. Counting them
 # as one of this repository's languages would say the tree is written in C when
-# what it holds is one file the compiler is handed.
+# what it holds is C the compiler is handed rather than C it is built from.
 compliance/** linguist-language=ignore
+regression/** linguist-language=ignore
+goldens/** linguist-language=ignore
