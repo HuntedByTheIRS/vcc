@@ -65,7 +65,7 @@ body:
       options:
         - label: I checked ROADMAP.md, and this is either not on it or is the part of it I need first.
           required: true
-        - label: I searched the open and closed issues and discussions for this.
+        - label: I searched the open and closed issues for this.
           required: true
         - label: This keeps the compiler in pure V and does not move the speed target.
           required: true

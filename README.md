@@ -340,7 +340,7 @@ Notes for whoever touches interoperability, all read off the V tree:
 - `ARCHITECTURE.md` for how the compiler is put together.
 - `ROADMAP.md` for the milestones between the stub and a usable compiler.
 - `tools/README.md` for the gate, the corpora and the benchmark harness.
-- `ISSUES.md` and `DISCUSSIONS.md` for where reports and questions go.
+- `ISSUES.md` for where reports, questions and feature requests go.
 - `SECURITY.md` for what counts as a vulnerability in a compiler.
 - `CODE_OF_CONDUCT.md` for how people are expected to treat each other.
 - The [wiki](https://github.com/HuntedByTheIRS/vcc/wiki) for the same material

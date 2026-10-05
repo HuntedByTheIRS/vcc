@@ -4,43 +4,27 @@ Where to ask and where to report, and the rules each place carries. The
 sources behind this page are `DISCUSSIONS.md`, `ISSUES.md`, `CONTRIBUTING.md`,
 `SECURITY.md` and `CODE_OF_CONDUCT.md`.
 
-## Discussions or the tracker
+## The tracker
 
-Discussions are at <https://github.com/HuntedByTheIRS/vcc/discussions>. The
-tracker is at <https://github.com/HuntedByTheIRS/vcc/issues>.
+Everything goes to <https://github.com/HuntedByTheIRS/vcc/issues>. Discussions
+were turned off and folded into it: an issue carries the same conversation and
+can be closed, which is what a maintainer wants out of a thread.
 
-The line between them: the tracker is for work that can be closed, and a
-discussion is for everything that is still moving. If the answer is "the
-compiler should do X and does not", it is an issue. If the answer is a design
-question, a direction, or a "what would you want here", it is a discussion.
-When a discussion settles into a concrete piece of work, someone opens an
-issue from it and links back, so the decision is findable from both sides.
+A question is an issue labeled `question`, and a direction for the project is
+one labeled `enhancement`. `ISSUES.md` lists what a report has to include. A
+report about a specific failure goes in even when it is incomplete, and a
+maintainer will ask for whatever is missing.
 
-A report about a specific failure goes to the tracker even if the report is
-incomplete. `ISSUES.md` lists what to include, and a maintainer will move it
-to Discussions if it belongs there. Bugs and feature requests go to the
-tracker; open-ended questions belong in Discussions, where the answer can stay
-a conversation.
+## Where the discussion forms went
 
-## Discussion categories
+Six forms were written for the categories that wanted structure, and they are
+still in the repository under `.github/DISCUSSION_TEMPLATE/`. Nothing offers
+them while Discussions is off; they are the material an issue form would be
+made from. `DISCUSSIONS.md` carries the table of what each one asked for.
 
-| Category | What belongs there | Form |
-|---|---|---|
-| Announcements | Maintainer posts about a milestone, a release, an interface change, or a direction that moved. | `announcements.yml` |
-| Design Proposals | A change to how the compiler is put together, argued while the shape is still moving. | `design-proposals.yml` |
-| RFCs | The same change carried to a document: the command line, the C that is accepted, the diagnostics, the bytes written. Settled before the work lands. | `rfcs.yml` |
-| Questions | How do I do this with vcc, why did it refuse this, what does this diagnostic mean. | `questions.yml` |
-| Roadmap Discussion | The order of the milestones, and what a milestone should cover. | `roadmap-discussion.yml` |
-| Compatibility | Where this compiler's answer differs from tcc's, gcc's, clang's, the standard's, or V's build's. | `compatibility.yml` |
-| Off-topic/Extras | Anything that does not fit the others, including process questions and something built with vcc. | none, deliberately |
-
-A form is offered when its file name matches the live slug of the category, so
-`questions.yml` is the form for the Questions category; the slugs are read
-back with the command in `DISCUSSIONS.md`. Questions is the question and
-answer format, which is what lets an answer be marked accepted, and
-Announcements is the announcement format, where only a maintainer can start a
-discussion and anyone can comment. Off-topic/Extras has no form because a post
-that fits nowhere in particular does not benefit from being asked for fields.
+Off-topic/Extras had no form on purpose, and Questions was the answerable
+format, which is what let a reply be marked accepted and stay on top. An issue
+has no such mark, and that is the one thing the move gives up.
 
 ## House rules for a proposal
 
@@ -59,8 +43,8 @@ commit hash answer most "which build is this" questions in one line.
 
 ## Reporting a vulnerability
 
-Do not file a vulnerability as an issue, and do not raise it in a public
-discussion. The private route is
+Do not file a vulnerability as an issue, and do not post it anywhere public.
+The private route is
 <https://github.com/HuntedByTheIRS/vcc/security/advisories/new>. Private
 reporting is enabled on the repository. If GitHub is not usable, email
 huntedbyth3irs@gmail.com, the address the repository's commits carry.

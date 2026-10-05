@@ -1,10 +1,10 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question about using vcc
-    url: https://github.com/HuntedByTheIRS/vcc/discussions/categories/q-a
-    about: Why did it reject this, what does this diagnostic mean, how do I build against it. Confirmed bugs still go in the tracker.
+    url: https://github.com/HuntedByTheIRS/vcc/issues/new?labels=question
+    about: Why did it reject this, what does this diagnostic mean, how do I build against it. Discussions are off, so a question is an issue carrying the question label. Confirmed bugs still go in the tracker.
   - name: Idea or direction
-    url: https://github.com/HuntedByTheIRS/vcc/discussions/categories/ideas
+    url: https://github.com/HuntedByTheIRS/vcc/issues/new?labels=enhancement
     about: A direction for the project, or a piece of C support worth prioritizing.
   - name: Security problem
     url: https://github.com/HuntedByTheIRS/vcc/security/advisories/new

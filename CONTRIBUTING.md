@@ -180,7 +180,8 @@ and the job overwrites it on the next push.
 
 ## Where to ask
 
-- Questions, design discussion, and half-formed ideas: `DISCUSSIONS.md`.
+- Questions, design discussion, and half-formed ideas: `ISSUES.md`, labeled
+  `question` or `enhancement`. Discussions are off and folded into the tracker.
 - Bugs and feature requests: `ISSUES.md`.
 - Vulnerabilities: `SECURITY.md`, privately, not in a public issue.
 - How people are expected to behave here: `CODE_OF_CONDUCT.md`.

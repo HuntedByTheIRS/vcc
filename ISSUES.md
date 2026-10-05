@@ -1,9 +1,8 @@
 # Filing an issue
 
-The tracker is at <https://github.com/HuntedByTheIRS/vcc/issues>. Bugs and
-feature requests go there. Open-ended questions belong in
-[DISCUSSIONS.md](DISCUSSIONS.md) instead, where the answer can stay a
-conversation.
+The tracker is at <https://github.com/HuntedByTheIRS/vcc/issues>. Bugs, feature
+requests and questions all go there now that discussions are off: a question is
+an issue labeled `question`, and a direction is one labeled `enhancement`.
 
 vcc is early. Most of C is unimplemented, on purpose, and the roadmap says so.
 An error telling you a construct is not implemented yet is the compiler working

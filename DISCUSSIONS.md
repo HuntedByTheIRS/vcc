@@ -1,12 +1,21 @@
 # Discussions
 
-Discussions are at <https://github.com/HuntedByTheIRS/vcc/discussions>. The
-tracker is for work that can be closed; a discussion is for everything that is
-still moving. Asking in Discussions costs nothing and often saves an issue.
+Discussions are off on this repository. The space is folded into the tracker,
+where a thread can be closed and where the work it settles into already lives.
 
-## Which category
+Questions, design arguments and half-formed ideas go to
+<https://github.com/HuntedByTheIRS/vcc/issues>, labeled `question` for a question
+and `enhancement` for a direction. [ISSUES.md](ISSUES.md) says what a report has
+to carry. A vulnerability does not go in the tracker at all;
+[SECURITY.md](SECURITY.md) says where it goes.
 
-| Category | What belongs there | Form |
+## The six forms, kept for the move
+
+They are still in `.github/DISCUSSION_TEMPLATE/` and nothing offers them while
+Discussions is off. Each row is a category that wanted structure, and the shape
+its issue form should take when the move happens.
+
+| Was | What belonged there | File |
 |---|---|---|
 | Announcements | Maintainer posts about a milestone, a release, an interface change, or a direction that moved. | `announcements.yml` |
 | Design Proposals | A change to how the compiler is put together, argued while the shape is still moving. | `design-proposals.yml` |
@@ -14,42 +23,16 @@ still moving. Asking in Discussions costs nothing and often saves an issue.
 | Questions | How do I do this with vcc, why did it refuse this, what does this diagnostic mean. | `questions.yml` |
 | Roadmap Discussion | The order of the milestones, and what a milestone should cover. | `roadmap-discussion.yml` |
 | Compatibility | Where this compiler's answer differs from tcc's, gcc's, clang's, the standard's, or V's build's. | `compatibility.yml` |
-| Off-topic/Extras | Anything that does not fit the others, including process questions and something you built with vcc. | none, deliberately |
 
-The forms are in `.github/DISCUSSION_TEMPLATE/`, and a form's file name is the
-live slug of its category, so `questions.yml` is the form for
-`/discussions/categories/questions`. A category whose name is changed in the
-repository's discussion settings needs the file renamed to match, or the form
-quietly stops being offered. The slugs in use:
+Off-topic/Extras never had a form on purpose: a post that fits nowhere in
+particular does not benefit from being asked for fields, and nothing written for
+it is lost by the space closing.
 
-```sh
-gh api graphql \
-  -f query='query{repository(owner:"HuntedByTheIRS",name:"vcc"){discussionCategories(first:50){nodes{name slug isAnswerable}}}}'
-```
+Questions was the answerable format, so a reply could be marked accepted and
+stay on top of the thread. An issue has no such mark, and that is the one thing
+the move gives up.
 
-Two of the categories are a format rather than only a topic. Questions is the
-question and answer format, which is what lets an answer be marked accepted and
-stay on top. Announcements is the announcement format, where only a maintainer
-can start a discussion and anyone can comment on one, which is what keeps the
-category to news from the project itself.
-
-Off-topic/Extras has no form on purpose. A post that fits nowhere in particular
-does not benefit from being asked for fields, and the category is the one place
-here where a blank box is the right box.
-
-## Issue or discussion
-
-If the answer is "the compiler should do X and does not", it is an issue. If the
-answer is a design question, a direction, or a "what would you want here", it is
-a discussion. When a discussion settles into a concrete piece of work, someone
-opens an issue from it and links back, so the decision is findable from both
-sides.
-
-Reports about a specific failure go to the tracker even if the report is
-incomplete. [ISSUES.md](ISSUES.md) has the list for what to include, and a
-maintainer will move it to Discussions if it belongs there.
-
-## A few house rules
+## House rules
 
 - vcc is written in pure V and has to stay at TCC-class speed. A proposal that
   needs a C dependency, or that trades the speed target away for convenience,
