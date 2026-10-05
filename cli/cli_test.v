@@ -546,3 +546,193 @@ fn test_the_kind_of_link_is_in_the_help() {
 	assert usage(false).contains('-shared')
 	assert usage(false).contains('-static')
 }
+
+// With no flags at all the command line still has to answer: every list empty,
+// every switch off, and the optimizer at the level it runs when nothing says
+// otherwise. This is the baseline a later flag is a change from.
+fn test_no_flags_leaves_the_defaults_in_place() {
+	opts := parse(['x.c'])!
+	assert opts.inputs == ['x.c']
+	assert opts.output == ''
+	assert opts.include_dirs.len == 0
+	assert opts.defines.len == 0
+	assert opts.undefines.len == 0
+	assert opts.library_dirs.len == 0
+	assert opts.libraries.len == 0
+	assert opts.preludes.len == 0
+	assert opts.ignored.len == 0
+	assert opts.target == ''
+	assert opts.standard == ''
+	assert opts.input_type == ''
+	assert opts.emulation == .none
+	assert !opts.compile_only
+	assert !opts.preprocess
+	assert !opts.print_ast
+	assert !opts.run
+	assert !opts.shared
+	assert !opts.static_link
+	assert !opts.pic
+	assert !opts.verbose
+	assert !opts.inhibit_warnings
+	assert !opts.undef_builtins
+	assert !opts.dump_macros
+	assert opts.optimization.level == .o0
+	// A command line with no input at all is empty rather than an error; the
+	// driver is the one that refuses it, with the usage text.
+	assert parse([])!.inputs.len == 0
+}
+
+// The output is empty until -o names it. The a.out default is the driver's and
+// the usage text says so; this field only ever holds what the command line
+// wrote, so a caller can tell "not named" from "named a.out".
+fn test_the_output_stays_empty_until_the_flag_names_it() {
+	assert parse(['x.c'])!.output == ''
+	assert parse(['-o', 'a.out', 'x.c'])!.output == 'a.out'
+	assert usage(false).contains('default a.out')
+}
+
+// -U, -x and -B are value flags the joined spellings elsewhere do not cover:
+// -U has both spellings, and -x and -B only take the next word. -B records the
+// flag and its value together, because the recorded list is what a verbose run
+// prints and the value is half of what was passed over.
+fn test_the_naming_flags_read_their_own_arguments() {
+	joined := parse(['-UFOO', '-D', 'BAR', 'x.c'])!
+	assert joined.undefines == ['FOO']
+	assert joined.defines == ['BAR']
+	separate := parse(['-U', 'FOO', 'x.c'])!
+	assert separate.undefines == ['FOO']
+	assert parse(['-x', 'c', 'x.c'])!.input_type == 'c'
+	assert parse(['-B', '/dir', 'x.c'])!.ignored == ['-B /dir']
+	assert parse(['-B/dir', 'x.c'])!.ignored == ['-B/dir']
+}
+
+// A flag that names a path or a name is given once per directory, header and
+// library, so repeating it adds to the list rather than replacing what came
+// before. The order is the command line's, which a search reads.
+fn test_a_repeated_value_flag_accumulates_in_order() {
+	opts := parse(['-I', 'a', '-Ib', '-D', 'ONE', '-DTWO', '-Lx', '-L', 'y', '-lm', '-l', 'pthread',
+		'x.c'])!
+	assert opts.include_dirs == ['a', 'b']
+	assert opts.defines == ['ONE', 'TWO']
+	assert opts.library_dirs == ['x', 'y']
+	assert opts.libraries == ['m', 'pthread']
+}
+
+// A boolean flag that can also be turned off is decided by the last spelling on
+// the line, which is what lets a build append -fno-pic to a line that already
+// had -fPIC. A flag with no negative spelling stays on however often it is
+// written.
+fn test_a_repeated_boolean_flag_is_decided_by_the_last_spelling() {
+	assert parse(['-fPIC', '-fno-pic', 'x.c'])!.pic == false
+	assert parse(['-fno-pic', '-fPIC', 'x.c'])!.pic
+	assert parse(['-fno-PIC', '-fpic', 'x.c'])!.pic
+	assert parse(['-c', '-c', 'x.c'])!.compile_only
+}
+
+// The ignored list is the promise the flag surface makes: what was accepted and
+// not acted on is recorded rather than refused, so a verbose run can say what
+// it passed over. A flag this compiler reads is not in it.
+fn test_the_ignored_list_holds_the_flags_that_were_passed_over() {
+	opts := parse(['-bt25', '-Wl,-rpath,/opt/v', '-fwrapv', '-fPIE', '-B/some/dir', 'x.c', '-o',
+		'out'])!
+	for flag in ['-bt25', '-Wl,-rpath,/opt/v', '-fwrapv', '-fPIE', '-B/some/dir'] {
+		assert opts.ignored.contains(flag), '${flag} should be recorded, not refused'
+	}
+	for read_flag in ['-o', 'out', '-c', '-w', '-verbose', '-print-search-dirs', '-shared'] {
+		assert !opts.ignored.contains(read_flag), '${read_flag} is read and not recorded'
+	}
+}
+
+// The recorded list keeps the order the flags were written in, so the verbose
+// output reads the way the command line did.
+fn test_the_ignored_list_keeps_the_command_line_order() {
+	opts := parse(['-bt25', '-fwrapv', '-Wl,-z,now', 'x.c'])!
+	assert opts.ignored == ['-bt25', '-fwrapv', '-Wl,-z,now']
+}
+
+// -v is the version, -vv is the paths, and -verbose is the long spelling of the
+// detailed report. They are three switches on three fields, so a build that
+// asks for one is not answered with another.
+fn test_the_version_paths_and_verbose_switches_are_separate() {
+	version_flag := parse(['-v'])!
+	assert version_flag.show_version
+	assert !version_flag.show_paths
+	assert !version_flag.verbose
+	assert parse(['--version'])!.show_version
+	paths := parse(['-vv'])!
+	assert paths.show_paths
+	assert !paths.show_version
+	assert !paths.verbose
+	verbose := parse(['-verbose', 'x.c'])!
+	assert verbose.verbose
+	assert !verbose.show_version
+	assert !verbose.show_paths
+}
+
+// -h and -hh are the two help flags, and they name the two texts main.v prints:
+// -h the short usage and -hh the replacement section as well. They can be given
+// together, which is what a command line appending -hh to -h does.
+fn test_the_two_help_flags_select_the_two_texts() {
+	short := parse(['-h'])!
+	assert short.show_help
+	assert !short.show_help_all
+	all := parse(['-hh'])!
+	assert all.show_help_all
+	assert !all.show_help
+	both := parse(['-h', '-hh'])!
+	assert both.show_help && both.show_help_all
+}
+
+// -E is a switch of its own and not just "a run that does not link": it says
+// the token stream is what comes out, which is a fact the driver reads before
+// it decides what to write.
+fn test_the_preprocess_flag_is_its_own_switch() {
+	opts := parse(['-E', 'x.c'])!
+	assert opts.preprocess
+	assert !opts.compile_only
+	assert !opts.print_ast
+	assert !opts.links()
+}
+
+// - is an input, and it is the one input with no name to read a kind from. The
+// -- marker ends the flags, so a - after it is an input too and the word after
+// it is an input rather than a flag.
+fn test_standard_input_and_the_end_of_flags_marker() {
+	assert parse(['-', '-o', 'out'])!.inputs == ['-']
+	assert parse(['--', '-', 'x.c'])!.inputs == ['-', 'x.c']
+	assert parse(['--', '-o'])!.inputs == ['-o']
+}
+
+// The version line and the usage text both name the binary, because both are
+// read by a build tool that has to know which compiler answered.
+fn test_the_version_line_and_the_usage_name_the_binary() {
+	line := version_line()
+	assert line.contains('vcc')
+	assert line.contains(version)
+	text := usage(false)
+	assert text.starts_with('Usage: vcc')
+	assert text.contains('vcc')
+}
+
+// The short usage and the full help differ by the section on what a drop-in
+// replacement for the bundled tcc is asked to accept. The short text stops
+// before it, and the short text is the one an error prints.
+fn test_the_full_help_adds_the_replacement_section() {
+	short := usage(false)
+	all := usage(true)
+	assert short.contains('-print-search-dirs')
+	assert !short.contains('What a replacement for the bundled tcc')
+	assert all.contains('What a replacement for the bundled tcc')
+	assert all.len > short.len
+	assert all.contains(short)
+}
+
+// The value of a flag is the next word whatever it starts with: -D -foo is a
+// define named -foo, and a value is not scanned for flags. A joined value is
+// the same string without the flag in front of it.
+fn test_a_value_that_looks_like_a_flag_is_still_a_value() {
+	opts := parse(['-D', '-foo', '-o', '-weird', 'x.c'])!
+	assert opts.defines == ['-foo']
+	assert opts.output == '-weird'
+	assert opts.inputs == ['x.c']
+}
