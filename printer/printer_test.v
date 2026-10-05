@@ -127,3 +127,114 @@ fn test_a_call_through_an_expression_prints_the_expression_it_calls() {
 	direct := lines(tree('int f(void) { return 0; } int main(void) { return f(); }'))
 	assert direct.any(it.contains('call f with 0 argument(s)'))
 }
+
+// The rest of the statement and expression shapes, one dump each, so a node the
+// parser can write and the printer cannot say is a failure here rather than a
+// silence a reader of a dump would not notice.
+
+fn test_a_global_is_printed_with_its_initializer_and_its_type_clause() {
+	printed := lines(tree('int g = 5; int main() { return 0; }'))
+	assert printed[0] == 'global g int = 5 at 1:5 : int'
+}
+
+fn test_a_global_with_no_initializer_says_it_starts_zeroed() {
+	printed := lines(tree('int g; int main() { return 0; }'))
+	assert printed[0].starts_with('global g int')
+	assert printed[0].contains('(zeroed)')
+	assert printed[0].contains(': int')
+}
+
+fn test_a_unit_with_no_declarations_says_so() {
+	assert render(ast.TranslationUnit{}) == '(no declarations)'
+}
+
+fn test_a_do_while_is_named_for_the_test_that_runs_after_its_body() {
+	dumped := lines(tree('int main() { int x = 0; do { x = 1; } while (x < 3); return x; }'))
+	assert dumped.any(it.contains('do at'))
+	// The test is the condition written after the body, and a do-while has no
+	// step of its own, which is the difference the two headings read.
+	assert dumped.any(it.contains('condition'))
+	assert !dumped.any(it.contains('step'))
+}
+
+fn test_a_switch_prints_its_labels_in_the_order_they_were_written() {
+	dumped := lines(tree('int main() { switch (1) { case 1: break; default: break; } return 0; }'))
+	header := line_of(dumped, 'switch at')
+	case_line := line_of(dumped, 'case 1 at')
+	default_line := line_of(dumped, 'default at')
+	assert header >= 0
+	assert case_line > header
+	assert default_line > case_line
+	assert dumped.any(it.contains('break at'))
+}
+
+fn test_a_goto_and_the_label_it_reaches_are_both_named() {
+	dumped := lines(tree('int main() { goto out; out: return 0; }'))
+	jump := line_of(dumped, 'goto out at')
+	label := line_of(dumped, 'label out at')
+	assert jump >= 0
+	assert label > jump
+}
+
+fn test_an_asm_statement_prints_the_spelling_the_file_wrote() {
+	dumped := lines(tree('int main() { __asm__ volatile ("nop" ::: "memory"); return 0; }'))
+	assert dumped.any(it.contains('asm statement "nop" at'))
+}
+
+fn test_a_member_is_printed_with_the_offset_the_layout_gave_it() {
+	dumped := lines(tree('struct S { int a; }; int main() { struct S s; s.a = 1; return s.a; }'))
+	assert dumped.any(it.contains('member s.a at +0 bytes, int, at'))
+}
+
+fn test_a_comma_expression_prints_both_sides() {
+	dumped := lines(tree('int main() { int x = 1; int y = (x, 2); return y; }'))
+	comma := line_of(dumped, 'comma at')
+	assert comma >= 0
+	assert dumped[comma + 1].contains('ident x')
+	assert dumped[comma + 2].contains('int 2')
+}
+
+fn test_a_statement_expression_prints_its_body_before_its_value() {
+	dumped := lines(tree('int main() { int y = ({ int x = 4; x; }); return y; }'))
+	header := line_of(dumped, 'statement expression at')
+	assert header >= 0
+	declaration := line_of(dumped, 'declaration of int x')
+	assert declaration > header
+}
+
+fn test_a_string_literal_prints_its_spelling_and_its_array_type() {
+	dumped := lines(tree('int main() { char *s = "hi"; return 0; }'))
+	assert dumped.any(it.contains('string "hi" at'))
+	assert dumped.any(it.contains(': char[3]'))
+}
+
+fn test_an_array_declaration_prints_its_element_count() {
+	dumped := lines(tree('int main() { int a[3]; return a[1]; }'))
+	assert dumped.any(it.contains('declaration of int a[3] at'))
+	assert dumped.any(it.contains('element[] at'))
+}
+
+fn test_a_cast_prints_the_type_it_converts_to() {
+	dumped := lines(tree('int main() { int x = 1; int y = (char)x; return y; }'))
+	assert dumped.any(it.contains('cast to char at'))
+}
+
+fn test_a_conditional_prints_its_three_operands_in_order() {
+	dumped := lines(tree('int main() { int x = 1; int y = x ? 1 : 2; return y; }'))
+	header := line_of(dumped, 'conditional at')
+	assert header >= 0
+	assert dumped[header + 1].contains('ident x')
+	assert dumped[header + 2].contains('int 1')
+	assert dumped[header + 3].contains('int 2')
+}
+
+fn test_an_increment_prints_its_form_beside_its_operator() {
+	dumped := lines(tree('int main() { int x = 1; x++; ++x; return x; }'))
+	assert dumped.any(it.contains('postfix ++ at'))
+	assert dumped.any(it.contains('prefix ++ at'))
+}
+
+fn test_an_assignment_expression_prints_its_operator() {
+	dumped := lines(tree('int main() { int x = 1; int y = (x = 2); return y; }'))
+	assert dumped.any(it.contains('assign = at'))
+}
