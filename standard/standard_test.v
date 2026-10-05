@@ -595,3 +595,94 @@ fn test_the_sizeof_row_is_read_and_no_mode_reports_it() {
 		assert uses([token('sizeof'), punct('('), token('x'), punct(')')], features, asking(mode)).len == 0
 	}
 }
+
+// The mode table answers a command line that may write a standard any of the
+// ways it has been named: the working name, the year it was published in, and
+// the ISO number, all of them one mode.
+fn test_the_year_spellings_and_the_working_names_are_one_mode() {
+	assert from_spelling('c90') == .c89
+	assert from_spelling('iso9899:1990') == .c89
+	assert from_spelling('iso9899:1999') == .c99
+	assert from_spelling('iso9899:2011') == .c11
+	assert from_spelling('iso9899:2017') == .c17
+	assert from_spelling('c18') == .c17
+	assert from_spelling('iso9899:2024') == .c23
+	assert from_spelling('gnu90') == .gnu89
+	assert from_spelling('gnu18') == .gnu17
+	// A spelling that names the year answers the same questions as the working
+	// name: the mode, and not the spelling, is what the dialect check reads.
+	assert from_spelling('c18').standard_name() == from_spelling('c17').standard_name()
+	assert from_spelling('iso9899:1990').includes(.c89)
+	assert !from_spelling('c90').is_gnu()
+	assert from_spelling('gnu90').is_gnu()
+}
+
+fn test_a_mode_reports_itself_under_the_name_of_the_standard() {
+	// c18 is the editorial year of C17, so the mode reports the standard's
+	// name, and the same for the draft name of the standard after C23.
+	assert from_spelling('c18').spelling() == 'c17'
+	assert from_spelling('gnu18').spelling() == 'gnu17'
+	assert from_spelling('c2y').spelling() == 'c29'
+	assert from_spelling('gnu2y').spelling() == 'gnu29'
+	assert from_spelling('iso9899:1999').spelling() == 'c99'
+	// The two modes that are not standards have no spelling of their own: the
+	// caller keeps what the command line wrote.
+	assert Mode.none.spelling() == ''
+	assert Mode.other.spelling() == ''
+}
+
+fn test_a_gnu_mode_names_the_same_standard_as_the_strict_mode_beside_it() {
+	assert Mode.gnu89.standard_name() == Mode.c89.standard_name()
+	assert Mode.gnu11.standard_name() == Mode.c11.standard_name()
+	assert Mode.gnu17.standard_name() == Mode.c17.standard_name()
+	assert Mode.gnu23.standard_name() == Mode.c23.standard_name()
+	assert Mode.gnu29.standard_name() == Mode.c29.standard_name()
+	assert Mode.c11.standard_name() == 'ISO C11'
+	assert Mode.c17.standard_name() == 'ISO C17'
+	assert Mode.c29.standard_name() == 'ISO C29'
+	// No standard is named for a mode that is not one, so a message about it
+	// cannot claim a standard the program was not written against.
+	assert Mode.none.standard_name() == ''
+	assert Mode.other.standard_name() == ''
+}
+
+fn test_includes_is_reflexive_and_transitive_over_the_standards() {
+	assert Mode.c99.includes(.c99)
+	assert Mode.c23.includes(.c89)
+	assert Mode.c23.includes(.c11)
+	assert Mode.gnu23.includes(.c11)
+	assert !Mode.c89.includes(.c23)
+	// A GNU dialect ranks with the standard it extends, so it takes in the GNU
+	// spelling before it as well as the strict one.
+	assert Mode.gnu99.includes(.c89)
+	assert Mode.gnu99.includes(.gnu89)
+	assert !Mode.gnu89.includes(.gnu99)
+	// A mode nobody ranked includes nothing and is included by nothing: it is
+	// not a standard, so a program written against one is not the question.
+	assert !Mode.none.includes(.none)
+	assert !Mode.other.includes(.other)
+	assert !Mode.none.includes(.c89)
+	assert !Mode.other.includes(.c23)
+	assert !Mode.c89.includes(.none)
+}
+
+fn test_the_standards_are_ranked_in_the_order_they_were_published() {
+	// The order is what makes includes an answer: each standard takes in the
+	// one before it and none of the ones after it.
+	ordered := [Mode.c89, .c99, .c11, .c17, .c23, .c29]
+	for i in 1 .. ordered.len {
+		assert ordered[i].includes(ordered[i - 1]), '${ordered[i]}'
+		assert !ordered[i - 1].includes(ordered[i]), '${ordered[i - 1]}'
+	}
+	// A GNU dialect stands where the standard beside it stands, so the two
+	// include each other and a program written for either is the same program.
+	for pair in [[Mode.c89, Mode.gnu89], [Mode.c11, Mode.gnu11], [Mode.c29, Mode.gnu29]] {
+		assert pair[0].includes(pair[1])
+		assert pair[1].includes(pair[0])
+		assert pair[0].is_gnu() || pair[1].is_gnu()
+	}
+	// A mode between two others is included by neither of the two around it
+	// except the later one.
+	assert Mode.c17.includes(.c11)
+	assert !Mode.c11.includes(.c17)
+}
