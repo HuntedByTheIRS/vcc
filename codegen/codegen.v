@@ -22,6 +22,25 @@ pub:
 	// the last stage wraps the program in and nothing before it, which is why it
 	// is an option here rather than a second entry point.
 	compile_only bool
+	// link asks for one piece of a link rather than a program: the same code and
+	// data with no process stub and no entry requirement, because which unit
+	// defines the entry and which one carries the stub is the link's decision
+	// and not this unit's. The result carries the image.Program and no
+	// container bytes, and the linker merges the programs and writes one
+	// container over the merged result. A name this unit only declares is left
+	// as an import for the linker to bind, which is why the unresolved-import
+	// check at the end of the walk is left out here: a sibling unit may be the
+	// definition the check would have looked for.
+	link bool
+	// start_only asks for the process stub and nothing else: the instructions
+	// the kernel lands on, which call the entry function and leave through the
+	// library's exit. It walks no declaration of the unit and it does not
+	// require the unit to define the entry, because the stub only references
+	// the name. The reference stays local, so the linker resolves it against
+	// the labels of whichever unit defines the entry, and a link with no such
+	// unit gets an undefined reference. Like link, the result carries the
+	// image.Program and no container bytes.
+	start_only bool
 	// pic is -fPIC: a relocatable object reaches every top-level object another
 	// object may define through the global offset table, so that a shared link
 	// has no direct reference to a symbol that can be interposed. It only means
@@ -41,7 +60,14 @@ pub:
 // Result carries the image to write, or the reasons it could not be produced.
 pub struct Result {
 pub:
-	bytes       []u8
+	bytes []u8
+	// program is the emitted unit the container was written over, and it is the
+	// emitter's own Program rather than a copy of the bytes. A slice or a map
+	// field is a reference, so handing the struct out costs nothing, and a
+	// caller that merges several units of a link reads the programs here. The
+	// bytes stay what they always were: the container, and empty for a link
+	// unit, which leaves the container to the linker.
+	program     image.Program
 	target      backend.Target
 	diagnostics []tokenize.Diagnostic
 }
@@ -209,6 +235,16 @@ struct Emitter {
 	entry          string
 	// compile_only says the container to build is an object and not a program.
 	compile_only bool
+	// link says this emitter is writing one piece of a link and not a program:
+	// no process stub, no entry requirement, and no container. The program it
+	// builds is one input to the linker, which merges it with its siblings and
+	// resolves a name this unit left as an import against a definition one of
+	// them provides.
+	link bool
+	// start_only says this emitter writes the process stub and nothing else.
+	// The stub is the one body emit_start carries, so a linker that wants it in
+	// a unit of its own gets exactly the instructions a program gets.
+	start_only bool
 	// pic says a relocatable object reaches a non-static top-level object
 	// through the global offset table rather than through a direct reference.
 	pic bool
@@ -453,6 +489,14 @@ const wide_bytes = 16
 // are jumps between labels. The functions are linked dynamically, so a call to a
 // name the file does not define is resolved out of the library the loader maps
 // before the first instruction runs.
+//
+// Three modes ask for less than a program. compile_only leaves the addresses to
+// a linker and wraps the unit as a relocatable object. link asks for one piece
+// of a link: no process stub, no entry requirement, and no container, so the
+// linker merges the programs and writes one container over the merged result.
+// start_only asks for the process stub alone. The result carries the emitted
+// unit in `program` for every mode, and `bytes` holds the container a program
+// or an object gets, which a link unit leaves empty for the linker.
 pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	target := resolve_target(opts.target) or {
 		return Result{
@@ -462,9 +506,12 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	// A program has to start somewhere and a kernel starts it at one place, so a
 	// program without the entry function is one this compiler cannot produce. An
 	// object is not a program: it starts nowhere, and which function a link makes
-	// the entry is not decided here.
+	// the entry is not decided here. Neither is a link unit: the entry is a
+	// sibling unit's business, and the linker checks the merged program once. A
+	// stub-only unit references the entry rather than defining it, so it is not
+	// asked for one either.
 	entry := if opts.entry == '' { 'main' } else { opts.entry }
-	if !opts.compile_only && entry_definition(unit, entry) == none {
+	if !opts.compile_only && !opts.link && !opts.start_only && entry_definition(unit, entry) == none {
 		return Result{
 			target:      target
 			diagnostics: [problem(1, 1, 'no definition of ${entry} in this translation unit')]
@@ -485,6 +532,8 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 		representation: types.from_target(target).representation
 		entry:          entry
 		compile_only:   opts.compile_only
+		link:           opts.link
+		start_only:     opts.start_only
 		pic:            opts.pic
 		internal:       internal
 		unit:           unit
@@ -492,14 +541,18 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 		library_dirs:   opts.library_dirs
 	}
 	// Nothing is written from a tree the model did not type. The check runs
-	// before the layout, so a tree it refuses produces no image at all.
-	emitter.refuse_unresolved() or {
-		if emitter.diagnostics.len == 0 {
-			emitter.diagnostics << problem(1, 1, 'internal: the tree could not be checked: ${err.msg()}')
-		}
-		return Result{
-			target:      target
-			diagnostics: emitter.diagnostics
+	// before the layout, so a tree it refuses produces no image at all. A
+	// stub-only unit walks no declaration and references no value, so there is
+	// nothing for the check to read and it is left out.
+	if !emitter.start_only {
+		emitter.refuse_unresolved() or {
+			if emitter.diagnostics.len == 0 {
+				emitter.diagnostics << problem(1, 1, 'internal: the tree could not be checked: ${err.msg()}')
+			}
+			return Result{
+				target:      target
+				diagnostics: emitter.diagnostics
+			}
 		}
 	}
 	image_bytes := emitter.build() or {
@@ -530,6 +583,7 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	}
 	return Result{
 		bytes:       image_bytes
+		program:     emitter.program
 		target:      target
 		diagnostics: emitter.diagnostics
 	}
@@ -563,7 +617,15 @@ fn entry_definition(unit ast.TranslationUnit, entry string) ?ast.FnDecl {
 
 // build lays the whole program out: the entry point the kernel jumps to, then
 // every function with a body, then the container that holds them.
+//
+// A stub-only unit stops at the entry point: the stub is the whole of what was
+// asked for, so no declaration is walked, no library is resolved and no
+// container is written.
 fn (mut e Emitter) build() ![]u8 {
+	if e.start_only {
+		e.emit_start()!
+		return []u8{}
+	}
 	// The libraries the image will name are settled before a byte is written.
 	// A -l name with no file behind it is an error a link makes, and the
 	// alternative is worse than an error: a program that compiles and then
@@ -572,7 +634,9 @@ fn (mut e Emitter) build() ![]u8 {
 	// An object names no libraries. What a translation unit runs against is
 	// decided when it is linked, so a -l on a -c command line is not this
 	// stage's business, and resolving one here would fail a compile over a
-	// library the object never mentions.
+	// library the object never mentions. A link unit does name its libraries,
+	// because one of the units of a link carries the -l flags the whole link
+	// runs against, and the merged program lists them once.
 	if !e.compile_only {
 		// The whole list goes over in one call: reading a library file is this
 		// system's business, and the emitter has nothing left to say about a name
@@ -708,8 +772,10 @@ fn (mut e Emitter) build() ![]u8 {
 	}
 	// The process stub is the place the kernel lands on: it calls the entry
 	// function and hands its result to the library's exit. An object has no such
-	// place, so it gets none; a link decides what the program starts at.
-	if !e.compile_only {
+	// place, so it gets none; a link decides what the program starts at. Nor
+	// does a link unit: the link carries the stub in a unit of its own, so
+	// writing one here would give the merged program two.
+	if !e.compile_only && !e.link {
 		e.emit_start()!
 	}
 	for decl in e.unit.decls {
@@ -735,7 +801,10 @@ fn (mut e Emitter) build() ![]u8 {
 	// turned an unresolved symbol into a compile that succeeded and a binary
 	// that died at load with nothing on the compiler's stderr. An object is not
 	// a program and is left out, because a linker resolves its symbols later.
-	if !e.compile_only {
+	// A link unit is left out for the same reason: a name it does not define may
+	// be a sibling unit's, and the linker runs this check once over the merged
+	// program, where every sibling's definitions are visible.
+	if !e.compile_only && !e.link {
 		dirs := linux.search_dirs(e.library_dirs, e.target.library_dirs)
 		// The names a program reaches out of a library are the functions it
 		// calls and the objects it copies, and both have to bind: a copy is not
@@ -753,6 +822,13 @@ fn (mut e Emitter) build() ![]u8 {
 			}
 			return error('unresolved imports')
 		}
+	}
+	// A link unit is not wrapped: its program is one input to the linker, which
+	// merges it with its siblings and wraps the merged result once. Returning
+	// no bytes says that, and the caller reads the program out of the result
+	// instead.
+	if e.link {
+		return []u8{}
 	}
 	// The same program, wrapped as one of two things: an object a linker takes as
 	// input, or a program a kernel starts. This is the last decision the emitter

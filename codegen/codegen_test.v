@@ -5186,3 +5186,51 @@ fn test_an_int_converted_to_a_pointer_is_extended_by_its_sign() {
 	assert holds(unsigned_text, [u8(0x89), u8(0xc0)])
 	assert !holds(unsigned_text, [u8(0x48), u8(0x63)])
 }
+
+// A unit that is one piece of a link has no entry of its own: it compiles
+// without a `main`, emits no process stub, and hands the caller its Program
+// rather than a container. The same source as a program is refused, which is
+// the difference link makes and the reason a unit without main could not be
+// compiled before it.
+fn test_a_link_unit_needs_no_entry_and_carries_its_program() {
+	linked := emit(translation_unit('int helper(void) { return 3; }'), Options{
+		link: true
+	})
+	assert linked.diagnostics.len == 0
+	assert linked.bytes.len == 0
+	assert linked.program.text.len > 0
+	assert '_start' !in linked.program.labels
+	assert 'helper' in linked.program.labels
+	refused := emit(translation_unit('int helper(void) { return 3; }'), Options{})
+	assert refused.diagnostics.len == 1
+	assert refused.diagnostics[0].msg.contains('no definition of main')
+	assert refused.bytes.len == 0
+}
+
+// A call to a function this unit only declares is the cross-unit reference a
+// link resolves: the name reaches the import list, where the linker looks for
+// the definition a sibling unit provides. A program would refuse it at the end
+// of the walk instead, because no library it names defines it.
+fn test_a_link_unit_leaves_a_declared_call_as_an_import() {
+	linked := emit(translation_unit('int helper(int x);\nint caller(void) { return helper(1); }\n'), Options{
+		link: true
+	})
+	assert linked.diagnostics.len == 0
+	assert 'helper' in linked.program.imports
+}
+
+// start_only asks the emitter for the stub alone even from a unit with a body:
+// no declaration of the unit is walked, so its `main` leaves no label and the
+// only references are the stub's own two.
+fn test_a_start_only_unit_emits_the_stub_and_no_declaration() {
+	stub := emit(translation_unit('int main(void) { return 1; }'), Options{
+		start_only: true
+	})
+	assert stub.diagnostics.len == 0
+	assert stub.bytes.len == 0
+	assert 'exit' in stub.program.imports
+	assert 'main' !in stub.program.labels
+	assert stub.program.fixups.len == 2
+	assert stub.program.fixups[0].kind.str() == 'call_local'
+	assert stub.program.fixups[1].kind.str() == 'call_import'
+}
