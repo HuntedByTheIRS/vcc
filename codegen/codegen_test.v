@@ -5219,6 +5219,24 @@ fn test_a_link_unit_leaves_a_declared_call_as_an_import() {
 	assert 'helper' in linked.program.imports
 }
 
+// The process stub on its own: the code a kernel lands on, which calls the
+// entry function and leaves through the library's exit. The entry is a local
+// reference the linker binds to the unit that defines it, the exit is an
+// import, and the stub itself has no label.
+fn test_a_start_stub_calls_the_entry_and_exits_through_the_library() {
+	stub := start_stub('main', Options{})
+	assert stub.diagnostics.len == 0
+	assert stub.bytes.len == 0
+	assert stub.program.text.len > 0
+	assert 'exit' in stub.program.imports
+	assert stub.program.labels.len == 0
+	assert stub.program.fixups.len == 2
+	assert stub.program.fixups[0].kind.str() == 'call_local'
+	assert stub.program.fixups[0].name == 'main'
+	assert stub.program.fixups[1].kind.str() == 'call_import'
+	assert stub.program.fixups[1].name == 'exit'
+}
+
 // start_only asks the emitter for the stub alone even from a unit with a body:
 // no declaration of the unit is walked, so its `main` leaves no label and the
 // only references are the stub's own two.

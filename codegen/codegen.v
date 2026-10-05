@@ -589,6 +589,44 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	}
 }
 
+// start_stub returns the process stub as a Program of its own: the code the
+// kernel lands on, the call it makes to the entry function, and the exit it
+// leaves through. It writes the same emit_start a program gets, so a linker
+// that wants the stub in a unit of its own gets exactly the instructions it
+// would have got at the front of a program, and there is one body rather than
+// two copies that can drift apart. The reference to the entry stays local, so
+// the linker resolves it against the labels of whichever unit defines the
+// entry, and a link with no such unit gets an undefined reference the way a
+// call to a missing function does. No declaration is walked: the unit this
+// builds is empty and the stub is all there is.
+pub fn start_stub(entry string, opts Options) Result {
+	target := resolve_target(opts.target) or {
+		return Result{
+			diagnostics: [problem(1, 1, err.msg())]
+		}
+	}
+	mut emitter := Emitter{
+		target:         target
+		representation: types.from_target(target).representation
+		entry:          if entry == '' { 'main' } else { entry }
+		start_only:     true
+	}
+	emitter.emit_start() or {
+		if emitter.diagnostics.len == 0 {
+			emitter.diagnostics << problem(1, 1, 'internal: the process stub could not be produced: ${err.msg()}')
+		}
+		return Result{
+			target:      target
+			diagnostics: emitter.diagnostics
+		}
+	}
+	return Result{
+		program:     emitter.program
+		target:      target
+		diagnostics: emitter.diagnostics
+	}
+}
+
 fn resolve_target(name string) !backend.Target {
 	return backend.resolve(name)
 }
