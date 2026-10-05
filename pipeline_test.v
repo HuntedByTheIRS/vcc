@@ -3751,6 +3751,36 @@ fn test_an_archive_is_read_for_the_member_the_link_needs() {
 	assert result.exit_code == 7
 }
 
+// A -l name the library search resolves to an archive is an input of the same
+// kind as an archive file named on the command line: the members that answer a
+// name the link still needs are pulled into the program. The archive also
+// contributes no name for the loader, so nothing in the file asks for a library
+// whose members are already inside it.
+fn test_a_library_name_that_resolves_to_an_archive_is_pulled() {
+	directory := scratch('named_lib_dir')
+	caller := scratch('named_caller.o')
+	binary := scratch('named_link')
+	os.mkdir(directory) or { panic(err) }
+	// The name the search looks for is `libnamed.a`, so the file has a
+	// directory of its own: the scratch name every other file here carries
+	// would not be found by `-lnamed` at all.
+	library := os.join_path(directory, 'libnamed.a')
+	holder := object_of('named_holder.c', 'int other(void) { return 4; }\n')
+	os.write_file_array(caller, object_of('named_caller.c', 'int other(void);\nint main(void) { return other() + 5; }\n')) or {
+		panic(err)
+	}
+	os.write_file_array(library, archive_of('named_holder.o', holder, ['other'])) or {
+		panic(err)
+	}
+	opts := cli.parse([caller, '-L', directory, '-lnamed', '-o', binary]) or { panic(err) }
+	link_inputs(opts)
+	assert os.exists(binary)
+	content := os.read_file(binary) or { panic(err) }
+	assert !content.contains('libnamed.a')
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 9
+}
+
 // -static asks for a program with every library resolved into the file. The
 // shape that is finished is the one that reaches no library at all: the process
 // stub leaves through the kernel's exit rather than through the library's, which

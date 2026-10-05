@@ -498,6 +498,27 @@ fn link_inputs(opts cli.Options) {
 		}
 		units << emitted.program
 	}
+	// A -l name that resolved to an archive is an input of the same kind as an
+	// archive file the command line named, and its members are pulled by the
+	// same rule below. Nothing else about the name is kept: the image asks the
+	// loader for no name for a static archive, so the archive contributes no
+	// DT_NEEDED entry.
+	if opts.libraries.len > 0 {
+		named := target.archive_libraries(opts.libraries, opts.library_dirs) or {
+			abort(err.msg())
+			return
+		}
+		for file in named {
+			source := read_source(file.path) or {
+				abort('cannot read ${file.path}: ${err.msg()}')
+				return
+			}
+			archives << archive.read(source.bytes()) or {
+				abort('${file.path}: ${err.msg()}')
+				return
+			}
+		}
+	}
 	// An archive is pulled apart only for the names the link still needs. A
 	// member whose symbols nothing refers to stays where it is, the way a linker
 	// leaves it, so a library of many objects adds the ones the program asks
