@@ -135,6 +135,18 @@ one building and passing `v test .` on its own.
 Areas in use: `tokenize`, `parser`, `ast`, `optimizer`, `printer`, `backend`,
 `image`, `codegen`, `cli`, `tools`, `github`, `tree`, `docs`.
 
+## The changelog
+
+`CHANGELOG.md` records what landed: one entry per commit, under the date it
+landed, oldest first, with the area, what changed and the commit in brackets.
+The entry is written with the change and in the same area vocabulary the
+subject uses, so the file reads on its own without the commit graph beside it.
+Merge commits and the badge commits the workflows write are not recorded,
+because neither is work a reader of the file came for.
+
+It is a record of the work, not a release log. A tag and its notes are the
+release.
+
 ## Review
 
 A reviewer reads for the failure first: what happens on malformed input, what
