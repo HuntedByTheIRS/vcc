@@ -80,12 +80,17 @@ fn reference_name(unit image.Program, unit_index int, kind image.FixupKind, name
 	}
 }
 
-// label_key is the key a label reference is written under. A name that is a
-// function the unit defines with external linkage is public and keeps the
-// merged table's own name for it; everything else is private to the unit, the
-// `static` function's entry and every local label the emitter made, and takes
-// the unit's key, which is the same key the merge's label table holds it under.
+// label_key is the key a label reference is written under, which has to be the
+// key the merged table holds its target under. A name this unit carries no label
+// for is not one of its own: the process stub's one code reference calls the
+// entry function, which another unit defines, and the merged table holds a name
+// with external linkage bare. A name this unit does label is its own, and it is
+// private unless it is a function of this unit with external linkage, which the
+// whole link names.
 fn label_key(unit image.Program, unit_index int, name string) string {
+	if name !in unit.labels {
+		return name
+	}
 	if name in unit.defined && name !in unit.internal {
 		return name
 	}

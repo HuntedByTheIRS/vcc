@@ -383,3 +383,30 @@ fn test_a_static_definition_does_not_answer_another_units_import() {
 	}
 	assert false, 'the link bound an import to another unit static definition'
 }
+
+// The process stub's one code reference calls the entry function, which another
+// unit defines, and the stub carries no label of its own for that name. A name a
+// unit holds no label for is not one of its private labels, so the reference
+// keeps the bare name and finds the defining unit's entry. Keying it as private
+// to the stub would leave the merged table with nothing to answer it, and a
+// program with an entry would be refused.
+fn test_the_stub_calls_an_entry_another_unit_defines() {
+	mut stub := image.Program{}
+	// A `call rel32` placeholder, which is the shape of the stub's first
+	// instruction.
+	stub.text = [u8(0xe8), u8(0), u8(0), u8(0), u8(0)]
+	stub.fixups << image.Fixup{
+		start:  1
+		length: 4
+		kind:   .call_local
+		name:   'main'
+	}
+	entry := defining('main', [u8(0xcc)])
+	merged := link([stub, entry], options('main')) or { panic('the link failed: ${err.msg()}') }
+	// `main` is the second unit's entry, placed after the stub's five bytes, and
+	// the reference still names it the way the merged table holds it.
+	assert merged.fixups.len == 1
+	assert merged.fixups[0].name == 'main'
+	assert merged.labels['main'] == 5
+	assert merged.text[5] == u8(0xcc)
+}
