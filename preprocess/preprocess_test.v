@@ -1154,3 +1154,92 @@ fn test_a_gnu_dialect_claims_a_gnu_compiler() {
 	// c99 is the mode that also hides what the standard does not have.
 	assert standard_defines(.c99, .none) == ['__STRICT_ANSI__=1']
 }
+
+// diagnosed is the messages of a source and the text of every token that still
+// reached the parser, for the tests whose input is meant to draw a diagnostic.
+fn diagnosed(source string) ([]string, []string) {
+	result := preprocess(source, 'test.c', Options{})
+	mut messages := []string{}
+	for diagnostic in result.diagnostics {
+		messages << diagnostic.msg
+	}
+	mut texts := []string{}
+	for tok in result.tokens {
+		texts << tok.text
+	}
+	return messages, texts
+}
+
+fn test_an_undef_of_a_name_that_is_not_defined_is_quiet() {
+	// C lets an #undef name a macro that is not defined there, and the name is
+	// then free to be defined again with a different replacement.
+	assert processed('#undef NOPE\nint x;') == ['int', 'x', ';']
+	assert processed('#define N 1\n#undef N\n#define N 2\nN') == ['2']
+}
+
+fn test_a_macro_defined_twice_is_the_second_definition() {
+	// A second #define of the same name replaces the first, for an object-like
+	// macro and for one whose parameter list changes shape alike.
+	assert processed('#define N 1\n#define N 2\nN') == ['2']
+	assert processed('#define F(x) x\n#define F(a, b) a b\nF(1, 2)') == ['1', '2']
+}
+
+fn test_stringizing_escapes_the_quotes_inside_the_argument() {
+	// `#` writes one string literal holding the argument, so the quotes the
+	// argument already had are escaped and the result is a literal that reads
+	// back as that text.
+	assert processed('#define S(x) #x\nS("q")\n') == ['"\\"q\\""']
+}
+
+fn test_a_paste_of_two_tokens_that_do_not_make_one_is_diagnosed() {
+	// C leaves the answer undefined when the two sides of a ## do not read back
+	// as one token, and both tokens are kept because both are real.
+	messages, texts := diagnosed('#define J(a, b) a ## b\nJ(1, +)\n')
+	assert messages.len == 1
+	assert messages[0].contains('do not make one token')
+	assert texts == ['1', '+']
+}
+
+fn test_a_paste_with_nothing_after_it_is_diagnosed() {
+	messages, texts := diagnosed('#define J(a) a ##\nJ(1)\n')
+	assert messages.len == 1
+	assert messages[0].contains('has nothing to join')
+	assert texts == ['1']
+}
+
+fn test_a_hash_not_in_front_of_a_parameter_is_diagnosed() {
+	// A `#` in a replacement only means stringize when a parameter follows it;
+	// anywhere else it is refused and the token is left as it stands.
+	messages, texts := diagnosed('#define S(x) # y\nS(1)\n')
+	assert messages.len == 1
+	assert messages[0].contains('not in front of one of its parameters')
+	assert texts == ['y']
+}
+
+fn test_an_elif_after_an_else_is_diagnosed() {
+	// The #else has already closed the chain, so the #elif has nothing left to
+	// decide and the branch the #else took still stands.
+	messages, texts := diagnosed('#if 0\n#else\n#elif 1\n#endif\nint x;\n')
+	assert messages.len == 1
+	assert messages[0].contains('#elif after #else')
+	assert texts == ['int', 'x', ';']
+}
+
+fn test_a_conditional_inside_a_branch_that_was_not_taken_is_still_followed() {
+	// A branch that is skipped still has to have its inner #ifdef followed to
+	// its #endif, and neither the inner text nor the outer one after it leaks.
+	source := '#if 0\n#ifdef NOPE\nint a;\n#endif\nint b;\n#endif\nint c;\n'
+	assert processed(source) == ['int', 'c', ';']
+}
+
+fn test_a_comma_inside_parentheses_is_part_of_a_variadic_argument() {
+	// The variadic arguments are split on the commas at the top level only, so
+	// a comma inside a parenthesised argument is part of it.
+	assert processed('#define V(...) g(__VA_ARGS__)\nV((1, 2), 3)\n') == ['g', '(', '(', '1', ',',
+		'2', ')', ',', '3', ')']
+}
+
+fn test_a_variadic_macro_called_with_no_arguments_expands_empty() {
+	// `V()` gives no variadic arguments, so __VA_ARGS__ stands for nothing.
+	assert processed('#define V(...) g(__VA_ARGS__)\nV()\n') == ['g', '(', ')']
+}
