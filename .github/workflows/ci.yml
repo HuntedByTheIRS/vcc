@@ -4,10 +4,11 @@ name: ci
 # formatting, the pure-V rule, the build, the test suite, and the links between
 # the documents. `tools/README.md` says what each step checks.
 #
-# Three jobs: the gate, the compliance corpus on a runner of its own, and a run
-# against whatever V master is today, which is allowed to fail. The last two each
-# build the pinned V, because a job is one machine and the pin is the only thing
-# they must share; see the comment on each for why it is worth the build.
+# Four jobs: the gate, the compliance corpus on a runner of its own, the
+# regression corpus on a runner of its own, and a run against whatever V master
+# is today, which is allowed to fail. The last three each build the pinned V,
+# because a job is one machine and the pin is the only thing they must share;
+# see the comment on each for why it is worth the build.
 
 on:
   push:
@@ -153,6 +154,69 @@ jobs:
             exit 0
           fi
           git commit --quiet -m "docs: the badge reads ${count} compliance tests"
+          # HEAD:main rather than a bare push, because checkout leaves a
+          # detached HEAD on some events and a branch name would not be there
+          git push origin HEAD:main
+
+  # The regression corpus: one C program per bug this compiler has already put
+  # right, and one golden program per answer whose exact stdout must not move.
+  # Each case is compiled and run on its own. It has a runner to itself for the
+  # same reason the compliance corpus does: its cost is a compile and a run per
+  # case rather than one test suite, and a corpus that regresses and a gate that
+  # fails are two different answers to two different questions. The price is a
+  # third build of the same pinned V; the pin itself is in one place, above.
+  regressions:
+    name: regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # The badge in README.md reads a number this job computes, so this job needs
+    # to write. Everything else in the workflow is read-only, and a pull request
+    # from a fork gets a read-only token whatever this says, which is why the step
+    # that writes is guarded to a push on main.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: build V at the pinned commit
+        run: |
+          git clone --quiet https://github.com/vlang/v "$V_DIR"
+          git -C "$V_DIR" checkout --quiet "$V_COMMIT"
+          make -C "$V_DIR"
+          echo "$V_DIR" >> "$GITHUB_PATH"
+          "$V_DIR/v" version
+
+      # The script builds the compiler from this tree itself, so the only thing
+      # this job has to get right is which `v` is on PATH. The run's summary is
+      # kept in a file because the badge step below reads its failure count.
+      - name: regression corpus
+        run: |
+          set -o pipefail
+          v run tools/regress.vsh 2>&1 | tee "$RUNNER_TEMP/regress.log"
+
+      # The two numbers the regressions badge in README.md carries: the case
+      # count, read from the runner's own file collection rather than from a
+      # second glob, and the number of cases the run just failed, read from its
+      # summary line. The badge counts failing cases (regression/README.md), so
+      # this step runs even when the corpus above failed; the job is still red,
+      # and the badge records the failure instead of the run hiding it. A push
+      # made with GITHUB_TOKEN does not start another workflow run, so this
+      # cannot loop.
+      - name: keep the regressions badge current
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          count=$(v run tools/regress.vsh --count)
+          failed=$(grep -oE '[0-9]+ failed' "$RUNNER_TEMP/regress.log" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+          file=.github/badges/regressions.json
+          printf '{"tests": %s, "failed": %s}\n' "$count" "${failed:-0}" > "$file"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$file"
+          if git diff --cached --quiet; then
+            echo "the badge already reads ${count} cases, ${failed:-0} failing"
+            exit 0
+          fi
+          git commit --quiet -m "docs: the badge reads ${count} cases, ${failed:-0} failing"
           # HEAD:main rather than a bare push, because checkout leaves a
           # detached HEAD on some events and a branch name would not be there
           git push origin HEAD:main
