@@ -958,3 +958,5 @@ it owns the change, which is the same vocabulary the commits use.
   the container (7fd1b7e)
 * main: a -l name that resolved to an archive is pulled as a link input
   (059089b)
+* backend/os/elf: a name the image defines gets its own global offset table slot
+  (7b1104c)
