@@ -3660,3 +3660,47 @@ fn test_sizeof_does_not_build_a_compound_literal_operand() {
 	exit_status := compile_and_run(['-std=gnu99', source, '-o', binary], program)
 	assert exit_status == 0
 }
+
+// The link path end to end: two files on one command line and one runnable
+// program out. The call the second file makes is the first file's function, so a
+// program that runs and exits with that value is the proof the driver compiled
+// both files as units of one link, the merge resolved the reference between
+// them, and the container wrote the result. It drives link_inputs, which is the
+// wiring a multi-input command line reaches.
+fn test_two_inputs_on_one_command_line_link_and_run() {
+	first := scratch('link_a.c')
+	second := scratch('link_b.c')
+	binary := scratch('link_out')
+	os.write_file(first, 'int answer(void) { return 42; }\n') or { panic(err) }
+	os.write_file(second, 'int answer(void);\nint main(void) { return answer(); }\n') or {
+		panic(err)
+	}
+	opts := cli.parse([second, first, '-o', binary]) or { panic(err) }
+	link_inputs(opts)
+	assert os.exists(binary)
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 42
+}
+
+// Two files that each keep a `static` function and a loop label of one name. Both
+// are private to their file, so the link has two of each and neither may answer
+// for the other; the emitter numbers its local labels from zero in each file, so
+// the two `again` loops are two labels with one name. The program exits with the
+// sum of both files' statics and both counters, which comes out right only if
+// each file's reference reached its own.
+fn test_two_inputs_whose_private_names_are_the_same_link_and_run() {
+	first := scratch('private_a.c')
+	second := scratch('private_b.c')
+	binary := scratch('private_out')
+	os.write_file(first, 'static int val(void) { return 7; }\nint a_val(void) { int i = 0;\nagain: i++;\n  if (i < 2) goto again;\n  return val() + i; }\n') or {
+		panic(err)
+	}
+	os.write_file(second, 'static int val(void) { return 30; }\nint a_val(void);\nint main(void) { int i = 0;\nagain: i++;\n  if (i < 3) goto again;\n  return a_val() + val() + i; }\n') or {
+		panic(err)
+	}
+	opts := cli.parse([second, first, '-o', binary]) or { panic(err) }
+	link_inputs(opts)
+	assert os.exists(binary)
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 42
+}

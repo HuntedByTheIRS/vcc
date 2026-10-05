@@ -6,6 +6,9 @@ import cli
 import codegen
 import diagnostics
 import extensions
+import image as unit
+import linking
+import linking.output
 import optimizer
 import os
 import parser
@@ -107,8 +110,20 @@ fn main() {
 	if refusal := opts.in_house_link_refusal() {
 		abort(refusal)
 	}
+	// More than one input is a link, and a link is the linker's job: every
+	// input is compiled as one unit of it, the merge settles the references
+	// between them, and the container writes the one program. The single-input
+	// path below writes that container from the one program it emitted
+	// instead, which is why the stub is a detail of its emitter there and a
+	// unit of the link here. A run that stops before a link has no list of
+	// units to hand over, and each of those options reads one file, so it is
+	// refused by name rather than linked from a subset of what it was given.
 	if opts.inputs.len > 1 {
-		abort('linking more than one input is not implemented yet')
+		if !opts.links() {
+			abort('more than one input is a link, and this run stops before one: -c, -E, -M and -print-ast each read one file, so name the inputs one command at a time')
+			return
+		}
+		link_inputs(opts)
 		return
 	}
 	if opts.verbose {
@@ -134,18 +149,7 @@ fn main() {
 	mut started := time.now()
 	// Lexing happens inside the preprocessor, which is the stage that knows
 	// which file it is reading and what to do with the directives it finds.
-	processed := preprocess.preprocess(source, path, preprocess.Options{
-		include_dirs:   opts.include_dirs
-		defines:        language_defines(opts)
-		undefines:      opts.undefines
-		standard_dirs:  if opts.nostdinc { []string{} } else { standard_include_dirs() }
-		preludes:       opts.preludes
-		undef_builtins: opts.undef_builtins
-		// The mode goes to the read as well as to the dialect check below,
-		// because phase 1 asks it a question before a token exists: whether a
-		// trigraph is replaced.
-		dialect:        opts.dialect
-	})
+	processed := preprocess.preprocess(source, path, read_options(opts))
 	phases << cli.Phase{
 		name:   'preprocess'
 		micros: time.since(started).microseconds()
@@ -182,11 +186,7 @@ fn main() {
 	// the flags promoted is the only way it can stop a compile. It is reported
 	// under the same policy as the stage above, so the two stages of a read-only
 	// run agree and neither of them can drop the answer.
-	pedantic := standard.pedantic_messages(processed.tokens, standard.Question{
-		mode:         opts.dialect
-		extensions:   opts.vcc_extensions.enabled_names()
-		system_files: system_files(processed.files)
-	})
+	pedantic := dialect_messages(processed, opts)
 	if report(path, pedantic, policy) > 0 {
 		exit(1)
 	}
@@ -276,7 +276,177 @@ fn main() {
 		}
 	}
 	if opts.verbose {
-		verbose_print(verbose_result_lines(opts, phases, image, out_path))
+		verbose_print(verbose_result_lines(opts, phases, image.bytes, out_path))
+	}
+	if opts.bench {
+		for line in cli.bench_lines(phases) {
+			eprintln(line)
+		}
+	}
+	if opts.run {
+		run_image(out_path, opts.run_args)
+	}
+}
+
+// read_options is what every input is read with, whether it is the one file the
+// ordinary path reads or one more unit of a link: the same -I, -D, -U, prelude
+// and dialect, so that a link's units are read the way the same files read one
+// command at a time would be.
+fn read_options(opts cli.Options) preprocess.Options {
+	return preprocess.Options{
+		include_dirs:   opts.include_dirs
+		defines:        language_defines(opts)
+		undefines:      opts.undefines
+		standard_dirs:  if opts.nostdinc { []string{} } else { standard_include_dirs() }
+		preludes:       opts.preludes
+		undef_builtins: opts.undef_builtins
+		// The mode goes to the read as well as to the dialect check, because
+		// phase 1 asks it a question before a token exists: whether a trigraph
+		// is replaced.
+		dialect:        opts.dialect
+	}
+}
+
+// dialect_messages are the constructs the selected mode does not allow, read off
+// the stream the preprocessor produced. It is the same check for one unit of a
+// link as for the one file the ordinary path reads.
+fn dialect_messages(processed preprocess.Result, opts cli.Options) []tokenize.Diagnostic {
+	return standard.pedantic_messages(processed.tokens, standard.Question{
+		mode:         opts.dialect
+		extensions:   opts.vcc_extensions.enabled_names()
+		system_files: system_files(processed.files)
+	})
+}
+
+// link_inputs is the multi-input path. Every input is compiled as one unit of a
+// link, the units are merged with the process stub, and the one program the link
+// calls for is written. The stub is built here and placed first, because text
+// offset zero is the stub and so the image's entry point is text offset zero
+// whatever the units do with a `main` of their own; the single-input path has
+// the emitter write that stub into the one image instead.
+fn link_inputs(opts cli.Options) {
+	if opts.verbose {
+		verbose_print(verbose_include_dir_lines(opts))
+	}
+	target := backend.resolve(opts.target) or {
+		abort(err.msg())
+		return
+	}
+	stub := codegen.start_stub('main', codegen.Options{ target: opts.target })
+	// The stub is emitted from a constant entry name and the exit sequence, so
+	// it has nothing to report; a diagnostic here is this compiler failing
+	// rather than an input. It goes through the one place a diagnostic becomes
+	// text, with no file to name because it has none.
+	if report('', stub.diagnostics, opts.warnings) > 0 {
+		exit(1)
+	}
+	mut units := []unit.Program{cap: opts.inputs.len + 1}
+	units << stub.program
+	mut reading := i64(0)
+	mut parsing := i64(0)
+	mut optimizing := i64(0)
+	mut emitting := i64(0)
+	for path in opts.inputs {
+		source := read_source(path) or {
+			abort('cannot read ${path}: ${err.msg()}')
+			return
+		}
+		// What the input is decides whether it is read as source at all, by the
+		// rule the single-input path uses and for its reason: an object or an
+		// archive is an input to a link this linker cannot read yet, and reading
+		// one as source answers a wrong input kind with a parse error raised
+		// from inside a binary file.
+		kind := cli.classify_input(source, path, opts.input_type)
+		if kind != .source {
+			abort(cli.input_refusal(path, kind))
+			return
+		}
+		mut started := time.now()
+		processed := preprocess.preprocess(source, path, read_options(opts))
+		reading += time.since(started).microseconds()
+		if opts.verbose {
+			verbose_print(verbose_file_lines(processed.files))
+		}
+		if report(path, processed.diagnostics, opts.warnings) > 0 {
+			exit(1)
+		}
+		if report(path, dialect_messages(processed, opts), opts.warnings) > 0 {
+			exit(1)
+		}
+		started = time.now()
+		parsed := parser.parse_for(processed.tokens, parser_target(opts.target))
+		parsing += time.since(started).microseconds()
+		if report(path, parsed.diagnostics, opts.warnings) > 0 {
+			exit(1)
+		}
+		started = time.now()
+		optimized := optimizer.optimize(parsed.unit, opts.optimization)
+		optimizing += time.since(started).microseconds()
+		started = time.now()
+		emitted := codegen.emit(optimized, codegen.Options{
+			target:       opts.target
+			link:         true
+			libraries:    opts.libraries
+			library_dirs: opts.library_dirs
+		})
+		emitting += time.since(started).microseconds()
+		if report(path, emitted.diagnostics, opts.warnings) > 0 {
+			exit(1)
+		}
+		units << emitted.program
+	}
+	mut started := time.now()
+	merged := linking.link(units, linking.Options{
+		entry:        'main'
+		target:       target
+		libraries:    opts.libraries
+		library_dirs: opts.library_dirs
+	}) or {
+		abort(err.msg())
+		return
+	}
+	bytes := output.image(merged, target) or {
+		abort(err.msg())
+		return
+	}
+	linked := time.since(started).microseconds()
+	// One line per phase for the whole command, because a build reading -bench
+	// wants what the link cost rather than a row per input: each number is the
+	// sum over the units and the last one is the merge and the container.
+	mut phases := []cli.Phase{}
+	phases << cli.Phase{
+		name:   'preprocess'
+		micros: reading
+	}
+	phases << cli.Phase{
+		name:   'parse'
+		micros: parsing
+	}
+	phases << cli.Phase{
+		name:   'opt'
+		micros: optimizing
+	}
+	phases << cli.Phase{
+		name:   'emit'
+		micros: emitting
+	}
+	phases << cli.Phase{
+		name:   'link'
+		micros: linked
+	}
+	out_path := if opts.output != '' {
+		opts.output
+	} else if opts.run {
+		temporary_path()
+	} else {
+		'a.out'
+	}
+	write_image(out_path, bytes) or {
+		abort('cannot write ${out_path}: ${err.msg()}')
+		return
+	}
+	if opts.verbose {
+		verbose_print(verbose_result_lines(opts, phases, bytes, out_path))
 	}
 	if opts.bench {
 		for line in cli.bench_lines(phases) {
@@ -937,7 +1107,7 @@ fn verbose_file_lines(files []preprocess.SourceFile) []string {
 // show. What it can show is the phases and what the image will carry - the loader,
 // the C library, the libraries a -l named, and the file - which is the part of
 // gcc's -v a build reads to see what got linked.
-fn verbose_result_lines(opts cli.Options, phases []cli.Phase, image codegen.Result, out_path string) []string {
+fn verbose_result_lines(opts cli.Options, phases []cli.Phase, bytes []u8, out_path string) []string {
 	mut out := []string{}
 	for phase in phases {
 		out << 'phase: ${phase.name} ${phase.micros}us'
@@ -951,7 +1121,7 @@ fn verbose_result_lines(opts cli.Options, phases []cli.Phase, image codegen.Resu
 	} {
 		out << '  library: ${library.soname} (${library.path})'
 	}
-	out << '  written: ${out_path} (${image.bytes.len} bytes)'
+	out << '  written: ${out_path} (${bytes.len} bytes)'
 	return out
 }
 

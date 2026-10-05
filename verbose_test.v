@@ -84,7 +84,7 @@ fn test_the_result_lines_name_the_work_this_compiler_does_itself() {
 	lines := verbose_result_lines(opts, [cli.Phase{
 		name:   'emit'
 		micros: 5
-	}], image, '/tmp/out')
+	}], image.bytes, '/tmp/out')
 	assert lines[0] == 'phase: emit 5us'
 	assert lines.contains('link: no linker is run; this compiler writes the container itself')
 	assert lines.contains('  interpreter: ${host.interpreter}')

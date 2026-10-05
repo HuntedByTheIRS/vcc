@@ -75,11 +75,13 @@ pub fn (kind InputKind) describe() string {
 // input_refusal is the message for an input this compiler will not read, and the
 // one place the wording lives. It names the construct and the path, the way the
 // other refusals here do, and says what is missing rather than blaming the file:
-// the file is fine and the linker is not written.
+// the file is fine and the reader for it is not written. A link is read from the
+// units the compiler just emitted, so what is missing here is the reader for a
+// file another compiler or an earlier run wrote.
 pub fn input_refusal(path string, kind InputKind) string {
 	match kind {
 		.object, .shared_object, .archive {
-			return '${path}: ${kind.describe()} is an input to a link, and linking is not implemented yet'
+			return '${path}: ${kind.describe()} is an input to a link, and this linker reads no relocatable file or archive yet: it links the translation units it just compiled'
 		}
 		.program {
 			return '${path}: a program is not an input this compiler reads'
