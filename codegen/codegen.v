@@ -1841,10 +1841,11 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 	}
 	// The width check is the one store_value makes for a name: a constant is
 	// written at the width of the object because a constant says nothing about
-	// its own width, and any other value has to have it already. A char object
-	// is the exception, since the language stores an int in a char by taking
-	// its low byte.
-	if e.constant(expr) == none && value_width != width && !(width < 4 && value_width == 4) {
+	// its own width, a value narrower than the object is converted to the
+	// object's type, and a wider one is refused. A char object takes an int by
+	// its low byte, which is the narrowing the language also defines and the
+	// check leaves alone.
+	if e.constant(expr) == none && value_width > width && !(width < 4 && value_width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored through an address of ${unary.typ.describe()}, which holds ${width}')
 		return error('width mismatch')
 	}
@@ -2588,11 +2589,11 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 	}
 	// The width check is the one a store through an address makes, because that
 	// is what a member store is: a constant is written at the width of the
-	// member, since a constant says nothing about its own width, and any other
-	// value has to have it already - except into a member narrower than four
-	// bytes, where the language converts an int by taking the low byte or the low
-	// two of it.
-	if e.constant(expr) == none && value_width != width && !(width < 4 && value_width == 4) {
+	// member, since a constant says nothing about its own width, a value
+	// narrower than the member is converted to the member's type, and a wider
+	// one is refused - except into a member narrower than four bytes, where the
+	// language converts an int by taking the low byte or the low two of it.
+	if e.constant(expr) == none && value_width > width && !(width < 4 && value_width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into the member ${member_name}, which holds ${width}')
 		return error('width mismatch')
 	}
@@ -2639,7 +2640,7 @@ fn (mut e Emitter) assign_member_bits(stmt ast.Stmt, member ast.Field, expr ast.
 			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 			return error('unknown width')
 		}
-		if e.constant(expr) == none && value_width != width && !(width < 4 && value_width == 4) {
+		if e.constant(expr) == none && value_width > width && !(width < 4 && value_width == 4) {
 			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into the member ${member_name}, which holds ${width}')
 			return error('width mismatch')
 		}
@@ -2788,11 +2789,11 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			// A constant is written at the width of the element, because a
 			// constant says nothing about its own width: this is what a store
 			// into a local already does, and an element of a top-level array is
-			// the same store at an address the image holds. Any other value has
-			// to have the element's width already, except into an element
-			// narrower than four bytes, where the language converts an int by
-			// taking its low byte or its low two.
-			if e.constant(expr) == none && width != object.width && !(object.width < 4 && width == 4) {
+			// the same store at an address the image holds. A value narrower
+			// than the element is converted to its type, and a wider one is
+			// refused, except into an element narrower than four bytes, where
+			// the language converts an int by taking its low byte or its low two.
+			if e.constant(expr) == none && width > object.width && !(object.width < 4 && width == 4) {
 				e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${stmt.target}, which holds ${object.width}')
 				return error('width mismatch')
 			}
@@ -2904,11 +2905,11 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	}
 	// A constant is written at the width of the element, because a constant
 	// says nothing about its own width: this is what a store into a local
-	// already does, and an element is the same store at a computed address.
-	// Any other value has to have the element's width already, except into an
-	// element narrower than four bytes, where the language converts an int by
-	// taking its low byte or its low two.
-	if e.constant(expr) == none && width != slot.width && !(slot.width < 4 && width == 4) {
+	// already does, and an element is the same store at a computed address. A
+	// value narrower than the element is converted to its type, and a wider one
+	// is refused, except into an element narrower than four bytes, where the
+	// language converts an int by taking its low byte or its low two.
+	if e.constant(expr) == none && width > slot.width && !(slot.width < 4 && width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${width} bytes is stored into an element of ${slot.width}')
 		return error('width mismatch')
 	}
@@ -2978,10 +2979,11 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 	// A constant is written at the width of the element, because a constant
 	// says nothing about its own width: this is what a store into a local
 	// already does, and an element reached through an address is the same store
-	// at a computed address. Any other value has to have the element's width
-	// already, except into an element narrower than four bytes, where the
-	// language converts an int by taking its low byte or its low two.
-	if e.constant(expr) == none && value_width != width && !(width < 4 && value_width == 4) {
+	// at a computed address. A value narrower than the element is converted to
+	// its type, and a wider one is refused, except into an element narrower than
+	// four bytes, where the language converts an int by taking its low byte or
+	// its low two.
+	if e.constant(expr) == none && value_width > width && !(width < 4 && value_width == 4) {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a value of ${value_width} bytes is stored into an element of ${width}')
 		return error('width mismatch')
 	}
@@ -4832,9 +4834,14 @@ fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int,
 // store_value writes the accumulator into a slot, after checking that the value
 // is one the slot can hold. A constant is written at the width of the slot,
 // because a constant is the one value that says nothing about its own width
-// (`char *p = 0` is a zero of pointer width). Any other value has to have the
-// slot's width already: storing a pointer in four bytes or an int in eight is a
-// wrong value rather than a narrow one.
+// (`char *p = 0` is a zero of pointer width). A value narrower than the slot is
+// converted to the slot's type first, which is the conversion the language makes
+// when a value is assigned to an object of another type (6.5.16.1) and the one
+// extend_operand_to_word writes for the store below: `long v = i` is the int
+// sign-extended into the whole slot, and an unsigned int takes zeros there. A
+// value wider than the slot is refused, because the store moves the slot's bytes
+// and the top of the value would be dropped; storing a pointer in four bytes is
+// that case.
 //
 // A slot holding a double is the exception to that, and the reason the check is
 // written around the conversion: the language converts an integer to a double
@@ -4900,7 +4907,7 @@ fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !voi
 			e.diagnostics << problem(line, col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 			return error('unknown width')
 		}
-		if width != slot.width && !(slot.width < 4 && width == 4) {
+		if width > slot.width && !(slot.width < 4 && width == 4) {
 			e.diagnostics << problem(line, col, 'unsupported: a value of ${width} bytes is stored into a slot of ${slot.width}')
 			return error('width mismatch')
 		}
@@ -10808,9 +10815,17 @@ fn (mut e Emitter) convert_for_global(expr ast.Expr, object image.GlobalSlot, un
 		return e.convert_to_int(expr, unsigned_target, object.width, line, col)
 	}
 	if width := e.width_of(expr) {
-		if width != object.width && !(object.width < 4 && width == 4) {
+		if width > object.width && !(object.width < 4 && width == 4) {
 			e.diagnostics << problem(line, col, 'unsupported: a value of ${width} bytes is stored into an object that holds ${object.width}')
 			return error('width mismatch')
+		}
+		if object.width == 8 && width != 8 {
+			// A value narrower than the object is widened into the whole
+			// register before it is written, the way a store into a name of
+			// that width does: the store moves eight bytes, so an int whose
+			// upper half the load cleared would be written as its unsigned
+			// reading.
+			e.extend_operand_to_word(expr, line, col)!
 		}
 		return
 	}
