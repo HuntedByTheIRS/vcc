@@ -296,8 +296,10 @@ fn run_in(root string, command string) int {
 	return os.system('cd ${os.quoted_path(root)} && ${command}')
 }
 
+// capture is stdout alone. V's os.execute folds stderr into the same stream, so a
+// warning beside the value would land in it; stderr is sent away before reading.
 fn capture(command string) string {
-	return os.execute(command).output
+	return os.execute('${command} 2>/dev/null').output
 }
 
 fn failed(name string, detail string) Outcome {
