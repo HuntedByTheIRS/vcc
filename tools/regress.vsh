@@ -40,7 +40,7 @@
 import os
 import time
 
-const regression_floor = 43
+const regression_floor = 44
 const goldens_floor = 16
 
 const compile_flags = '-x c -std=gnu99 -w -lm'
