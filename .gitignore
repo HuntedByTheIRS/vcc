@@ -12,8 +12,19 @@ vcc
 # `tools/gate.vsh` builds `tools/gate`. A `git add -A` in this tree committed
 # one of them once, at 2.9 MB; the rules are here so it cannot happen again.
 # The sources are `*_test.v`, which the pattern does not match.
+#
+# The scripts under tools/ are named the same way: `v run tools/build.vsh`
+# builds `tools/build` beside it, and a run that stops early can leave its
+# scratch directory (`tools/.regress.v3cc.*`) there too. Both are byproducts of
+# running a script, and neither is a source.
 *_test
 tools/gate
+tools/build
+tools/bench
+tools/compliance
+tools/regress
+tools/tests
+tools/.*.v3cc.*
 
 # Ignore binary output folders
 bin/

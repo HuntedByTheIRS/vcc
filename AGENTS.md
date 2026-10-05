@@ -48,6 +48,7 @@ Linux x86-64.
 v -o vcc .                 # build
 v test .                   # the suite
 v run tools/gate.vsh       # format, pure-V rule, build, tests, doc links
+v run tools/build.vsh      # the front door: build, gate, corpora, bench, image, version
 v run tools/bench.vsh      # wall time and peak memory, tcc alongside
 v fmt -w .                 # format before committing
 ./vcc -hh                  # the flag surface
@@ -55,7 +56,9 @@ v fmt -w .                 # format before committing
 /usr/bin/time -v ./vcc -o /tmp/out src.c   # wall time and peak RSS
 ```
 
-`tools/gate.vsh` is the same set of checks a pull request has to pass, and CI
+`tools/build.vsh` is the front door over these commands: it runs the same
+checks plus the corpora, the benchmark, the image and the version report in one
+run. `tools/gate.vsh` is the same set of checks a pull request has to pass, and CI
 runs it too (`.github/workflows/ci.yml`), so run it before claiming a change is
 done rather than after CI says otherwise. Use `-nocache`
 on probe builds, and prefer the gate's build over a binary from an earlier edit.

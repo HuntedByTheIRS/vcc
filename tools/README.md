@@ -4,6 +4,38 @@ Scripts that check the tree and measure it. They are V scripts (`v run tools/…
 so the tooling follows the same rule as the compiler: no shell scripts that call
 a C compiler, no dependency on anything but V and the system's `time`.
 
+## build.vsh
+
+The front door over the scripts below: build the compiler, run the gate, run
+both corpora, benchmark, build the image, and report the version. Reach for it
+when you want the checks in one command, or when you do not remember which
+runner owns a check. The individual runners are still the way to pass a flag
+they alone take.
+
+```sh
+v run tools/build.vsh                 # build the compiler, then the gate, then both corpora
+v run tools/build.vsh build [-o PATH] # the compiler only; -o is where it lands
+v run tools/build.vsh test            # `v test .`
+v run tools/build.vsh gate            # gate.vsh
+v run tools/build.vsh compliance      # compliance.vsh
+v run tools/build.vsh regress         # regress.vsh
+v run tools/build.vsh corpora         # compliance and regress together
+v run tools/build.vsh bench [args]    # bench.vsh, args passed through
+v run tools/build.vsh docker          # build the image, then run the binary in it
+v run tools/build.vsh version         # the binary, v.mod, and the pinned V commit
+v run tools/build.vsh all             # every step, then a summary
+v run tools/build.vsh --list          # the steps, one line each
+```
+
+Every step calls the runner that owns the check, so no count or floor is kept
+twice. The compiler is built under the temp directory for the steps that only
+need one to run cases, and no step leaves a `vcc` in the tree unless it was
+asked for by name (`build -o PATH`). `all` runs every step even when one fails
+and exits non-zero if any failed, so one run reports every failure. A step whose
+tool is missing is skipped and named in the summary; that fails the run only
+when the step was asked for by name. `version` prints what the binary reports,
+what `v.mod` names, and the V commit `ci.yml` pins, because those three drift.
+
 ## gate.vsh
 
 The checks a pull request has to pass, in one command, so CI never holds an
