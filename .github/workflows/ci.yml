@@ -91,6 +91,32 @@ jobs:
           # push because checkout can leave a detached HEAD on some events.
           git pull --rebase --quiet origin main && git push origin HEAD:main
 
+      # The lines badge in README.md reads this, from the tool the count has one
+      # home in. It is a walk over the tracked files, so it costs nothing beside
+      # the gate, and it carries its own commit for the same reason the ones
+      # above do.
+      - name: keep the lines badge current
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          count=$(v run tools/lines.vsh --count)
+          file=.github/badges/lines.json
+          printf '{"lines": %s}\n' "$count" > "$file"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$file"
+          if git diff --cached --quiet; then
+            echo "the badge already reads ${count} lines"
+            exit 0
+          fi
+          git commit --quiet -m "docs: the badge reads ${count} lines"
+          # The remote can move while this job runs: another push, or one of the
+          # other badge jobs finishing first. The two commands share a line so a
+          # rejected rebase cannot push a stale badge as though it were current.
+          # `origin main` is named rather than a bare pull because a detached
+          # HEAD has no branch to merge into, and HEAD:main rather than a bare
+          # push because checkout can leave a detached HEAD on some events.
+          git pull --rebase --quiet origin main && git push origin HEAD:main
+
       # The numbers are recorded, not gated. A shared runner's wall time is not
       # a budget anyone can hold a pull request to, and the workload that will
       # decide this project is the V self-build, which no milestone reaches yet
