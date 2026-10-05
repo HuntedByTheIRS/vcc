@@ -46,11 +46,17 @@ pub fn link(units []image.Program, options Options) !image.Program {
 	// The names come first: their resolution is what decides which unit's
 	// storage an object binds to and which references are bound at all.
 	names := symbols.collect(units)!
-	entry := names.definitions[options.entry] or {
-		return error('no definition of ${options.entry} in any unit of the link')
-	}
-	if !entry.function {
-		return error('the entry ${options.entry} names an object and not a function')
+	// A shared object has no entry: nothing starts it, so there is no name to
+	// resolve here and no diagnostic to make about one. An empty entry is how
+	// the caller says that, and the container writes an entry point of zero for
+	// that kind of link.
+	if options.entry != '' {
+		entry := names.definitions[options.entry] or {
+			return error('no definition of ${options.entry} in any unit of the link')
+		}
+		if !entry.function {
+			return error('the entry ${options.entry} names an object and not a function')
+		}
 	}
 	layout := place.lay(units, names.globals_alignment)
 	read_only := merge_read_only(units, layout)

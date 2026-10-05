@@ -503,28 +503,22 @@ fn test_a_run_that_stops_before_a_link_says_so() {
 	stopped := parse(['-c', '-external-linker=ld', 'x.c'])!
 	assert stopped.external_linker == 'ld'
 	assert !stopped.links()
-	assert stopped.in_house_link_refusal() == none
+	assert stopped.link_kind_conflict_refusal() == none
 }
 
-// The path that runs without a linker writes a program, so the two flags that
-// ask for another kind of file are refused by name and the message says what
-// would write them. The same flags on a run that stops before a link are not a
-// refusal: there is nothing for them to decide.
-fn test_the_kind_of_link_is_refused_by_name_when_nothing_writes_it() {
-	assert parse(['x.c'])!.in_house_link_refusal() == none
-	assert parse(['-c', '-shared', 'x.c'])!.in_house_link_refusal() == none
-	assert parse(['-E', '-static', 'x.c'])!.in_house_link_refusal() == none
-	shared := parse(['-shared', 'x.c'])!.in_house_link_refusal() or {
-		panic('a shared object is not what this path writes')
-	}
-	assert shared.contains('-shared')
-	assert shared.contains('-external-linker=NAME')
-	st := parse(['-static', 'x.c'])!.in_house_link_refusal() or {
-		panic('a static program is not what this path writes')
-	}
-	assert st.contains('-static')
-	assert st.contains('-external-linker=NAME')
-	both := parse(['-shared', '-static', 'x.c'])!.in_house_link_refusal() or {
+// The path with no linker writes all three kinds of file, so the two flags that
+// name one are read rather than refused, and the only refusal left is the pair
+// that disagree about which file comes out. A flag on a run that stops before a
+// link decides nothing either way.
+fn test_the_kind_of_link_is_read_and_only_the_pair_is_refused() {
+	assert parse(['x.c'])!.link_kind_conflict_refusal() == none
+	assert parse(['-c', '-shared', 'x.c'])!.link_kind_conflict_refusal() == none
+	assert parse(['-E', '-static', 'x.c'])!.link_kind_conflict_refusal() == none
+	assert parse(['-shared', 'x.c'])!.link_kind_conflict_refusal() == none
+	assert parse(['-static', 'x.c'])!.link_kind_conflict_refusal() == none
+	assert parse(['-shared', 'x.c'])!.shared
+	assert parse(['-static', 'x.c'])!.static_link
+	both := parse(['-shared', '-static', 'x.c'])!.link_kind_conflict_refusal() or {
 		panic('a shared object and a static program are different links')
 	}
 	assert both.contains('-shared') && both.contains('-static')

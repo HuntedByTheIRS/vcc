@@ -313,6 +313,32 @@ pub fn (t &Target) exit_sequence(code u8) ![]u8 {
 	return out
 }
 
+// exit_sequence_from is exit_sequence for a status already in a register rather
+// than one known when the bytes are written. The move is the machine's own, so
+// the register the status arrives in is the caller's to name and the register
+// the kernel reads it from stays the system's to name. A process stub that
+// leaves through the syscall needs this shape: the value is in the register the
+// call to the entry function left it in, and what is left to write is the move,
+// the number, and the trap.
+pub fn (t &Target) exit_sequence_from(held Register) ![]u8 {
+	exit_call := t.syscall(t.exit_syscall) or {
+		return error('${t.name}: no ${t.exit_syscall} syscall in the table')
+	}
+	if exit_call.args.len == 0 {
+		return error('${t.name}: ${exit_call.name} is described with no argument register')
+	}
+	number_reg := t.reg(t.syscall_number_reg) or {
+		return error('${t.name}: no register named ${t.syscall_number_reg}')
+	}
+	status_reg := t.reg(exit_call.args[0]) or {
+		return error('${t.name}: no register named ${exit_call.args[0]}')
+	}
+	mut out := t.encoders.mov_reg32(t.describe(status_reg), t.describe(held))!
+	out << t.encoders.mov_imm32(t.describe(number_reg), exit_call.number)!
+	out << t.encoders.trap()
+	return out
+}
+
 // The instructions an emitter puts around its own code. Each one takes the
 // displacement it should carry, so the emitter can lay an image out first and
 // fill the references in afterwards; the length of the instruction does not

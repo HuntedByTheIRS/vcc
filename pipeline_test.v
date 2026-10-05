@@ -1,5 +1,6 @@
 module main
 
+import backend.os.elf
 import cli
 import codegen
 import optimizer
@@ -3748,6 +3749,91 @@ fn test_an_archive_is_read_for_the_member_the_link_needs() {
 	assert os.exists(binary)
 	result := os.execute(os.quoted_path(binary))
 	assert result.exit_code == 7
+}
+
+// -static asks for a program with every library resolved into the file. The
+// shape that is finished is the one that reaches no library at all: the process
+// stub leaves through the kernel's exit rather than through the library's, which
+// is the one import a static link cannot resolve. The file then carries no
+// interpreter and no dynamic table, which is what a reader looks for to call it
+// static, and the kernel starts it alone.
+fn test_a_static_link_writes_a_program_the_kernel_starts_alone() {
+	source := scratch('static_kind.c')
+	binary := scratch('static_kind_out')
+	body := 'int main(void) { return 7; }\n'
+	os.write_file(source, body) or { panic(err) }
+	opts := cli.parse(['-static', source, '-o', binary]) or { panic(err) }
+	// A single input is wrapped inside the emitter rather than by the linker,
+	// so the kind the command line named is read here the way main() reads it.
+	lexed := tokenize.lex(body)
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 0
+	emitted := codegen.emit(parsed.unit, codegen.Options{
+		target:    opts.target
+		entry:     'main'
+		link_kind: link_kind(opts)
+	})
+	assert emitted.diagnostics.len == 0
+	os.write_file_array(binary, emitted.bytes) or { panic(err) }
+	os.chmod(binary, 0o755) or { panic(err) }
+	result := os.execute(os.quoted_path(binary))
+	assert result.exit_code == 7
+	types := program_header_types(binary)
+	assert !types.contains(int(elf.elf_ph_type_interp))
+	assert !types.contains(int(elf.elf_ph_type_dynamic))
+}
+
+// -shared asks for a shared object, which something else loads and calls into,
+// so it has no entry point and no interpreter and its type is ET_DYN. Nothing
+// runs it here, because loading one is the loader's job; the container's own
+// test checks what it exports, and this one checks the way the command line
+// reaches the container, including that a file with no `main` is not refused.
+fn test_a_shared_link_writes_an_object_for_a_loader_to_map() {
+	source := scratch('shared_kind.c')
+	binary := scratch('shared_kind_out')
+	body := 'int twice(int n) { return n + n; }\n'
+	os.write_file(source, body) or { panic(err) }
+	opts := cli.parse(['-shared', source, '-o', binary]) or { panic(err) }
+	lexed := tokenize.lex(body)
+	parsed := parser.parse(lexed.tokens)
+	assert parsed.diagnostics.len == 0
+	emitted := codegen.emit(parsed.unit, codegen.Options{
+		target:    opts.target
+		entry:     'main'
+		link_kind: link_kind(opts)
+	})
+	assert emitted.diagnostics.len == 0
+	os.write_file_array(binary, emitted.bytes) or { panic(err) }
+	content := os.read_file(binary) or { panic(err) }
+	assert read_le(content, 16, 2) == 3
+	assert read_le(content, 24, 8) == 0
+	assert !program_header_types(binary).contains(int(elf.elf_ph_type_interp))
+}
+
+// program_header_types is the p_type of every program header a written file
+// carries, in the order they were written: what a kernel and a loader read
+// before any code runs, and how a test asks which headers the container left out
+// without a reader for the whole format.
+fn program_header_types(path string) []int {
+	content := os.read_file(path) or { panic(err) }
+	offset := read_le(content, 32, 8)
+	entry_size := read_le(content, 54, 2)
+	count := read_le(content, 56, 2)
+	mut types := []int{cap: int(count)}
+	for i in 0 .. int(count) {
+		types << int(read_le(content, int(offset) + i * int(entry_size), 4))
+	}
+	return types
+}
+
+// read_le reads one little-endian field of `width` bytes at `at`, which is the
+// order the format writes every field of both headers in.
+fn read_le(content string, at int, width int) u64 {
+	mut value := u64(0)
+	for i in 0 .. width {
+		value |= u64(content[at + i]) << (8 * i)
+	}
+	return value
 }
 
 // ar_header is one 60-byte member header: the name left-justified in its sixteen

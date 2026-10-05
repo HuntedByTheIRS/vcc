@@ -487,29 +487,6 @@ pub fn (opts Options) link_kind_conflict_refusal() ?string {
 	return none
 }
 
-// in_house_link_refusal is the message for a command line whose kind of link the
-// path with no linker does not write, and none when it writes it: that path
-// writes a program, linked against the shared C library, so a shared object and
-// a static program are both refused by name and the message says what would
-// write them. A run that stops before a link is not one of these, because
-// neither flag has anything to decide about a run that never reaches one, and
-// neither is a plain run, which is the program this path writes.
-pub fn (opts Options) in_house_link_refusal() ?string {
-	if !opts.links() {
-		return none
-	}
-	if conflict := opts.link_kind_conflict_refusal() {
-		return conflict
-	}
-	if opts.shared {
-		return '-shared needs -external-linker=NAME: this compiler writes a program linked against the shared C library, and a linker is what writes the shared object'
-	}
-	if opts.static_link {
-		return '-static needs -external-linker=NAME: this compiler writes a program linked against the shared C library, and a linker is what resolves the libraries into the file'
-	}
-	return none
-}
-
 // search_dirs_text renders `-print-search-dirs` in the shape gcc uses: where the
 // compiler is, where its helper programs are looked for, and where its libraries
 // are looked for. gcc names its private install tree and its cc1/as/collect2

@@ -104,12 +104,12 @@ fn main() {
 		external_link(opts)
 		return
 	}
-	// -shared and -static decide what a link writes, and the path that runs
-	// with no linker writes one kind of file: a program, linked against the
-	// shared C library. Handing back a program for either would be this
-	// compiler answering a question it was not asked, so each is refused by
-	// name and says what it needs instead.
-	if refusal := opts.in_house_link_refusal() {
+	// -shared and -static decide what a link writes, and the path with no linker
+	// writes all three kinds of file: the container has a shape for each. Both
+	// flags are therefore read here rather than refused. The one command line
+	// that is refused is the pair asking for different files, because a link
+	// that took one flag would drop the other without a word.
+	if refusal := opts.link_kind_conflict_refusal() {
 		abort(refusal)
 	}
 	// More than one input is a link, and a link is the linker's job: every
@@ -257,6 +257,7 @@ fn main() {
 		entry:        'main'
 		compile_only: opts.compile_only
 		pic:          opts.pic
+		link_kind:    link_kind(opts)
 		libraries:    opts.libraries
 		library_dirs: opts.library_dirs
 	})
@@ -408,16 +409,25 @@ fn link_inputs(opts cli.Options) {
 		abort(err.msg())
 		return
 	}
-	stub := codegen.start_stub('main', codegen.Options{ target: opts.target })
-	// The stub is emitted from a constant entry name and the exit sequence, so
-	// it has nothing to report; a diagnostic here is this compiler failing
-	// rather than an input. It goes through the one place a diagnostic becomes
-	// text, with no file to name because it has none.
-	if report('', stub.diagnostics, opts.warnings) > 0 {
-		exit(1)
-	}
+	// A shared object has no process stub: nothing starts it and the image's
+	// entry point is zero. Every other kind of link starts at a stub, which is
+	// why text offset zero is the stub.
+	output_kind := link_kind(opts)
 	mut units := []unit.Program{cap: opts.inputs.len + 1}
-	units << stub.program
+	if output_kind != .shared {
+		stub := codegen.start_stub('main', codegen.Options{
+			target:    opts.target
+			link_kind: output_kind
+		})
+		// The stub is emitted from a constant entry name and the exit
+		// sequence, so it has nothing to report; a diagnostic here is this
+		// compiler failing rather than an input. It goes through the one place
+		// a diagnostic becomes text, with no file to name because it has none.
+		if report('', stub.diagnostics, opts.warnings) > 0 {
+			exit(1)
+		}
+		units << stub.program
+	}
 	mut reading := i64(0)
 	mut parsing := i64(0)
 	mut optimizing := i64(0)
@@ -506,7 +516,7 @@ fn link_inputs(opts cli.Options) {
 	}
 	mut started := time.now()
 	merged := linking.link(units, linking.Options{
-		entry:        'main'
+		entry:        if output_kind == .shared { '' } else { 'main' }
 		target:       target
 		libraries:    opts.libraries
 		library_dirs: opts.library_dirs
@@ -514,7 +524,7 @@ fn link_inputs(opts cli.Options) {
 		abort(err.msg())
 		return
 	}
-	bytes := output.image(merged, target) or {
+	bytes := output.image(merged, target, link_kind(opts)) or {
 		abort(err.msg())
 		return
 	}

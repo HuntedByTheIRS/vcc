@@ -48,6 +48,14 @@ pub:
 	// every address settled here, so its addressing is unchanged whether the
 	// flag is given or not.
 	pic bool
+	// link_kind is which kind of file the wrapper writes for this unit: a
+	// program, a static program, or a shared object. It is the command line's
+	// -shared and -static decision, and it is an option here because a single
+	// input is wrapped at the end of this walk rather than by the linker, which
+	// wraps the merged program instead. An object this compiler writes as an
+	// input to a link is not one of these, and neither is a link unit: both
+	// leave the container to somebody else.
+	link_kind linux.LinkKind = .program
 	// libraries are the -l names the command line gave, in the order they were
 	// written: a program that calls a function out of a shared library other
 	// than the C library has to name that library for the loader to map it.
@@ -248,6 +256,9 @@ struct Emitter {
 	// pic says a relocatable object reaches a non-static top-level object
 	// through the global offset table rather than through a direct reference.
 	pic bool
+	// link_kind is which kind of file the wrapper writes, and nothing before
+	// the wrapper reads it.
+	link_kind linux.LinkKind
 	// internal is every top-level object this unit defines with internal
 	// linkage: the names the declaration wrote `static`. A reference to one is
 	// direct under any addressing, because no other object can define the name
@@ -510,8 +521,12 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	// sibling unit's business, and the linker checks the merged program once. A
 	// stub-only unit references the entry rather than defining it, so it is not
 	// asked for one either.
+	// A shared object is not asked for an entry: nothing starts it, and what it
+	// hands out is a definition something else calls. The container writes an
+	// entry point of zero for it, so the name is not resolved here.
 	entry := if opts.entry == '' { 'main' } else { opts.entry }
-	if !opts.compile_only && !opts.link && !opts.start_only && entry_definition(unit, entry) == none {
+	if !opts.compile_only && !opts.link && !opts.start_only && opts.link_kind != .shared
+		&& entry_definition(unit, entry) == none {
 		return Result{
 			target:      target
 			diagnostics: [problem(1, 1, 'no definition of ${entry} in this translation unit')]
@@ -535,6 +550,7 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 		link:           opts.link
 		start_only:     opts.start_only
 		pic:            opts.pic
+		link_kind:      opts.link_kind
 		internal:       internal
 		unit:           unit
 		libraries:      opts.libraries
@@ -610,6 +626,7 @@ pub fn start_stub(entry string, opts Options) Result {
 		representation: types.from_target(target).representation
 		entry:          if entry == '' { 'main' } else { entry }
 		start_only:     true
+		link_kind:      opts.link_kind
 	}
 	emitter.emit_start() or {
 		if emitter.diagnostics.len == 0 {
@@ -809,11 +826,13 @@ fn (mut e Emitter) build() ![]u8 {
 		}
 	}
 	// The process stub is the place the kernel lands on: it calls the entry
-	// function and hands its result to the library's exit. An object has no such
-	// place, so it gets none; a link decides what the program starts at. Nor
-	// does a link unit: the link carries the stub in a unit of its own, so
-	// writing one here would give the merged program two.
-	if !e.compile_only && !e.link {
+	// function and hands its result to the library's exit, or to the kernel's
+	// exit when the link is static. An object has no such place, so it gets
+	// none; a link decides what the program starts at. Nor does a link unit:
+	// the link carries the stub in a unit of its own, so writing one here would
+	// give the merged program two. Nor a shared object: nothing starts it and
+	// its entry point is zero, so a stub there would be bytes no one reaches.
+	if !e.compile_only && !e.link && e.link_kind != .shared {
 		e.emit_start()!
 	}
 	for decl in e.unit.decls {
@@ -842,7 +861,13 @@ fn (mut e Emitter) build() ![]u8 {
 	// A link unit is left out for the same reason: a name it does not define may
 	// be a sibling unit's, and the linker runs this check once over the merged
 	// program, where every sibling's definitions are visible.
-	if !e.compile_only && !e.link {
+	//
+	// A shared object is left out because the check would be wrong for it: its
+	// imports are what a loader resolves when the object is mapped, so a name no
+	// library on this machine defines is still a name the object can be loaded
+	// with. The container refuses a name the file itself cannot leave
+	// unresolved when the kind is a static program, which is where that belongs.
+	if !e.compile_only && !e.link && e.link_kind != .shared {
 		dirs := linux.search_dirs(e.library_dirs, e.target.library_dirs)
 		// The names a program reaches out of a library are the functions it
 		// calls and the objects it copies, and both have to bind: a copy is not
@@ -878,7 +903,7 @@ fn (mut e Emitter) build() ![]u8 {
 			return error('cannot lay out the object')
 		}
 	} else {
-		bytes = elf.executable(e.program, e.target) or {
+		bytes = elf.write(e.program, e.target, e.link_kind) or {
 			e.diagnostics << problem(1, 1, 'internal: the image could not be laid out: ${err.msg()}')
 			return error('cannot lay out the image')
 		}
@@ -987,6 +1012,17 @@ fn (mut e Emitter) emit_start() !void {
 		return error('no result register')
 	}
 	e.reference(e.target.call_near(0), .call_local, e.entry, '')
+	if e.link_kind == .static_program {
+		// A static program leaves through the exit syscall. The library's exit
+		// is what flushes a buffered stream, and a program with no library has
+		// nothing to flush through it: the call would be the one import a
+		// static link cannot resolve, so the kernel's own exit takes its place.
+		// The status is already in the register the call to the entry function
+		// left it in, and the sequence moves it where the kernel reads it.
+		e.append(e.target.exit_sequence_from(result)!)
+		e.append(e.target.halt())
+		return
+	}
 	e.append(e.target.move_register32(status, result)!)
 	e.import_symbol('exit')
 	e.reference(e.target.call_slot(0), .call_import, 'exit', '')
