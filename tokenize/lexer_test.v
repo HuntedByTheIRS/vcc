@@ -624,3 +624,95 @@ fn test_a_mode_without_the_digraphs_has_the_punctuators() {
 	assert result.tokens.map(it.text) == ['%', ':', 'define', 'A', '41', '']
 	assert lex_fragment('a %:%: b', false).map(it.text) == ['a', '%', ':', '%', ':', 'b']
 }
+
+fn test_integer_literals_of_every_base_are_one_number_token() {
+	// The reader takes a preprocessing number and does not judge the base: a
+	// hexadecimal, a binary, an octal and the 0o spelling that is not C are
+	// each one token, and the case of the base marker is the source's.
+	source := '0 42 0x2a 0X2A 052 0b1010 0B1010 0o17 0O17 00'
+	assert texts(source) == ['0', '42', '0x2a', '0X2A', '052', '0b1010', '0B1010', '0o17', '0O17',
+		'00', '']
+	tokens := lex(source).tokens
+	for i in 0 .. tokens.len - 1 {
+		assert tokens[i].kind == .number
+	}
+	assert tokens.last().kind == .eof
+}
+
+fn test_every_integer_suffix_spelling_stays_in_the_token() {
+	// A suffix is letters after the number, and the number reader keeps them
+	// whatever order and case they are written in.
+	source := '1u 1U 1l 1L 1ul 1UL 1lu 1LU 1ull 1ULL 0xffUL 052ul'
+	assert texts(source) == ['1u', '1U', '1l', '1L', '1ul', '1UL', '1lu', '1LU', '1ull', '1ULL',
+		'0xffUL', '052ul', '']
+	for tok in lex(source).tokens {
+		assert tok.kind == .number || tok.kind == .eof
+	}
+}
+
+fn test_a_hexadecimal_float_keeps_its_exponent_sign_and_suffix() {
+	// The binary exponent of a hexadecimal float takes a sign, and the suffix
+	// after it is part of the same number.
+	assert texts('0x1p-4 0X1P-4 0x1.8p+3f 0x1P+3L 0xa.bp2 0x.8p-2') == ['0x1p-4', '0X1P-4', '0x1.8p+3f',
+		'0x1P+3L', '0xa.bp2', '0x.8p-2', '']
+}
+
+fn test_a_decimal_float_keeps_its_exponent_sign_and_its_dot() {
+	// `e` and `E` take a sign, a leading dot is a number and not a punctuator,
+	// and a trailing dot on its own is the whole number.
+	assert texts('1e3 1E3 1e+3 1e-3 1.5e10 .5 .5f .5e3 1. 3.') == ['1e3', '1E3', '1e+3', '1e-3',
+		'1.5e10', '.5', '.5f', '.5e3', '1.', '3.', '']
+}
+
+fn test_a_second_dot_ends_the_number_it_started_in() {
+	// The reader takes one dot, so the dot after one is a token of its own: a
+	// second number when a digit follows it and a punctuator when not.
+	assert texts('1.2.3') == ['1.2', '.3', '']
+	assert texts('1..2') == ['1', '.', '.2', '']
+}
+
+fn test_a_letter_after_digits_is_the_same_preprocessing_number() {
+	// C99 6.4.8: a preprocessing number is digits, letters, dots and exponent
+	// signs, so a number with a code the parser would refuse is one token here,
+	// and two numbers are two tokens.
+	assert texts('12abc 1x2y 0xZZ 1__') == ['12abc', '1x2y', '0xZZ', '1__', '']
+	assert texts('1+2') == ['1', '+', '2', '']
+}
+
+fn test_hexadecimal_and_octal_escapes_stay_as_written() {
+	// The escapes belong to phase 5 and not to the lexer, so a hexadecimal and
+	// an octal escape are handed on with their backslash in place, in a
+	// character constant and in a string alike.
+	source := '\'\\x41\' \'\\101\' "\\x41" "\\101"'
+	assert lex(source).diagnostics.len == 0
+	assert texts(source) == ["'\\x41'", "'\\101'", '"\\x41"', '"\\101"', '']
+	assert kinds(source) == [.character, .character, .string, .string, .eof]
+}
+
+fn test_an_unknown_escape_is_kept_and_not_diagnosed() {
+	// The lexer does not know the valid escapes, so `\q` is the two bytes it
+	// is and the reader that interprets the literal is the one to refuse it.
+	source := '\'\\q\' "\\q"'
+	assert lex(source).diagnostics.len == 0
+	assert texts(source) == ["'\\q'", '"\\q"', '']
+}
+
+fn test_an_unterminated_string_literal_is_reported_with_its_position() {
+	// The character-literal case has its own test; this is the string one, and
+	// the token that never closed is dropped while the tokens before it stay.
+	result := lex('char *s = "abc;')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].line == 1
+	assert result.diagnostics[0].col == 11
+	assert result.diagnostics[0].msg.contains('unterminated string literal')
+	assert tokens_of('char *s = "abc;') == ['char', '*', 's', '=']
+}
+
+fn test_a_comment_marker_inside_a_comment_is_part_of_it() {
+	// Which comment is open decides what a marker means: a `//` inside a block
+	// comment is text of that comment, and a `/*` inside a line comment is text
+	// of the line's.
+	assert lex('a /* x // y */ b').diagnostics.len == 0
+	assert texts('a /* x // y */ b') == ['a', 'b', '']
+	assert texts('a // x /* y\nb') == ['a', 'b', '']
+}
