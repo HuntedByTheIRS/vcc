@@ -2,6 +2,7 @@ module linking
 
 import backend
 import image
+import linking.symbols
 
 // The merge is checked on programs built here rather than on the output of
 // codegen, because the questions worth pinning are about the merge's own rules:
@@ -225,4 +226,160 @@ fn test_an_object_a_unit_defines_binds_to_that_unit_and_is_not_a_copy() {
 	assert merged.globals['o'].offset == 8
 	assert merged.globals_blob[merged.globals['o'].offset] == u8(0x42)
 	assert merged.bound['o'].offset == 8
+}
+
+// Two units may each hold a `static` function of one name. The emitter records
+// such a name in the unit's `internal` set, and each unit calls its own. The
+// merged labels have to hold two entries at two offsets, and each unit's call
+// has to be rewritten to its own entry, because the two are different functions
+// that happen to share a spelling. Under one bare name the link refused the
+// program with `multiple definition`.
+fn test_two_units_private_functions_get_two_labels() {
+	mut first := defining('main', [u8(0x90), u8(0x90), u8(0xcc), u8(0xcc)])
+	first.defined['helper'] = true
+	first.internal['helper'] = true
+	first.labels['helper'] = 2
+	first.fixups << image.Fixup{
+		start:  0
+		length: 5
+		kind:   .call_local
+		name:   'helper'
+	}
+	mut second := image.Program{}
+	second.text = [u8(0xee), u8(0xee)]
+	second.defined['helper'] = true
+	second.internal['helper'] = true
+	second.labels['helper'] = 0
+	second.fixups << image.Fixup{
+		start:  0
+		length: 5
+		kind:   .call_local
+		name:   'helper'
+	}
+	merged := link([first, second], options('main')) or { panic('the link failed: ${err.msg()}') }
+	// The first unit's code is at 0 and the second unit's at 4, so the two
+	// helpers land at 2 and 4.
+	assert merged.labels['0:helper'] == 2
+	assert merged.labels['1:helper'] == 4
+	// Each call is rewritten to its own unit's key, so it resolves to its own
+	// helper and not to the other unit's.
+	assert merged.fixups.len == 2
+	assert merged.fixups[0].name == '0:helper'
+	assert merged.fixups[0].kind == .call_local
+	assert merged.fixups[1].name == '1:helper'
+	assert merged.fixups[1].kind == .call_local
+	assert merged.labels[merged.fixups[0].name] == 2
+	assert merged.labels[merged.fixups[1].name] == 4
+	assert merged.text[2] == u8(0xcc)
+	assert merged.text[4] == u8(0xee)
+}
+
+// The emitter numbers its jump labels from zero in each unit, so two units that
+// each contain a loop both name a label `.L0`. The merge used to keep the first
+// unit's offset for it, and the second unit's jump then landed in the first
+// unit's code. Two entries and two rewritten jumps are what fixes that, and the
+// offsets are the thing to assert: no error was ever raised for this one.
+fn test_two_units_local_labels_of_one_name_get_two_offsets() {
+	mut first := defining('main', [u8(0x90), u8(0x90)])
+	first.labels['.L0'] = 1
+	first.fixups << image.Fixup{
+		start:  0
+		length: 2
+		kind:   .jump_local
+		name:   '.L0'
+	}
+	mut second := image.Program{}
+	second.text = [u8(0x90), u8(0x90)]
+	second.labels['.L0'] = 0
+	second.fixups << image.Fixup{
+		start:  0
+		length: 2
+		kind:   .jump_local
+		name:   '.L0'
+	}
+	merged := link([first, second], options('main')) or { panic('the link failed: ${err.msg()}') }
+	assert merged.labels['0:.L0'] == 1
+	assert merged.labels['1:.L0'] == 2
+	assert merged.fixups[0].name == '0:.L0'
+	assert merged.fixups[1].name == '1:.L0'
+	// The first jump lands at 1 and the second at 2, which is each unit's own
+	// label; one key naming the first offset for both is the wrong jump this
+	// test exists to catch.
+	assert merged.labels[merged.fixups[0].name] == 1
+	assert merged.labels[merged.fixups[1].name] == 2
+}
+
+// Two units may each hold a `static` object of one name. Each keeps its own
+// storage in the merged writable data, and each unit's `.global_address`
+// reference is rewritten to its own slot. A bare name would have merged the two
+// into one, and the second unit would read the first unit's bytes.
+fn test_two_units_private_objects_get_two_slots() {
+	mut first := defining('main', [u8(0x90)])
+	first.globals_blob = [u8(0x01), u8(0), u8(0), u8(0)]
+	first.globals['counter'] = image.GlobalSlot{
+		offset: 0
+		width:  4
+	}
+	first.internal['counter'] = true
+	first.data_fixups << image.DataFixup{
+		offset: 0
+		kind:   .global_address
+		name:   'counter'
+	}
+	mut second := image.Program{}
+	second.globals_blob = [u8(0x02), u8(0), u8(0), u8(0)]
+	second.globals['counter'] = image.GlobalSlot{
+		offset: 0
+		width:  4
+	}
+	second.internal['counter'] = true
+	second.data_fixups << image.DataFixup{
+		offset: 0
+		kind:   .global_address
+		name:   'counter'
+	}
+	merged := link([first, second], options('main')) or { panic('the link failed: ${err.msg()}') }
+	// The first unit's storage is at 0 and the second unit's at 4.
+	assert merged.globals['0:counter'].offset == 0
+	assert merged.globals['1:counter'].offset == 4
+	assert merged.globals_blob[0] == u8(0x01)
+	assert merged.globals_blob[4] == u8(0x02)
+	// Each reference names its own unit's slot, so it points at its own bytes.
+	assert merged.data_fixups.len == 2
+	assert merged.data_fixups[0].name == '0:counter'
+	assert merged.data_fixups[0].offset == 0
+	assert merged.data_fixups[1].name == '1:counter'
+	assert merged.data_fixups[1].offset == 4
+}
+
+// A `static int helper` in one unit does not answer another unit's call to
+// `helper`. Internal linkage is not visible outside its unit (6.2.2p2), so the
+// call binds to a library symbol or to nothing, and no library defines this one.
+// The static is held under its own unit's key alone, so the import stays
+// external and the link refuses the call by name.
+fn test_a_static_definition_does_not_answer_another_units_import() {
+	mut definer := defining('helper', [u8(0xcc)])
+	definer.internal['helper'] = true
+	mut caller := defining('main', []u8{len: 4, init: u8(0x90)})
+	caller.imports << 'helper'
+	caller.imports << 'exit'
+	caller.fixups << image.Fixup{
+		start:  0
+		length: 5
+		kind:   .call_import
+		name:   'helper'
+	}
+	names := symbols.collect([definer, caller]) or { panic('collect failed: ${err.msg()}') }
+	// The static is a definition of its own unit and under its own key, and no
+	// bare `helper` is one, so a link cannot resolve the import to it.
+	assert '0:helper' in names.definitions
+	assert 'helper' !in names.definitions
+	// The library check then refuses the call. `exit` is a real library name,
+	// so the miss it reports is `helper` and not an unreadable library.
+	link([definer, caller], options('main')) or {
+		assert err.msg().contains('undefined reference')
+		assert err.msg().contains('helper')
+		return
+	}
+	assert false, 'the link bound an import to another unit static definition'
 }
