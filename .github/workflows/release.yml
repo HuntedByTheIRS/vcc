@@ -1,26 +1,70 @@
 name: release
 
-# A tag publishes a compiler: the artifact is built, put through the same gate a
-# pull request goes through, run once, and only then attached to a release. The
-# version in the binary has to agree with the tag, because a compiler that
-# reports the wrong version is a compiler V will key its cached builds against
+# A release is automatic, and v.mod decides when. Every push to main reads the
+# version v.mod names; if no release carries that version yet, the binary is
+# built, put through the same gate a pull request goes through, run once, and
+# attached to a release tagged with the version. A push whose v.mod version
+# already has a release does nothing, so the way to cut a release is to bump the
+# version in v.mod and merge. v.mod is the single source: the tag, the release
+# title and the binary's `--version` all come from it, and a compiler that
+# reports the wrong version is one V will key its cached builds against
 # incorrectly (see "What a drop-in has to satisfy" in README.md).
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# One release run at a time: two pushes close together must not both find the
+# version unreleased and race to publish it.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   V_COMMIT: b99970bd438a7bdcdfbe38f74d9364db801d5439
   V_DIR: /opt/v
 
 jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+      published: ${{ steps.check.outputs.published }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: read the version v.mod names
+        id: read
+        run: |
+          version="$(sed -n "s/^[[:space:]]*version:[[:space:]]*'\([^']*\)'.*/\1/p" v.mod | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "v.mod names no version" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: is that version released already
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.read.outputs.tag }}" >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
     name: release
+    needs: version
+    if: needs.version.outputs.published == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -37,13 +81,12 @@ jobs:
       - name: gate
         run: v run tools/gate.vsh
 
-      - name: the binary agrees with the tag
+      - name: the binary agrees with v.mod
         run: |
           v -o vcc .
-          tag="${GITHUB_REF_NAME#v}"
           built="$(./vcc --version | awk '{print $2}')"
-          if [ "$tag" != "$built" ]; then
-            echo "the tag says ${tag} and the binary says ${built}; bump cli/version in cli/cli.v" >&2
+          if [ "$built" != "${{ needs.version.outputs.version }}" ]; then
+            echo "v.mod names ${{ needs.version.outputs.version }} and the binary answered ${built}" >&2
             exit 1
           fi
 
@@ -73,6 +116,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sha256sum vcc > vcc.sha256
-          gh release create "$GITHUB_REF_NAME" vcc vcc.sha256 \
-            --title "$GITHUB_REF_NAME" \
+          gh release create "${{ needs.version.outputs.tag }}" vcc vcc.sha256 \
+            --title "${{ needs.version.outputs.tag }}" \
+            --target "${GITHUB_SHA}" \
             --generate-notes
