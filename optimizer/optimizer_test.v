@@ -192,3 +192,126 @@ fn test_a_declaration_keeps_its_parameters_through_the_rewrite() {
 	assert optimized.decls[0].params[0].name == 'a'
 	assert optimized.decls[0].params[1].name == 'b'
 }
+
+fn test_the_debug_and_fast_spellings_map_to_the_level_they_mean() {
+	// -Og is -O1 without the passes that make debugging harder and -Ofast is -O3
+	// plus semantic loosenings, so each is the level and not the loosenings this
+	// stub does not implement.
+	assert options(['-Og']).level == .o1
+	assert options(['-Ofast']).level == .o3
+	// A bare -O is -O1, which is what gcc makes of it.
+	assert options(['-O']).level == .o1
+}
+
+fn test_the_size_level_runs_what_o2_runs() {
+	// -Os is -O2 without the passes that make code larger, which is the rank it
+	// was given: the two pipelines name the same passes while nothing in this
+	// stub makes code larger.
+	assert options(['-Os']).level == .os
+	assert pipeline(options(['-Os'])) == pipeline(options(['-O2']))
+}
+
+fn test_a_spelling_that_is_not_a_level_is_recorded_and_changes_nothing() {
+	opts := options(['-Oz'])
+	assert opts.level == .o0
+	assert opts.recorded == ['-Oz']
+}
+
+fn test_the_recorded_flags_keep_the_order_they_were_written_in() {
+	opts := options(['-O2', '-fno-builtin-abs', '-O1'])
+	// The flags are kept as they were written, and the level is the last one
+	// written rather than the highest.
+	assert opts.recorded == ['-O2', '-fno-builtin-abs', '-O1']
+	assert opts.level == .o1
+}
+
+fn test_a_disabled_name_is_kept_as_the_flag_wrote_it() {
+	opts := options(['-fno-builtin-labs'])
+	assert opts.disabled == ['labs']
+	assert !opts.folds_builtin('labs')
+	assert opts.folds_builtin('abs')
+	// -fbuiltin-NAME is the only thing that shortens the list, and it takes the
+	// name back on.
+	back := options(['-fno-builtin-labs', '-fbuiltin-labs'])
+	assert back.disabled == []
+	assert back.folds_builtin('labs')
+}
+
+fn test_a_builtin_argument_written_with_a_sign_is_still_a_constant() {
+	// The constant reader takes a literal with a sign or a complement in front
+	// of it, which is what makes `abs(-7)` a value here.
+	opts := options(['-O2'])
+	plus := optimize_source('int abs(int n);\nint main() { return abs(+7); }', opts)
+	assert (returned_fold(plus) or { -1 }) == 7
+	complement := optimize_source('int abs(int n);\nint main() { return abs(~0); }', opts)
+	assert (returned_fold(complement) or { -1 }) == 1
+}
+
+fn test_a_builtin_argument_that_is_a_sum_stays_a_call() {
+	// Folding `abs(1 + 2)` would mean a constant expression evaluator here, and
+	// the emitter already has one; until the two are one function, the argument
+	// has to be written out.
+	opts := options(['-O2'])
+	expr := first_expression(optimize_source('int abs(int n);\nint main() { return abs(1 + 2); }', opts))
+	assert expr is ast.Call
+}
+
+fn test_a_folded_value_is_written_as_the_literal_it_became() {
+	opts := options(['-O2'])
+	expr := first_expression(optimize_source('int abs(int n);\nint main() { return abs(-7); }', opts))
+	assert expr is ast.IntLit
+	folded := expr as ast.IntLit
+	assert folded.value == 7
+	assert folded.text == '7'
+	// The location is the call's, so a diagnostic about what the value became
+	// points at the expression a person wrote.
+	assert folded.line == 2
+	assert folded.col > 0
+}
+
+fn test_the_argument_count_in_the_table_is_checked_before_the_value() {
+	// abs takes one argument, so a call written with none has no operand to
+	// compute and is left for the emitter to report.
+	opts := options(['-O2'])
+	expr := first_expression(optimize_source('int abs();\nint main() { return abs(); }', opts))
+	assert expr is ast.Call
+}
+
+fn test_the_reserved_spellings_are_in_the_table_too() {
+	opts := options(['-O2'])
+	for name in ['__builtin_abs', '__builtin_labs', '__builtin_llabs'] {
+		folded := optimize_source('int ${name}(int n);\nint main() { return ${name}(-5); }', opts)
+		assert (returned_fold(folded) or { -1 }) == 5, name
+	}
+}
+
+fn test_a_call_nested_in_an_element_is_reached() {
+	opts := options(['-O2'])
+	unit := optimize_source('int abs(int n);\nint main() { int a[3]; return a[abs(-1)]; }', opts)
+	body := unit.decls[1].body
+	assert body.len == 2
+	expr := body[1].expr or {
+		assert false
+		return
+	}
+	assert expr is ast.Index
+	index := (expr as ast.Index).index
+	assert index is ast.IntLit
+	assert (index as ast.IntLit).value == 1
+}
+
+fn test_a_builtin_call_in_a_condition_is_folded_and_the_branches_survive() {
+	opts := options(['-O2'])
+	unit := optimize_source('int abs(int n);\nint main() { if (abs(-2)) { return 1; } return 0; }', opts)
+	stmt := unit.decls[1].body[0]
+	cond := stmt.cond or {
+		assert false
+		return
+	}
+	assert cond is ast.IntLit
+	assert (cond as ast.IntLit).value == 2
+	// The statement is carried over whole: the rewrite changes the condition and
+	// not the branches or the kind.
+	assert stmt.kind == .if_stmt
+	assert stmt.then_body.len == 1
+}
