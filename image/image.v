@@ -89,22 +89,49 @@ pub const section_key_text = '.text'
 pub const section_key_rodata = '.rodata'
 pub const section_key_data = '.data'
 
-// Relocation is a reference inside one unit's code that the unit left for the
-// link: four bytes that hold the distance from the end of the field to what the
-// name stands for. A relocatable object carries one per reference it could not
-// settle, because the addresses belong to whoever places it, and this compiler's
-// own emitter settles its own references and carries none. `offset` is where the
-// four bytes are in the unit's text; the name is either a symbol the link
-// resolves or one of the unit's own section keys, `.text`, `.rodata` and
-// `.data`, which name a place in one of its blobs rather than in a symbol table;
-// and `addend` is the byte past the name the field points at. A call carries
-// minus four, because the psABI measures the distance from the end of the field
-// and the name is where the instruction began.
+// Relocation is a reference inside one unit that the unit left for the link: a
+// field of a known width that holds the distance from the end of the field to
+// what the name stands for. A relocatable object carries one per reference it
+// could not settle, because the addresses belong to whoever places it, and this
+// compiler's own emitter settles its own references and carries none.
+//
+// The name is either a symbol the link resolves or one of the unit's own section
+// keys, `.text`, `.rodata` and `.data`, which name a place in one of its blobs
+// rather than in a symbol table. `addend` is the byte past the name the field
+// points at: a call carries minus four, because the psABI measures the distance
+// from the end of the field and the name is where the instruction began.
 pub struct Relocation {
 pub:
 	offset int
+	// place is which of the unit's blobs the field itself is in. It is `.text`
+	// for a reference in the code, which is what this compiler writes, and
+	// another of the three for a reference that a section of read-only or
+	// writable data carries: an unwind table refers to the code from a section
+	// of its own, and the field moves with its own blob when the units merge.
+	place RelocationPlace = .text
+	// kind is how the name is reached. A direct reference uses the address of
+	// what the name stands for. A `.got` one uses the address of the global
+	// offset table's slot for the name, which is what a position-independent
+	// reference to an object the image may not hold a copy of goes through.
+	kind   RelocationKind = .direct
 	name   string
 	addend int
+}
+
+// RelocationPlace is which of a unit's blobs a relocatable field lies in. The
+// three are the ones a unit is made of, and each has a base of its own in the
+// merged image, which is what the merge adds to the field's offset.
+pub enum RelocationPlace {
+	text
+	read_only
+	data
+}
+
+// RelocationKind is how a relocatable reference reaches what it names: the
+// address itself, or the address of the global offset table's slot for it.
+pub enum RelocationKind {
+	direct
+	got
 }
 
 // Definition is where a name that another translation unit of the same link

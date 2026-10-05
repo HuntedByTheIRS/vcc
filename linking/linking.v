@@ -66,6 +66,12 @@ pub fn link(units []image.Program, options Options) !image.Program {
 	merged_relocations := merge_relocations(units, layout)
 	mut plts := []string{}
 	for relocation in merged_relocations {
+		// A reference that goes through the global offset table reads the
+		// table's slot, not a stub, and a direct branch to a name the link
+		// defines reaches it without either.
+		if relocation.kind != .direct {
+			continue
+		}
 		if is_section_key(relocation.name) {
 			continue
 		}

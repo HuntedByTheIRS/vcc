@@ -12,17 +12,23 @@ import linking.symbols
 // because the merged tables are keyed by name; only a kind changes, and only
 // where a link turns a reference into one the container writes itself.
 
-// relocations appends one unit's rewritten code relocations to the merged list.
-// A relocation's offset moves with its unit's text, exactly as a fixup's does,
-// and its name is keyed the way the merged tables key it. A reference into one
-// of the unit's own sections gains that section's base in the addend, because
-// the object measured the byte from the start of its own copy of the section and
-// the merged copy starts somewhere else; a section key keeps its spelling, since
-// the container reads it as a place in a merged blob rather than as a symbol.
+// relocations appends one unit's rewritten relocations to the merged list. A
+// field moves with the blob it lies in, so its offset gains that blob's base,
+// which is what the place it carries names. Its name is keyed the way the merged
+// tables key it. A reference into one of the unit's own sections gains that
+// section's base in the addend, because the object measured the byte from the
+// start of its own copy of the section and the merged copy starts somewhere
+// else; a section key keeps its spelling, since the container reads it as a
+// place in a merged blob rather than as a symbol.
 pub fn relocations(unit image.Program, unit_index int, text_base int, string_base int, globals_base int, mut out []image.Relocation) {
 	for relocation in unit.relocations {
 		mut addend := relocation.addend
 		mut name := relocation.name
+		place_base := match relocation.place {
+			.text { text_base }
+			.read_only { string_base }
+			.data { globals_base }
+		}
 		match relocation.name {
 			image.section_key_text {
 				addend += text_base
@@ -38,7 +44,9 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 			}
 		}
 		out << image.Relocation{
-			offset: relocation.offset + text_base
+			offset: relocation.offset + place_base
+			place:  relocation.place
+			kind:   relocation.kind
 			name:   name
 			addend: addend
 		}
