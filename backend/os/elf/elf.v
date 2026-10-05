@@ -98,14 +98,22 @@ pub const symbol_weak_function = u8(0x22)
 pub const elf_symbol_size = 24
 pub const elf_relocation_size = 24
 pub const elf_dynamic_entry_size = 16
+// plt_stub_size is how long one call stub is: a jump through a displacement, and
+// the four bytes of that displacement.
+const plt_stub_size = 6
 
 // Sections is where each part of the image landed, as a file offset from the
 // start of the file. The image is one segment that starts at file offset zero,
 // so a file offset and a virtual address differ by the load base and nothing
 // else, which is what lets the references be patched in file-offset arithmetic.
 struct Sections {
-	interp  int
-	text    int
+	interp int
+	text   int
+	// plt is the six-byte stub for each imported function an object reached by
+	// a direct branch: the call goes to the stub and the stub jumps through the
+	// import's slot. A program the emitter wrote in one piece has no stubs and
+	// the area is empty.
+	plt     int
 	dynstr  int
 	strings int
 	// globals is the storage of the objects defined at the top level: the only
@@ -232,6 +240,10 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	offset = align(offset + interp_len, 8)
 	text := offset
 	offset = align(offset + program.text.len, 8)
+	// The call stubs follow the code they are reached from: six bytes each,
+	// one per imported function an object called by a direct branch.
+	plt := offset
+	offset = align(offset + program.plts.len * plt_stub_size, 8)
 	dynstr := offset
 	offset = align(offset + dynstr_len, 8)
 	strings := offset
@@ -270,6 +282,7 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	return Sections{
 		interp:  interp
 		text:    text
+		plt:     plt
 		dynstr:  dynstr
 		strings: strings
 		globals: globals
@@ -627,6 +640,56 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 		referent := referent_of(program, sections, fixup.kind, fixup.name)!
 		put_u64(mut output, sections.globals + fixup.offset, target.load_base + u64(referent + fixup.addend))
 	}
+	// The references a unit carried as relocations are four-byte fields the unit
+	// already wrote, so only the field is filled in: the value is the distance
+	// from the field to what the name stands for, and the object's own addend is
+	// added to the name's address. A call's addend is minus four, which is the
+	// psABI's way of measuring the distance from the end of the field while
+	// naming where the instruction began.
+	for relocation in program.relocations {
+		field := sections.text + relocation.offset
+		referent := relocation_referent_of(program, sections, relocation.name)!
+		put_u32(mut output, field, u32(i32(referent + relocation.addend - field)))
+	}
+	// Each stub jumps through the slot of the import it stands for: the
+	// displacement is measured from the end of the stub, and the loader writes
+	// the function's address into the slot the jump reads.
+	for i, name in program.plts {
+		stub := sections.plt + i * plt_stub_size
+		index := program.imports.index(name)
+		if index < 0 {
+			return error('${name} needs a call stub and is not among the imports of this image')
+		}
+		slot := sections.got + index * 8
+		put(mut output, stub, target.jump_slot(i32(slot - (stub + plt_stub_size))))
+	}
+}
+
+// relocation_referent_of is where a relocation's name stands in the image. It
+// answers the same question referent_of answers for a fixup, for the names a
+// relocation can carry: one of the unit's own section keys, an imported function
+// reached through its stub, or a symbol some unit of the link defines.
+fn relocation_referent_of(program image.Program, sections Sections, name string) !int {
+	match name {
+		image.section_key_text { return sections.text }
+		image.section_key_rodata { return sections.strings }
+		image.section_key_data { return sections.globals }
+		else {}
+	}
+	// A direct branch cannot reach the value a slot holds, so an imported
+	// function is reached through the stub that jumps through its slot.
+	for i, stub in program.plts {
+		if stub == name {
+			return sections.plt + i * plt_stub_size
+		}
+	}
+	if offset := program.labels[name] {
+		return sections.text + offset
+	}
+	if slot := program.globals[name] {
+		return sections.globals + slot.offset
+	}
+	return error('${name} is named by a relocation and no unit of this link defines it and no stub stands for it')
 }
 
 // referent_of is where one reference points, as an offset into the image. It is
@@ -664,6 +727,21 @@ fn referent_of(program image.Program, sections Sections, kind image.FixupKind, n
 			return sections.strings + (program.doubles[name] or {
 				return error('no floating constant ${name} in the image')
 			})
+		}
+		.section_address {
+			// The name is one of the unit's own section keys and the addend is
+			// the byte inside it, so the place is the section's base and the
+			// caller's addend picks the byte. It is how a relocatable object
+			// names a string or a double it points at, where this compiler's
+			// own emitter names the interned entry instead.
+			match name {
+				image.section_key_text { return sections.text }
+				image.section_key_rodata { return sections.strings }
+				image.section_key_data { return sections.globals }
+				else {
+					return error('${name} is not a section of this image')
+				}
+			}
 		}
 		.global_address {
 			return sections.globals + (program.globals[name] or {

@@ -334,6 +334,15 @@ pub fn (t &Target) call_slot(disp i32) []u8 {
 	return t.encoders.call_rip_slot(disp)
 }
 
+// jump_slot jumps to the address a quadword holds, found through a displacement
+// from the instruction. It is the jump form of call_slot and the whole of a call
+// stub: a call whose target is a library function reaches a stub that jumps
+// through the function's slot, and the address in that slot is the loader's to
+// write.
+pub fn (t &Target) jump_slot(disp i32) []u8 {
+	return t.encoders.jump_rip_slot(disp)
+}
+
 // load_slot_value reads the value a slot holds, found through a displacement from
 // the instruction. It is the load form of call_slot: a dynamically linked
 // function's address is read out of the slot the loader fills rather than called

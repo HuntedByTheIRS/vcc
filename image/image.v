@@ -48,6 +48,15 @@ pub enum FixupKind {
 	import_address   // the address of a function the loader resolves out of a library
 	float_constant   // a double the instruction reads out of the read-only data
 	single_constant  // the same read of a four-byte float
+	// section_address is the address of a byte in one of the unit's own
+	// sections rather than of a name: a string, a double, or a place in the
+	// writable data, named by the section it lives in and the byte past its
+	// start. A relocatable object states such a reference this way, as a
+	// relocation against a section symbol, where this compiler's own emitter
+	// names the interned entry instead. The name is the section's own key,
+	// which is `.text`, `.rodata` or `.data`, and the addend is the byte
+	// inside it, so the whole reference is a section key and a number.
+	section_address
 }
 
 // DataFixup is a reference inside the writable data: eight bytes of a top-level
@@ -69,6 +78,32 @@ pub:
 	// for the address of a whole object, and the byte a part starts at for the
 	// address of a part, which is what `&a[3]` and `&s.b` write. The layout
 	// adds it to the address it resolves the name to.
+	addend int
+}
+
+// The names a relocation uses for a unit's own sections, so that a reference to
+// a place rather than to a symbol is spelled the same way in the reader and in
+// the container that fills it in. A section key cannot be a C identifier, so it
+// never meets the name of a symbol.
+pub const section_key_text = '.text'
+pub const section_key_rodata = '.rodata'
+pub const section_key_data = '.data'
+
+// Relocation is a reference inside one unit's code that the unit left for the
+// link: four bytes that hold the distance from the end of the field to what the
+// name stands for. A relocatable object carries one per reference it could not
+// settle, because the addresses belong to whoever places it, and this compiler's
+// own emitter settles its own references and carries none. `offset` is where the
+// four bytes are in the unit's text; the name is either a symbol the link
+// resolves or one of the unit's own section keys, `.text`, `.rodata` and
+// `.data`, which name a place in one of its blobs rather than in a symbol table;
+// and `addend` is the byte past the name the field points at. A call carries
+// minus four, because the psABI measures the distance from the end of the field
+// and the name is where the instruction began.
+pub struct Relocation {
+pub:
+	offset int
+	name   string
 	addend int
 }
 
@@ -121,6 +156,15 @@ pub mut:
 	// data_fixups are the references the layout has to write into the storage
 	// of the objects at the top level: one per address-valued initializer.
 	data_fixups []DataFixup
+	// relocations are the references inside the text that this unit left as
+	// plain fields for the link rather than as fixups it could write itself.
+	// This compiler's own emitter writes none, because it settles every
+	// reference it makes; a unit read back from a relocatable object carries
+	// one per reference that object left to a linker. They are applied by the
+	// container once every address is settled, the same way a fixup is, and
+	// they carry an addend rather than an instruction shape because the bytes
+	// are already written and only the four-byte field is filled in.
+	relocations []Relocation
 	// labels is where each function's code begins in text, and where every jump
 	// label inside one landed.
 	labels map[string]int
@@ -192,6 +236,15 @@ pub mut:
 	// definitions of a name do. It is a different question from weak, which
 	// still leaves the name visible to the link.
 	internal map[string]bool
+	// plts are the imported functions this image has to reach by a stub: a
+	// unit read from a relocatable object calls a library function with a
+	// direct branch, and the address that branch reaches is only known once
+	// the table of slots is laid out, so the call goes to a six-byte stub that
+	// jumps through the import's slot. The names are in the order the call
+	// sites were first read, so the same inputs give the same stub addresses.
+	// A program the emitter wrote in one piece has none, because its calls to
+	// a library go through the slot directly.
+	plts []string
 	// bound is the imports whose definition is inside this image: names the
 	// emitter wrote as a reference to another translation unit, which a link
 	// resolved to a definition one of its own units provides. Such a name stays

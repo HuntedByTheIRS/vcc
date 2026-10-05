@@ -1249,6 +1249,18 @@ pub fn call_rip_slot(disp i32) []u8 {
 		u8((value >> 24) & 0xff)]
 }
 
+// jump_rip_slot jumps to the address held in a quadword found at a displacement
+// from the instruction, which is the jump form of call_rip_slot. It is what a
+// stub is made of: a call that has to reach a library function whose address the
+// loader writes into a slot goes to a stub, and the stub's one instruction reads
+// that slot and jumps through it, so the call site keeps the four-byte distance
+// its own instruction has room for.
+pub fn jump_rip_slot(disp i32) []u8 {
+	value := u32(disp)
+	return [u8(0xff), 0x25, u8(value & 0xff), u8((value >> 8) & 0xff), u8((value >> 16) & 0xff),
+		u8((value >> 24) & 0xff)]
+}
+
 // load_rip_slot reads the eight bytes held in a quadword found at a displacement
 // from the instruction, which is the load form of call_rip_slot: a dynamically
 // linked function's address is read out of its slot rather than called through it,
@@ -2619,6 +2631,7 @@ pub:
 	call_register                   fn (Register) ![]u8                 = unsafe { nil }
 	call_rel32                      fn (i32) []u8                       = unsafe { nil }
 	call_rip_slot                   fn (i32) []u8                       = unsafe { nil }
+	jump_rip_slot                   fn (i32) []u8                       = unsafe { nil }
 	cdq                             fn () []u8                          = unsafe { nil }
 	cmp_reg32                       fn (Register, Register) ![]u8       = unsafe { nil }
 	cmp_reg64                       fn (Register, Register) ![]u8       = unsafe { nil }
@@ -2764,6 +2777,7 @@ pub fn encoders() Encoders {
 		call_register:                   &call_register
 		call_rel32:                      &call_rel32
 		call_rip_slot:                   &call_rip_slot
+		jump_rip_slot:                   &jump_rip_slot
 		cdq:                             &cdq
 		cmp_reg32:                       &cmp_reg32
 		cmp_reg64:                       &cmp_reg64
