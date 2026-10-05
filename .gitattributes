@@ -13,3 +13,10 @@ v.mod linguist-language=V
 compliance/** linguist-language=ignore
 regression/** linguist-language=ignore
 goldens/** linguist-language=ignore
+
+# The Dockerfile is how the compiler's image is built, not a language the
+# compiler is written in, and GitHub counts it as one: 2,715 bytes against V's
+# 3,309,218 in its breakdown, which is the 0.1% that took the language badge off
+# 100%. It gets the same marker as the corpora for the same reason, that what a
+# file is for here is not a language the tree is written in.
+Dockerfile linguist-language=ignore
