@@ -1,0 +1,76 @@
+name: wiki
+
+# The pages at https://github.com/HuntedByTheIRS/vcc/wiki are built from wiki/ in
+# this repository, and nothing else writes them: this job copies the directory
+# into the wiki's own git repository on a push to main, so a page edited in the
+# browser is overwritten by the next push.
+#
+# GitHub does not create that repository until somebody has saved a page in the
+# Wiki tab once. Until then the clone below fails and this job says which one
+# thing is missing; one page saved by hand is the whole bootstrap.
+#
+# The token is GITHUB_TOKEN, which normally carries write to the repository's own
+# wiki. If it is ever refused, a fine-grained token with read and write on
+# Contents, stored as WIKI_TOKEN, replaces it on the clone line below.
+#
+# `tools/gate.vsh` reads a V_COMMIT out of every file under .github/workflows and
+# refuses two different values, so this file names the same pin as the others
+# even though no step here runs V.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wiki/**'
+      - '.github/workflows/wiki.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wiki
+  cancel-in-progress: true
+
+env:
+  V_COMMIT: b99970bd438a7bdcdfbe38f74d9364db801d5439
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The repository's default token is read-only, and the wiki is part of this
+    # repository's own permission set, so the write is asked for here.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: copy wiki/ into the wiki repository
+        env:
+          TOKEN: ${{ secrets.WIKI_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          if ! git clone --quiet "$remote" wiki-repo 2>clone.err; then
+            if grep -qi 'repository not found' clone.err; then
+              echo '::error::the wiki repository does not exist yet. Open the Wiki tab once, save a page, and run this job again.'
+            else
+              echo '::error::the wiki repository could not be read. If the token was refused, store a token with write on Contents as the WIKI_TOKEN secret.'
+              cat clone.err
+            fi
+            exit 1
+          fi
+          rsync -a --delete --exclude=.git wiki/ wiki-repo/
+          cd wiki-repo
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'the wiki already matches wiki/'
+            exit 0
+          fi
+          git commit --quiet -m "wiki: copy wiki/ from ${GITHUB_SHA:0:7}"
+          git push --quiet
+          echo 'the wiki now matches wiki/'
