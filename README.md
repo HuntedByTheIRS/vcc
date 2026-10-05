@@ -108,10 +108,12 @@ are supported by design rather than by accident of which compiler was installed.
 subset of C and refuses the rest with a diagnostic naming the construct and its
 location, which is the right failure but still a failure: a program outside the
 subset does not compile, and the subset is smaller than GCC's. It is not
-self-hosting yet and cannot compile V's generated C. Linking more than one
-translation unit, `-shared` and `-static` currently need
-`-external-linker=NAME`, because the in-house linker is not written. It targets
-Linux x86-64 only; arm64, macOS and Windows are back ends that do not exist yet.
+self-hosting yet and cannot compile V's generated C. It links the translation
+units of one command line into a program, but a relocatable file or an archive
+handed to it, `-shared` and `-static` still need `-external-linker=NAME`: the
+reader for a file another compiler wrote is not written, and the in-house linker
+writes the one shape. It targets Linux x86-64 only; arm64, macOS and Windows are
+back ends that do not exist yet.
 It is slower than tcc, by a margin that grows with input size. And a compiler in
 the bootstrap chain is high-stakes: if vcc miscompiles a subtle thing, the V it
 builds is wrong in a way that is hard to attribute, which is why the chain is
@@ -150,13 +152,19 @@ library through the ld script in `/usr/lib` when the file it finds is one, and
 the SONAME of the file at the end of that is what the image asks for, which is
 how `-lm` gets `sqrt` to resolve. `-c` writes a real ELF64 relocatable object.
 `-fPIC` reaches top-level objects through the global offset table so the object
-can go into a shared library later.
+can go into a shared library later. More than one input is linked in the tree:
+each is emitted as a unit, `linking/` merges the units and settles the
+references between them, and the same container writes the program with a
+process stub of its own as the first unit.
 
 Verified today on this machine: a program including `stdio.h`, `stdlib.h`,
 `string.h`, `stdint.h`, `stddef.h`, `limits.h`, `errno.h` and `time.h` compiles
 clean with `-c`; enum/switch/shift/bitwise/unsigned code compiles and runs; a
 program with designated initializers, compound literals, bitfields, a union, and
-a struct returned by value compiles and runs.
+a struct returned by value compiles and runs. Two files on one command line link
+and run, including two that each keep a `static` function, a loop label and a
+`static` object of the same name, and a call no unit defines is refused with
+`undefined reference`.
 
 Anything outside the subset exits non-zero with a diagnostic that names the
 construct and its location, instead of writing an output file that would fail
@@ -224,11 +232,11 @@ Targets, in order:
 - The V self-build, meaning vcc compiling V's generated C and the result passing
   V's test suite (bootstrap step 3), by the end of Q4 2026 or early Q1 2027.
 
-Between here and there, the known gaps are the ones named above: the in-house
-linker (multi-unit linking, archives, `-shared`, `-static`) without
-`-external-linker`, V's generated C, and the streaming path that is meant to
-close the speed gap. `ROADMAP.md` lays out the milestones and what verifies
-each one.
+Between here and there, the known gaps are the ones named above: the rest of the
+in-house linker (reading a relocatable file and an archive, `-shared`,
+`-static`) without `-external-linker`, V's generated C, and the streaming path
+that is meant to close the speed gap. `ROADMAP.md` lays out the milestones and
+what verifies each one.
 
 Speed is the number to watch, and it is not close yet. Measured with
 `v run tools/bench.vsh` against the tcc V vendors:

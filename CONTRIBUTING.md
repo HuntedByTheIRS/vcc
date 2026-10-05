@@ -133,7 +133,7 @@ measurement showed if speed was involved. One logical change per commit, each
 one building and passing `v test .` on its own.
 
 Areas in use: `tokenize`, `parser`, `ast`, `optimizer`, `printer`, `backend`,
-`image`, `codegen`, `cli`, `tools`, `github`, `tree`, `docs`.
+`image`, `codegen`, `linking`, `cli`, `tools`, `github`, `tree`, `docs`.
 
 ## The changelog
 

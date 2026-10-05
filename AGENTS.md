@@ -188,8 +188,8 @@ it, because an adjective is not evidence.
 
 `area: what changed`, lowercase, no trailing period, body explaining why. Areas
 in use: `tokenize`, `parser`, `ast`, `optimizer`, `printer`, `backend`,
-`image`, `codegen`, `cli`, `tools`, `github`, `tree`, `docs`. One logical change
-per commit, each one building on its own.
+`image`, `codegen`, `linking`, `cli`, `tools`, `github`, `tree`, `docs`. One
+logical change per commit, each one building on its own.
 
 ## Do not
 
