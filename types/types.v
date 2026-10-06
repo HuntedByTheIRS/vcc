@@ -45,6 +45,18 @@ pub enum Kind {
 	float
 	double
 	long_double
+	// float128 is the GNU 128-bit floating type, `_Float128` and the
+	// `__float128` its header typedefs it to. gcc gives it the IEEE binary128
+	// interchange format, which this target stores in the same sixteen bytes
+	// its x87 extended `long double` uses. The kind is its own so that the
+	// name is a type of its own rather than a second spelling of `long
+	// double`, which holds a different format. What this back end does with a
+	// value of it is written on `is_extended` and in `codegen/long_double.v`:
+	// it stores, copies and converts one, and its arithmetic is computed in
+	// the x87 extended format, which is not binary128. Measured on gcc 16.2.1
+	// on this target, `sizeof(_Float128)` and `_Alignof(_Float128)` are both
+	// 16.
+	float128
 	complex_float
 	complex_double
 	complex_long_double
@@ -135,6 +147,14 @@ pub mut:
 	// the tree carries the expression to the back end, and the handle is only
 	// how a later use inside the reader finds it again.
 	vla_id int
+	// vector says an array is a GNU vector type, the one a declaration wrote
+	// `__attribute__((vector_size(N)))` for: it holds count elements of base
+	// in N bytes, and it is an array for storage, sizeof and subscripting.
+	// What it is not is an array anywhere else: it is not converted to a
+	// pointer, and the arithmetic operators on it are the element-wise ones,
+	// which the parser and the emitter implement separately. It is false for
+	// every array that is not one and for every other kind.
+	vector bool
 	// members are the members of a struct or a union, in the order they were
 	// written.
 	members []Member
@@ -237,7 +257,20 @@ pub fn (k Kind) is_unsigned() bool {
 // is_floating says whether the kind is a real floating type. The complex types
 // are not here: they are a pair of floating values, not a floating value.
 pub fn (k Kind) is_floating() bool {
-	return k in [Kind.float, .double, .long_double]
+	return k in [Kind.float, .double, .long_double, .float128]
+}
+
+// is_extended says whether a kind is one this target stores in sixteen bytes of
+// memory and reads and writes through the x87 stack: `long double`, whose
+// format is the x87 extended one, and `_Float128`, whose format gcc gives as
+// IEEE binary128 and which this back end carries in the same storage and the
+// same conversions. The two are distinct kinds because their formats are
+// different; the shared answer is about how many bytes the object is and which
+// machine paths move those bytes. Arithmetic on a `_Float128` therefore runs in
+// the x87 extended format and is not IEEE binary128 arithmetic: see the comment
+// in `codegen/long_double.v`.
+pub fn (k Kind) is_extended() bool {
+	return k == .long_double || k == .float128
 }
 
 pub fn (k Kind) is_complex() bool {
@@ -316,9 +349,10 @@ pub fn (k Kind) rank() int {
 		.float { 7 }
 		.double { 8 }
 		.long_double { 9 }
-		.complex_float { 10 }
-		.complex_double { 11 }
-		.complex_long_double { 12 }
+		.float128 { 10 }
+		.complex_float { 11 }
+		.complex_double { 12 }
+		.complex_long_double { 13 }
 		else { -1 }
 	}
 }
@@ -355,6 +389,15 @@ pub fn (t Type) is_pointer() bool {
 
 pub fn (t Type) is_array() bool {
 	return t.kind == .array
+}
+
+// is_vector says whether an array type is the GNU vector type a
+// `__attribute__((vector_size(N)))` declared. A vector is an array here, so
+// every place that asks is_array() also says yes about it; this is the question
+// that tells the two apart where the difference matters, which is that a vector
+// does not convert to a pointer and its arithmetic is element-wise.
+pub fn (t Type) is_vector() bool {
+	return t.kind == .array && t.vector
 }
 
 pub fn (t Type) is_function() bool {
@@ -484,7 +527,8 @@ pub fn (t Type) same(other Type) bool {
 		return false
 	}
 	if t.count != other.count || t.variadic != other.variadic
-		|| t.prototyped != other.prototyped || t.vla != other.vla {
+		|| t.prototyped != other.prototyped || t.vla != other.vla
+		|| t.vector != other.vector {
 		return false
 	}
 	if !(t.kind in [.struct_, .union_] && t.tag != '') {
@@ -591,6 +635,7 @@ fn (t Type) describe_unqualified() string {
 		.float { return 'float' }
 		.double { return 'double' }
 		.long_double { return 'long double' }
+		.float128 { return '__float128' }
 		.complex_float { return 'float _Complex' }
 		.complex_double { return 'double _Complex' }
 		.complex_long_double { return 'long double _Complex' }
@@ -774,6 +819,16 @@ pub fn long_double_type() Type {
 	}
 }
 
+// float128_type is the `_Float128` type, whose spelling gcc also writes
+// `__float128`. It is complete and sixteen bytes wide; the format its storage
+// holds is the topic of the comment on the kind and of `is_extended`.
+pub fn float128_type() Type {
+	return Type{
+		kind:     .float128
+		complete: true
+	}
+}
+
 pub fn complex_float_type() Type {
 	return Type{
 		kind:     .complex_float
@@ -817,6 +872,7 @@ pub fn scalar(kind Kind) ?Type {
 		.float { float_type() }
 		.double { double_type() }
 		.long_double { long_double_type() }
+		.float128 { float128_type() }
 		.complex_float { complex_float_type() }
 		.complex_double { complex_double_type() }
 		.complex_long_double { complex_long_double_type() }
@@ -850,6 +906,19 @@ pub fn array_of(base Type, count int) Type {
 		base:  &Type{ ...base }
 		count: count
 	}
+}
+
+// vector_of is the type of a GNU vector holding count elements of base in the
+// bytes a `__attribute__((vector_size(N)))` named. It is an array of those
+// elements carrying the vector flag, so it is laid out, sized and subscripted
+// as that array; what the flag changes is that a value of it is not converted
+// to a pointer and its operators are the element-wise ones. The caller has
+// already checked that the byte count is a positive multiple of the element
+// size, because the count is what this is told.
+pub fn vector_of(base Type, count int) Type {
+	mut t := array_of(base, count)
+	t.vector = true
+	return t
 }
 
 // vla_array_of is the type of an array of base whose bound is computed at run

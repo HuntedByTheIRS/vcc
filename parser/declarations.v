@@ -36,7 +36,7 @@ const type_qualifiers = ['const', 'volatile', 'restrict', '_Atomic', '__const', 
 // builtin_types are the type words of the language. A type can also be a name
 // this file has typedef'd, which is why the parser carries that list.
 const builtin_types = ['void', 'char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double',
-	'_Bool', '_Complex', '_Imaginary', '__int128']
+	'_Bool', '_Complex', '_Imaginary', '__int128', '__float128']
 
 // bitint_words are the spellings that open a _BitInt specifier. C23 added the
 // type, and its width is written in parentheses after the word: `_BitInt(128)`
@@ -89,8 +89,8 @@ const keywords = ['_Atomic', '_BitInt', '_Bool', '_Complex', '_Imaginary', '_Thr
 	'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'typeof', 'typeof_unqual', 'union',
 	'unsigned', 'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
 	'__extension__', '__inline', '__inline__', '__int128', '__restrict', '__restrict__', '__signed',
-	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile__',
-	'__volatile__', '__auto_type']
+	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile',
+	'__volatile__', '__auto_type', '__float128']
 
 // is_keyword says whether a spelling is one of the reserved words. Nothing in the
 // language may use one as an identifier, so the question is asked by the declarator
@@ -1376,7 +1376,31 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 	if spec.is_typedef {
 		// A typedef names a type and declares no object: the names are
 		// registered by the caller once the whole declaration has been read.
+		//
+		// A `vector_size(N)` attribute on it is the one attribute that changes
+		// the type the name stands for rather than the object, and it is the
+		// documented way GNU vector types are written: the typedef becomes a
+		// vector holding components of the declared type in N bytes. The type
+		// the declarator recorded when the name was read is the plain element
+		// type, so it is replaced here with the vector. gcc 16.2.1 allows the
+		// attribute on any declaration, but the manual gives the typedef form
+		// and this compiler implements that form; anywhere else the attribute
+		// is refused by name, in the branch that reads an object declaration.
+		if asked.vector_size > 0 {
+			if vector := p.vector_type_for(data_clause, asked.vector_size, data_at) {
+				p.scopes.complete_type(data_name, vector)
+			}
+		}
 		return true
+	}
+	if asked.vector_size > 0 {
+		// A vector_size on a declaration other than a typedef is a GNU vector
+		// type this reader could apply, but the manual documents the typedef
+		// form and this compiler implements only that one. Refusing by name is
+		// the honest answer: reading past it would declare a plain object where
+		// the program asked for a vector.
+		p.error_at(data_at, 'unsupported: a vector_size attribute on ${data_name} is not implemented, and this compiler reads vector_size only on a typedef of an arithmetic type')
+		return false
 	}
 	if spec.is_extern && !data_defined {
 		// An extern declaration adds no code of its own: it says the object
@@ -1518,8 +1542,8 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 	// truncated towards zero, which is the conversion an assignment makes
 	// and the reason neither of these needs a diagnostic of its own.
 	init, init_float := initializer_for(data_type, data_init, data_init_float)
-	if data_init_long != none && data_type != 'long double' {
-		p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is a long double constant')
+	if data_init_long != none && data_type != 'long double' && data_type != '__float128' {
+		p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is a constant of a 128-bit floating type')
 		return false
 	}
 	mut starts_at_zero := true
@@ -1533,14 +1557,15 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 			starts_at_zero = false
 		}
 	}
-	if data_type == 'long double' && data_init_long == none && !starts_at_zero {
-		// An object of the extended type at the top level starts at the
+	if (data_type == 'long double' || data_type == '__float128') && data_init_long == none
+		&& !starts_at_zero {
+		// An object of a 128-bit floating type at the top level starts at the
 		// constant its initializer names when that constant is one of the
 		// type, and at zero when there is nothing to start it at, which is
 		// what the unsized storage in the image already holds. A constant of
 		// another type is a conversion at load time, which this reader does
 		// not write into the image.
-		p.error_at(data_at, 'unsupported: ${data_name} is a long double, and its initializer is not a long double constant: converting a constant of another type to the extended format at load time is not written into the image')
+		p.error_at(data_at, 'unsupported: ${data_name} is a ${data_type}, and its initializer is not a constant of a 128-bit floating type: converting a constant of another type to that storage at load time is not written into the image')
 		return false
 	}
 	if spec.auto_deduced {
@@ -1878,6 +1903,30 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 			// exponent word, so flipping that bit is what `-12.0L` and `-0.0L`
 			// mean; without it every signed long double constant at file scope
 			// carried the positive value.
+			signed := if sign < 0 {
+				types.LongDouble{
+					mantissa: value.mantissa
+					sign_exp: value.sign_exp ^ 0x8000
+				}
+			} else {
+				value
+			}
+			return NumberConstant{
+				number: FileConstant{
+					long_floating: signed
+				}
+				at:     t
+			}
+		}
+		if is_float128_constant(t.text) {
+			// A `_Float128` constant at file scope carries its value the same
+			// way a long double constant does, and the sign travels with it
+			// the same way: the two types share this storage, which is the
+			// topic of the comment on the `float128` kind.
+			value := parse_float128_literal(t.text) or {
+				p.error_at(t, err.msg())
+				return none
+			}
 			signed := if sign < 0 {
 				types.LongDouble{
 					mantissa: value.mantissa
@@ -3932,12 +3981,12 @@ fn (mut p Parser) constant_expr(constant NumberConstant) ast.Expr {
 // double are both conversions the language makes, so neither is reported, and a
 // float object takes a floating initializer the same way a double does.
 fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
-	if written == 'long double' {
-		// A long double object holds a value a host double cannot represent, so
-		// the conversion of a double or an integer constant into one is not made
-		// here: the constant's own extended-format value travels in its own
-		// field, and a constant without one is refused where the bytes would be
-		// written.
+	if written == 'long double' || written == '__float128' {
+		// A 128-bit floating object holds a value a host double cannot
+		// represent, so the conversion of a double or an integer constant into
+		// one is not made here: the constant's own 128-bit value travels in
+		// its own field, and a constant without one is refused where the bytes
+		// would be written.
 		return none, none
 	}
 	mut value := integer
@@ -4022,14 +4071,14 @@ fn (p Parser) cast_file_constant(typ types.Type, operand FileConstant) ?FileCons
 // than read as a zero, because a zero in the storage is a value the declaration
 // did not write.
 fn (mut p Parser) initializer_list_for(written string, elements []BraceElement, name string, at tokenize.Token) ([]i64, []f64) {
-	if written == 'long double' {
-		// An array of long doubles would be a table of sixteen-byte extended
+	if written == 'long double' || written == '__float128' {
+		// An array of 128-bit floating values would be a table of sixteen-byte
 		// constants, and the two lists this returns carry an integer or a
-		// double; a long double value fits in neither. The elements are refused
+		// double; a value of one fits in neither. The elements are refused
 		// by name rather than dropped, because the storage they would have gone
 		// into starts zeroed and a program reading the table would get zeros
 		// with no diagnostic.
-		p.error_at(at, 'unsupported: ${name} is an array of long doubles with a brace initializer, and the extended constants of one have no field to be written into at file scope here')
+		p.error_at(at, 'unsupported: ${name} is an array of ${written} values with a brace initializer, and the 128-bit constants of one have no field to be written into at file scope here')
 		return []i64{}, []f64{}
 	}
 	if written == 'double' || written == 'float' {
@@ -6190,6 +6239,35 @@ fn closing_of(open string) string {
 		'{' { '}' }
 		else { ')' }
 	}
+}
+
+// vector_type_for is the vector type a `vector_size(N)` attribute makes of a
+// declared type: N bytes holding N / sizeof(element) components of it, which is
+// the message GNU's manual gives the attribute and what gcc 16.2.1 measures. The
+// attribute is written on a typedef of an arithmetic type, and the cases gcc
+// refuses are refused here by name rather than read into a different object:
+// measured, `vector_size(6)` on an int is `vector size not an integral multiple
+// of component size`, a size that makes three components is `number of vector
+// components 3 not a power of two`, and a size of zero is `zero vector size`.
+fn (mut p Parser) vector_type_for(element types.Type, bytes int, at tokenize.Token) ?types.Type {
+	if !element.is_arithmetic() {
+		p.error_at(at, 'unsupported: a vector_size attribute on ${element.describe()} is not implemented, and a vector holds components of an arithmetic type')
+		return none
+	}
+	width := p.representation.size_of(element) or {
+		p.error_at(at, 'unsupported: a vector_size attribute names the component type ${element.describe()}, and this compiler does not know its size')
+		return none
+	}
+	if width <= 0 || bytes % width != 0 {
+		p.error_at(at, 'unsupported: a vector_size of ${bytes} bytes on ${element.describe()} is not an integral multiple of the size of one component')
+		return none
+	}
+	count := bytes / width
+	if count & (count - 1) != 0 {
+		p.error_at(at, 'unsupported: a vector_size of ${bytes} bytes on ${element.describe()} makes ${count} components, and that is not a power of two')
+		return none
+	}
+	return types.vector_of(element, count)
 }
 
 // register_typedef remembers a name as a type for the rest of the file. The

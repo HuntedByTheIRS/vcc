@@ -138,6 +138,19 @@ pub fn from_specifiers(words []string) ?Kind {
 		}
 		return none
 	}
+	if seen['__float128'] {
+		// The 128-bit floating type is gcc's, and the words it takes are none:
+		// measured on gcc 16.2.1, `signed __float128`, `unsigned __float128`,
+		// `long __float128`, `short __float128` and `__float128 __float128`
+		// are each refused, and `__float128` alone is the one spelling. The
+		// header glibc writes for it is `typedef __float128 _Float128;`, so a
+		// program that names `_Float128` reaches the same kind through that
+		// typedef.
+		if longs != 0 || ints != 0 || seen.len != 1 {
+			return none
+		}
+		return Kind.float128
+	}
 	if seen.len > 0 {
 		for word, _ in seen {
 			if !word.starts_with('_BitInt(') {

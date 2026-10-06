@@ -33,18 +33,28 @@ import types
 
 const long_double_bytes = 16
 
-// writes_a_long_double says whether a written type spelling is the extended
-// type. A pointer to it is a pointer, which type_width already answers for, so
-// only the type itself is asked about.
+// writes_a_long_double says whether a written type spelling is one of the two
+// sixteen-byte floating types this back end carries in the same storage: the
+// extended `long double`, and `_Float128`, whose format is IEEE binary128 and
+// whose values this back end stores, copies and converts but does not compute
+// arithmetic for. A pointer to either is a pointer, which type_width already
+// answers for, so only the type itself is asked about.
 fn (e Emitter) writes_a_long_double(written string) bool {
-	return written == 'long double'
+	if written == 'long double' {
+		return true
+	}
+	typ := types.from_words(written.split(' ')) or { return false }
+	return typ.kind == .float128
 }
 
-// long_double_of says whether a value is one of the extended type. It is the
-// question every path that would otherwise compute in a double asks, and the
-// type the reader resolved onto the expression is the answer.
+// long_double_of says whether a value is one of the sixteen-byte floating types,
+// which this back end represents the same way: the value is the address of its
+// sixteen bytes rather than a register. It is the question every path that would
+// otherwise compute in a double asks, and the type the reader resolved onto the
+// expression is the answer. Arithmetic between two of them is refused by name
+// below where the two formats would disagree.
 fn (e Emitter) long_double_of(expr ast.Expr) bool {
-	return expr.typ.kind == .long_double
+	return expr.typ.kind.is_extended()
 }
 
 // global_is_long_double is the same question about a top-level object. An array
@@ -76,10 +86,10 @@ fn (e Emitter) global_array_is_long_double(name string) bool {
 // type: the signature the reader resolved says so, and the spelling a function
 // this file declares returns says so where the reader had no signature.
 fn (e Emitter) returns_a_long_double(call ast.Call) bool {
-	if call.typ.kind == .long_double {
+	if call.typ.kind.is_extended() {
 		return true
 	}
-	return e.returns[call.name] == 'long double'
+	return e.returns[call.name] == 'long double' || e.returns[call.name] == '__float128'
 }
 
 // extended_parameter says whether a call's parameter at `position` is the

@@ -116,6 +116,14 @@ pub fn usual_arithmetic_conversions(a Type, b Type, rep Representation) !Type {
 	if !a.is_arithmetic() || !b.is_arithmetic() {
 		return error('the usual arithmetic conversions need two arithmetic types, and ${a.describe()} and ${b.describe()} are not both arithmetic')
 	}
+	if a.kind == .float128 || b.kind == .float128 {
+		// `_Float128` ranks above every type the standard has, which is where
+		// gcc's own conversion rank puts it: measured with `_Generic` on gcc
+		// 16.2.1, `_Float128` with any of them is `_Float128`. The arithmetic
+		// on the result is refused by name in the back end, which is where the
+		// difference between the two 128-bit floating formats would show.
+		return float128_type()
+	}
 	if a.kind == .long_double || b.kind == .long_double {
 		return long_double_type()
 	}
@@ -214,6 +222,18 @@ pub fn value_preserving(to Type, from Type, rep Representation) !bool {
 // a decay where a value is wanted, and those three places do not ask.
 pub fn decay(t Type) Type {
 	if t.kind == .array && t.base != unsafe { nil } {
+		if t.vector {
+			// A vector is not converted to a pointer: 6.3.2.1 makes an
+			// array designator decay, and a GNU vector is not an array
+			// designator. gcc 16.2.1 measures `_Generic(v, int[4]: 1,
+			// default: 2)` as 2 for a vector and refuses `int *p = v;`, so
+			// the value keeps the vector type wherever a value is wanted.
+			// This is what lets `a + b` reach the operator with two vector
+			// operands rather than two pointers, and what makes assigning
+			// one vector to another the aggregate assignment of one type to
+			// itself.
+			return t
+		}
 		// The element carries the qualifiers, since `const int a[4]` is an
 		// array of const int; the array's own qualifiers are merged in for a
 		// reader that put them there instead.

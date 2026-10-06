@@ -184,7 +184,7 @@ mut:
 // wrote. A spelling of more than one word is not here, because the words name a
 // kind that emitted_kinds answers.
 const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long long', 'signed',
-	'unsigned', 'unsigned int', 'unsigned long', 'unsigned long long', 'short', '_Bool']
+	'unsigned', 'unsigned int', 'unsigned long', 'unsigned long long', 'short', '_Bool', '__float128']
 
 // emitted_kinds are the kinds those spellings name, which is the question a
 // spelling cannot answer on its own: `unsigned`, `unsigned int` and `unsigned
@@ -194,7 +194,8 @@ const supported_types = ['int', 'char', 'void', 'double', 'float', 'long', 'long
 // name one of these.
 const emitted_kinds = [types.Kind.void_, .int_, .unsigned_int, .bool_, .char_, .signed_char,
 	.unsigned_char, .short, .unsigned_short, .double, .float, .long, .unsigned_long, .long_long,
-	.unsigned_long_long, .long_double, .complex_float, .complex_double, .complex_long_double]
+	.unsigned_long_long, .long_double, .float128, .complex_float, .complex_double,
+	.complex_long_double]
 
 // max_expression_depth bounds how deep one expression nests: a parenthesis, a
 // prefix operator, a cast, a `?:`, a `[` index, a call's argument list and a
@@ -1134,6 +1135,27 @@ fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) 
 			p.error_at(op, err.msg())
 			return types.Type{}
 		}
+	}
+	if a.is_vector() || b.is_vector() {
+		// A GNU vector operator is defined on its elements, so `a + b` adds
+		// lane by lane and the two operands have to be the same vector type.
+		// The arithmetic is element-wise and not the usual arithmetic
+		// conversions: a vector and a scalar do not mix, and two different
+		// vector types do not either.
+		//
+		// Only `+` is typed here, which is the operator the corpus checks and
+		// the one this compiler lowers. The other element-wise operators are
+		// refused by name rather than typed and then computed with a scalar
+		// meaning, which would answer one lane or the wrong width.
+		if !(a.is_vector() && b.is_vector()) || !a.same(b) {
+			p.error_at(op, 'unsupported: the type of ${describe_operand(left)} ${op.text} ${describe_operand(right)} is not one this compiler resolves, and a vector operator takes two operands of one vector type')
+			return types.Type{}
+		}
+		if op.text != '+' {
+			p.error_at(op, 'unsupported: the element-wise operator ${op.text} on ${a.describe()} is not implemented, and this compiler implements + on two vectors of one type')
+			return types.Type{}
+		}
+		return a
 	}
 	if op.text == '+' || op.text == '-' {
 		if a.is_pointer() && b.is_integer() {
@@ -2667,6 +2689,19 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 					col:        t.col
 				})
 			}
+			if is_float128_constant(t.text) {
+				value := parse_float128_literal(t.text) or {
+					p.error_at(t, err.msg())
+					return error('bad _Float128 literal')
+				}
+				return ast.Expr(ast.FloatLit{
+					long_value: value
+					text:       t.text
+					typ:        p.floating_type(t, 0.0)
+					line:       t.line
+					col:        t.col
+				})
+			}
 			value := parse_floating_literal(t.text) or {
 				p.error_at(t, err.msg())
 				return error('bad floating literal')
@@ -3010,6 +3045,9 @@ fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 	}
 	if is_long_double_constant(at.text) && is_floating_constant(at.text) {
 		return types.long_double_type()
+	}
+	if is_float128_constant(at.text) {
+		return types.float128_type()
 	}
 	if at.text.len > 0 && (at.text[at.text.len - 1] == `f` || at.text[at.text.len - 1] == `F`) {
 		return types.float_type()

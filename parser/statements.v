@@ -2069,6 +2069,24 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				p.error_at(list.at, 'a constraint violation: ${d.name} is initialized with ${list.elements.len} elements and its type holds ${reached}')
 			}
 		}
+		// A vector initialized from a vector value is the element-wise stores a
+		// brace list makes, which are written where the brace list's own stores
+		// are written below. `v4si c = a + b;` writes c[0] = a[0] + b[0] and so
+		// on, and `v4si c = a;` copies lane by lane. The vector `+` is defined
+		// element-wise, so lowering it to the scalar `+` this back end already
+		// emits computes exactly the values SIMD would. The operands have to be
+		// lvalues, because a lane reads its operand once per component and a
+		// call or other effectful operand would then run more than once; an
+		// operand that is not one is left as it stands and refused at the
+		// operator, which is the honest answer rather than a doubled call.
+		mut vector_stores := []ast.Stmt{}
+		if declared.is_vector() && !brace {
+			if initializer := init {
+				if p.vector_initializer_stores(declared, d.name, initializer, d.name_at, mut vector_stores) {
+					init = none
+				}
+			}
+		}
 		// A union's initializer is the store into its first member written
 		// below, and a struct's is the stores into its members, so the
 		// declaration itself starts as storage and carries no initializer.
@@ -2348,6 +2366,14 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				}
 			}
 		}
+		// The element-wise stores a vector value initializer lowered to, one per
+		// component, written after the declaration reserves the object the way
+		// a brace list's own stores are. A vector that kept its initializer
+		// here is one whose operand was not an lvalue, and it is refused at the
+		// operator rather than lowered.
+		for store in vector_stores {
+			stmts << store
+		}
 		if p.at_punct(',') {
 			if spec.auto_deduced {
 				// C23 gives the deduced type to one declarator; a second has
@@ -2383,6 +2409,107 @@ fn zero_initializer(at tokenize.Token) ast.Expr {
 		line:  at.line
 		col:   at.col
 	})
+}
+
+// vector_initializer_stores lowers a vector initializer that is a vector value
+// - a sum of two vectors or a copy of one - into the element stores a brace list
+// makes, and answers whether it did. `v4si c = a + b;` becomes c[0] = a[0] +
+// b[0] and so on; `v4si c = a;` copies lane by lane. The `+` is the operator the
+// parser typed for two vectors of one type, and the scalar `+` each lane is
+// lowered to is exactly the element-wise sum, which is what makes this an honest
+// implementation of the operator rather than a compromise.
+//
+// The operands have to be lvalues. A lane is stored once per component, so an
+// operand that is a call or another effectful expression would run once per
+// component; only a name, an element or a member reads the same value every
+// time. An initializer shape this does not cover is left as it stands and
+// refused at the operator it was written with, which names the construct rather
+// than computing a different program.
+fn (mut p Parser) vector_initializer_stores(declared types.Type, name string, initializer ast.Expr, at tokenize.Token, mut stores []ast.Stmt) bool {
+	element := declared.element() or { return false }
+	count := declared.count
+	if count <= 0 {
+		return false
+	}
+	if initializer is ast.Binary {
+		if !initializer.typ.is_vector() || initializer.op != '+' {
+			return false
+		}
+		if !p.vector_lvalue(initializer.left) || !p.vector_lvalue(initializer.right) {
+			p.error_at(at, 'unsupported: the element-wise sum assigned to the vector ${name} is lowered one component at a time, and an operand that is not a name, an element or a member would be read once per component')
+			return false
+		}
+		for i in 0 .. count {
+			left := p.vector_lane(initializer.left, element, i, at)
+			right := p.vector_lane(initializer.right, element, i, at)
+			sum := ast.Expr(ast.Binary{
+				op:    '+'
+				left:  left
+				right: right
+				typ:   element
+				line:  at.line
+				col:   at.col
+			})
+			stores << p.vector_store(name, i, sum, at)
+		}
+		return true
+	}
+	if initializer is ast.Ident {
+		if !initializer.typ.is_vector() {
+			return false
+		}
+		for i in 0 .. count {
+			stores << p.vector_store(name, i, p.vector_lane(initializer, element, i, at), at)
+		}
+		return true
+	}
+	return false
+}
+
+// vector_lvalue says whether an expression reads the same value every time it is
+// evaluated, which is what lowering a vector operand into one read per component
+// needs. A name, an element of one and a member of one all do; a call and every
+// other effectful expression do not.
+fn (mut p Parser) vector_lvalue(expr ast.Expr) bool {
+	return expr is ast.Ident || expr is ast.Index || expr is ast.Field
+}
+
+// vector_lane is `base[i]` for one component of a vector: the element type is
+// the component type, so the subscript the emitter reads scales and loads it the
+// way it reads an element of an array, which is how a vector is stored.
+fn (mut p Parser) vector_lane(base ast.Expr, element types.Type, i int, at tokenize.Token) ast.Expr {
+	return ast.Expr(ast.Index{
+		base:  base
+		index: ast.Expr(ast.IntLit{
+			value: i64(i)
+			text:  '${i}'
+			typ:   types.int_type()
+			line:  at.line
+			col:   at.col
+		})
+		typ:   element
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// vector_store is `name[i] = value`, the element store a brace list makes and
+// the one a lowered vector component is written with.
+fn (mut p Parser) vector_store(name string, i int, value ast.Expr, at tokenize.Token) ast.Stmt {
+	return ast.Stmt{
+		kind:   .assign
+		target: name
+		index:  ast.Expr(ast.IntLit{
+			value: i64(i)
+			text:  '${i}'
+			typ:   types.int_type()
+			line:  at.line
+			col:   at.col
+		})
+		expr:   value
+		line:   at.line
+		col:    at.col
+	}
 }
 
 // declaration_stride is the size of one element of an array declaration, which
