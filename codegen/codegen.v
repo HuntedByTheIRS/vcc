@@ -9256,6 +9256,18 @@ fn (mut e Emitter) emit_count_leading(call ast.Call, depth int) !void {
 	e.append(e.target.count_leading(accumulator, accumulator, call.name == '__builtin_clzll')!)
 }
 
+// emit_return_address answers `__builtin_return_address(0)` with the address the
+// call that reached this function left. A frame opens with `push rbp; mov rbp,
+// rsp`, so the saved frame pointer is at [rbp] and the return address is the word
+// above it at [rbp + word_size]: one load and the answer is that word. The
+// emitter's frames are all frame-pointer based, which is what makes the word a
+// fixed offset from the frame pointer rather than something to walk for.
+fn (mut e Emitter) emit_return_address(call ast.Call) !void {
+	base := e.frame_pointer(call.line, call.col)!
+	register := e.accumulator(call.line, call.col)!
+	e.append(e.target.load_slot(base, i32(e.target.word_size), register, e.target.word_size)!)
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -9323,6 +9335,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		'__builtin_clz', '__builtin_clzll' {
 			return e.emit_count_leading(call, depth)
+		}
+		'__builtin_return_address' {
+			return e.emit_return_address(call)
 		}
 		'atexit' {
 			// glibc defines atexit in libc_nonshared.a, the static half of

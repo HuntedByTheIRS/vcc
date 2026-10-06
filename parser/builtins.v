@@ -35,7 +35,7 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
 	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p',
-	'__builtin_object_size']
+	'__builtin_object_size', '__builtin_return_address']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -108,6 +108,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_object_size' {
 			return p.parse_object_size(at)
+		}
+		'__builtin_return_address' {
+			return p.parse_return_address(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -679,6 +682,38 @@ fn (mut p Parser) parse_object_size(at tokenize.Token) !ast.Expr {
 		size = 0
 	}
 	return integer_constant(size, '${at.text}(${describe_operand(operand)}, ${kind})', at, types.Kind.unsigned_long)
+}
+
+// parse_return_address reads `__builtin_return_address(level)`, which is the
+// address the current function returns to. Only level 0 is answered: that is the
+// word at [rbp+8] of this frame, the return address the `call` that reached this
+// function left, and it is the only one this frame can state. A level above zero
+// asks for an address further up the frame chain, which this compiler does not
+// walk, so it is refused by name rather than answered with this frame's word.
+//
+// gcc gives the result the type void *.
+fn (mut p Parser) parse_return_address(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	level_expr := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_return_address')
+		return error('unclosed __builtin_return_address')
+	}
+	level := p.constant_value(level_expr) or {
+		p.error_at(at, 'unsupported: __builtin_return_address walks the frame chain by a constant level, and this compiler cannot read that one')
+		return error('the level is not a constant')
+	}
+	if level != 0 {
+		p.error_at(at, 'unsupported: __builtin_return_address reads the return address of a caller ${level} frames up, and this compiler answers level 0 only')
+		return error('a level above zero')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_return_address'
+		args: []
+		typ:  types.pointer_to(types.void_type())
+		line: at.line
+		col:  at.col
+	})
 }
 
 // The builtins that are a value rather than a question about a declaration: the
