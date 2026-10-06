@@ -1384,7 +1384,14 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	e.function_symbol = decl.name
 	e.enclosing_symbol = decl.owner
 	e.chain = none
-	e.nested_functions = map[string]string{}
+	// The names the body writes are added to the ones the functions around this
+	// one wrote, because a nested function is visible in every function written
+	// inside the one that defines it, and a call to one of those hands over the
+	// frame it reads its objects in. Only a top-level function, which is written
+	// in no function, starts with none.
+	if e.enclosing_symbol.len == 0 {
+		e.nested_functions = map[string]string{}
+	}
 	for nested in collect_nested(decl.body) {
 		e.nested_functions[nested.name] = nested.owner
 	}

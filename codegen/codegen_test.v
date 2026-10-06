@@ -5389,12 +5389,13 @@ fn test_an_object_two_functions_out_is_read_through_two_chain_links() {
 
 fn test_a_nested_function_calls_one_written_two_functions_out() {
 	// A call puts the callee's enclosing frame in the chain register, and the
-	// frame of a function two functions out is the end of a two-link walk:
-	// gfun is written in main, so inner's call runs the walk.
-	emitted := emit(translation_unit('int main() { int gfun(int a) { return a + 1; } int outer(int x) { int inner(int y) { return y + gfun(0); } return inner(x); } return outer(4); }'),
+	// frame of a function two functions out is the end of a two-link walk. gfun
+	// reads `n` out of main's frame, so the walk is what makes the answer 4
+	// rather than whatever frame the call happened to leave in the register.
+	emitted := emit(translation_unit('int main() { int n = 4; int gfun(void) { return n; } int outer(void) { int inner(void) { return gfun(); } return inner(); } return outer(); }'),
 		Options{})
 	assert emitted.diagnostics.len == 0
-	assert run_image(emitted.bytes) == 5
+	assert run_image(emitted.bytes) == 4
 }
 
 fn test_a_nested_function_reads_and_writes_a_captured_object_of_any_type() {
