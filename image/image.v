@@ -135,11 +135,15 @@ pub enum RelocationWidth {
 }
 
 // RelocationPlace is which of a unit's blobs a relocatable field lies in. The
-// three are the ones a unit is made of, and each has a base of its own in the
-// merged image, which is what the merge adds to the field's offset.
+// four are the ones a unit is made of, and each has a base of its own in the
+// merged image, which is what the merge adds to the field's offset. A field in
+// the thread-local image is the one that is not storage of the program's own:
+// every thread gets a copy of that image made by the loader, so a field in it
+// holds an address rather than a distance.
 pub enum RelocationPlace {
 	text
 	read_only
+	tls
 	data
 }
 
@@ -170,6 +174,12 @@ pub:
 	// thread-local is the one place a name lives that is neither code nor the
 	// storage of an object: every thread gets its own copy of it.
 	tls bool
+	// image_base says the definition is the image itself: the address the first
+	// byte of the file is loaded at, which is offset zero in the flat image
+	// every other offset is counted in. `__ehdr_start` is the name the C
+	// library's own startup gives it, and it is what a program reads to find
+	// its own program headers at run time.
+	image_base bool
 }
 
 // GlobalSlot is where a top-level object lives in the image and how wide it is:
@@ -280,6 +290,22 @@ pub mut:
 	// binding, which `__attribute__((weak))` asks for. The object's symbol
 	// table says WEAK rather than GLOBAL for a name in it.
 	weak map[string]bool
+	// weak_imports is every name in `imports` the units named with a weak
+	// symbol binding and none of them defines, which is what a reference to
+	// `__gmon_start__` in the runtime's own startup files is. A weak import is
+	// the one name a link does not have to answer: the ELF rule is that an
+	// undefined weak symbol stands for zero, so no library is asked for it and
+	// the image's own symbol table writes it with the weak binding, which is
+	// how the loader is told to leave the slot zero rather than fail on a name
+	// nothing defines.
+	weak_imports map[string]bool
+	// tls_slots is every name whose global offset table slot holds how far the
+	// thread-local lies below the thread pointer rather than its address, which
+	// is what a `R_X86_64_GOTTPOFF` reference reads: the code loads the slot and
+	// reaches the variable through the thread pointer, the initial-exec model.
+	// The slot's content is a number the link writes, not an address the loader
+	// fills in.
+	tls_slots map[string]bool
 	// internal is every function and object this unit defines with internal
 	// linkage, which a file-scope `static` gives a name (6.2.2p3). The object's
 	// symbol table writes such a name with the local binding, so a definition
