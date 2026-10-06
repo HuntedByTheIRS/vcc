@@ -11009,19 +11009,38 @@ fn (mut e Emitter) intern(text string) {
 	e.program.string_blob << u8(0) // the terminator a library function reads to
 }
 
+// wide_char_width is the width of the wchar_t this target gives, four bytes. It
+// is both the alignment a wide literal's entry needs and the number of zero
+// bytes that end one.
+const wide_char_width = 4
+
 // intern_wide puts a wide string literal into the image's read-only data once,
 // keyed by the bytes of its characters, and ends the entry with a zero wchar_t,
 // which is four zero bytes. It is a table of its own because those bytes can also
 // be a narrow literal's, and the two are different objects: a narrow literal's
 // entry ends with one zero byte and its object is a byte longer than the wide
 // one's, so one table would hand one of them the other's entry.
+//
+// The entry starts where a wchar_t starts. A narrow literal interned before it
+// can be an odd number of bytes long, and a function that reads a wide string is
+// not owed an unaligned address: measured, glibc's swprintf answers a
+// misaligned `%ls` argument with something other than the count it should, and
+// the same program is right one byte either side of that offset. The unit's
+// read-only data is declared to the same alignment, so the entry's offset in the
+// blob is its offset in the image however the blob is placed.
 fn (mut e Emitter) intern_wide(value string) {
 	if value in e.program.wide_strings {
 		return
 	}
+	for e.program.string_blob.len % wide_char_width != 0 {
+		e.program.string_blob << u8(0)
+	}
+	if wide_char_width > e.program.read_only_alignment {
+		e.program.read_only_alignment = wide_char_width
+	}
 	e.program.wide_strings[value] = e.program.string_blob.len
 	e.program.string_blob << value.bytes()
-	for _ in 0 .. 4 {
+	for _ in 0 .. wide_char_width {
 		e.program.string_blob << u8(0)
 	}
 }

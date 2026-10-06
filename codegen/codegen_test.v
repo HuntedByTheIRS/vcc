@@ -2079,6 +2079,29 @@ fn test_a_wide_string_literal_decays_to_a_wide_pointer() {
 	assert run_image(emitted.bytes) == 42
 }
 
+// A wide string literal's entry in the read-only data starts where a wchar_t
+// starts, four bytes on this target. A narrow literal interned before it can be
+// an odd number of bytes long, and the functions that read a wide string are not
+// owed an unaligned address: measured, glibc's swprintf answers a misaligned `%ls`
+// argument with the wrong count, and the same program is right one byte either
+// side of that offset. The two-character narrow literal here is three bytes with
+// its terminator, so the wide entry that follows is the one that would land
+// misaligned without the padding this test is about.
+fn test_a_wide_string_literal_starts_where_a_wchar_starts() {
+	emitted := emit(translation_unit('int main(void) { char *n = "ab"; int *w = L"hi"; if (n[0] != 97) return 1; if (w[0] != 104) return 2; return 42; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert emitted.program.wide_strings.len == 1
+	for _, offset in emitted.program.wide_strings {
+		assert offset % 4 == 0
+		// the narrow literal is walked first and is three bytes long, so an
+		// entry at zero would mean the padding stopped being exercised
+		assert offset > 0
+	}
+	assert emitted.program.read_only_alignment >= 4
+	assert run_image(emitted.bytes) == 42
+}
+
 // A function that takes both a pointer and an int and calls the library itself.
 // The call to it is written before its definition, which is where a call has to
 // bind forward, and the variadic call inside it formats a value computed from
