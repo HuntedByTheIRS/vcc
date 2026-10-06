@@ -5,8 +5,6 @@
  * its value is the value of the conditional expression. Therefore, the
  * expression x ? : y has the value of x if that is nonzero; otherwise, the
  * value of y."
- *
- * unimplemented: a conditional expression with the middle operand omitted.
  */
 
 #include <stdio.h>

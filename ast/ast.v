@@ -662,14 +662,21 @@ pub:
 // `typ` is the type 6.5.15 gives the two arms together and not either arm's own.
 // The condition's type is not part of that answer: a pointer, a double and an
 // int condition all select between the same two arms.
+//
+// `omitted_middle` says the GNU spelling `a ?: b` was read, where the middle
+// operand was left out and is the condition itself: the reader sets it and makes
+// `then_expr` the very node `cond` is, so the emitter can tell the repeated
+// operand from one the program wrote and evaluate the condition exactly once
+// rather than twice.
 pub struct Conditional {
 pub:
-	cond      Expr
-	then_expr Expr
-	else_expr Expr
-	typ       types.Type
-	line      int
-	col       int
+	cond           Expr
+	then_expr      Expr
+	else_expr      Expr
+	typ            types.Type
+	omitted_middle bool
+	line           int
+	col            int
 }
 
 // Cast is a conversion written as a type name in parentheses, `(char *)p`. The

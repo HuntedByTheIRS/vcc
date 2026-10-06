@@ -272,8 +272,12 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 		}
 		ast.Conditional {
 			// The three operands are printed in the order they were written,
-			// which is what makes the branch the emitter builds readable.
-			out << '${indent}conditional at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			// which is what makes the branch the emitter builds readable. The
+			// middle one is marked when the source left it out: the node holds
+			// the condition there as well, and a dump that printed it without a
+			// word would read as one the program wrote.
+			omitted := if expr.omitted_middle { ' middle omitted' } else { '' }
+			out << '${indent}conditional at ${expr.line}:${expr.col}${typed(expr.typ)}${omitted}'
 			dump_expression(expr.cond, depth + 1, mut out)
 			dump_expression(expr.then_expr, depth + 1, mut out)
 			dump_expression(expr.else_expr, depth + 1, mut out)

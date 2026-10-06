@@ -833,15 +833,50 @@ fn is_a_compound_target(expr ast.Expr) bool {
 // middle operand is the whole expression before the `:`, so it is read the same
 // way.
 //
-// The GNU spelling with the middle operand left out, `a ?: b`, is not C99, and
-// the standard reading of those tokens is not the same as the extension's: the
-// extension repeats the condition, and this compiler refuses it by name rather
-// than reading the condition as the middle operand.
+// The GNU spelling with the middle operand left out, `a ?: b`, is read here too.
+// gcc 6.12.13 defines the middle operand as the condition itself, and the whole
+// expression as the condition's value when it is nonzero and the else operand's
+// otherwise: measured on gcc 16.2.1, `x++ ?: y` steps x a single time and is
+// worth the value x held before the step. The node keeps the condition as its
+// middle operand and marks that the source left it out, so the emitter evaluates
+// the condition once instead of reading it twice. Measured on gcc 16.2.1, a
+// strict ISO mode refuses the spelling - `-std=c99 -pedantic-errors` reports
+// `ISO C forbids omitting the middle term of a '?:' expression` - and a GNU
+// dialect takes it as its own.
 fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 	question := p.next() // ?
+	cond := p.constant_condition(question, condition)
 	if p.at_punct(':') {
-		p.error_at(question, 'unsupported: `?:` with the middle operand left out is a GNU extension and not C99, and this compiler reads the middle operand')
-		return error('omitted middle operand')
+		// The middle operand was left out and is the condition's own value. The
+		// condition node is the middle operand and the flag says the source did
+		// not write it, so the arm carries the condition's type and the emitter
+		// knows the value is the one the condition's own evaluation produced.
+		// The colon is consumed here, and the else operand is the expression
+		// after it.
+		p.next() // :
+		p.depth++
+		if p.depth > max_expression_depth {
+			p.depth--
+			p.error_at(question, 'expression is nested more than ${max_expression_depth} levels deep')
+			return error('expression nested too deeply')
+		}
+		p.compound_unstable++
+		else_expr := p.parse_expression() or {
+			p.compound_unstable--
+			p.depth--
+			return error('a conditional expression')
+		}
+		p.compound_unstable--
+		p.depth--
+		return ast.Expr(ast.Conditional{
+			cond:           cond
+			then_expr:      condition
+			else_expr:      else_expr
+			typ:            p.conditional_type(question, condition, else_expr)
+			omitted_middle: true
+			line:           question.line
+			col:            question.col
+		})
 	}
 	// A chain of conditionals nests through its operands: the third of
 	// `a ? b : c ? d : e` is another conditional and the second of
@@ -874,7 +909,7 @@ fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 	p.compound_unstable--
 	p.depth--
 	return ast.Expr(ast.Conditional{
-		cond:      p.constant_condition(question, condition)
+		cond:      cond
 		then_expr: then_expr
 		else_expr: else_expr
 		typ:       p.conditional_type(question, then_expr, else_expr)

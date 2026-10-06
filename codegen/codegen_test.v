@@ -4181,6 +4181,30 @@ fn test_only_the_arm_a_conditional_selects_is_evaluated() {
 	assert run_image(called.bytes) == 20
 }
 
+// The GNU spelling with the middle operand left out, `a ?: b`, is worth the
+// condition when it is nonzero and the else operand otherwise, and the condition
+// is evaluated a single time: measured on gcc 16.2.1, `x++ ?: y` steps x once and
+// is worth the value x held before the step. A shape that read the condition
+// twice would leave x at 7 and not 6, which is what the first check would see.
+fn test_a_conditional_with_the_middle_operand_left_out_evaluates_the_condition_once() {
+	value := emit(translation_unit('int main(void) { int x = 5; int y = 9; int z = x++ ?: y; int w = 0 ?: y; return (x == 6 ? 1 : 0) + (z == 5 ? 2 : 0) + (w == 9 ? 4 : 0); }'),
+		Options{})
+	assert value.diagnostics.len == 0
+	assert run_image(value.bytes) == 7
+	// A pointer condition is the pointer when it is not null and the else
+	// operand when it is, and the result is a pointer either way.
+	pointer := emit(translation_unit('int main(void) { const char *p = 0; const char *q = "y"; return (p ?: "x")[0] + (q ?: "x")[0]; }'),
+		Options{})
+	assert pointer.diagnostics.len == 0
+	assert run_image(pointer.bytes) == i32(`x`) + i32(`y`)
+	// A floating condition keeps its value, and the else operand is what a zero
+	// condition selects.
+	floating := emit(translation_unit('int main(void) { double d = 0 ?: 2.5; double e = 4.5 ?: 2.5; return (d == 2.5 ? 1 : 0) + (e == 4.5 ? 2 : 0); }'),
+		Options{})
+	assert floating.diagnostics.len == 0
+	assert run_image(floating.bytes) == 3
+}
+
 // The value of a conditional is the arm's value converted to the type the two
 // arms share. An int arm beside a double one arrives as a double, so 1 is 1.0
 // and not the bits of an int read as one; and `sizeof(1 ? 1 : 1.0)` is the size

@@ -2180,6 +2180,41 @@ fn test_a_conditional_is_right_associative() {
 	assert (inner.cond as ast.Ident).name == 'c'
 }
 
+// The GNU spelling with the middle operand left out, `a ?: b`, is read as the
+// condition's own value when it is nonzero and the else operand's otherwise. The
+// reader marks the node and puts the condition in the middle operand, so the
+// emitter can evaluate the condition a single time. Measured on gcc 16.2.1,
+// `x++ ?: y` steps x once and is worth the value x held before the step.
+fn test_a_conditional_with_the_middle_operand_left_out_is_read() {
+	result := parsed('int f(int x, int y) { return x ?: y; }')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	conditional := expr as ast.Conditional
+	assert conditional.omitted_middle
+	assert conditional.cond is ast.Ident
+	assert (conditional.then_expr as ast.Ident).name == 'x'
+	assert (conditional.else_expr as ast.Ident).name == 'y'
+	// The result type is the one the middle operand and the else operand share,
+	// which is the condition's own type beside the else operand's.
+	assert conditional.typ.describe() == 'int'
+	// A condition that is an integer constant is folded for the branch, and the
+	// middle operand keeps the condition's own node and so its own type: `1L ?:
+	// 2` is a long and not the int the folded condition would give it.
+	folded := parsed('int f(void) { return 1L ?: 2; }')
+	assert folded.diagnostics.len == 0
+	folded_expr := folded.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	folded_conditional := folded_expr as ast.Conditional
+	assert folded_conditional.omitted_middle
+	assert folded_conditional.then_expr is ast.IntLit
+	assert folded_conditional.typ.describe() == 'long'
+}
+
 // The conditional binds looser than every binary operator, so it is read after
 // the precedence climbing has taken them: `a || b ? c : d` selects on `a || b`.
 fn test_a_conditional_binds_looser_than_the_binary_operators() {
@@ -2231,14 +2266,23 @@ fn test_a_constant_condition_is_folded_to_its_value() {
 	assert kept.cond is ast.Ident
 }
 
-// The GNU spelling with the middle operand left out is refused by name: the
-// extension repeats the condition, and reading the tokens that way would be a
-// value the standard does not give them.
-fn test_the_omitted_middle_operand_is_refused_by_name() {
+// The GNU spelling with the middle operand left out is read rather than refused:
+// the middle operand is the condition's own value, and the node says the source
+// left it out so the emitter evaluates the condition once. The reader refused
+// this spelling until the construct was implemented - the message was `?: with
+// the middle operand left out is a GNU extension and not C99` - so this test
+// replaces the assertion that the spelling is refused by name.
+fn test_the_omitted_middle_operand_is_read() {
 	result := parsed('int main(void) { int a = 1; return a ?: 2; }')
-	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('GNU extension')
-	assert result.diagnostics[0].msg.contains('not C99')
+	assert result.diagnostics.len == 0
+	expr := result.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	conditional := expr as ast.Conditional
+	assert conditional.omitted_middle
+	assert (conditional.then_expr as ast.Ident).name == 'a'
+	assert conditional.else_expr is ast.IntLit
 }
 
 // Two pointers to compatibly qualified versions of one type give a pointer to
