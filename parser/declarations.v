@@ -61,6 +61,15 @@ const tag_keywords = ['struct', 'union', 'enum']
 // including c89 and draws no pedantic message from any of them.
 const typeof_words = ['typeof', '__typeof', '__typeof__']
 
+// auto_type_words are the spellings of the deduced type specifier, whose type
+// is taken from the initializer rather than written: GNU C's `__auto_type`,
+// which every GNU dialect and every strict one takes because the spelling is in
+// the namespace an implementation reserves for itself. C23's `auto` names the
+// same construct and is read through the same flag, but its spelling is also
+// the C89 storage class, so it is recognized by what follows it (see
+// auto_is_a_type_specifier) and not by this list.
+const auto_type_words = ['__auto_type']
+
 // typeof_unqual_words are the same specifier with the qualifiers taken off the
 // type it names, which is the one difference between the two: `typeof` keeps
 // them and `typeof_unqual` does not. C23 spells it `typeof_unqual`, and the
@@ -80,8 +89,8 @@ const keywords = ['_Atomic', '_BitInt', '_Bool', '_Complex', '_Imaginary', '_Thr
 	'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'typeof', 'typeof_unqual', 'union',
 	'unsigned', 'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
 	'__extension__', '__inline', '__inline__', '__int128', '__restrict', '__restrict__', '__signed',
-	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile',
-	'__volatile__']
+	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile__',
+	'__volatile__', '__auto_type']
 
 // is_keyword says whether a spelling is one of the reserved words. Nothing in the
 // language may use one as an identifier, so the question is asked by the declarator
@@ -168,7 +177,7 @@ fn (p Parser) starts_type_name(t tokenize.Token) bool {
 fn is_specifier_word(text string) bool {
 	return text in storage_classes || text in type_qualifiers || text in builtin_types
 		|| text in tag_keywords || text in typeof_words || text in typeof_unqual_words
-		|| text in bitint_words
+		|| text in bitint_words || text in auto_type_words
 }
 
 // storage_of is the storage class a word names. `inline` and `__extension__` say
@@ -230,6 +239,11 @@ mut:
 	// been read, and the reader that has the initializer is the one that fills
 	// the clause. It is false for the storage class of the same spelling.
 	auto_deduced bool
+	// auto_spelling is the word that opened a deduced specifier, `auto` or
+	// `__auto_type`, kept so that a diagnostic names the construct the source
+	// wrote and not the one spelling of it. It is empty when the declaration is
+	// not deduced.
+	auto_spelling string
 	// attributes is what any GNU `__attribute__` written among the specifiers
 	// said about the declaration. The two that change the object - a weak
 	// binding and a strict alignment - travel here to the reader that builds
@@ -842,7 +856,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				// own initializer and its own type, which is not what the
 				// declaration says. Measured on gcc 16.2.1, `auto x = 1, y = 2;`
 				// is `'auto' may only be used with a single declarator`.
-				p.error_at(p.peek(), 'a constraint violation: auto may be used with only one declarator')
+				p.error_at(p.peek(), 'a constraint violation: ${spec.auto_spelling} may be used with only one declarator')
 				p.skip_declaration()
 				return decls
 			}
@@ -1032,17 +1046,17 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 		// storage the image lays out. The clause the specifiers left
 		// unresolved is filled here, once the type is a fact.
 		if d.pointer_count() > 0 || d.is_array() {
-			p.error_at(data_at, 'unsupported: the C23 auto type specifier needs a plain identifier, and ${data_name} is written with a pointer or an array')
+			p.error_at(data_at, 'unsupported: ${deduced_specifier_name(spec.auto_spelling)} needs a plain identifier, and ${data_name} is written with a pointer or an array')
 			return false
 		}
 		if !p.at_punct('=') {
-			p.error_at(data_at, 'unsupported: auto needs an initializer to take a type from, and ${data_name} has none')
+			p.error_at(data_at, 'unsupported: ${spec.auto_spelling} needs an initializer to take a type from, and ${data_name} has none')
 			return false
 		}
 		p.next()
 		data_defined = true
 		written := p.auto_file_initializer() or {
-			p.error_at(data_at, 'unsupported: auto takes the type of ${data_name} from its initializer, and this compiler read no type and no constant in it')
+			p.error_at(data_at, 'unsupported: ${spec.auto_spelling} takes the type of ${data_name} from its initializer, and this compiler read no type and no constant in it')
 			return false
 		}
 		spec.type_words = [written.typ.describe()]
@@ -2398,10 +2412,14 @@ fn (p Parser) is_parenthesized_constant() bool {
 // initializer: `.name` picks a member of a struct, `[n]` an element of an array,
 // and a run of them descends through subobjects, `.chain[1]` picking member
 // `chain` and then element 1 of it. Exactly one of `member` and `index` is set.
+// A GNU range designator `[first ... last]` is an index designator whose
+// `range_end` is the last element it names: `index` is then the first, and the
+// two are equal only when the range covers one element.
 struct BraceDesignator {
-	member ?string
-	index  ?int
-	at     tokenize.Token
+	member    ?string
+	index     ?int
+	range_end ?int
+	at        tokenize.Token
 }
 
 // BraceElement is one element of a brace initializer. At most one of number,
@@ -3035,12 +3053,22 @@ fn (mut p Parser) brace_designators() ?[]BraceDesignator {
 			continue
 		}
 		index := p.brace_designator_index() or { return none }
+		// A GNU range designator names a run of elements, `[first ... last]`,
+		// and the value after it initializes every one of them. The last is
+		// read the same way the first is, which is what lets both be integer
+		// constant expressions; the closing bracket then ends the designator.
+		mut range_end := ?int(none)
+		if p.at_punct('...') {
+			p.next()
+			range_end = p.brace_designator_index() or { return none }
+		}
 		if !p.expect_punct(']') {
 			return none
 		}
 		designators << BraceDesignator{
-			index: index
-			at:    at
+			index:     index
+			range_end: range_end
+			at:        at
 		}
 	}
 	return designators
@@ -3201,7 +3229,9 @@ fn (list BraceList) is_a_flat_number_list() bool {
 
 // brace_array_count is how many elements a list gives an array declared with
 // empty brackets: the highest subobject it reaches, one past the last index a
-// designator names and one past each element written by position.
+// designator names and one past each element written by position. A range
+// designator names its last element, `[0 ... 9]` reaching element 9, so the
+// count one past it is the element after the whole range.
 fn brace_array_count(items []BraceElement) int {
 	mut index := 0
 	mut count := 0
@@ -3209,6 +3239,11 @@ fn brace_array_count(items []BraceElement) int {
 		if item.designators.len > 0 {
 			if named := item.designators[0].index {
 				index = named
+			}
+			// A range reaches its last element, not its first, so the size
+			// an unsized array takes from the list is counted from there.
+			if end := item.designators[0].range_end {
+				index = end
 			}
 		}
 		if index + 1 > count {
@@ -3228,6 +3263,48 @@ fn member_index(typ types.Type, name string) ?int {
 		}
 	}
 	return none
+}
+
+// check_array_designator answers whether an array designator names elements the
+// array holds and reports the one that does not. A single index and a range are
+// one question asked of two numbers: the first element named has to be in the
+// array, a range may not be empty, and its last element has to be in the array.
+// Measured on gcc 16.2.1, which refuses `int a[5] = {[0 ... 9] = 1}` as `array
+// index range in initializer exceeds array bounds` and `[3 ... 1]` as `empty
+// index range in initializer`. `count` is zero for an array whose size the list
+// itself gives, where no element is out of bounds.
+fn (mut p Parser) check_array_designator(designator BraceDesignator, first int, last int, count int, typ types.Type) bool {
+	if designator.range_end == none {
+		if first < 0 || (count > 0 && first >= count) {
+			p.error_at(designator.at, 'a constraint violation: the designator [${first}] is outside ${typ.describe()}')
+			return false
+		}
+		return true
+	}
+	if last < first {
+		p.error_at(designator.at, 'a constraint violation: the designator [${first} ... ${last}] names no element, because ${last} is before ${first}')
+		return false
+	}
+	if first < 0 || (count > 0 && last >= count) {
+		p.error_at(designator.at, 'a constraint violation: the designator [${first} ... ${last}] is outside ${typ.describe()}')
+		return false
+	}
+	return true
+}
+
+// fill_index_range initializes every element a GNU range designator names,
+// `[first ... last]`, from the one element at `start`: 6.7.8 as gcc extends it
+// writes the single value after the designator into each element of the range,
+// so `{ [0 ... 9] = 1 }` is ten elements of one. `rest` is the designators after
+// the range, empty for the shape the corpus writes, and the answer is the first
+// element left, which is the one after the single value the range wrote.
+fn (mut p Parser) fill_index_range(element types.Type, designator BraceDesignator, rest []BraceDesignator, items []BraceElement, start int, base int, stride int, mut writes []BraceWrite) int {
+	first := designator.index or { return start }
+	last := designator.range_end or { first }
+	for index := first; index <= last; index++ {
+		_ = p.fill_designated(element, rest, items, start, base + index * stride, mut writes)
+	}
+	return start + 1
 }
 
 // fill_brace walks a brace list against the type it initializes and appends the
@@ -3264,14 +3341,23 @@ fn (mut p Parser) fill_brace(typ types.Type, items []BraceElement, start int, ba
 			for i < items.len {
 				item := items[i]
 				if item.designators.len > 0 {
-					named := item.designators[0].index or {
-						p.error_at(item.designators[0].at, 'unsupported: an array is initialized by position or by an index, and a member designator names no element')
+					designator := item.designators[0]
+					named := designator.index or {
+						p.error_at(designator.at, 'unsupported: an array is initialized by position or by an index, and a member designator names no element')
+						return items.len
+					}
+					last := designator.range_end or { named }
+					if !p.check_array_designator(designator, named, last, count, typ) {
 						return items.len
 					}
 					index = named
-					if index < 0 || (count > 0 && index >= count) {
-						p.error_at(item.designators[0].at, 'a constraint violation: the designator [${index}] is outside ${typ.describe()}')
-						return items.len
+					if designator.range_end != none {
+						// `[first ... last] = value` writes the one value into
+						// every element of the range, and the walk resumes at
+						// the element after them.
+						i = p.fill_index_range(element, designator, item.designators[1..], items, i, base, stride, mut writes)
+						index = last + 1
+						continue
 					}
 					i = p.fill_designated(element, item.designators[1..], items, i, base + index * stride, mut writes)
 					index++
@@ -3411,9 +3497,12 @@ fn (mut p Parser) fill_designated(typ types.Type, designators []BraceDesignator,
 				p.error_at(designator.at, 'unsupported: an array is initialized by position or by an index, and a member designator names no element')
 				return items.len
 			}
-			if index < 0 || (typ.count > 0 && index >= typ.count) {
-				p.error_at(designator.at, 'a constraint violation: the designator [${index}] is outside ${typ.describe()}')
+			last := designator.range_end or { index }
+			if !p.check_array_designator(designator, index, last, typ.count, typ) {
 				return items.len
+			}
+			if designator.range_end != none {
+				return p.fill_index_range(element, designator, rest, items, start, base, stride, mut writes)
 			}
 			return p.fill_designated(element, rest, items, start, base + index * stride, mut writes)
 		}
@@ -4367,6 +4456,20 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			spec.attributes = merge_attributes(spec.attributes, p.skip_gnu_postfix(opening)!)
 			continue
 		}
+		if t.text in auto_type_words {
+			// `__auto_type` is the GNU spelling of the deduced specifier and
+			// names the same construct C23's `auto` does: one declarator, a
+			// plain identifier, initialized, and the type taken from the
+			// initializer. Only the spelling is GNU, so it shares the flag
+			// with `auto` and the one reader fills the clause.
+			p.next()
+			spec.note(t)
+			spec.type_words << t.text
+			spec.auto_deduced = true
+			spec.auto_spelling = t.text
+			spec.has_type = true
+			continue
+		}
 		if t.text in storage_classes {
 			// `auto` is two constructs with one spelling: the C89 storage class
 			// and C23's type specifier for a type taken from the initializer.
@@ -4379,6 +4482,7 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 				spec.note(t)
 				spec.type_words << 'auto'
 				spec.auto_deduced = true
+				spec.auto_spelling = 'auto'
 				spec.has_type = true
 				continue
 			}
@@ -5338,6 +5442,17 @@ fn (p Parser) size_as_unsigned(expr ast.Expr, at tokenize.Token) ast.Expr {
 		line:     at.line
 		col:      at.col
 	})
+}
+
+// deduced_specifier_name names a deduced specifier for a diagnostic. `auto` is
+// described as C23's specifier because the word is also the C89 storage class
+// and naming it alone would not say which construct was meant; the GNU spelling
+// names itself, since there is only one thing `__auto_type` can be.
+fn deduced_specifier_name(spelling string) string {
+	if spelling == 'auto' {
+		return 'the C23 auto type specifier'
+	}
+	return spelling
 }
 
 // auto_deduced_type is the type C23's auto type specifier takes from its

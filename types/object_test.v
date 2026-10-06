@@ -663,6 +663,22 @@ fn test_a_completed_aggregate_carries_the_layout_it_was_already_given() {
 	assert size_of(fresh) == 0 && align_of(fresh) == 1
 }
 
+// A structure with no members is a complete object of no bytes, and a member of
+// one occupies no storage and does not move the members after it. Measured on
+// gcc 16.2.1: sizeof(struct empty) is 0 and _Alignof(struct empty) is 1, and in
+// `struct wrapper { int n; struct empty e; }` the member e sits at offset 4 and
+// the whole object is four bytes, so the zero-size member neither takes room nor
+// disturbs the layout around it.
+fn test_a_member_of_a_structure_with_no_members_takes_no_room() {
+	empty := struct_type('empty', [])
+	assert size_of(empty) == 0 && align_of(empty) == 1
+	wrapper := struct_type('wrapper', [member('n', int_type()), member('e', empty)])
+	w := layout_of(wrapper)
+	assert w.size == 4 && w.align == 4
+	assert w.offsets == [0, 4]
+	assert w.padding == 0
+}
+
 // A width wider than the storage unit of the declared type is a declaration gcc
 // refuses with `width of 'a' exceeds its type`, so there is no layout to answer.
 // The unit is the width of the declared type in bits: eight for a char,

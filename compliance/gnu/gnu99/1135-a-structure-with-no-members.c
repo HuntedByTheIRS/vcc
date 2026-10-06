@@ -2,8 +2,6 @@
  *
  * GCC 6.2.3 Structures with No Members: "GCC permits a C structure to have no
  * members: struct empty { }; The structure has size zero."
- *
- * unimplemented: a structure with no members.
  */
 
 #include <stdio.h>
