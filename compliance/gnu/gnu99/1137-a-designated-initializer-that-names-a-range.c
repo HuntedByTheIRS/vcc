@@ -4,7 +4,7 @@
  * same value, write '[ first ... last ] = value'. This is a GNU extension. For
  * example, int widths[] = { [0 ... 9] = 1, [10 ... 99] = 2, [100] = 3 };"
  */
- 
+
 #include <stdio.h>
 
 #define CHECK(...)                                                            \
