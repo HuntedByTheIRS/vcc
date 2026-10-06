@@ -59,6 +59,16 @@ fn (mut p Parser) parse_compound_literal(spec DeclSpec, d Declarator, at tokeniz
 	list := p.parse_brace_initializer(true) or {
 		return error('compound literal initializer')
 	}
+	return p.build_compound_literal(spec, d, at, list)
+}
+
+// build_compound_literal builds the object a type name and an initializer name,
+// and answers the use of it. The list is what the file wrote for a literal, and
+// a list the reader built itself for a construct that means the same object
+// written another way: a cast to a union type is an object of the union with one
+// member initialized, which is a brace list with a designated element, so the
+// two arrive here as one shape rather than two.
+fn (mut p Parser) build_compound_literal(spec DeclSpec, d Declarator, at tokenize.Token, list BraceList) !ast.Expr {
 	if p.compound_pending.len == 0 {
 		// A compound literal outside a statement is one whose object lives in
 		// the image rather than in a frame. The one shape this reader builds
@@ -103,6 +113,51 @@ fn (mut p Parser) parse_compound_literal(spec DeclSpec, d Declarator, at tokeniz
 		line: at.line
 		col:  at.col
 	})
+}
+
+// cast_to_union reads a cast whose destination is a union type and whose operand
+// is not already an object of it. GCC 6.2.7 makes such a cast a value of the
+// union with the member whose type matches the operand's initialized to the
+// operand, so the construct is the object a compound literal names with a
+// designated element: `(union value)42` is `(union value){.i = 42}` and the two
+// are one tree, built by the reader that already builds the literal.
+//
+// The member is chosen by type and not by position. `(union value)1.5f` writes
+// the float member, which is not the first member of the union, so a list
+// written positionally would write the int member and the program would read a
+// wrong value. Measured on gcc 16.2.1: `(union value)42` writes the int member,
+// `(union value)1.5f` the float member, and an operand whose type is no member's
+// is a constraint violation - `cast to union type from type not present in
+// union`, refused here by name with the location.
+fn (mut p Parser) cast_to_union(at tokenize.Token, spec DeclSpec, d Declarator, destination types.Type, operand ast.Expr) !ast.Expr {
+	union_type := p.tagged_type(destination)
+	source := types.unqualified(p.value_type(operand))
+	mut member := ''
+	for candidate in union_type.members {
+		if types.unqualified(candidate.typ).compatible(source) {
+			member = candidate.name
+			break
+		}
+	}
+	if member == '' {
+		p.error_at(at, 'a constraint violation: a cast to ${union_type.describe()} writes the member whose type matches the operand, and no member of ${union_type.describe()} has the type ${source.describe()}')
+		return error('no member of the union has the operand type')
+	}
+	list := BraceList{
+		elements: [
+			BraceElement{
+				designators: [
+					BraceDesignator{
+						member: member
+						at:     at
+					},
+				]
+				expr:        operand
+			},
+		]
+		at:       at
+	}
+	return p.build_compound_literal(spec, d, at, list)
 }
 
 // compound_name is the name of the unnamed object a compound literal declares.

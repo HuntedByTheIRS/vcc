@@ -272,3 +272,47 @@ fn test_a_body_brace_element_may_be_a_compound_literal() {
 	}
 	assert values == [1, 2, 3, 4]
 }
+
+// A cast to a union type, GCC 6.2.7: the value is the object a compound literal
+// names with the member whose type matches the operand initialized to the
+// operand. The member is chosen by type and not by position, so `(union value)
+// 1.5f` writes the float member even though the int member is written first.
+fn test_a_cast_to_a_union_type_initializes_the_member_whose_type_matches() {
+	decl := compound_first('union value { int i; float f; }; int main(void) { union value a = (union value)1.5f; return 0; }')
+	body := decl.body
+	object := body[0]
+	assert object.kind == .var_decl
+	assert object.decl_name.starts_with('__vcc_compound_')
+	assert object.resolved().kind == .union_
+	// Each store the initializer makes names the member it writes as the
+	// member's own type. The zero stores come first and the value the operand
+	// wrote comes last, so the last one is the member the cast chose.
+	mut chosen := ''
+	for stmt in body {
+		if stmt.kind == .assign {
+			if field := stmt.field {
+				chosen = field.spelling
+			}
+		}
+	}
+	assert chosen == 'float'
+	int_decl := compound_first('union value { int i; float f; }; int main(void) { union value a = (union value)42; return 0; }')
+	mut int_chosen := ''
+	for stmt in int_decl.body {
+		if stmt.kind == .assign {
+			if field := stmt.field {
+				int_chosen = field.spelling
+			}
+		}
+	}
+	assert int_chosen == 'int'
+}
+
+// An operand whose type is no member's is a constraint violation, which gcc
+// reports as `cast to union type from type not present in union`.
+fn test_a_cast_to_a_union_type_refuses_an_operand_no_member_has() {
+	lexed := tokenize.lex('union value { int i; float f; }; int main(void) { union value a = (union value)1.5; return 0; }')
+	result := parse(lexed.tokens)
+	assert result.diagnostics.len > 0
+	assert result.diagnostics[0].msg.contains('no member of')
+}
