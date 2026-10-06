@@ -4,8 +4,6 @@
  * supported variadic macros, and used a different syntax that allowed you to
  * give a name to the variable arguments just like any other argument. Here is an
  * example: #define debug(format, args...) fprintf (stderr, format, args)"
- *
- * unimplemented: a variadic macro that names its variable arguments, args....
  */
 
 #include <stdio.h>
