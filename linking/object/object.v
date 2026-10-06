@@ -411,7 +411,9 @@ fn lay_out(bytes []u8, sections []Section) !Layout {
 	mut alignment := 8
 	mut read_only_alignment := 0
 	mut init_run := image.CodeRun{}
-	mut eh_frame_run := image.CodeRun{}
+	mut eh_frame_run := image.CodeRun{
+		base: -1
+	}
 	mut fini_run := image.CodeRun{}
 	for i, s in sections {
 		if blob_of[i] != .code {

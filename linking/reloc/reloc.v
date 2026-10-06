@@ -109,7 +109,7 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 // has to reach the rest, so a field inside one moves with it.
 fn eh_frame_field(unit image.Program, offset int, eh_frame_base int) ?int {
 	run := unit.eh_frame_run
-	if run.len <= 0 || offset < run.base || offset >= run.base + run.len {
+	if run.base < 0 || offset < run.base || offset > run.base + run.len {
 		return none
 	}
 	return eh_frame_base + (offset - run.base)

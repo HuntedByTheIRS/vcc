@@ -105,6 +105,10 @@ pub fn lay(units []image.Program, globals_alignment int, read_only_alignment int
 	// them into one output section, because a gap of zero bytes ends the scan.
 	for unit in units {
 		run := unit.eh_frame_run
+		if run.base < 0 {
+			layout.eh_frame_bases << 0
+			continue
+		}
 		alignment := if run.alignment > 1 { run.alignment } else { 1 }
 		layout.eh_frame_len = align_up(layout.eh_frame_len, alignment)
 		layout.eh_frame_bases << layout.eh_frame_len

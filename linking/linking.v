@@ -495,7 +495,7 @@ fn merge_globals(units []image.Program, layout place.Layout, definitions map[str
 // moves with it.
 fn eh_frame_place(unit image.Program, offset int, read_only_base int, run_base int) int {
 	fragment := unit.eh_frame_run
-	if fragment.len <= 0 || offset < fragment.base || offset >= fragment.base + fragment.len {
+	if fragment.base < 0 || offset < fragment.base || offset > fragment.base + fragment.len {
 		return offset + read_only_base
 	}
 	return run_base + (offset - fragment.base)
