@@ -1178,7 +1178,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			if stacked % 2 == 1 {
 				stacked++
 			}
-			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col)!
+			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col, false)!
 			at := 2 * e.target.word_size + stacked * e.target.word_size
 			e.copy_stack_object(object, at, param.line, param.col)!
 			stacked += 4
@@ -1194,7 +1194,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			if stacked % 2 == 1 {
 				stacked++
 			}
-			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col)!
+			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col, false)!
 			at := 2 * e.target.word_size + stacked * e.target.word_size
 			e.copy_stack_object(object, at, param.line, param.col)!
 			stacked += 2
@@ -1222,7 +1222,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 				e.diagnostics << problem(param.line, param.col, 'unsupported: the parameter ${param.name} is declared ${param.typ}, and the pair it is passed in takes two argument registers at once, which this machine has not got at position ${integers}: the convention passes such a pair in memory, which this back end does not do')
 				return error('128-bit parameter in memory')
 			}
-			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col)!
+			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col, false)!
 			base := e.frame_pointer(param.line, param.col)!
 			word := e.target.word_size
 			e.append(e.target.store_slot(base, object.offset, registers[0], word)!)
@@ -1235,7 +1235,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// that many bytes: the value is copied into the slot rather than
 		// converted into it.
 		if class.bytes > 0 {
-			object := e.declare(param.name, param.typ, 0, class.bytes, 0, param.line, param.col)!
+			object := e.declare(param.name, param.typ, 0, class.bytes, 0, param.line, param.col, false)!
 			stacked_at := 2 * e.target.word_size + stacked * e.target.word_size
 			if class.count > 2 {
 				// An object of more than two eightbytes is passed in memory: the
@@ -1294,7 +1294,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// A parameter is one value in a register or one on the stack, and an
 		// object of an aggregate type passed by value is neither: its spelling
 		// reaches `type_width` and is refused there by name.
-		slot := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col)!
+		slot := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col, false)!
 		// The arguments a sequence ran out for arrive on the stack, and where
 		// they are is the caller's side of the same rule: the first one the
 		// caller pushed is at the return address, so sixteen bytes past the
@@ -1750,8 +1750,13 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		// claimed while the program runs rather than reserved by the frame.
 		return e.emit_vla_decl(stmt, size_expr)
 	}
+	// An object of an aggregate type is sized by the layout the reader worked
+	// out, and that size may legitimately be zero: a structure with no members
+	// is a complete object of no bytes. measured tells declare the zero is the
+	// object's size and not a spelling it has no width for.
+	measured := e.known_aggregate_bytes(stmt.resolved()) != none
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes(), stmt.decl_stride(),
-		stmt.line, stmt.col)!
+		stmt.line, stmt.col, measured)!
 	// What makes an object an argument list is the type it was declared with,
 	// because that is what says how the four operations over a list may treat it.
 	if abi.is_argument_list(stmt.resolved()) {
@@ -3209,7 +3214,7 @@ fn (mut e Emitter) emit_expression_statement(stmt ast.Stmt) !void {
 fn (mut e Emitter) emit_discard(expr ast.Expr, depth int) !void {
 	match expr {
 		ast.Cast {
-			e.emit_expr_at(expr.expr, depth + 1)!
+			e.emit_discard_operand(expr.expr, depth + 1)!
 		}
 		ast.Unary {
 			e.emit_expr_at(expr.expr, depth + 1)!
@@ -3245,6 +3250,21 @@ fn (mut e Emitter) emit_discard(expr ast.Expr, depth int) !void {
 fn (mut e Emitter) emit_effect(expr ast.Expr, depth int) !void {
 	if expr.typ.is_void() {
 		return e.emit_discard(expr, depth)
+	}
+	e.emit_expr_at(expr, depth)!
+}
+
+// emit_discard_operand evaluates the operand of a conversion to void for what it
+// does and throws its value away. A name that is an object of an aggregate type
+// is the one operand with nothing left to do: its value is not one a register
+// holds, and reading a name is not something an expression does, so the
+// conversion emits nothing. That is what makes `(void)e;` for a structure with
+// no members a statement with no code, and it holds for a structure with members
+// too, where reading the object as a value is not implemented for the same
+// reason. Every other operand is evaluated as it would be for its value.
+fn (mut e Emitter) emit_discard_operand(expr ast.Expr, depth int) !void {
+	if expr is ast.Ident && expr.typ.kind in [.struct_, .union_, .array] {
+		return
 	}
 	e.emit_expr_at(expr, depth)!
 }
@@ -3689,6 +3709,20 @@ fn (mut e Emitter) report_undefined_labels() {
 	}
 }
 
+// known_aggregate_bytes answers the storage an object of an aggregate type takes
+// when the model laid the type out, and none when the declaration is not such an
+// object. A struct or union the reader completed has a size the model worked out,
+// which is zero for a structure with no members; everything else - a scalar, a
+// pointer, an array - the back end sizes from its spelling, and a type the model
+// never completed has no size to answer. The two are told apart here so that a
+// measured zero is not read as a spelling with no width.
+fn (e Emitter) known_aggregate_bytes(typ types.Type) ?int {
+	if typ.kind !in [types.Kind.struct_, .union_] || !typ.is_complete() {
+		return none
+	}
+	return e.representation.size_of(typ)
+}
+
 // declare gives a name a slot and makes it visible in the block being emitted.
 // The width is the width of the type as it was written: an int is four bytes, a
 // pointer is the machine's word and a double is eight. A type that is none of
@@ -3699,7 +3733,7 @@ fn (mut e Emitter) report_undefined_labels() {
 // element after another, and what the name is worth in an expression is the
 // address of the first of them. The block is rounded up to the machine's word
 // like every other slot, so no element straddles the end of it.
-fn (mut e Emitter) declare(name string, written string, count int, bytes int, stride int, line int, col int) !Slot {
+fn (mut e Emitter) declare(name string, written string, count int, bytes int, stride int, line int, col int, measured bool) !Slot {
 	if e.scopes.len > 0 {
 		if name in e.scopes[e.scopes.len - 1] {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared twice in the same block')
@@ -3721,10 +3755,18 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 	// array of arrays is the whole row and larger than the scalar spelling: it
 	// is what an index scales by and what the count reserves together. It is
 	// zero for a declaration that is not an array.
+	// measured says bytes is the size the model gave an aggregate object and
+	// not the fallback zero a declaration the back end sizes from its spelling
+	// leaves behind. The two are told apart because a structure with no members
+	// is a complete object of zero bytes: `struct empty e;` is storage nothing
+	// occupies, and the classifier below would otherwise read the zero as a
+	// spelling it has no width for. See known_aggregate_bytes.
 	width := if stride > 0 {
 		stride
 	} else if bytes > 0 {
 		bytes
+	} else if measured {
+		0
 	} else if wide {
 		wide_bytes
 	} else if long_double {
