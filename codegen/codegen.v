@@ -1211,20 +1211,15 @@ fn collect_nested(stmts []ast.Stmt) []ast.FnDecl {
 // one chain link: a call hands that frame pointer over in the chain register and
 // the entry stores it in the chain slot. An object of a function further out is
 // one more link per function, because each frame keeps the pointer it was handed
-// in a chain slot of its own, and the walk reads those slots in turn. An object
-// this back end moves with an instruction that cannot take the chain register as
-// its base is refused here, by name, where the object is used, rather than
-// addressed wrongly: an object of either floating type, a 128-bit integer, a
-// long double, a complex object, a variable-length array and an object of an
-// aggregate type.
+// in a chain slot of its own, and the walk reads those slots in turn. The
+// register the walk ends on is the base of the object for every type this back
+// end can move: an integer, a pointer, an array and a floating value as much as
+// a 128-bit integer, a long double, a complex object, an aggregate or a
+// variable-length array, because each of those moves is written with a base
+// register the instruction names.
 fn (mut e Emitter) slot_base_register(slot Slot, line int, col int) !backend.Register {
 	if !slot.captured {
 		return e.frame_pointer(line, col)
-	}
-	if slot.floating || slot.single || slot.wide || slot.long_double || slot.complex || slot.vla
-		|| (slot.bytes > 0 && slot.count == 0) {
-		e.diagnostics << problem(line, col, 'unsupported: ${e.function_symbol} uses an object of the enclosing function whose declared type this back end does not reach through the static chain; only an integer or pointer scalar, or an array of them, is')
-		return error('a captured object of a type the chain cannot carry')
 	}
 	chain := e.chain or {
 		e.diagnostics << problem(line, col, 'internal: ${e.function_symbol} reaches an object of its enclosing function and has no static chain')
@@ -12451,6 +12446,7 @@ fn (mut e Emitter) emit_complex_part(unary ast.Unary, depth int) !void {
 		object := e.complex_object_as(unary.expr, value, depth + 1)!
 		which := if unary.op == '__imag__' { 1 } else { 0 }
 		component := Slot{
+			...object
 			offset: object.offset + which * complex_long_double_component
 			width:  long_double_bytes
 		}
@@ -12459,7 +12455,7 @@ fn (mut e Emitter) emit_complex_part(unary ast.Unary, depth int) !void {
 	object := e.complex_object_as(unary.expr, value, depth + 1)!
 	which := if unary.op == '__imag__' { 1 } else { 0 }
 	single := complex_component_single(value)
-	frame := e.frame_pointer(line, col)!
+	frame := e.slot_base_register(object, line, col)!
 	register := e.float_accumulator(line, col)!
 	offset := object.offset + complex_component_offset(value, which)
 	e.load_complex_component(frame, register, offset, single)!

@@ -787,14 +787,25 @@ fn scalar_slot_move(prefix u8, base Register, disp i32, operand Register, store 
 	if operand.width != 16 {
 		return error('${name}: a floating value is moved through a sixteen-byte register, and ${operand.name} is not one')
 	}
-	mut out := []u8{cap: 9}
-	if operand.code >= 8 || base.code >= 8 {
-		return error('${name}: a frame access names ${operand.name} and ${base.name}, and neither may be above the seventh register')
+	if operand.code >= 8 {
+		return error('${name}: a frame access names ${operand.name}, and no register above the seventh is written')
 	}
+	// The base register is named by the low three bits of the modrm byte, which
+	// is where rm sits in a `[base + disp32]` operand, so the chain pointer a
+	// nested function is handed can be the base of a floating move the same way
+	// rbp is. A base of rsp is the encoding this instruction does not write:
+	// rm 100 asks for a SIB byte, and one is refused rather than written.
+	if base.code & 0x07 == 4 {
+		return error('${name}: ${base.name} cannot be the base of a frame access, which needs the index form this instruction does not write')
+	}
+	mut out := []u8{cap: 11}
 	out << prefix
+	if base.code >= 8 {
+		out << u8(0x41) // REX.B: the base is one of the eighth register onwards
+	}
 	out << u8(0x0f)
 	out << u8(if store { 0x11 } else { 0x10 })
-	out << u8(0x80 | ((operand.code & 0x07) << 3) | 0x05) // mod 10, rm 101: [base + disp32]
+	out << u8(0x80 | ((operand.code & 0x07) << 3) | (base.code & 0x07)) // mod 10: [base + disp32]
 	value := u32(disp)
 	out << u8(value & 0xff)
 	out << u8((value >> 8) & 0xff)

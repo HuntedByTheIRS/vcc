@@ -1168,6 +1168,7 @@ fn test_the_float_instructions_are_the_bytes_the_machine_reads() {
 	rbp := target.reg('rbp') or { panic('the target description has no such name') }
 	eax := target.reg('eax') or { panic('the target description has no such name') }
 	rax := target.reg('rax') or { panic('the target description has no such name') }
+	r10 := target.reg('r10') or { panic('the target description has no such name') }
 	xmm0 := target.float_reg('xmm0') or { panic('the target description has no such name') }
 	xmm1 := target.float_reg('xmm1') or { panic('the target description has no such name') }
 	// movss xmm0, xmm1
@@ -1231,6 +1232,32 @@ fn test_the_float_instructions_are_the_bytes_the_machine_reads() {
 		0x0f,
 		0x11,
 		0x85,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	// movss xmm0, [r10-8] / movss [r10-8], xmm0. The base is named in the modrm
+	// byte the same way an integer move names it, which is what lets a nested
+	// function read a floating value out of the frame it was handed. r10 is above
+	// the seventh register, so the move carries the REX byte that reaches it.
+	assert target.load_float_slot(r10, -8, xmm0) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x41,
+		0x0f,
+		0x10,
+		0x82,
+		0xf8,
+		0xff,
+		0xff,
+		0xff,
+	]
+	assert target.store_float_slot(r10, -8, xmm0) or { panic('the target description has no such name') } == [
+		u8(0xf3),
+		0x41,
+		0x0f,
+		0x11,
+		0x82,
 		0xf8,
 		0xff,
 		0xff,

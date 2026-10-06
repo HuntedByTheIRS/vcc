@@ -5397,14 +5397,15 @@ fn test_a_nested_function_calls_one_written_two_functions_out() {
 	assert run_image(emitted.bytes) == 5
 }
 
-fn test_an_object_of_a_type_the_chain_cannot_carry_is_refused_by_name() {
-	// An object of either floating type is moved with an instruction that cannot
-	// take the chain register as its base, so a capture of one is refused by name
-	// rather than addressed from the wrong frame.
-	emitted := emit(translation_unit('int main() { double d = 1.5; int f(void) { return (int)d; } return f(); }'),
+fn test_a_nested_function_reads_and_writes_a_captured_object_of_any_type() {
+	// The chain pointer is the base of a captured object for every move this
+	// back end writes, so a floating value, an aggregate and a complex value are
+	// reached the way an integer is: d is 2.0 after the half step, p.b is 5, and
+	// the real part of c is 4.0. The integer answer is 2 + 3 + 5 + 4.
+	emitted := emit(translation_unit('struct P { int a; int b; }; int main() { double d = 1.5; struct P p = { 3, 4 }; double _Complex c = 4.0 + 0.0i; int f(void) { d += 0.5; p.b = 5; return (int)d + p.a + p.b + (int)__real__ c; } return f(); }'),
 		Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('static chain')
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 14
 }
 
 fn test_a_nested_function_takes_the_address_of_an_object_it_is_written_beside() {
