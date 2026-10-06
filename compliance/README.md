@@ -73,28 +73,61 @@ Such a test is measured twice over: gcc compiles it, runs it and it exits 0, so
 the program is right, and this compiler's refusal is the gap. The program is a
 check with its own assertions, so the day this compiler takes it the test runs,
 and a gap that compiles is reported by name as a line that can go: the corpus
-does not keep a gap that has closed. No test carries the line today. The three
-it carried at the last count were HUGE_VALL, whose glibc definition is
-`1e10000L`, and the division of a `long double _Complex` and its negation;
-closing them removed the lines with them.
+does not keep a gap that has closed. 26 tests carry the line, all of them under
+`gnu/gnu99`; the section below lists them. Three were carried before those and
+have since closed: HUGE_VALL, whose glibc definition is `1e10000L`, and the
+division of a `long double _Complex` and its negation.
 
-## Why 159 tests sit under gnu/gnu99 and not iso/c99
+## The GNU extensions nothing reads yet
+
+A GNU extension has no ISO clause to cite. The document that defines the dialect
+is GCC's manual, section 6 (Extensions to the C Language Family) and the built-in
+function chapters under section 7, so a test cites the node it comes from by
+number and title:
+
+    /* 1125: case-ranges-in-a-switch
+     *
+     * GCC 6.12.14 Case Ranges: "You can specify a range of consecutive values
+     * in a single case label, like this: case low ... high :"
+     *
+     * unimplemented: a case label holding a range of values.
+     */
+
+26 tests, numbered 1125 to 1150, name a GNU construct this compiler does not
+read yet: case ranges, a label declared with `__label__`, the address of a label
+and a computed goto, nested functions, `__auto_type`, `_Countof`, `__alignof__`,
+a variadic macro that names its arguments, the `?:` with its middle operand
+omitted, `__FUNCTION__` and `__PRETTY_FUNCTION__`, a structure with no members, a
+cast to a union type, the `[first ... last]` designated initializer, `_Float128`,
+the decimal floating types, the `cleanup` attribute, the built-ins
+`__builtin_add_overflow` and `__builtin_mul_overflow`, a vector type declared
+with `__attribute__((vector_size(N)))`, `__builtin_constant_p`, the bit-operation
+and byte-swapping built-ins, `__builtin_unreachable` and `__builtin_trap`,
+`__builtin_alloca`, `__builtin_object_size`, `__builtin_return_address`, and
+`asm goto`.
+
+Each was compiled and run under `gcc -std=gnu99` first: it exits 0 and prints
+nothing. That is what makes "the program is right and only this compiler is
+behind" a measurement rather than a claim.
+
+## Why 159 of the tests sit under gnu/gnu99 and not iso/c99
 
 Measured on this compiler, each test compiled on its own:
 
-- Under `-std=c99`, 159 fail. 158 of them include `<tgmath.h>` and stop at
-  `/usr/include/tgmath.h:802: #error "Unsupported compiler; you cannot use
-  <tgmath.h>"`, because this compiler claims `__GNUC__` only in a GNU dialect
-  and glibc's `<tgmath.h>` refuses a compiler that does not claim it. The
-  159th, `0941-assert-a-true-expression-does-nothing`, uses `assert()`, whose
-  glibc expansion under strict ISO needs a construct this back end does not
-  evaluate yet.
+- Under `-std=c99`, 159 of the tests that predate the GNU gap tests fail. 158 of
+  them include `<tgmath.h>` and stop at `/usr/include/tgmath.h:802: #error
+  "Unsupported compiler; you cannot use <tgmath.h>"`, because this compiler
+  claims `__GNUC__` only in a GNU dialect and glibc's `<tgmath.h>` refuses a
+  compiler that does not claim it. The 159th,
+  `0941-assert-a-true-expression-does-nothing`, uses `assert()`, whose glibc
+  expansion under strict ISO needs a construct this back end does not evaluate
+  yet.
 - Under `-std=gnu99` the 1057 accepted programs compile and run. The 68 that must
   be refused are refused under either mode.
 
 So `iso/c99` holds the 898 programs that hold under strict `-std=c99` and the 68
-that must be refused, and `gnu/gnu99` holds the 159 that need the GNU dialect:
-1125 test files.
+that must be refused, and `gnu/gnu99` holds those 159 plus the 26 GNU extensions
+nothing reads yet: 1151 test files.
 
 ## Running it
 
@@ -104,7 +137,7 @@ That builds the compiler from this tree, compiles and runs every test under the
 standard of the directory it sits in, runs `monolithic.c` as well, and fails
 when a test exits non-zero, prints something it should not, when the compiler
 refuses a test it should accept or accepts a test it should refuse, when fewer
-than 1125 test files are present, or when the monolith holds fewer than 906
+than 1151 test files are present, or when the monolith holds fewer than 906
 checks. `tools/README.md` says what the script checks in more detail.
 
 `monolithic.c` is the file the corpus arrived as, kept whole at the root: 12,340

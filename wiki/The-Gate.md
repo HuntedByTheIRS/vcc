@@ -83,7 +83,7 @@ v run tools/compliance.vsh --count                # print how many tests there a
 The runner refuses a test that does not build, a test that exits non-zero, a
 test that prints something other than the two lines the corpus prints on
 purpose, a test that expects a refusal the compiler does not make or an
-acceptance it does not give, a test file count below 1125, and a `monolithic.c`
+acceptance it does not give, a test file count below 1151, and a `monolithic.c`
 run that holds fewer than 906 checks. Both floors are floors and not equalities:
 adding tests needs no edit here, losing them is a failure. A test carrying a
 `requires-define: NAME` line is skipped unless `--define` names it, because

@@ -123,7 +123,7 @@ The conformance corpus under `compliance/` is compiled and run by
 `v run tools/compliance.vsh`, which checks the compiler against the standard
 rather than against its own tests. It is one directory per standard and the leaf
 name is the mode, so `iso/c99/` is compiled `-std=c99` and `gnu/gnu99/`
-`-std=gnu99`. `monolithic.c` holds 906 checks and the corpus holds 1125 test
+`-std=gnu99`. `monolithic.c` holds 906 checks and the corpus holds 1151 test
 files, 68 of them programs the compiler must refuse, and `-lm` is not optional.
 `regression/` holds one program per bug that must not come back, run by
 `v run tools/regress.vsh`. The suite itself
