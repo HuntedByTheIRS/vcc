@@ -771,55 +771,62 @@ pub fn encode(v Value, f Format) []u8 {
 		max_biased := f.largest_biased_exponent()
 		mut c := v.coefficient()
 		mut used := v.digits.len
-		// A value written with fewer digits than the format keeps can still be
-		// written when its power of ten is too large for the exponent field:
-		// multiplying the coefficient by ten and lowering the power by one keeps
-		// the value and brings the exponent back into the field. gcc does the
-		// same, which is why `1e96df` is stored as 1000000 with a power of 90:
-		// the largest biased exponent is 191, and a coefficient of one with a
-		// power of 96 needs 197.
-		for biased > max_biased && used < f.digits() {
-			c *= 10
-			used++
-			biased--
-		}
-		// The other direction: a coefficient with trailing zeros can be shrunk,
-		// which raises the power of ten and brings it back up into the field.
-		mut removable := 0
-		for removable < v.digits.len && v.digits[v.digits.len - 1 - removable] == `0` {
-			removable++
-		}
-		for biased < 0 && removable > 0 {
-			c /= 10
-			used--
-			removable--
-			biased++
-		}
 		if used == 0 {
-			// A zero keeps whichever power of ten it was written with, as far as
-			// the field can hold it: the value is the same either way.
-			if biased < 0 {
-				biased = 0
+			// A zero keeps whichever power of ten it was written with, as far as the
+			// field can hold it, and a zero is never out of range however it was
+			// written. Measured on gcc 16.2.1: `0e30df` is 41800000 (a biased 131),
+			// `0e300df` is 5f800000, brought down to 191, the largest biased
+			// exponent, and `0e400dd` is 5fe0000000000000, brought down to 767.
+			// There are no digits to pad, so this is the whole answer for a zero.
+			mut zero_biased := biased
+			if zero_biased < 0 {
+				zero_biased = 0
 			}
-			if biased > max_biased {
-				biased = max_biased
+			if zero_biased > max_biased {
+				zero_biased = max_biased
 			}
-		}
-		if biased < 0 || biased > max_biased {
-			return []u8{}
-		}
-		cbits := f.coefficient_bits()
-		if c < (u128(1) << cbits) {
-			w = (u128(biased) << cbits) | c
+			w = u128(zero_biased) << f.coefficient_bits()
 		} else {
-			// The large form: the marker takes the two bits under the sign, the
-			// exponent moves down two bits, and the coefficient keeps its implied
-			// top bit. A coefficient too large for even this does not fit.
-			low := cbits - 2
-			if c >= (u128(1) << cbits) + (u128(1) << low) {
+			// A value written with fewer digits than the format keeps can still be
+			// written when its power of ten is too large for the exponent field:
+			// multiplying the coefficient by ten and lowering the power by one keeps
+			// the value and brings the exponent back into the field. gcc does the
+			// same, which is why `1e96df` is stored as 1000000 with a power of 90:
+			// the largest biased exponent is 191, and a coefficient of one with a
+			// power of 96 needs 197.
+			for biased > max_biased && used < f.digits() {
+				c *= 10
+				used++
+				biased--
+			}
+			// The other direction: a coefficient with trailing zeros can be shrunk,
+			// which raises the power of ten and brings it back up into the field.
+			mut removable := 0
+			for removable < v.digits.len && v.digits[v.digits.len - 1 - removable] == `0` {
+				removable++
+			}
+			for biased < 0 && removable > 0 {
+				c /= 10
+				used--
+				removable--
+				biased++
+			}
+			if biased < 0 || biased > max_biased {
 				return []u8{}
 			}
-			w = (u128(0b11) << (total - 3)) | (u128(biased) << low) | (c & ((u128(1) << low) - 1))
+			cbits := f.coefficient_bits()
+			if c < (u128(1) << cbits) {
+				w = (u128(biased) << cbits) | c
+			} else {
+				// The large form: the marker takes the two bits under the sign, the
+				// exponent moves down two bits, and the coefficient keeps its implied
+				// top bit. A coefficient too large for even this does not fit.
+				low := cbits - 2
+				if c >= (u128(1) << cbits) + (u128(1) << low) {
+					return []u8{}
+				}
+				w = (u128(0b11) << (total - 3)) | (u128(biased) << low) | (c & ((u128(1) << low) - 1))
+			}
 		}
 	}
 	if v.sign {

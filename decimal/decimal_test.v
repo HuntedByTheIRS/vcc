@@ -60,6 +60,16 @@ const measured = [
 	'9999999e-95df 60d8967f',
 	'8388.608df 6c400000',
 	'83886.08df 6c600000',
+	// A zero written with a power of ten past the exponent field, measured on gcc
+	// 16.2.1: the exponent is brought into the field rather than refused, and a
+	// zero is never out of range however it is written. 0e300df lands on 191, the
+	// largest biased exponent _Decimal32 has, and 0e400dd on 767 for _Decimal64.
+	'0e30df 41800000',
+	'0e300df 5f800000',
+	'0e0dd 31c0000000000000',
+	'0e400dd 5fe0000000000000',
+	'0e-400dd 0000000000000000',
+	'0e-7000dl 00000000000000000000000000000000',
 	'0.0dd 31a0000000000000',
 	'1.0dd 31a000000000000a',
 	'-1.0dd b1a000000000000a',
