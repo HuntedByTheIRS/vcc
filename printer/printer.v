@@ -122,7 +122,11 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 				out << '${indent}switch at ${stmt.line}:${stmt.col}'
 			}
 			.case_stmt {
-				out << '${indent}case ${stmt.case_value()} at ${stmt.line}:${stmt.col}'
+				if stmt.case_is_range() {
+					out << '${indent}case ${stmt.case_value()} ... ${stmt.case_value_high()} at ${stmt.line}:${stmt.col}'
+				} else {
+					out << '${indent}case ${stmt.case_value()} at ${stmt.line}:${stmt.col}'
+				}
 			}
 			.default_stmt {
 				out << '${indent}default at ${stmt.line}:${stmt.col}'

@@ -403,8 +403,15 @@ pub:
 	subscript ?Expr
 	// case_value is the integer constant a case label names, as written. C
 	// converts it to the type of the controlling expression, and that
-	// conversion is made where the label is placed.
+	// conversion is made where the label is placed. When the label wrote a
+	// range, `case low ... high:`, this is the low end and case_value_high is
+	// the high one.
 	case_value i64
+	// case_value_high is the last value a case range names, and case_is_range
+	// says whether the label wrote a range at all. A label that named one value
+	// has the two ends equal and case_is_range false, which is a run of one.
+	case_value_high i64
+	case_is_range   bool
 	// label is the name a goto jumps to and the name a label statement
 	// declares. Labels are a namespace of their own: a label named `x` and an
 	// object named `x` in the same function are two different names, and only
@@ -493,6 +500,22 @@ pub fn (stmt Stmt) case_value() i64 {
 		return extra.case_value
 	}
 	return 0
+}
+
+@[inline]
+pub fn (stmt Stmt) case_value_high() i64 {
+	if extra := stmt.extra {
+		return extra.case_value_high
+	}
+	return 0
+}
+
+@[inline]
+pub fn (stmt Stmt) case_is_range() bool {
+	if extra := stmt.extra {
+		return extra.case_is_range
+	}
+	return false
 }
 
 @[inline]

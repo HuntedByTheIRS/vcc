@@ -1198,9 +1198,11 @@ fn (mut p Parser) parse_switch_statement() ![]ast.Stmt {
 	}
 	p.check_switch_operand(cond, t)
 	p.case_values << map[i64]bool{}
+	p.case_ranges << []CaseRange{}
 	p.case_defaults << false
 	body := p.parse_control_body()!
 	p.case_values.pop()
+	p.case_ranges.pop()
 	p.case_defaults.pop()
 	return [ast.Stmt{
 		kind: .switch_stmt
@@ -1227,10 +1229,27 @@ fn (mut p Parser) check_switch_operand(expr ast.Expr, at tokenize.Token) {
 	}
 }
 
-// parse_case_label reads `case constant: stmt`. The value is converted to the
-// type of the controlling expression where the label is placed, so what is kept
-// here is the constant as written; what this reader refuses is a value it cannot
-// reduce to one, which is a constant expression that is not a written constant.
+// CaseRange is the run of values one case label names: the two ends of
+// `case low ... high:`, the GNU spelling. The values between the ends are not
+// written down, so a range over a 64-bit type stays two numbers rather than the
+// whole run, which is what lets a range be tested without the compiler carrying
+// every value in it.
+struct CaseRange {
+	low  i64
+	high i64
+}
+
+// parse_case_label reads `case constant: stmt`, or the GNU range spelling
+// `case low ... high: stmt`. The value is converted to the type of the
+// controlling expression where the label is placed, so what is kept here is the
+// constant as written; what this reader refuses is a value it cannot reduce to
+// one, which is a constant expression that is not a written constant.
+//
+// A range is one label for every value from low to high, so it takes the same
+// duplicate check a single value does: it is refused where it overlaps a label
+// already written. The run is checked as its two ends and not by walking the
+// values, because the number of values in `case 0 ... 4000000000:` is not a
+// number a reader may expand.
 //
 // The label is worth a statement of its own rather than a field on the statement
 // after it: a run of labels over one statement, `case 0: case 1: x += 1;`, is a
@@ -1247,6 +1266,19 @@ fn (mut p Parser) parse_case_label() ![]ast.Stmt {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	// A `...` after the first constant opens a range. The second constant is
+	// read the way the first is and held until the colon is past, so that a
+	// value that does not reduce is refused at the same place either way.
+	mut range_end := ?ast.Expr(none)
+	mut is_range := false
+	if p.at_punct('...') {
+		p.next() // ...
+		is_range = true
+		range_end = p.parse_expression() or {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+	}
 	if !p.expect_punct(':') {
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -1258,21 +1290,72 @@ fn (mut p Parser) parse_case_label() ![]ast.Stmt {
 		p.error_at(t, 'unsupported: this case value is not one this reader reduces to an integer constant, and only a written integer constant or one of those negated is read')
 		return p.statement_under_label()
 	}
-	if p.case_values[p.case_values.len - 1][value] {
-		p.error_at(t, 'duplicate case value ${value} in one switch')
-		return p.statement_under_label()
+	mut high := value
+	if is_range {
+		end := range_end or { return p.statement_under_label() }
+		high = p.case_constant(end) or {
+			p.error_at(t, 'unsupported: this case value is not one this reader reduces to an integer constant, and only a written integer constant or one of those negated is read')
+			return p.statement_under_label()
+		}
 	}
-	p.case_values[p.case_values.len - 1][value] = true
+	// An empty range, `case 5 ... 3:`, names no value: gcc warns and matches
+	// nothing, and it is left out of the duplicate check because it can collide
+	// with no label. It is still emitted, and the two comparisons it becomes
+	// jump nowhere.
+	if value <= high {
+		if p.case_duplicate(value, high) {
+			p.error_at(t, 'duplicate case value ${value} in one switch')
+			return p.statement_under_label()
+		}
+		top := p.case_values.len - 1
+		if value == high {
+			p.case_values[top][value] = true
+		} else {
+			p.case_ranges[top] << CaseRange{
+				low:  value
+				high: high
+			}
+		}
+	}
 	mut out := [ast.Stmt{
 		kind:  .case_stmt
 		extra: &ast.StmtExtra{
-			case_value: value
+			case_value:      value
+			case_value_high: high
+			case_is_range:   is_range
 		}
 		line:  t.line
 		col:   t.col
 	}]
 	out << p.statement_under_label()!
 	return out
+}
+
+// case_duplicate says whether a case label naming low through high collides
+// with one already written in the switch being read. A single value is looked up
+// in the set in constant time, which is the shape most switches write. A range
+// is checked against that set and against the ranges already read, so the work
+// is in the number of labels the switch has written and never in the number of
+// values a range names.
+fn (p Parser) case_duplicate(low i64, high i64) bool {
+	top := p.case_values.len - 1
+	if low == high {
+		if p.case_values[top][low] {
+			return true
+		}
+	} else {
+		for value, _ in p.case_values[top] {
+			if value >= low && value <= high {
+				return true
+			}
+		}
+	}
+	for entry in p.case_ranges[top] {
+		if low <= entry.high && entry.low <= high {
+			return true
+		}
+	}
+	return false
 }
 
 // parse_default_label reads `default: stmt`. Which of the labels is the default

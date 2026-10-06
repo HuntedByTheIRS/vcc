@@ -136,6 +136,12 @@ mut:
 	// states; a switch's own set is pushed and popped around its body, so the
 	// cases of a nested switch do not collide with the ones outside it.
 	case_values []map[i64]bool
+	// case_ranges holds the case labels written as a range, one list per switch
+	// being read, innermost last, beside the single values in case_values. A
+	// range keeps only its two ends, so `case 0 ... 4000000000:` is one entry
+	// and not the four billion values it names, and a new label is checked
+	// against every range for overlap rather than the range being expanded.
+	case_ranges [][]CaseRange
 	// case_defaults says, one entry per switch being read, whether a default
 	// label has been read in it: a second default in one switch is refused.
 	case_defaults []bool

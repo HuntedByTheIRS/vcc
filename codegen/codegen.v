@@ -183,9 +183,13 @@ struct LoopLabels {
 // constant it matches, the machine label its statement is placed at, and
 // whether it is the default one. A switch's dispatch compares the controlling
 // expression against every non-default value and jumps to the matching label;
-// the default is where it goes when none matches.
+// the default is where it goes when none matches. When the label wrote a range,
+// `case low ... high:`, value is the low end, high the high one, and is_range
+// says the dispatch tests a run rather than one value.
 struct CaseTarget {
 	value      i64
+	high       i64
+	is_range   bool
 	label      string
 	is_default bool
 }
@@ -3408,8 +3412,8 @@ fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
 // case value is converted to the operand's type the same way C converts it.
 //
 // The comparison chain is a loop and not a recursion, and it is one comparison
-// per case: the corpus writes a switch with 1023 labels and a few thousand is
-// the size a switch is allowed to reach.
+// per case, two for a range: the corpus writes a switch with 1023 labels and a
+// few thousand is the size a switch is allowed to reach.
 fn (mut e Emitter) emit_switch(stmt ast.Stmt) !void {
 	cond := stmt.cond or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a switch without a controlling expression')
@@ -3434,6 +3438,39 @@ fn (mut e Emitter) emit_switch(stmt ast.Stmt) !void {
 	other := e.scratch(stmt.line, stmt.col)!
 	for target in cases {
 		if target.is_default {
+			continue
+		}
+		if target.is_range {
+			// A range is `low <= v <= high`, which is two comparisons rather
+			// than one per value: `case 'A' ... 'Z':` is two, and a run over a
+			// 64-bit type is still two where expanding the run would be
+			// millions. A value below the run or above it skips this label and
+			// the dispatch goes on to the next case. The operand is reloaded
+			// for the second comparison because the first leaves its answer in
+			// the accumulator, which is where a comparison writes its result.
+			skip := e.label()
+			low := case_constant_in(target.value, width, unsigned)
+			high := case_constant_in(target.high, width, unsigned)
+			e.load_accumulator(operand, stmt.line, stmt.col)!
+			e.append(e.target.move_immediate64(other, u64(low))!)
+			if unsigned {
+				e.append(e.target.compare_word_unsigned('<', accumulator, other)!)
+			} else {
+				e.append(e.target.compare_word('<', accumulator, other)!)
+			}
+			e.emit_test(cond, stmt.line, stmt.col)!
+			e.branch(.branch_nonzero, skip, stmt.line, stmt.col)!
+			e.load_accumulator(operand, stmt.line, stmt.col)!
+			e.append(e.target.move_immediate64(other, u64(high))!)
+			if unsigned {
+				e.append(e.target.compare_word_unsigned('>', accumulator, other)!)
+			} else {
+				e.append(e.target.compare_word('>', accumulator, other)!)
+			}
+			e.emit_test(cond, stmt.line, stmt.col)!
+			e.branch(.branch_nonzero, skip, stmt.line, stmt.col)!
+			e.jump(target.label)!
+			e.place(skip)
 			continue
 		}
 		e.load_accumulator(operand, stmt.line, stmt.col)!
@@ -3526,8 +3563,10 @@ fn (mut e Emitter) collect_cases(body []ast.Stmt, mut cases []CaseTarget) {
 		match stmt.kind {
 			.case_stmt {
 				cases << CaseTarget{
-					value: stmt.case_value()
-					label: e.label()
+					value:    stmt.case_value()
+					high:     stmt.case_value_high()
+					is_range: stmt.case_is_range()
+					label:    e.label()
 				}
 			}
 			.default_stmt {

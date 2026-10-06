@@ -323,9 +323,11 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 		mut extra := ?&ast.StmtExtra(none)
 		if deref != none || stmt.label() != '' || stmt.kind == .case_stmt {
 			extra = &ast.StmtExtra{
-				deref:      deref
-				label:      stmt.label()
-				case_value: stmt.case_value()
+				deref:           deref
+				label:           stmt.label()
+				case_value:      stmt.case_value()
+				case_value_high: stmt.case_value_high()
+				case_is_range:   stmt.case_is_range()
 			}
 		}
 		out << ast.Stmt{
