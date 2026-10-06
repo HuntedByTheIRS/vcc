@@ -2056,6 +2056,29 @@ fn (mut p Parser) file_scope_address() ?ast.AddressInit {
 	}
 	if p.peek().kind == .identifier {
 		name := p.next()
+		// `__PRETTY_FUNCTION__` written at file scope is the one function-name
+		// spelling that means something there: gcc 6.12.24 makes it the string
+		// "top level" rather than a name, so the initializer is that string and
+		// not a reference to a symbol. The other two spellings, `__func__` and
+		// `__FUNCTION__`, name the function they are written in and there is no
+		// function at file scope, so each is refused by name where it is written
+		// rather than left for the emitter to report as a symbol nothing defines.
+		if name.text == '__PRETTY_FUNCTION__' {
+			if p.at_punct('[') || p.at_punct('.') || p.at_punct('->') {
+				p.error_at(name, 'unsupported: a part of __PRETTY_FUNCTION__ is read at file scope, and this reader takes the string it names whole and no part of it')
+				return none
+			}
+			return ast.AddressInit{
+				name:   'top level'
+				string: true
+				line:   name.line
+				col:    name.col
+			}
+		}
+		if name.text in ['__func__', '__FUNCTION__'] {
+			p.error_at(name, 'unsupported: ${name.text} is read at file scope, and it names the function it is written in, which a use at file scope has none of; gcc 16.2.1 defines only __PRETTY_FUNCTION__ there, as the string "top level"')
+			return none
+		}
 		if p.at_punct('[') || p.at_punct('.') || p.at_punct('->') {
 			p.error_at(name, 'unsupported: ${name.text} is named where an address is wanted and a part of it is read, and an address of a part of an object is not implemented')
 			return none
