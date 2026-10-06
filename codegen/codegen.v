@@ -7647,6 +7647,16 @@ fn (e Emitter) difference_stride(step ast.Binary) ?int {
 }
 
 fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
+	if binary.typ.is_vector() {
+		// A vector value in an expression position other than the initializer
+		// of a vector declaration is not implemented here. The parser lowers
+		// `v4si c = a + b;` into element stores, so the sum never reaches this
+		// back end as a value; one that does - `(a + b)[0]`, or a sum handed to
+		// a function - has no path, and refusing it by name is the honest
+		// answer rather than computing one lane or a wrong width.
+		e.diagnostics << problem(binary.line, binary.col, 'unsupported: the vector value ${binary.typ.describe()} is used where this back end does not compute it, and a vector is implemented only as the initialized object of a declaration')
+		return error('vector value')
+	}
 	// A step with a complex operand is a comparison: the arithmetic is written by
 	// the complex paths into an object, and a step that reaches here is one whose
 	// value is wanted in the accumulator, which is a comparison and nothing else,

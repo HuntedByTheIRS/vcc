@@ -1084,6 +1084,27 @@ fn (mut p Parser) binary_type(op tokenize.Token, left ast.Expr, right ast.Expr) 
 			return types.Type{}
 		}
 	}
+	if a.is_vector() || b.is_vector() {
+		// A GNU vector operator is defined on its elements, so `a + b` adds
+		// lane by lane and the two operands have to be the same vector type.
+		// The arithmetic is element-wise and not the usual arithmetic
+		// conversions: a vector and a scalar do not mix, and two different
+		// vector types do not either.
+		//
+		// Only `+` is typed here, which is the operator the corpus checks and
+		// the one this compiler lowers. The other element-wise operators are
+		// refused by name rather than typed and then computed with a scalar
+		// meaning, which would answer one lane or the wrong width.
+		if !(a.is_vector() && b.is_vector()) || !a.same(b) {
+			p.error_at(op, 'unsupported: the type of ${describe_operand(left)} ${op.text} ${describe_operand(right)} is not one this compiler resolves, and a vector operator takes two operands of one vector type')
+			return types.Type{}
+		}
+		if op.text != '+' {
+			p.error_at(op, 'unsupported: the element-wise operator ${op.text} on ${a.describe()} is not implemented, and this compiler implements + on two vectors of one type')
+			return types.Type{}
+		}
+		return a
+	}
 	if op.text == '+' || op.text == '-' {
 		if a.is_pointer() && b.is_integer() {
 			return a

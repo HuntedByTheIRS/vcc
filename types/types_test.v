@@ -116,7 +116,53 @@ fn test_the_conversion_ranks_are_the_standards() {
 	assert Kind.long_long.rank() < Kind.float.rank()
 	assert Kind.float.rank() < Kind.double.rank()
 	assert Kind.double.rank() < Kind.long_double.rank()
+	// The GNU 128-bit floating type ranks above long double and below the
+	// complex types, which is the order gcc 16.2.1 measures: `_Float128 + long
+	// double` is `_Float128` and `_Float128 + float _Complex` is `float
+	// _Complex`.
+	assert Kind.long_double.rank() < Kind.float128.rank()
+	assert Kind.float128.rank() < Kind.complex_float.rank()
 	assert Kind.void_.rank() == -1
+}
+
+// A vector is the GNU type `__attribute__((vector_size(N)))` declares: an array
+// for storage, sizeof and subscripting, and not an array anywhere else. Measured
+// on gcc 16.2.1, a vector is not converted to a pointer (`_Generic(v, int[4]: 1,
+// default: 2)` selects the default for a vector) and a vector with the same
+// components as an array is a different type from that array.
+fn test_a_vector_is_an_array_that_is_not_converted_to_a_pointer() {
+	v := vector_of(int_type(), 4)
+	assert v.is_array() && v.is_vector()
+	assert v.count == 4 && v.describe() == 'int[4]'
+	element := v.element() or {
+		assert false
+		return
+	}
+	assert element.kind == .int_
+	// A plain array of the same shape is not a vector, and the two are not the
+	// same type even though they are laid out the same.
+	plain := array_of(int_type(), 4)
+	assert !plain.is_vector()
+	assert !v.same(plain) && !plain.same(v)
+	// The value keeps the vector type where an array designator decays, which
+	// is what routes `a + b` to the element-wise operator.
+	assert decay(v).is_vector()
+	assert decay(plain).is_pointer()
+	// Two vectors of one component type are one type.
+	assert v.same(vector_of(int_type(), 4))
+}
+
+// `_Float128` is the GNU 128-bit floating type. It is a kind of its own rather
+// than long double because its format is IEEE binary128, and this target's long
+// double is the x87 extended format; the two are both sixteen bytes but are not
+// the same type. Both are the extended kinds this back end carries through the
+// same sixteen-byte storage.
+fn test_the_float128_kind_is_an_extended_type_of_its_own() {
+	assert float128_type().kind == .float128
+	assert float128_type().describe() == '__float128'
+	assert float128_type().is_floating() && float128_type().kind.is_extended()
+	assert long_double_type().kind.is_extended()
+	assert !long_double_type().same(float128_type())
 }
 
 fn test_a_pointer_says_what_it_points_at() {

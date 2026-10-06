@@ -27,6 +27,11 @@ mut:
 	// alignment is the strictest alignment the declaration asked for with
 	// `aligned(N)`, and zero when it asked for none.
 	alignment int
+	// vector_size is the byte count a `vector_size(N)` attribute named, and
+	// zero when one was not written. It does not stand on its own: it is what
+	// a typedef of a scalar type becomes, and the reader that turns it into a
+	// vector type is the one that knows the element type.
+	vector_size int
 }
 
 // merge_attributes folds the attributes of a second list into the first. A
@@ -34,10 +39,18 @@ mut:
 // all of them say something about the same object, so a strict alignment asked
 // for twice is the stricter of the two and a weak binding asked for once is
 // enough.
+//
+// A vector_size written twice with the same count is that count, and one list
+// that says nothing about a vector leaves the other's count alone. Two different
+// counts are a declaration asking for two vector types at once, which gcc 16.2.1
+// refuses (`invalid vector type for attribute`); the larger is kept here and the
+// reader that applies it reports the conflict, because only it knows where the
+// declaration is.
 fn merge_attributes(a AttributeSet, b AttributeSet) AttributeSet {
 	return AttributeSet{
-		weak:      a.weak || b.weak
-		alignment: if b.alignment > a.alignment { b.alignment } else { a.alignment }
+		weak:        a.weak || b.weak
+		alignment:   if b.alignment > a.alignment { b.alignment } else { a.alignment }
+		vector_size: if b.vector_size > a.vector_size { b.vector_size } else { a.vector_size }
 	}
 }
 
@@ -181,6 +194,30 @@ fn (mut p Parser) read_attribute(at tokenize.Token, args []tokenize.Token, repor
 			// this compiler accepts them and records nothing.
 			return AttributeSet{}
 		}
+		'vector_size' {
+			// The one argument is the size of the vector in bytes. gcc 16.2.1
+			// spells it `1` for the error it raises on it and `vector_size (16)`
+			// in the documented form, and the count is read the same integer way
+			// `aligned(N)` reads its own. Whether the count is a multiple of the
+			// element size and how many components it makes of it is a question
+			// about the element type, which this reader does not have: the
+			// attribute records the byte count and the declaration applies it.
+			value := attribute_vector_size(args) or {
+				// A vector_size this reader cannot read is refused even where
+				// `report` is false, which is the position after a declarator.
+				// The two other attributes honoured from that position say
+				// nothing when they fail and leave the object as it was; a
+				// vector_size that fails must not, because the declaration
+				// asked for a vector and reading past it would declare an
+				// object of another type. Measured, gcc 16.2.1 refuses
+				// `vector_size(0)` as `zero vector size`.
+				p.error_at(at, "unsupported: the attribute 'vector_size' asks for '${attribute_arguments_text(args)}', and this compiler reads one integer byte count that is more than zero")
+				return AttributeSet{}
+			}
+			return AttributeSet{
+				vector_size: value
+			}
+		}
 		else {
 			if report {
 				p.error_at(at, "unsupported: the attribute '${name}' is not implemented")
@@ -222,6 +259,23 @@ fn attribute_alignment(args []tokenize.Token) ?int {
 	}
 	value := attribute_number(args[0].text) or { return none }
 	if value <= 0 || (value & (value - 1)) != 0 {
+		return none
+	}
+	return value
+}
+
+// attribute_vector_size reads the one argument `vector_size(N)` takes. The
+// argument is the size of the vector in bytes, a positive integer. Whether the
+// bytes divide into the element type, and how many components that makes, is
+// checked where the element type is known. Measured, gcc 16.2.1 refuses
+// `vector_size(0)` as `zero vector size` and a non-constant argument as
+// `invalid vector type`, so an unreadable one is left to the caller's refusal.
+fn attribute_vector_size(args []tokenize.Token) ?int {
+	if args.len != 1 || args[0].kind != .number {
+		return none
+	}
+	value := attribute_number(args[0].text) or { return none }
+	if value <= 0 {
 		return none
 	}
 	return value

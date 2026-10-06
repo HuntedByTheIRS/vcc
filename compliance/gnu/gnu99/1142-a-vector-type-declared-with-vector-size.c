@@ -4,8 +4,6 @@
  * in using these extensions is to provide the necessary data types. This should
  * be done using an appropriate typedef: typedef int v4si __attribute__
  * ((vector_size (16)));"
- *
- * unimplemented: a vector type declared with __attribute__((vector_size(N))).
  */
 
 #include <stdio.h>

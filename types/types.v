@@ -147,6 +147,14 @@ pub mut:
 	// the tree carries the expression to the back end, and the handle is only
 	// how a later use inside the reader finds it again.
 	vla_id int
+	// vector says an array is a GNU vector type, the one a declaration wrote
+	// `__attribute__((vector_size(N)))` for: it holds count elements of base
+	// in N bytes, and it is an array for storage, sizeof and subscripting.
+	// What it is not is an array anywhere else: it is not converted to a
+	// pointer, and the arithmetic operators on it are the element-wise ones,
+	// which the parser and the emitter implement separately. It is false for
+	// every array that is not one and for every other kind.
+	vector bool
 	// members are the members of a struct or a union, in the order they were
 	// written.
 	members []Member
@@ -383,6 +391,15 @@ pub fn (t Type) is_array() bool {
 	return t.kind == .array
 }
 
+// is_vector says whether an array type is the GNU vector type a
+// `__attribute__((vector_size(N)))` declared. A vector is an array here, so
+// every place that asks is_array() also says yes about it; this is the question
+// that tells the two apart where the difference matters, which is that a vector
+// does not convert to a pointer and its arithmetic is element-wise.
+pub fn (t Type) is_vector() bool {
+	return t.kind == .array && t.vector
+}
+
 pub fn (t Type) is_function() bool {
 	return t.kind == .function
 }
@@ -510,7 +527,8 @@ pub fn (t Type) same(other Type) bool {
 		return false
 	}
 	if t.count != other.count || t.variadic != other.variadic
-		|| t.prototyped != other.prototyped || t.vla != other.vla {
+		|| t.prototyped != other.prototyped || t.vla != other.vla
+		|| t.vector != other.vector {
 		return false
 	}
 	if !(t.kind in [.struct_, .union_] && t.tag != '') {
@@ -888,6 +906,19 @@ pub fn array_of(base Type, count int) Type {
 		base:  &Type{ ...base }
 		count: count
 	}
+}
+
+// vector_of is the type of a GNU vector holding count elements of base in the
+// bytes a `__attribute__((vector_size(N)))` named. It is an array of those
+// elements carrying the vector flag, so it is laid out, sized and subscripted
+// as that array; what the flag changes is that a value of it is not converted
+// to a pointer and its operators are the element-wise ones. The caller has
+// already checked that the byte count is a positive multiple of the element
+// size, because the count is what this is told.
+pub fn vector_of(base Type, count int) Type {
+	mut t := array_of(base, count)
+	t.vector = true
+	return t
 }
 
 // vla_array_of is the type of an array of base whose bound is computed at run

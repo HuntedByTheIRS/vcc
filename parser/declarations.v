@@ -1362,7 +1362,31 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 	if spec.is_typedef {
 		// A typedef names a type and declares no object: the names are
 		// registered by the caller once the whole declaration has been read.
+		//
+		// A `vector_size(N)` attribute on it is the one attribute that changes
+		// the type the name stands for rather than the object, and it is the
+		// documented way GNU vector types are written: the typedef becomes a
+		// vector holding components of the declared type in N bytes. The type
+		// the declarator recorded when the name was read is the plain element
+		// type, so it is replaced here with the vector. gcc 16.2.1 allows the
+		// attribute on any declaration, but the manual gives the typedef form
+		// and this compiler implements that form; anywhere else the attribute
+		// is refused by name, in the branch that reads an object declaration.
+		if asked.vector_size > 0 {
+			if vector := p.vector_type_for(data_clause, asked.vector_size, data_at) {
+				p.scopes.complete_type(data_name, vector)
+			}
+		}
 		return true
+	}
+	if asked.vector_size > 0 {
+		// A vector_size on a declaration other than a typedef is a GNU vector
+		// type this reader could apply, but the manual documents the typedef
+		// form and this compiler implements only that one. Refusing by name is
+		// the honest answer: reading past it would declare a plain object where
+		// the program asked for a vector.
+		p.error_at(data_at, 'unsupported: a vector_size attribute on ${data_name} is not implemented, and this compiler reads vector_size only on a typedef of an arithmetic type')
+		return false
 	}
 	if spec.is_extern && !data_defined {
 		// An extern declaration adds no code of its own: it says the object
@@ -6077,6 +6101,35 @@ fn closing_of(open string) string {
 		'{' { '}' }
 		else { ')' }
 	}
+}
+
+// vector_type_for is the vector type a `vector_size(N)` attribute makes of a
+// declared type: N bytes holding N / sizeof(element) components of it, which is
+// the message GNU's manual gives the attribute and what gcc 16.2.1 measures. The
+// attribute is written on a typedef of an arithmetic type, and the cases gcc
+// refuses are refused here by name rather than read into a different object:
+// measured, `vector_size(6)` on an int is `vector size not an integral multiple
+// of component size`, a size that makes three components is `number of vector
+// components 3 not a power of two`, and a size of zero is `zero vector size`.
+fn (mut p Parser) vector_type_for(element types.Type, bytes int, at tokenize.Token) ?types.Type {
+	if !element.is_arithmetic() {
+		p.error_at(at, 'unsupported: a vector_size attribute on ${element.describe()} is not implemented, and a vector holds components of an arithmetic type')
+		return none
+	}
+	width := p.representation.size_of(element) or {
+		p.error_at(at, 'unsupported: a vector_size attribute names the component type ${element.describe()}, and this compiler does not know its size')
+		return none
+	}
+	if width <= 0 || bytes % width != 0 {
+		p.error_at(at, 'unsupported: a vector_size of ${bytes} bytes on ${element.describe()} is not an integral multiple of the size of one component')
+		return none
+	}
+	count := bytes / width
+	if count & (count - 1) != 0 {
+		p.error_at(at, 'unsupported: a vector_size of ${bytes} bytes on ${element.describe()} makes ${count} components, and that is not a power of two')
+		return none
+	}
+	return types.vector_of(element, count)
 }
 
 // register_typedef remembers a name as a type for the rest of the file. The

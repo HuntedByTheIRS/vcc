@@ -103,6 +103,16 @@ pub fn (r Representation) align_of(t Type) ?int {
 		return t.layout.align
 	}
 	if t.kind == .array {
+		if t.is_vector() {
+			// gcc aligns a vector to its size: measured on gcc 16.2.1,
+			// `_Alignof(v4si)` is 16 and not the 4 its int components align
+			// to. The power-of-two component count the reader requires makes
+			// that size a power of two, so it is an alignment the frame can
+			// use. Elements' alignment would lay a vector out differently
+			// from gcc and change the layout of every object holding one,
+			// which is a difference the program can see.
+			return r.size_of(t)
+		}
 		if t.base == unsafe { nil } {
 			return none
 		}

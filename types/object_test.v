@@ -73,6 +73,10 @@ fn test_the_size_and_alignment_of_every_scalar() {
 	assert size_of(float_type()) == 4 && align_of(float_type()) == 4
 	assert size_of(double_type()) == 8 && align_of(double_type()) == 8
 	assert size_of(long_double_type()) == 16 && align_of(long_double_type()) == 16
+	// `_Float128` is the GNU 128-bit floating type; measured on gcc 16.2.1 it
+	// is sixteen bytes aligned to sixteen like the extended type, and it is a
+	// separate kind because its format is IEEE binary128 and not x87 extended.
+	assert size_of(float128_type()) == 16 && align_of(float128_type()) == 16
 	assert size_of(complex_float_type()) == 8 && align_of(complex_float_type()) == 4
 	assert size_of(complex_double_type()) == 16 && align_of(complex_double_type()) == 8
 	assert size_of(complex_long_double_type()) == 32 && align_of(complex_long_double_type()) == 16
@@ -84,6 +88,21 @@ fn test_an_array_is_its_element_size_times_its_count() {
 	assert size_of(array_of(int_type(), 3)) == 12 && align_of(array_of(int_type(), 3)) == 4
 	assert size_of(array_of(double_type(), 2)) == 16 && align_of(array_of(double_type(), 2)) == 8
 	assert measured.representation().size_of(array_of(int_type(), -1)) == none
+}
+
+// A vector is sized by its components and aligned to its whole size. Measured on
+// gcc 16.2.1: `typedef int v4si __attribute__((vector_size(16)));` has sizeof 16
+// and _Alignof 16, and `typedef double v2df __attribute__((vector_size(16)));`
+// and `typedef short v8hi __attribute__((vector_size(16)));` the same. The
+// alignment is the vector's size and not the components' four or two, which is
+// what makes a struct holding one as large as gcc makes it.
+fn test_a_vector_is_its_components_and_aligned_to_its_whole_size() {
+	assert size_of(vector_of(int_type(), 4)) == 16 && align_of(vector_of(int_type(), 4)) == 16
+	assert size_of(vector_of(double_type(), 2)) == 16 && align_of(vector_of(double_type(), 2)) == 16
+	assert size_of(vector_of(short_type(), 8)) == 16 && align_of(vector_of(short_type(), 8)) == 16
+	// The same components as a plain array keep the element's alignment, which
+	// is what tells the vector apart in a layout.
+	assert align_of(array_of(int_type(), 4)) == 4
 }
 
 // An enumerated type has the representation of the integer type its enumerators
