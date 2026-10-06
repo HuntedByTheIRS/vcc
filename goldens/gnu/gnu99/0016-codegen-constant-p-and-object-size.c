@@ -5,9 +5,11 @@
 int main(void)
 {
     int arr[10];
+    int x = 5;
     int i = 3;
 
     printf("%d %d\n", __builtin_constant_p(7), __builtin_constant_p(i));
     printf("%zu %zu\n", __builtin_object_size(arr, 0), __builtin_object_size("abcdef", 0));
+    printf("%zu %zu\n", __builtin_object_size(&arr, 0), __builtin_object_size(&x, 0));
     return 0;
 }

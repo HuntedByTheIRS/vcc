@@ -11,12 +11,13 @@ int main(void)
     v4si a = { 1, 2, 3, 4 };
     v4si b = { 10, 20, 30, 40 };
     v4si c = a + b;
+    int i;
 
     printf("%zu %zu %zu\n", sizeof(v4si), sizeof(v8hi), sizeof(v16qi));
     printf("%zu %zu %zu\n", (size_t)__alignof__(v4si), (size_t)__alignof__(v8hi),
            (size_t)__alignof__(v16qi));
-    /* A vector's elements are not read back here: a vector value is read in a
-       declaration's initializer, which is where `c` is built. */
-    printf("%d\n", (int)(c[0] == 0));
+    for (i = 0; i < 4; i++) printf("%d%s", c[i], i == 3 ? "\n" : " ");
+    c[1] = 99;
+    printf("%d %d\n", c[0], c[1]);
     return 0;
 }
