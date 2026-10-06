@@ -59,12 +59,13 @@ badge and the runner do not disagree about what a case is.
 `v run tools/compliance.vsh` compiles and runs the corpus under `compliance/`.
 The suite says the compiler does what its own tests say; this corpus says it
 agrees with C programs nobody wrote for it, checking about nine hundred of its
-answers against the standard library.
+answers against the standard library and asking it to refuse the programs the
+standard says are invalid.
 
 The tests live in a directory per standard, and the directory is the mode: the
 leaf name is the `-std=` spelling, so `compliance/iso/c99/` is compiled
 `-std=c99` and `compliance/gnu/gnu99/` `-std=gnu99`. `monolithic.c` is the file
-the corpus arrived as, kept at the root, and `NNN-name.c` inside a dialect
+the corpus arrived as, kept at the root, and `NNNN-name.c` inside a dialect
 directory is one of its checks with the declarations and statements that check
 needs. Each test is a program, so the runner is a work queue: it compiles and
 runs all of them in parallel (`-j`, eight by default) and reports the suite, the
@@ -73,7 +74,7 @@ test file and the line in it that failed.
 ```sh
 v run tools/compliance.vsh                        # build the tree, then run everything
 v run tools/compliance.vsh --compiler /tmp/vcc    # a compiler you already built
-v run tools/compliance.vsh --only 017 018         # the tests you name
+v run tools/compliance.vsh --only 0017 0018       # the tests you name
 v run tools/compliance.vsh --define C99_TRIGRAPHS # include the gated tests too
 v run tools/compliance.vsh --list                 # print what would run
 v run tools/compliance.vsh --count                # print how many tests there are
@@ -81,12 +82,16 @@ v run tools/compliance.vsh --count                # print how many tests there a
 
 The runner refuses a test that does not build, a test that exits non-zero, a
 test that prints something other than the two lines the corpus prints on
-purpose, a test file count below 999, and a `monolithic.c` run that holds
-fewer than 906 checks. Both floors are floors and not equalities: adding tests
-needs no edit here, losing them is a failure. A test carrying a
+purpose, a test that expects a refusal the compiler does not make or an
+acceptance it does not give, a test file count below 1067, and a `monolithic.c`
+run that holds fewer than 906 checks. Both floors are floors and not equalities:
+adding tests needs no edit here, losing them is a failure. A test carrying a
 `requires-define: NAME` line is skipped unless `--define` names it, because
 running it with the construct off would pass by not compiling the thing under
-test. Each test compiles with the standard of its directory, and
+test. A test carrying an `expects-refusal:` line is a program that breaks a
+Constraint or a syntax rule, so a conforming implementation owes a diagnostic
+for it: the refusal is the check, and the test is never run. Each test compiles
+with the standard of its directory, and
 [compliance/README.md](https://github.com/HuntedByTheIRS/vcc/blob/main/compliance/README.md)
 says why the corpus is split and why `-lm` is not optional.
 

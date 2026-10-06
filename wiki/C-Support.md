@@ -123,15 +123,14 @@ The conformance corpus under `compliance/` is compiled and run by
 `v run tools/compliance.vsh`, which checks the compiler against the standard
 rather than against its own tests. It is one directory per standard and the leaf
 name is the mode, so `iso/c99/` is compiled `-std=c99` and `gnu/gnu99/`
-`-std=gnu99`. `monolithic.c` holds 906 checks and the corpus holds 999 test
-files, and `-lm` is not optional. `regression/` holds one program per bug that
-must not come back, run by `v run tools/regress.vsh`. The suite itself is
-counted by `v run tools/tests.vsh`.
+`-std=gnu99`. `monolithic.c` holds 906 checks and the corpus holds 1067 test
+files, 68 of them programs the compiler must refuse, and `-lm` is not optional.
+`regression/` holds one program per bug that must not come back, run by
+`v run tools/regress.vsh`. The suite itself is counted by `v run tools/tests.vsh`.
 
 The recorded counts live in `.github/badges/` and are written by the runners
-rather than kept by hand: 1561 tests, 999 compliance tests, 60 regression
-cases with 0 failing, and 46843 lines of V. [[The-Gate]] runs the same checks
-a pull request has to pass.
+rather than kept by hand, so each badge reads what the tool counted. [[The-Gate]]
+runs the same checks a pull request has to pass.
 
 ## What is not there yet
 

@@ -69,7 +69,7 @@ directory is still this compiler's source and gets no such pass.
 The corpus under `compliance/`, compiled by the tree and run. The suite says the
 compiler does what its own tests say; this says it agrees with C programs nobody
 wrote for it, checking about nine hundred of its answers against the standard
-library.
+library and asking it to refuse the programs the standard says are invalid.
 
 ```sh
 v run tools/compliance.vsh                        # build the tree, then run everything
@@ -83,7 +83,7 @@ v run tools/compliance.vsh --count                # print how many tests there a
 The tests live in a directory per standard, and the directory is the mode: the
 leaf name is the `-std=` spelling, so `compliance/iso/c99/` is compiled
 `-std=c99` and `compliance/gnu/gnu99/` `-std=gnu99`. `monolithic.c` is the file
-the corpus arrived as, kept at the root, and `NNN-name.c` inside a dialect
+the corpus arrived as, kept at the root, and `NNNN-name.c` inside a dialect
 directory is one of its checks with the declarations and statements that check
 needs. Each test is a program, so the runner is a work queue: it compiles and
 runs all of them in parallel (`-j`, eight by default) and reports the suite, the
@@ -92,15 +92,22 @@ test file and the line in it that failed.
 It builds the tree under test first unless `--compiler` names a binary, so the run
 describes the current source rather than one from an earlier edit. It fails on a
 test that does not build, a test that exits non-zero, a test that prints
-something other than the two lines the corpus prints on purpose, a test file
-count below 999, and a `monolithic.c` run that holds fewer than 906 checks. Both
-floors are floors and not equalities: adding tests needs no edit here, losing
-them is a failure.
+something other than the two lines the corpus prints on purpose, a test that
+expects a refusal the compiler does not make or an acceptance it does not give, a
+test file count below 1067, and a `monolithic.c` run that holds fewer than 906
+checks. Both floors are floors and not equalities: adding tests needs no edit
+here, losing them is a failure.
 
 A test carrying a `requires-define: NAME` line exercises a construct this
 compiler accepts only when `NAME` is defined, and is skipped unless `--define`
 names it. Running it with the construct off would pass by not compiling the
 thing under test.
+
+A test carrying an `expects-refusal:` line is a program that breaks a Constraint
+or a syntax rule of ISO/IEC 9899:1999, so a conforming implementation owes a
+diagnostic for it. The refusal is the check: the test passes when the compiler
+refuses to compile it, and fails when the compiler compiles it. Such a test is
+never run.
 
 Every test compiles with the standard of its directory and `-lm`;
 `compliance/README.md` says why the corpus is split and why `-lm` is not
