@@ -298,8 +298,20 @@ fn parse_hex_long_double(text string, body string) !types.LongDouble {
 fn decimal_to_long_double(significant string, exp int) ?types.LongDouble {
 	// A power of ten this far from the digits cannot leave a value the extended
 	// exponent field holds, whatever the digits are, so the arithmetic below is
-	// kept to a size a string can carry.
-	if exp > 5000 || exp < -5000 {
+	// kept to a size a string can carry. Ten to the five thousandth is past
+	// every value the format reaches, and a decimal constant that far out is an
+	// overflow rather than a constant this reader cannot carry: gcc 16.2.1
+	// answers one with an infinity, measured on `1e10000L`, which is where
+	// glibc's HUGE_VALL resolves outside a GNU dialect. A constant this far the
+	// other way cannot reach the smallest value the reader computes exactly, so
+	// it stays a refusal rather than an answer of zero.
+	if exp > 5000 {
+		return types.LongDouble{
+			mantissa: u64(0x8000000000000000)
+			sign_exp: u16(0x7fff)
+		}
+	}
+	if exp < -5000 {
 		return none
 	}
 	// The arithmetic is arbitrary precision because a constant may name more
@@ -377,7 +389,15 @@ fn long_double_from_parts(mantissa u64, exponent int) ?types.LongDouble {
 	}
 	field := exponent + 16383
 	if field >= 0x7fff {
-		return none
+		// The value is past every value the extended format reaches, so it is
+		// an infinity, which is what gcc 16.2.1 answers a constant that
+		// overflows the type with: measured, `1e4933L` is above LDBL_MAX and
+		// gcc and this reader both make it +inf. `long_double_from_scaled`
+		// below answers the same way for the hexadecimal form.
+		return types.LongDouble{
+			mantissa: u64(0x8000000000000000)
+			sign_exp: u16(0x7fff)
+		}
 	}
 	if field <= 0 {
 		// A subnormal or underflowing constant is outside what this reader
