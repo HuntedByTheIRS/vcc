@@ -430,6 +430,11 @@ pub:
 	// later pass may not keep across the statement, which is the whole of what
 	// an accepted barrier tells the optimizer.
 	asm_clobbers []string
+	// cleanup is the name of the function a declaration asked for with
+	// `__attribute__((cleanup(name)))`, which runs on the object when the
+	// block it was declared in ends. It is empty for a declaration that asked
+	// for none, which is every declaration but the one GNU attribute's.
+	cleanup string
 }
 
 // The rest of this file is how a statement answers for what is in its extra
@@ -541,6 +546,17 @@ pub fn (stmt Stmt) asm_clobbers() []string {
 		return extra.asm_clobbers
 	}
 	return []
+}
+
+// cleanup is the function a declaration asked to run on the object when the
+// block it was declared in ends, or the empty string for a declaration that
+// asked for none.
+@[inline]
+pub fn (stmt Stmt) cleanup() string {
+	if extra := stmt.extra {
+		return extra.cleanup
+	}
+	return ''
 }
 
 // Expr is one of the expression shapes the stub understands. A call is parsed

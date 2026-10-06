@@ -1,11 +1,9 @@
 /* 1136: a-cast-to-a-union-type
  *
  * GCC 6.2.7 Cast to a Union Type: "A cast to a union type is a C extension not
- * available in C++. ... The result of a cast to a union is a temporary rvalue
+ * The result of a cast to a union is a temporary rvalue
  * of the union type with a member whose type matches that of the operand
  * initialized to the value of the operand."
- *
- * unimplemented: a cast to a union type.
  */
 
 #include <stdio.h>

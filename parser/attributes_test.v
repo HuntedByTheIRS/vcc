@@ -134,3 +134,37 @@ fn test_an_unimplemented_attribute_is_a_diagnostic_not_a_skip() {
 	assert result.unit.globals[0].name == 'x'
 	assert result.unit.globals[0].alignment == 0
 }
+
+// `__attribute__((cleanup(name)))` on a declaration inside a function records
+// the function to run on the object when the block the object was declared in
+// ends. The name is read at the attribute and the statement it sits on carries
+// it, which is what the back end places the call from.
+fn test_a_cleanup_attribute_names_the_function_the_block_runs() {
+	result := attributes_of('void mark(int *p) {\n\t(void)p;\n}\nvoid f(void) {\n\t__attribute__((cleanup(mark))) int x = 1;\n\t(void)x;\n}\n')
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[1].body
+	assert body[0].kind == .var_decl
+	assert body[0].decl_name == 'x'
+	assert body[0].cleanup() == 'mark'
+}
+
+// The attribute names one function and nothing else. An argument that is not a
+// single name is refused by name rather than read as some other function.
+fn test_a_cleanup_attribute_that_names_no_function_is_refused() {
+	result := attributes_of('void f(void) {\n\t__attribute__((cleanup(1 + 2))) int x = 1;\n\t(void)x;\n}\n')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains("the attribute 'cleanup'")
+}
+
+// The call runs where the block ends, so the object has to have automatic
+// storage duration: a static object outlives the block and an extern one has no
+// block here at all. Both are refused rather than given a call at a scope the
+// object does not leave.
+fn test_a_cleanup_attribute_on_an_object_that_is_not_automatic_is_refused() {
+	held := attributes_of('void mark(int *p) {\n\t(void)p;\n}\nvoid f(void) {\n\tstatic __attribute__((cleanup(mark))) int x = 1;\n\t(void)x;\n}\n')
+	assert held.diagnostics.len == 1
+	assert held.diagnostics[0].msg.contains('automatic storage duration')
+	external := attributes_of('void mark(int *p) {\n\t(void)p;\n}\nvoid f(void) {\n\textern __attribute__((cleanup(mark))) int x;\n\t(void)x;\n}\n')
+	assert external.diagnostics.len == 1
+	assert external.diagnostics[0].msg.contains('automatic storage duration')
+}

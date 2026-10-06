@@ -27,17 +27,24 @@ mut:
 	// alignment is the strictest alignment the declaration asked for with
 	// `aligned(N)`, and zero when it asked for none.
 	alignment int
+	// cleanup is the name of the function a declaration asked for with
+	// `cleanup(name)`, which the declaration runs on the object when the block
+	// it was declared in ends. It is empty when none was asked for.
+	cleanup string
 }
 
 // merge_attributes folds the attributes of a second list into the first. A
 // declaration may carry more than one `__attribute__` specifier and 6.7 makes
 // all of them say something about the same object, so a strict alignment asked
 // for twice is the stricter of the two and a weak binding asked for once is
-// enough.
+// enough. A cleanup asked for twice is a constraint violation in gcc, and the
+// later name is the one kept here: the reader that places the attribute reports
+// the second, so this folding never has to.
 fn merge_attributes(a AttributeSet, b AttributeSet) AttributeSet {
 	return AttributeSet{
 		weak:      a.weak || b.weak
 		alignment: if b.alignment > a.alignment { b.alignment } else { a.alignment }
+		cleanup:   if b.cleanup != '' { b.cleanup } else { a.cleanup }
 	}
 }
 
@@ -180,6 +187,22 @@ fn (mut p Parser) read_attribute(at tokenize.Token, args []tokenize.Token, repor
 			// Linux accepts all three and emits the same object without them, so
 			// this compiler accepts them and records nothing.
 			return AttributeSet{}
+		}
+		'cleanup' {
+			// GCC 6.4.1: the attribute names one function, which is called with
+			// the address of the object when the block the object was declared
+			// in ends. The name is read here and the call is the back end's. An
+			// argument that is not a single name is refused by name rather than
+			// read as though some other function had been written.
+			if args.len != 1 || args[0].kind != .identifier {
+				if report {
+					p.error_at(at, "unsupported: the attribute 'cleanup' names the one function to run on the object, and '${attribute_arguments_text(args)}' is not a name")
+				}
+				return AttributeSet{}
+			}
+			return AttributeSet{
+				cleanup: args[0].text
+			}
 		}
 		else {
 			if report {

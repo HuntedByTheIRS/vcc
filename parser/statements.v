@@ -1453,6 +1453,18 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 	if spec.attributes.weak {
 		p.error_at(spec.start, 'unsupported: a weak symbol binding is implemented on a declaration at file scope, not inside a function')
 	}
+	// GCC 6.4.1: the cleanup attribute runs on an object with automatic storage
+	// duration when the block it was declared in ends, so a declaration that
+	// gives the object static storage, external linkage, or no object at all is
+	// refused by name rather than carrying a call the back end would place at
+	// the wrong scope or for an object that has no storage here.
+	cleanup := if spec.attributes.cleanup != ''
+		&& (spec.is_typedef || spec.is_extern || spec.storage == .static_) {
+		p.error_at(spec.start, "unsupported: the attribute 'cleanup' runs on an object with automatic storage duration, and this declaration is not one")
+		''
+	} else {
+		spec.attributes.cleanup
+	}
 	if p.at_punct(';') {
 		if spec.tag_decl {
 			// A tag with no declarator, as in `struct S { int a; };` or
@@ -1876,6 +1888,10 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 					// the count it was declared with travels beside it: the frame reserves
 					// the product, and an index scales by the size of one element.
 					bytes:         p.aggregate_bytes(declared)
+					// The function a cleanup attribute named, which the back end
+					// calls with this object's address when the block ends. It is
+					// empty for a declaration that asked for none.
+					cleanup:       cleanup
 				}
 				line:       d.name_at.line
 				col:        d.name_at.col

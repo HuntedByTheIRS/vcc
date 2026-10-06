@@ -2049,6 +2049,15 @@ fn (mut p Parser) parse_cast_or_compound(at tokenize.Token) !ast.Expr {
 	}
 	operand := p.parse_prefix_operand(at)!
 	destination := p.declared_type(spec.clause, d)
+	// GCC 6.2.7 makes a cast to a union type a value of the union with the member
+	// whose type matches the operand initialized to the operand. That is a
+	// different value from the conversion the cast spells, so it is built as the
+	// object it names rather than as a conversion. An operand that already has
+	// the union type is the ordinary conversion and falls through below.
+	if destination.kind == .union_ && !p.is_unresolved(operand)
+		&& !types.unqualified(p.value_type(operand)).compatible(types.unqualified(destination)) {
+		return p.cast_to_union(at, spec, d, destination, operand)!
+	}
 	return ast.Expr(ast.Cast{
 		spelling: p.conversion_spelling(spec, d, destination)
 		expr:     decayed_operand(operand)
