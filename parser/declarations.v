@@ -800,11 +800,24 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				p.declare_parameters(d.function_params())
 				// The function-name spellings inside the body name this
 				// function, so its name is carried while the body is read and
-				// the one before it is given back after.
+				// the one before it is given back after. A nested function's
+				// symbol is built from the symbol of the function it is written
+				// in, so that function's symbol is carried too, and the nested
+				// names of an earlier function are set aside: a nested function
+				// is visible only in the function that writes it.
 				previous_function := p.current_function
+				previous_symbol := p.function_symbol
+				previous_enclosing := p.enclosing_symbol
+				previous_names := p.nested_names
 				p.current_function = d.name
+				p.function_symbol = d.name
+				p.enclosing_symbol = ''
+				p.nested_names = map[string]string{}
 				body := p.parse_block()
 				p.current_function = previous_function
+				p.function_symbol = previous_symbol
+				p.enclosing_symbol = previous_enclosing
+				p.nested_names = previous_names
 				p.scopes.leave()
 				statements := body or { return decls }
 				// A definition with no name has been reported and has no

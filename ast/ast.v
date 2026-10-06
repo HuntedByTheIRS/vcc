@@ -76,8 +76,20 @@ pub:
 	// prototype and for a definition written as `{}`, so defined is what tells
 	// the two apart.
 	body []Stmt
-	line int
-	col  int
+	// nested says the function is defined inside another function, which GNU's
+	// nested functions are. Its storage is a frame of its own, and it reaches
+	// the objects of the function it is written in through a static chain: the
+	// frame pointer of the enclosing function is handed to it in a register at
+	// every call, and a name of the enclosing function it uses is read and
+	// written as an offset from that pointer rather than from its own frame.
+	nested bool
+	// owner is the name of the function a nested function is written in, as
+	// the emitter mangles it. It is what a call to the nested function has to
+	// name to put the right frame pointer in the static-chain register, and
+	// empty for a function defined at the top level.
+	owner string
+	line  int
+	col   int
 }
 
 // Param is one parameter of a function: its name, the type as written, and what
@@ -282,6 +294,13 @@ pub enum StmtKind {
 	// emitter's answer: a statement with empty text and no operands is the
 	// barrier, and one that writes an instruction is refused by name.
 	asm_stmt
+	// nested_function is a function defined inside another function, GNU's
+	// nested functions with lexical scoping. It is a statement of its own
+	// because it is written where a statement goes in the enclosing body and
+	// it is a definition, not an expression: the nested function's body runs
+	// when the nested function is called, not where it is written. The
+	// function itself travels in the statement's extra part.
+	nested_function
 }
 
 pub struct Stmt {
@@ -455,6 +474,12 @@ pub:
 	// block it was declared in ends. It is empty for a declaration that asked
 	// for none, which is every declaration but the one GNU attribute's.
 	cleanup string
+	// nested_fn is the function a nested_function statement defines, held by
+	// value because there is nothing else in the extra part for such a
+	// statement and it is one of the few statements that carries a whole
+	// function. It is none for every other statement, which is all of them but
+	// a `nested_function`.
+	nested_fn ?FnDecl
 }
 
 // The rest of this file is how a statement answers for what is in its extra
@@ -617,6 +642,17 @@ pub fn (stmt Stmt) asm_goto_labels() []string {
 		return extra.asm_goto_labels
 	}
 	return []
+}
+
+// nested_fn is the function a nested_function statement defines, or none for
+// every other statement. It is how a reader gets the definition out without
+// reaching through the extra pointer itself.
+@[inline]
+pub fn (stmt Stmt) nested_fn() ?FnDecl {
+	if extra := stmt.extra {
+		return extra.nested_fn
+	}
+	return none
 }
 
 // Expr is one of the expression shapes the stub understands. A call is parsed

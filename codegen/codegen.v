@@ -151,6 +151,20 @@ struct Slot {
 	// they are reserved for the declaration and never given out again.
 	vla_base int
 	vla_size int
+	// captured is set for an object of an enclosing function that a nested
+	// function reaches through the static chain: the offset is still the
+	// object's offset in the frame it was declared in, but the frame is the
+	// enclosing one, which is where the chain points rather than where rbp
+	// does. A captured slot is addressed from the chain pointer and a local one
+	// from rbp, which is the one thing every place that turns a slot into an
+	// address has to ask, so it asks this.
+	captured bool
+	// capture_owner is the symbol of the function whose frame a captured slot
+	// lives in. Only the frame of the function a nested function is written in
+	// is a register away: an object of a function further out would take a walk
+	// of the chain, which is not written, so a use of such an object is refused
+	// by name where it is used.
+	capture_owner string
 }
 
 // is_array says the slot holds an array, whether its size was written or is
@@ -232,6 +246,17 @@ struct Cleanup {
 struct LabelUse {
 	line int
 	col  int
+}
+
+// PendingNested is a nested function waiting to be emitted, with the scopes of
+// the block it was written in. The objects the enclosing function had declared
+// where the definition was read are the ones the nested function may reach, and
+// a copy of the scope stack is what carries them to the point the nested
+// function is emitted, after the enclosing body has been emitted and its own
+// scopes are gone.
+struct PendingNested {
+	decl   ast.FnDecl
+	scopes []map[string]Slot
 }
 
 // Emitter writes one translation unit into a Program. It owns statement and
@@ -388,6 +413,31 @@ mut:
 	// what names them without the emitter having to match scope identities
 	// across the two walks. It is empty for a function that declares none.
 	cleanup_label_counts map[string]int
+	// chain is the frame slot a nested function's static chain lives in: the
+	// frame pointer of the function it is written in, handed to it in the chain
+	// register at every call and kept in the slot for the body to read. It is
+	// none for a function defined at the top level, which has no enclosing
+	// frame to reach.
+	chain ?Slot
+	// function_symbol is the symbol of the function being emitted and
+	// enclosing_symbol that of the function it is written in, both as the
+	// reader mangled them and both empty at the top level. A nested function
+	// reaches the frame of the function it is written in through one chain
+	// link, so how the two symbols compare is what says whether a captured
+	// object is that one link away.
+	function_symbol  string
+	enclosing_symbol string
+	// nested_functions maps the symbol of a nested function to the symbol of
+	// the function it is written in. A call to a nested function has to put
+	// that function's frame pointer into the chain register, and this is where
+	// the call reads which frame that is.
+	nested_functions map[string]string
+	// pending_nested is the nested functions of the function being emitted,
+	// each with the scopes of the block it was written in. They are held back
+	// so the enclosing body is emitted first: a nested function is a function
+	// of its own, emitted after the function that writes it, and nothing in the
+	// enclosing body depends on it being anywhere in particular.
+	pending_nested []PendingNested
 	// frame_used is how many bytes of frame the function being emitted has
 	// claimed: its parameters, its locals and the slots an expression needs.
 	frame_used int
@@ -757,7 +807,20 @@ fn (mut e Emitter) build() ![]u8 {
 	// answers only when no prototype is in scope. A declaration with a parameter
 	// this back end cannot size is left out of the table, because its own
 	// emission is where that is reported.
+	// A nested function is a function of its own, so its name and the classes of
+	// its parameters are settled here with the top-level names, before a body is
+	// emitted: a call to a nested function binds to its prototype wherever in the
+	// file it is written, exactly as a call to a top-level name does. The nested
+	// functions are gathered from the bodies that write them, and the function
+	// that writes one emits it after its own body, so this list is for the tables
+	// alone; a definition reached only here is not emitted here.
+	mut declared_functions := e.unit.decls.clone()
 	for decl in e.unit.decls {
+		if decl.defined {
+			declared_functions << collect_nested(decl.body)
+		}
+	}
+	for decl in declared_functions {
 		e.returns[decl.name] = decl.ret
 		if decl.ret_type.kind == .complex_long_double {
 			e.complex_long_double_returns[decl.name] = true
@@ -787,6 +850,14 @@ fn (mut e Emitter) build() ![]u8 {
 			// define the same name. A prototype never reaches the symbol
 			// table, so only a definition is recorded here.
 			if decl.static_ {
+				e.program.internal[decl.name] = true
+			}
+			// A nested function is written inside a body, so its name is not a
+			// name any other translation unit can reach: the symbol is local
+			// the way a `static` definition's is, whether or not the enclosing
+			// function was. The dot in the symbol keeps it from colliding with
+			// any C name even so.
+			if decl.nested {
 				e.program.internal[decl.name] = true
 			}
 		}
@@ -1005,6 +1076,14 @@ fn (mut e Emitter) check_statements(stmts []ast.Stmt, depth int) !void {
 		e.check_statements(stmt.then_body, depth)!
 		e.check_statements(stmt.else_body, depth)!
 		e.check_statements(stmt.step, depth)!
+		// A nested function is a body of its own, and a constant in it is the
+		// emitter's to write just as one in the enclosing body is, so the walk
+		// reaches into it. Nothing else of the nested definition is checked
+		// here: its name and its parameter classes were settled with the
+		// top-level ones, and its statements are the ones this walks.
+		if nested := stmt.nested_fn() {
+			e.check_statements(nested.body, depth)!
+		}
 	}
 }
 
@@ -1077,12 +1156,158 @@ fn (mut e Emitter) emit_start() !void {
 	e.append(e.target.halt())
 }
 
+// collect_nested gathers the functions a body defines inside itself, in the
+// order they are written, walking the blocks a statement can hold a definition
+// in and the bodies of the functions it finds. A function written inside a
+// nested function is a function of the unit like any other, so it is gathered
+// here too: its name and the classes of its parameters have to be in the tables
+// before any body is emitted, or a call to it would be left to the linker.
+fn collect_nested(stmts []ast.Stmt) []ast.FnDecl {
+	mut out := []ast.FnDecl{}
+	for stmt in stmts {
+		if decl := stmt.nested_fn() {
+			out << decl
+			out << collect_nested(decl.body)
+		}
+		out << collect_nested(stmt.body)
+		out << collect_nested(stmt.then_body)
+		out << collect_nested(stmt.else_body)
+		out << collect_nested(stmt.step)
+	}
+	return out
+}
+
+// slot_base_register is the register a slot is addressed from: the frame pointer
+// of the function being emitted for an object that function declares itself, or
+// the static-chain pointer for an object of the function a nested function is
+// written in. Every place that turns a slot into an address asks this, so a
+// captured object is reached through the chain everywhere it is used and a local
+// object is reached through the frame everywhere, without either question being
+// asked twice.
+//
+// A nested function reaches the frame of the function it is written in through
+// one chain link: a call hands that frame pointer over in the chain register and
+// the entry stores it in the chain slot. An object of a function further out
+// would take a walk of the chain, which is not written, and neither is a captured
+// object this back end moves with an instruction that cannot take the chain
+// register as its base: an object of either floating type, a 128-bit integer, a
+// long double, a complex object, a variable-length array and an object of an
+// aggregate type. Both are refused here, by name, where the object is used,
+// rather than addressed wrongly.
+fn (mut e Emitter) slot_base_register(slot Slot, line int, col int) !backend.Register {
+	if !slot.captured {
+		return e.frame_pointer(line, col)
+	}
+	if slot.capture_owner != e.enclosing_symbol {
+		e.diagnostics << problem(line, col, 'unsupported: ${e.function_symbol} uses an object declared in ${slot.capture_owner}, and only an object of the function it is written in is reached through the static chain')
+		return error('an object captured from a function further out')
+	}
+	if slot.floating || slot.single || slot.wide || slot.long_double || slot.complex || slot.vla
+		|| (slot.bytes > 0 && slot.count == 0) {
+		e.diagnostics << problem(line, col, 'unsupported: ${e.function_symbol} uses an object of the enclosing function whose declared type this back end does not reach through the static chain; only an integer or pointer scalar, or an array of them, is')
+		return error('a captured object of a type the chain cannot carry')
+	}
+	chain := e.chain or {
+		e.diagnostics << problem(line, col, 'internal: ${e.function_symbol} reaches an object of its enclosing function and has no static chain')
+		return error('no static chain')
+	}
+	register := e.static_chain(line, col)!
+	base := e.frame_pointer(line, col)!
+	e.append(e.target.load_slot(base, i32(chain.offset), register, e.target.word_size)!)
+	return register
+}
+
+// load_call_chain puts the frame pointer of the function a nested function is
+// written in into the chain register, where the callee reads it on entry. A
+// nested function of this function is handed this function's frame; a nested
+// function of the function this one is written in is handed the frame this one
+// was itself handed, so two functions written side by side in one body see the
+// same enclosing objects.
+fn (mut e Emitter) load_call_chain(owner string, line int, col int) !void {
+	register := e.static_chain(line, col)!
+	if owner == e.function_symbol {
+		base := e.frame_pointer(line, col)!
+		e.append(e.target.move_register64(register, base)!)
+		return
+	}
+	if owner == e.enclosing_symbol {
+		chain := e.chain or {
+			e.diagnostics << problem(line, col, 'internal: ${e.function_symbol} calls a nested function of its enclosing function and has no static chain')
+			return error('no static chain')
+		}
+		base := e.frame_pointer(line, col)!
+		e.append(e.target.load_slot(base, i32(chain.offset), register, e.target.word_size)!)
+		return
+	}
+	e.diagnostics << problem(line, col, 'unsupported: ${e.function_symbol} calls a nested function written in ${owner}, and only a nested function of this function or of the function it is written in is called')
+	return error('a nested function out of reach')
+}
+
+// record_nested keeps a nested function until the function that writes it is
+// done, with the scopes of the block the definition was read in. The scopes are
+// copied and every object in them is marked captured, because the frame those
+// offsets belong to is the enclosing one: the nested function's own frame does
+// not hold them, so each is reached from the chain.
+//
+// An object already marked captured came from a function further out and keeps
+// its owner, which is one link more than the nested function can walk, so a use
+// of it is refused where it is used.
+fn (mut e Emitter) record_nested(decl ast.FnDecl) {
+	mut scopes := []map[string]Slot{cap: e.scopes.len}
+	for scope in e.scopes {
+		mut marked := map[string]Slot{}
+		for name, slot in scope {
+			captured := if slot.captured {
+				slot
+			} else {
+				Slot{
+					...slot
+					captured:      true
+					capture_owner: e.function_symbol
+				}
+			}
+			marked[name] = captured
+		}
+		scopes << marked
+	}
+	e.pending_nested << PendingNested{
+		decl:   decl
+		scopes: scopes
+	}
+}
+
+// emit_nested emits a nested function after the function that writes it. The
+// scopes the definition was read in are the scopes the nested function's body is
+// emitted with, which is what lets a name of the enclosing function resolve
+// inside it, and they are put away afterwards: the enclosing function is done
+// with its scopes, and the next function starts with none.
+fn (mut e Emitter) emit_nested(pending PendingNested) !void {
+	e.scopes = pending.scopes
+	e.emit_function(pending.decl)!
+	e.scopes = []
+}
+
 // emit_function writes one function: its frame, its parameters into their slots,
 // its statements, and a return of zero when the body can fall off the end
 // without a return of its own. C says the entry function does that, and every
 // function here needs it, because falling through would otherwise hand the
 // caller whatever the last call left in the result register.
 fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
+	// Which function is being emitted and which function wrote it are what a
+	// captured object is answered against: an object is reached through the
+	// chain when it belongs to the function this one is written in. The nested
+	// functions of this body are read here too, so a call inside the body finds
+	// the frame pointer it has to hand over, and the chain a nested function
+	// keeps is emptied: a function declared at the top level has no enclosing
+	// frame and one declared in a body gets its own slot below.
+	e.function_symbol = decl.name
+	e.enclosing_symbol = decl.owner
+	e.chain = none
+	e.nested_functions = map[string]string{}
+	for nested in collect_nested(decl.body) {
+		e.nested_functions[nested.name] = nested.owner
+	}
+	e.pending_nested = []
 	// How the value this function returns is handed back is the target's answer for
 	// the type the declaration resolved to. It is asked once here, where the frame
 	// is laid out, rather than read off the declaration.
@@ -1122,6 +1347,13 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	if e.hidden_bytes > 0 {
 		e.hidden = e.reserve(e.hidden_bytes)
 	}
+	// A nested function is handed the frame pointer of the function it is
+	// written in, and keeps it: the chain slot is where the body of a captured
+	// object is read from, so it is reserved before the parameters, which may
+	// themselves be stored beside it.
+	if decl.nested {
+		e.chain = e.reserve(e.target.word_size)
+	}
 	// The prologue is what a call to this function jumps to, so the label goes
 	// in front of it.
 	e.program.labels[decl.name] = e.program.text.len
@@ -1133,6 +1365,16 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// that was written after it.
 	frame_at := e.program.text.len + e.target.frame_immediate_offset()
 	e.append(e.target.frame_reserve(0))
+	// The chain register is only a value a call put there, and the call that
+	// follows the entry reads it before anything else does: a nested function
+	// stores it in its chain slot on entry, so every object of the function it
+	// is written in can be read from it afterwards. The store is after the
+	// frame is open because the slot is at an offset from rbp.
+	if slot := e.chain {
+		register := e.static_chain(decl.line, decl.col)!
+		base := e.frame_pointer(decl.line, decl.col)!
+		e.append(e.target.store_slot(base, i32(slot.offset), register, e.target.word_size)!)
+	}
 	// A goto that leaves a block claiming a variable-length array's storage
 	// restores the stack pointer from the scope it lands inside, and the pre-pass
 	// records how many such scopes enclose each named label. A function that
@@ -1457,6 +1699,17 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	e.goto_labels = map[string]string{}
 	e.goto_placed = map[string]bool{}
 	e.goto_used = map[string]LabelUse{}
+	// A nested function is a function of its own and is emitted here, after the
+	// function that writes it: its body may call that function back and it reads
+	// that function's frame through the chain, so the enclosing body was emitted
+	// first and its frame is the one the chain names. The scopes are set to the
+	// ones the definition was read in, and each nested function puts them away
+	// when it is done.
+	pending := e.pending_nested
+	e.pending_nested = []
+	for nested in pending {
+		e.emit_nested(nested)!
+	}
 }
 
 // emit_statements writes a list of statements in order and answers whether any
@@ -1525,6 +1778,14 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 			}
 			.asm_stmt {
 				e.emit_asm(stmt)!
+			}
+			.nested_function {
+				// A function defined here is not run here: its body is emitted
+				// after the function that writes it, and what this place does is
+				// remember the definition with the scopes it was written in.
+				if decl := stmt.nested_fn() {
+					e.record_nested(decl)
+				}
 			}
 		}
 	}
@@ -2357,7 +2618,7 @@ fn (mut e Emitter) assign_double_at(stmt ast.Stmt, address Slot, expr ast.Expr, 
 fn (mut e Emitter) assign_object_local(stmt ast.Stmt, target Slot, depth int) !void {
 	expr_value := stmt.expr or { return error('assignment without a value') }
 	register := e.accumulator(stmt.line, stmt.col)!
-	frame := e.frame_pointer(stmt.line, stmt.col)!
+	frame := e.slot_base_register(target, stmt.line, stmt.col)!
 	e.append(e.target.address_of_slot(frame, target.offset, register))
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
@@ -2476,7 +2737,7 @@ fn (mut e Emitter) copy_frame_object(source Slot, destination Slot, width int, l
 		} else {
 			1
 		}
-		base := e.frame_pointer(line, col)!
+		base := e.slot_base_register(source, line, col)!
 		value := e.scratch(line, col)!
 		e.append(e.target.load_slot(base, i32(source.offset + done), value, chunk)!)
 		destination_register := e.accumulator(line, col)!
@@ -2749,7 +3010,7 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 				return error('not an array')
 			}
 			stride = slot.width
-			frame := e.frame_pointer(line, col)!
+			frame := e.slot_base_register(slot, line, col)!
 			e.append(e.target.address_of_slot(frame, slot.offset, base))
 		} else if object := e.global_of(name) {
 			if object.count == 0 {
@@ -2823,7 +3084,7 @@ fn (mut e Emitter) address_of_member(name string, index ?ast.Expr, offset int, t
 		}
 		return
 	}
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.address_of_slot(base, slot.offset + offset, register))
 }
 
@@ -3164,7 +3425,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	}
 	e.emit_subscript_index(subscript, depth)!
 	register := e.accumulator(stmt.line, stmt.col)!
-	mut base := e.frame_pointer(stmt.line, stmt.col)!
+	mut base := e.slot_base_register(slot, stmt.line, stmt.col)!
 	mut offset := slot.offset
 	if slot.vla {
 		// The array is not in the frame but at an address the frame holds, so
@@ -4072,7 +4333,7 @@ fn (mut e Emitter) declare_vla(name string, elem int, line int, col int) !Slot {
 // the object lives in was not known before that: it is what the stack pointer
 // became after the declaration subtracted the object's size from it.
 fn (mut e Emitter) load_vla_base(slot Slot, register backend.Register, line int, col int) !void {
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.load_slot(base, i32(slot.vla_base), register, e.target.word_size)!)
 }
 
@@ -4777,6 +5038,17 @@ fn (mut e Emitter) frame_pointer(line int, col int) !backend.Register {
 	}
 }
 
+// static_chain is the register a nested function is handed the frame pointer of
+// the function it is written in through, and the one a call to a nested function
+// puts it in. It is asked here rather than at each use so that the machine's
+// answer and the diagnostic for a machine that has none are in one place.
+fn (mut e Emitter) static_chain(line int, col int) !backend.Register {
+	return e.target.static_chain() or {
+		e.diagnostics << problem(line, col, "${e.target.name}: the machine's table has no register for the static chain, and a nested function has no enclosing frame to reach without one")
+		return error('no static chain register')
+	}
+}
+
 // accumulator is the register an expression leaves its value in, which is the
 // register a function leaves its result in as well: one convention and not two,
 // so a value computed by a call and a value a function returns arrive in the same
@@ -4816,7 +5088,7 @@ fn (mut e Emitter) store_register(slot Slot, register backend.Register, line int
 		e.append(e.target.set_condition(backend.Condition.not_equal, register)!)
 		e.append(e.target.widen_byte(register)!)
 	}
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.store_slot(base, slot.offset, register, slot.width)!)
 }
 
@@ -4831,7 +5103,7 @@ fn (mut e Emitter) store_accumulator(slot Slot, line int, col int) !void {
 // whose type is unsigned, with zero above it.
 fn (mut e Emitter) load_accumulator(slot Slot, line int, col int) !void {
 	register := e.accumulator(line, col)!
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	if slot.unsigned && slot.width < 4 {
 		e.append(e.target.load_slot_unsigned(base, slot.offset, register, slot.width)!)
 		return
@@ -4845,7 +5117,7 @@ fn (mut e Emitter) load_accumulator(slot Slot, line int, col int) !void {
 // what widens it: four bytes from a one-byte slot would take the padding with
 // them.
 fn (mut e Emitter) load_argument(slot Slot, register backend.Register, width int, line int, col int) !void {
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	if slot.width < 4 {
 		if slot.unsigned {
 			e.append(e.target.load_slot_unsigned(base, slot.offset, register, slot.width)!)
@@ -4878,7 +5150,7 @@ fn (mut e Emitter) float_scratch(line int, col int) !backend.Register {
 
 // store_double_register writes one floating-point register into a slot.
 fn (mut e Emitter) store_double_register(slot Slot, register backend.Register, line int, col int) !void {
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.store_double_slot(base, slot.offset, register)!)
 }
 
@@ -4893,7 +5165,7 @@ fn (mut e Emitter) store_double_accumulator(slot Slot, line int, col int) !void 
 
 fn (mut e Emitter) load_double_accumulator(slot Slot, line int, col int) !void {
 	register := e.float_accumulator(line, col)!
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.load_double_slot(base, slot.offset, register)!)
 }
 
@@ -4901,7 +5173,7 @@ fn (mut e Emitter) load_double_accumulator(slot Slot, line int, col int) !void {
 // that carries its position. It mirrors load_argument, and a double is always
 // eight bytes wide, so there is no promotion to take into account here.
 fn (mut e Emitter) load_double_argument(slot Slot, register backend.Register, line int, col int) !void {
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.load_double_slot(base, slot.offset, register)!)
 }
 
@@ -4910,7 +5182,7 @@ fn (mut e Emitter) load_double_argument(slot Slot, register backend.Register, li
 // instruction is a different one at this width, and every caller of one of these
 // has already decided which width the value is.
 fn (mut e Emitter) store_single_register(slot Slot, register backend.Register, line int, col int) !void {
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.store_float_slot(base, slot.offset, register)!)
 }
 
@@ -4921,12 +5193,12 @@ fn (mut e Emitter) store_single_accumulator(slot Slot, line int, col int) !void 
 
 fn (mut e Emitter) load_single_accumulator(slot Slot, line int, col int) !void {
 	register := e.float_accumulator(line, col)!
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.load_float_slot(base, slot.offset, register)!)
 }
 
 fn (mut e Emitter) load_single_argument(slot Slot, register backend.Register, line int, col int) !void {
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.load_float_slot(base, slot.offset, register)!)
 }
 
@@ -5413,7 +5685,7 @@ fn (e Emitter) wide_value(expr ast.Expr) bool {
 fn (mut e Emitter) store_wide(slot Slot, expr ast.Expr, line int, col int, depth int) !void {
 	// A slot's two words are written through its address, which is the same store
 	// a member's is: the frame's address plus the slot's offset.
-	frame := e.frame_pointer(line, col)!
+	frame := e.slot_base_register(slot, line, col)!
 	register := e.accumulator(line, col)!
 	e.append(e.target.address_of_slot(frame, slot.offset, register))
 	address := e.value_slot(depth)
@@ -5791,7 +6063,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				// an expression it is what a pointer is, which is what makes
 				// `puts(buf)` and `strlen(buf)` work with an array.
 				register := e.accumulator(expr.line, expr.col)!
-				base := e.frame_pointer(expr.line, expr.col)!
+				base := e.slot_base_register(slot, expr.line, expr.col)!
 				e.append(e.target.address_of_slot(base, slot.offset, register))
 				return
 			}
@@ -6011,7 +6283,7 @@ fn (mut e Emitter) emit_index(expr ast.Index, depth int) !void {
 fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, local bool, slot Slot) !void {
 	if local {
 		e.emit_subscript_index(expr.index, depth + 1)!
-		base := e.frame_pointer(expr.line, expr.col)!
+		base := e.slot_base_register(slot, expr.line, expr.col)!
 		register := e.accumulator(expr.line, expr.col)!
 		e.element_address(base, register, slot.width, slot.offset, slot.wide || slot.long_double,
 			expr.typ.is_array(), name, expr.line, expr.col)!
@@ -6204,7 +6476,7 @@ fn (mut e Emitter) emit_base_address(base ast.Expr, depth int) !void {
 			}
 			if slot.count > 0 {
 				register := e.accumulator(base.line, base.col)!
-				frame := e.frame_pointer(base.line, base.col)!
+				frame := e.slot_base_register(slot, base.line, base.col)!
 				e.append(e.target.address_of_slot(frame, slot.offset, register))
 				return
 			}
@@ -6246,7 +6518,7 @@ fn (mut e Emitter) emit_address(unary ast.Unary, depth int) !void {
 				e.load_vla_base(slot, register, unary.line, unary.col)!
 				return
 			}
-			base := e.frame_pointer(unary.line, unary.col)!
+			base := e.slot_base_register(slot, unary.line, unary.col)!
 			e.append(e.target.address_of_slot(base, slot.offset, register))
 			return
 		}
@@ -6797,7 +7069,7 @@ fn (mut e Emitter) inc_dec_address(operand ast.Expr, depth int) !void {
 	if operand is ast.Ident {
 		if slot := e.lookup(operand.name) {
 			register := e.accumulator(operand.line, operand.col)!
-			frame := e.frame_pointer(operand.line, operand.col)!
+			frame := e.slot_base_register(slot, operand.line, operand.col)!
 			e.append(e.target.address_of_slot(frame, slot.offset, register))
 			return
 		}
@@ -7312,13 +7584,13 @@ fn (mut e Emitter) wide_working_slot(depth int) WideWorking {
 // wide_load_word and wide_store_word move one word of a pair between a slot and a
 // register, which is what a routine that shifts a pair a bit at a time is made of.
 fn (mut e Emitter) wide_load_word(slot Slot, at int, reg backend.Register, line int, col int) !void {
-	frame := e.frame_pointer(line, col)!
+	frame := e.slot_base_register(slot, line, col)!
 	word := e.target.word_size
 	e.append(e.target.load_slot(frame, slot.offset + at * word, reg, word)!)
 }
 
 fn (mut e Emitter) wide_store_word(slot Slot, at int, reg backend.Register, line int, col int) !void {
-	frame := e.frame_pointer(line, col)!
+	frame := e.slot_base_register(slot, line, col)!
 	word := e.target.word_size
 	e.append(e.target.store_slot(frame, slot.offset + at * word, reg, word)!)
 }
@@ -7359,7 +7631,7 @@ fn (mut e Emitter) wide_pair_slot(mut pairs []Slot, depth int) Slot {
 // and the high word eight bytes above it, which is the order the bytes of a
 // 128-bit object are in.
 fn (mut e Emitter) store_pair(slot Slot, line int, col int) !void {
-	frame := e.frame_pointer(line, col)!
+	frame := e.slot_base_register(slot, line, col)!
 	low := e.accumulator(line, col)!
 	high := e.remainder(line, col)!
 	word := e.target.word_size
@@ -7369,7 +7641,7 @@ fn (mut e Emitter) store_pair(slot Slot, line int, col int) !void {
 
 // load_pair reads a pair back out of a slot, and is the other half of store_pair.
 fn (mut e Emitter) load_pair(slot Slot, line int, col int) !void {
-	frame := e.frame_pointer(line, col)!
+	frame := e.slot_base_register(slot, line, col)!
 	low := e.accumulator(line, col)!
 	high := e.remainder(line, col)!
 	word := e.target.word_size
@@ -7423,7 +7695,7 @@ fn (mut e Emitter) widen_word_pair(unsigned bool, width int, line int, col int) 
 // the bytes of a 128-bit object are in.
 fn (mut e Emitter) widen_into_pair(slot Slot, unsigned bool, width int, line int, col int) !void {
 	e.widen_word_pair(unsigned, width, line, col)!
-	frame := e.frame_pointer(line, col)!
+	frame := e.slot_base_register(slot, line, col)!
 	low := e.accumulator(line, col)!
 	high := e.remainder(line, col)!
 	word := e.target.word_size
@@ -10574,6 +10846,15 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		return e.store_extended_result(call, call.line, call.col)
 	}
 	if call.name in e.program.defined {
+		// A call to a nested function hands it the frame pointer of the function
+		// it is written in, in the chain register, before the jump: that is what
+		// makes an object of the enclosing function readable inside the nested
+		// body. It goes in after the arguments are loaded, because the chain
+		// register carries no argument of this convention, so no argument that
+		// was just put in a register is disturbed.
+		if owner := e.nested_functions[call.name] {
+			e.load_call_chain(owner, call.line, call.col)!
+		}
 		e.reference(e.target.call_near(0), .call_local, call.name, '')
 		e.release_call_stack(entry_pushed)
 		return e.store_extended_result(call, call.line, call.col)
@@ -12269,15 +12550,16 @@ fn (mut e Emitter) emit_real_into_complex(dest Slot, destination types.Type, exp
 // scratch register: sixteen bytes is two moves and eight is one, and neither
 // address is held in a register because the frame pointer names both.
 fn (mut e Emitter) copy_complex_frame(source Slot, destination Slot, width int, line int, col int) !void {
-	if source.offset == destination.offset {
+	if source.offset == destination.offset && !source.captured && !destination.captured {
 		return
 	}
-	base := e.frame_pointer(line, col)!
+	source_base := e.slot_base_register(source, line, col)!
+	destination_base := e.slot_base_register(destination, line, col)!
 	register := e.scratch(line, col)!
 	mut done := 0
 	for done < width {
-		e.append(e.target.load_slot(base, i32(source.offset + done), register, 8)!)
-		e.append(e.target.store_slot(base, i32(destination.offset + done), register, 8)!)
+		e.append(e.target.load_slot(source_base, i32(source.offset + done), register, 8)!)
+		e.append(e.target.store_slot(destination_base, i32(destination.offset + done), register, 8)!)
 		done += 8
 	}
 }
@@ -12297,7 +12579,7 @@ fn (mut e Emitter) copy_complex_into(address Slot, source Slot, kind types.Kind,
 	single := kind == .complex_float
 	step := complex_component_width(complex_type_of(kind))
 	bytes := complex_object_bytes(kind)
-	frame := e.frame_pointer(line, col)!
+	frame := e.slot_base_register(source, line, col)!
 	base := e.scratch(line, col)!
 	e.load_argument(address, base, e.target.word_size, line, col)!
 	mut offset := 0

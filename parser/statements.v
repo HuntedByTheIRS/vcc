@@ -1772,8 +1772,15 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			return stmts
 		}
 		if d.is_function() {
-			p.error_at(d.name_at, 'unsupported: a function declaration inside a body is not implemented')
-			p.skip_declaration()
+			// A function defined inside a body is GNU's nested function,
+			// and it is a definition this statement carries: the function
+			// itself is code of its own, emitted as a function with a frame
+			// and reached through the static chain. What is read here is the
+			// definition, and the name it puts in scope is the name the rest
+			// of the body calls.
+			if nested := p.parse_nested_function(spec, d) {
+				stmts << nested
+			}
 			return stmts
 		}
 		if spec.auto_deduced && (d.pointer_count() > 0 || d.is_array()) {
@@ -2658,6 +2665,118 @@ fn store_a_brace_write(name string, at tokenize.Token, write BraceWrite, value a
 		line:   at.line
 		col:    at.col
 	}
+}
+
+// parse_nested_function reads a function defined inside a body, which is GNU's
+// nested function: a function with a frame and a body of its own, written where
+// a statement goes and visible to the rest of the block it is written in. It is
+// the construct GNU 6.12.4 calls lexical scoping, and the enclosing function's
+// objects are reachable inside it.
+//
+// The name it puts in scope is not the name the file wrote. A nested function is
+// emitted under its enclosing function's symbol and its own joined by a dot,
+// which no C identifier can spell, so two nested functions in two functions, or
+// a nested function and a top-level one, cannot land on one symbol. The written
+// name is what the rest of the body calls, and a call is written against the
+// symbol through `nested_names`.
+//
+// The body is read with the enclosing function's scopes still visible, which is
+// what makes an enclosing object typed inside the nested function. Whether the
+// object is carried through the static chain is the emitter's decision, made
+// where the nested function uses it.
+fn (mut p Parser) parse_nested_function(spec DeclSpec, d Declarator) ?ast.Stmt {
+	if d.name.len == 0 {
+		p.error_at(d.name_at, 'unsupported: expected a name in a declaration, found ${describe(p.peek())}')
+		p.skip_declaration()
+		return none
+	}
+	// A function is written inside a body only when there is a function whose
+	// body it is, so an empty symbol means this definition is not one.
+	parent := p.function_symbol
+	if parent.len == 0 {
+		p.error_at(d.name_at, 'unsupported: a function defined inside another function is written in a body, and this declaration is not in one')
+		p.skip_declaration()
+		return none
+	}
+	if spec.is_typedef {
+		p.error_at(d.name_at, 'unsupported: a typedef names a type, so it cannot have a function body')
+		p.skip_declaration()
+		return none
+	}
+	if d.name in p.nested_names {
+		p.error_at(d.name_at, 'unsupported: a second nested function named ${d.name} in one function, and this compiler keeps one nested name for each function')
+		p.skip_declaration()
+		return none
+	}
+	if !p.at_punct('{') {
+		// A nested function that is only declared names a function with no body
+		// in this translation unit. The tree defines what it emits, and a
+		// declaration of a nested function that nothing defines is a call the
+		// link would have to answer for out of a symbol this compiler never
+		// writes, so it is refused by name rather than half-read.
+		p.error_at(d.name_at, 'unsupported: a nested function is implemented as a definition, and this declaration writes no body')
+		p.skip_declaration()
+		return none
+	}
+	mangled := p.nested_symbol(parent, d.name)
+	p.nested_names[d.name] = mangled
+	at := d.name_at
+	p.check_definition(spec, d)
+	fn_type := p.declared_type(spec.clause, d)
+	p.declare_name(mangled, fn_type, at, true)
+	// A parameter's scope is the body, so the parameters are declared in a scope
+	// around it, which is the same shape a top-level definition's parameters are
+	// declared in.
+	p.scopes.enter()
+	p.declare_parameters(d.function_params())
+	previous_function := p.current_function
+	previous_symbol := p.function_symbol
+	previous_enclosing := p.enclosing_symbol
+	p.current_function = d.name
+	p.function_symbol = mangled
+	p.enclosing_symbol = parent
+	body := p.parse_block()
+	p.current_function = previous_function
+	p.function_symbol = previous_symbol
+	p.enclosing_symbol = previous_enclosing
+	p.scopes.leave()
+	statements := body or { return none }
+	decl := ast.FnDecl{
+		name:     mangled
+		ret:      p.spelling_of(spec, d.pointer_count())
+		ret_type: p.return_type(spec.clause, d)
+		resolved: fn_type
+		params:   d.function_params()
+		defined:  true
+		nested:   true
+		owner:    parent
+		body:     statements
+		line:     at.line
+		col:      at.col
+	}
+	return ast.Stmt{
+		kind:  .nested_function
+		extra: &ast.StmtExtra{
+			nested_fn: decl
+		}
+		line:  at.line
+		col:   at.col
+	}
+}
+
+// nested_symbol is the symbol a nested function is emitted under: its enclosing
+// function's symbol and its own written name joined by a dot. A name the file
+// repeats gets a number appended, so two nested functions may share a written
+// name in different blocks without landing on one symbol.
+fn (mut p Parser) nested_symbol(parent string, name string) string {
+	base := '${parent}.${name}'
+	mut symbol := base
+	for p.nested_used[symbol] {
+		p.nested_serial++
+		symbol = '${base}.${p.nested_serial}'
+	}
+	p.nested_used[symbol] = true
+	return symbol
 }
 
 // parse_return_statement reads `return;` or `return expr;`.

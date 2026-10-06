@@ -1384,10 +1384,16 @@ pub fn halt() []u8 {
 // Three registers have a job beyond being general storage: the frame pointer is
 // where a local is found, the scratch register holds the right-hand value of an
 // operation while the left-hand one waits in the result register, and the
-// register above the result register is what a division leaves over.
+// register above the result register is what a division leaves over. A fourth
+// carries the static chain: a nested function is handed the frame pointer of the
+// function it is written in, and this is the register the convention leaves for
+// it, so the callers that set up a nested call and the callee that reads its
+// enclosing frame agree without naming a general register either side might be
+// using for something else.
 pub const frame_pointer = 'rbp'
 pub const scratch_reg = 'ecx'
 pub const remainder_reg = 'edx'
+pub const static_chain_reg = 'r10'
 
 // load_slot and store_slot move a value between a register and the frame. The
 // displacement is written in the wide form always: the frame is still growing
@@ -1436,6 +1442,15 @@ fn slot_move(base Register, disp i32, operand Register, width int, store bool, s
 	if base.code >= 8 {
 		rex |= 0x01 // REX.B: the base is one of those too
 	}
+	// The base register is named by the low three bits of the modrm byte, which
+	// is where rm sits in a `[base + disp32]` operand. The form written here is
+	// mod 10, so a full displacement follows and rm 101 names rbp rather than
+	// the no-base form the same bits mean at mod 00. A base of rsp is the one
+	// this encoding cannot write down: rm 100 asks for a SIB byte, which is not
+	// written, so it is refused rather than encoded as something else.
+	if base.code & 0x07 == 4 {
+		return error('${name}: ${base.name} cannot be the base of a frame access, which needs the index form this instruction does not write')
+	}
 	// A two-byte store carries the operand-size prefix, which comes before the
 	// REX byte. A two-byte load that widens does not: the instruction names a
 	// four-byte destination and a two-byte source on its own.
@@ -1467,7 +1482,7 @@ fn slot_move(base Register, disp i32, operand Register, width int, store bool, s
 	} else {
 		out << u8(0x8b) // the move, in one direction or the other
 	}
-	out << u8(0x80 | ((operand.code & 0x07) << 3) | 0x05) // mod 10, rm 101: [base + disp32]
+	out << u8(0x80 | ((operand.code & 0x07) << 3) | (base.code & 0x07)) // mod 10: [base + disp32]
 	value := u32(disp)
 	out << u8(value & 0xff)
 	out << u8((value >> 8) & 0xff)
@@ -1490,7 +1505,7 @@ pub fn address_of_slot(base Register, disp i32, dst Register) []u8 {
 	})
 	out << rex
 	out << u8(0x8d) // lea
-	out << u8(0x80 | ((dst.code & 0x07) << 3) | 0x05) // mod 10, rm 101: [base + disp32]
+	out << u8(0x80 | ((dst.code & 0x07) << 3) | (base.code & 0x07)) // mod 10: [base + disp32]
 	value := u32(disp)
 	out << u8(value & 0xff)
 	out << u8((value >> 8) & 0xff)

@@ -37,12 +37,17 @@ pub:
 	// the scratch and remainder registers, the register a shift count is read
 	// from, and the numbers the machine's relocations and frame instruction
 	// carry.
-	syscall_number_reg     string
-	float_return_reg       string
-	float_scratch_reg      string
-	frame_pointer_reg      string
-	scratch_reg            string
-	remainder_reg          string
+	syscall_number_reg string
+	float_return_reg   string
+	float_scratch_reg  string
+	frame_pointer_reg  string
+	scratch_reg        string
+	remainder_reg      string
+	// static_chain_reg is the register a nested function reaches the frame of the
+	// function it is written in through. A call to a nested function puts the
+	// enclosing frame pointer there and the nested function reads it on entry, so
+	// the register is a fact about the convention and lives with the machine.
+	static_chain_reg       string
 	shift_count_code       u8
 	relocation_call        u32
 	relocation_pc_relative u32
@@ -122,6 +127,7 @@ fn x86_64_linux() Target {
 		frame_pointer_reg:          x86_64.frame_pointer
 		scratch_reg:                x86_64.scratch_reg
 		remainder_reg:              x86_64.remainder_reg
+		static_chain_reg:           x86_64.static_chain_reg
 		shift_count_code:           x86_64.shift_count_code
 		relocation_call:            x86_64.relocation_call
 		relocation_pc_relative:     x86_64.relocation_pc_relative
@@ -515,6 +521,14 @@ pub fn (t &Target) carries_shift_count(handle Register) bool {
 // evenly.
 pub fn (t &Target) frame_pointer() ?Register {
 	return t.reg(t.frame_pointer_reg)
+}
+
+// static_chain is the register a nested function is handed the frame pointer of
+// the function it is written in through. A call sets it and the nested function
+// reads it, and neither side names a general register of its own: which register
+// that is is the machine's answer.
+pub fn (t &Target) static_chain() ?Register {
+	return t.reg(t.static_chain_reg)
 }
 
 pub fn (t &Target) scratch() ?Register {

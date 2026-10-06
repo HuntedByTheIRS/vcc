@@ -5299,3 +5299,130 @@ fn test_a_start_only_unit_emits_the_stub_and_no_declaration() {
 	assert stub.program.fixups[0].kind.str() == 'call_local'
 	assert stub.program.fixups[1].kind.str() == 'call_import'
 }
+
+// A function defined inside a body is GNU's nested function, and the artifact is
+// what these check: the image is written and run, and the exit status is what the
+// program's own checks became. The enclosing function's objects are reached
+// through the static chain, which is the frame pointer of the function the nested
+// function is written in, handed over in a register at every call.
+fn test_a_function_defined_in_a_body_is_emitted_and_called() {
+	// No enclosing object is used, so the call sets the chain and the nested
+	// function reads nothing through it.
+	emitted := emit(translation_unit('int main() { int f(int x) { return x + 1; } return f(6); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
+}
+
+fn test_a_nested_function_reads_an_object_of_the_function_it_is_written_in() {
+	// The object is reached by reference, so a write of it after the definition
+	// is what the nested function sees: gcc 16.2.1 returns 11 for this program.
+	emitted := emit(translation_unit('int main() { int n = 5; int f(int x) { return x + n; } n = 10; return f(1); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 11
+}
+
+fn test_a_nested_function_writes_an_object_of_the_function_it_is_written_in() {
+	emitted := emit(translation_unit('int main() { int n = 0; void inc(void) { n = n + 1; } inc(); inc(); return n; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 2
+}
+
+fn test_a_nested_function_reads_an_array_of_the_function_it_is_written_in() {
+	emitted := emit(translation_unit('int main() { int a[2]; a[0] = 3; a[1] = 4; int sum(void) { return a[0] + a[1]; } return sum(); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
+}
+
+fn test_two_functions_written_side_by_side_in_one_body_share_the_enclosing_frame() {
+	// The second nested function calls the first, and the chain it hands over is
+	// the one it was itself handed, so both see the same enclosing frame.
+	emitted := emit(translation_unit('int main() { int n = 3; int f(void) { return n; } int g(void) { return f() + 1; } return g(); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
+}
+
+fn test_a_nested_function_calls_a_function_outside_its_body() {
+	emitted := emit(translation_unit('int twice(int x) { return x + x; } int main() { int n = 3; int f(void) { return twice(n); } return f(); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 6
+}
+
+fn test_a_nested_function_written_in_a_block_is_emitted_with_that_block_s_scopes() {
+	emitted := emit(translation_unit('int main() { { int b = 10; int get(void) { return b; } if (get() != 10) return 1; } return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+fn test_a_nested_function_defined_and_never_called_is_emitted_and_does_nothing() {
+	emitted := emit(translation_unit('int main() { int unused(int z) { return z + 1; } return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+fn test_a_nested_function_inside_a_nested_function_is_emitted() {
+	// The inner function captures the middle function's object, which is one
+	// chain link away from it, so it is reached and the program answers.
+	emitted := emit(translation_unit('int main() { int f(void) { int m = 4; int g(void) { return m + 1; } return g(); } return f(); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 5
+}
+
+fn test_an_object_two_functions_out_is_refused_by_name() {
+	// The chain a nested function is handed reaches the frame of the function it
+	// is written in and no further. An object two functions out would take a walk
+	// of the chain, which is not written, so the use is refused by name rather
+	// than read from the wrong frame.
+	emitted := emit(translation_unit('int main() { int n = 1; int f(void) { int g(void) { return n; } return g(); } return f(); }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('reached through the static chain')
+}
+
+fn test_an_object_of_a_type_the_chain_cannot_carry_is_refused_by_name() {
+	// An object of either floating type is moved with an instruction that cannot
+	// take the chain register as its base, so a capture of one is refused by name
+	// rather than addressed from the wrong frame.
+	emitted := emit(translation_unit('int main() { double d = 1.5; int f(void) { return (int)d; } return f(); }'),
+		Options{})
+	assert emitted.diagnostics.len == 1
+	assert emitted.diagnostics[0].msg.contains('static chain')
+}
+
+fn test_a_nested_function_takes_the_address_of_an_object_it_is_written_beside() {
+	// The address of an enclosing object is the chain plus the object's offset,
+	// so a read through it reads the enclosing frame and the step below writes
+	// it.
+	emitted := emit(translation_unit('int main() { int n = 4; int get(void) { int *p = &n; return *p; } void bump(void) { n++; } if (get() != 4) return 1; bump(); return n; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 5
+}
+
+fn test_a_nested_function_reads_and_writes_through_a_captured_pointer() {
+	// The pointer is an enclosing scalar, so the chain reaches it; what it points
+	// at is the enclosing frame too, and the member is read and written through
+	// the value.
+	emitted := emit(translation_unit('struct P { int x; int y; }; int main() { struct P p; p.x = 3; p.y = 4; struct P *q = &p; int via(void) { return q->x + q->y; } int set(void) { q->x = 9; return 0; } if (via() != 7) return 1; set(); return p.x; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 9
+}
+
+fn test_a_name_the_nested_function_declares_itself_is_not_a_capture() {
+	// The parameter of the nested function is the one the body sees, and the
+	// enclosing object of the same name is still reachable by a function that
+	// does not shadow it.
+	emitted := emit(translation_unit('int main() { int n = 100; int shadow(int n) { return n + 1; } int use(void) { return n; } if (shadow(1) != 2) return 1; return use(); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 100
+}
