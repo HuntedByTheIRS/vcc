@@ -537,7 +537,34 @@ fn (mut e Emitter) emit_extended_negate(unary ast.Unary, depth int) !void {
 // the branch machinery carries an address the same way it carries a value in a
 // register: only the arm the condition selects is evaluated, and its address is
 // what the conditional is worth.
+//
+// The GNU spelling with the middle operand left out, `c ?: b`, has the condition
+// as its middle operand, so the condition's own sixteen bytes are the value the
+// taken arm is worth. They are materialized once into a temporary, which is what
+// `extended_temp` does for a written arm, and the address of that temporary is
+// what both the test and the taken arm read: the condition is evaluated a single
+// time. A condition of another type converted to the extended one would need a
+// conversion this reader does not make there, so it is refused by name.
 fn (mut e Emitter) emit_extended_conditional(conditional ast.Conditional, depth int) !void {
+	if conditional.omitted_middle {
+		if !e.long_double_of(conditional.cond) {
+			e.diagnostics << problem(conditional.line, conditional.col, 'unsupported: a conditional with the middle operand left out needs a condition of the extended type when the result is one, and this condition is of another type')
+			return error('extended conditional with an omitted middle')
+		}
+		condition_temp := e.extended_temp(conditional.cond, depth + 1)!
+		e.leave_address(condition_temp, conditional.line, conditional.col)!
+		e.emit_extended_test(conditional.line, conditional.col)!
+		else_label := e.label()
+		end_label := e.label()
+		e.branch(.branch_zero, else_label, conditional.line, conditional.col)!
+		e.leave_address(condition_temp, conditional.line, conditional.col)!
+		e.jump(end_label)!
+		e.place(else_label)
+		else_temp := e.extended_temp(conditional.else_expr, depth + 1)!
+		e.leave_address(else_temp, conditional.line, conditional.col)!
+		e.place(end_label)
+		return
+	}
 	e.emit_condition(conditional.cond, depth + 1, conditional.line, conditional.col)!
 	else_label := e.label()
 	end_label := e.label()

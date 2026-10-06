@@ -497,13 +497,18 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			// All three operands are rewritten: a builtin call can sit in the
 			// condition as much as in either arm. The clause travels with the
 			// node, since which arm runs does not change the type they share.
+			// `omitted_middle` travels with it too: rewriting the condition and
+			// the middle operand separately would lose the fact that the source
+			// wrote only one of them, and the emitter needs it to evaluate the
+			// condition once.
 			return ast.Expr(ast.Conditional{
-				cond:      rewrite(expr.cond, opts, depth + 1)
-				then_expr: rewrite(expr.then_expr, opts, depth + 1)
-				else_expr: rewrite(expr.else_expr, opts, depth + 1)
-				typ:       expr.typ
-				line:      expr.line
-				col:       expr.col
+				cond:           rewrite(expr.cond, opts, depth + 1)
+				then_expr:      rewrite(expr.then_expr, opts, depth + 1)
+				else_expr:      rewrite(expr.else_expr, opts, depth + 1)
+				typ:            expr.typ
+				omitted_middle: expr.omitted_middle
+				line:           expr.line
+				col:            expr.col
 			})
 		}
 		ast.StmtExpr {

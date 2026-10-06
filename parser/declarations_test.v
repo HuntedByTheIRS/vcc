@@ -1551,6 +1551,31 @@ fn test_a_cast_in_a_file_scope_initializer_is_an_address_constant() {
 	assert bare.diagnostics.len == 1
 }
 
+// gcc 6.12.24 makes `__PRETTY_FUNCTION__` the string "top level" at file scope,
+// where it names no function: measured on gcc 16.2.1, `static const char *const
+// top = __PRETTY_FUNCTION__;` compiles to a pointer to "top level". The other two
+// spellings name the function they are written in and there is none at file
+// scope, so each is refused by name at its own location rather than read as a
+// symbol nothing defines.
+fn test_pretty_function_at_file_scope_is_the_string_top_level() {
+	pretty := declarations_of('static const char *const top = __PRETTY_FUNCTION__;')
+	assert pretty.diagnostics.len == 0
+	assert pretty.unit.globals.len == 1
+	address := pretty.unit.globals[0].address or {
+		assert false
+		return
+	}
+	assert address.string
+	assert address.name == 'top level'
+	for spelling in ['__FUNCTION__', '__func__'] {
+		refused := declarations_of('static const char *const top = ${spelling};')
+		assert refused.diagnostics.len == 1
+		assert refused.diagnostics[0].msg.contains(spelling)
+		assert refused.diagnostics[0].msg.contains('file scope')
+		assert refused.diagnostics[0].line == 1
+	}
+}
+
 fn test_a_definition_keeps_its_parameters() {
 	result := declarations_of('int add(int a, int b) { return a + b; }')
 	assert result.diagnostics.len == 0

@@ -3,8 +3,6 @@
  * GCC 6.12.24 Function Names as Strings: "__FUNCTION__ is another name for
  * __func__ ... In C, __PRETTY_FUNCTION__ is yet another name for __func__,
  * except that at file scope ... it evaluates to the string "top level".
- *
- * unimplemented: __FUNCTION__ and __PRETTY_FUNCTION__.
  */
 
 #include <stdio.h>

@@ -833,15 +833,50 @@ fn is_a_compound_target(expr ast.Expr) bool {
 // middle operand is the whole expression before the `:`, so it is read the same
 // way.
 //
-// The GNU spelling with the middle operand left out, `a ?: b`, is not C99, and
-// the standard reading of those tokens is not the same as the extension's: the
-// extension repeats the condition, and this compiler refuses it by name rather
-// than reading the condition as the middle operand.
+// The GNU spelling with the middle operand left out, `a ?: b`, is read here too.
+// gcc 6.12.13 defines the middle operand as the condition itself, and the whole
+// expression as the condition's value when it is nonzero and the else operand's
+// otherwise: measured on gcc 16.2.1, `x++ ?: y` steps x a single time and is
+// worth the value x held before the step. The node keeps the condition as its
+// middle operand and marks that the source left it out, so the emitter evaluates
+// the condition once instead of reading it twice. Measured on gcc 16.2.1, a
+// strict ISO mode refuses the spelling - `-std=c99 -pedantic-errors` reports
+// `ISO C forbids omitting the middle term of a '?:' expression` - and a GNU
+// dialect takes it as its own.
 fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 	question := p.next() // ?
+	cond := p.constant_condition(question, condition)
 	if p.at_punct(':') {
-		p.error_at(question, 'unsupported: `?:` with the middle operand left out is a GNU extension and not C99, and this compiler reads the middle operand')
-		return error('omitted middle operand')
+		// The middle operand was left out and is the condition's own value. The
+		// condition node is the middle operand and the flag says the source did
+		// not write it, so the arm carries the condition's type and the emitter
+		// knows the value is the one the condition's own evaluation produced.
+		// The colon is consumed here, and the else operand is the expression
+		// after it.
+		p.next() // :
+		p.depth++
+		if p.depth > max_expression_depth {
+			p.depth--
+			p.error_at(question, 'expression is nested more than ${max_expression_depth} levels deep')
+			return error('expression nested too deeply')
+		}
+		p.compound_unstable++
+		else_expr := p.parse_expression() or {
+			p.compound_unstable--
+			p.depth--
+			return error('a conditional expression')
+		}
+		p.compound_unstable--
+		p.depth--
+		return ast.Expr(ast.Conditional{
+			cond:           cond
+			then_expr:      condition
+			else_expr:      else_expr
+			typ:            p.conditional_type(question, condition, else_expr)
+			omitted_middle: true
+			line:           question.line
+			col:            question.col
+		})
 	}
 	// A chain of conditionals nests through its operands: the third of
 	// `a ? b : c ? d : e` is another conditional and the second of
@@ -874,7 +909,7 @@ fn (mut p Parser) parse_conditional(condition ast.Expr) !ast.Expr {
 	p.compound_unstable--
 	p.depth--
 	return ast.Expr(ast.Conditional{
-		cond:      p.constant_condition(question, condition)
+		cond:      cond
 		then_expr: then_expr
 		else_expr: else_expr
 		typ:       p.conditional_type(question, then_expr, else_expr)
@@ -1541,6 +1576,22 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	// x, which is the grammar the standard writes for an operator.
 	if t.kind == .identifier && t.text == 'sizeof' {
 		return p.parse_sizeof(t)
+	}
+	// `_Countof` is a keyword-like spelling rather than a name the program may
+	// declare, so it is routed here the way `sizeof` is, before an ordinary
+	// identifier would be read as a call. gcc 16.2.1 carries it as a reserved
+	// word the same way and reads `_Countof(a)` as a count rather than as a call
+	// to a function nothing declares, which is the defect this routing removes.
+	if t.kind == .identifier && t.text == '_Countof' {
+		return p.parse_countof(t)
+	}
+	// `__alignof__` is the GNU spelling of `_Alignof`, and like `_Countof` it is
+	// a keyword-like reserved word rather than a callable name: gcc 16.2.1 reads
+	// `__alignof__(x)` as an alignment and never as a call. Routing it here keeps
+	// the name from being read as an ordinary identifier, which is what made the
+	// argument list refuse the type words inside it.
+	if t.kind == .identifier && t.text == '__alignof__' {
+		return p.parse_alignof(t)
 	}
 	// `__extension__` marks the expression after it as an extension and is worth
 	// nothing itself. glibc writes it inside tgmath.h to keep a strict mode quiet
@@ -2214,6 +2265,184 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 	return ast.Expr(ast.IntLit{
 		value: i64(size)
 		text:  'sizeof(${spelling})'
+		typ:   types.unsigned_long_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// parse_countof reads `_Countof` and its operand, which is a type name or an
+// expression, and answers how many elements the outermost dimension of the array
+// has.
+//
+// gcc 6.12.6 defines it: "The keyword _Countof determines the number of elements
+// of an array operand. Its syntax is similar to sizeof. The operand must be a
+// parenthesized complete array type name or an expression of such a type." The
+// answer is the outermost bound and not the product of the bounds, which is the
+// whole difference from `sizeof`: measured on gcc 16.2.1, `_Countof(int [7][3])`
+// is 7 where `sizeof(int [7][3])` is 84, and `_Countof` of `char s[] = "hello"`
+// is 6, the array the initializer gave it and not the address its name decays to.
+//
+// The operand is not evaluated and its type is not decayed, exactly as a sizeof
+// operand is not, so an array keeps its array type and the count is read off it
+// rather than off a pointer. The constant has the type the target gives size_t,
+// which is unsigned long here, so the answer is unsigned like `sizeof`'s.
+//
+// An operand that is not an array type is a constraint violation, named with the
+// type the operand has and the place it was written.
+fn (mut p Parser) parse_countof(at tokenize.Token) !ast.Expr {
+	p.next() // _Countof
+	mut spelling := ''
+	mut count := 0
+	mut bound := ?ast.Expr(none)
+	if p.at_punct('(') && p.starts_declaration(p.peek_at(1)) {
+		// The operand is written as a type name. A brace list after the closing
+		// parenthesis makes it a compound literal whose element type names an
+		// array whose bound the brackets did not write, and that bound is the
+		// initializer's own count: `_Countof((int[]){1, 2, 3})` is 3. The list
+		// is read only for that count and nothing is stored, the same way a
+		// `sizeof` of a compound literal reads it.
+		p.next() // (
+		spec, d, _ := p.parse_type_name_parts(0)!
+		if !p.expect_punct(')') {
+			return error('unclosed _Countof')
+		}
+		mut declared := p.declared_type(spec.clause, d)
+		if p.at_punct('{') {
+			list := p.parse_brace_initializer(true) or {
+				return error('_Countof compound literal')
+			}
+			if declared.is_array() && d.array_count() <= 0 {
+				named := brace_array_count(list.elements)
+				if named > 0 {
+					declared = types.array_of(declared.element() or { declared }, named)
+				}
+			}
+		}
+		spelling = p.spelling_of(spec, d.pointer_count())
+		if !declared.is_array() {
+			p.error_at(at, 'a constraint violation: _Countof asks how many elements an array has, and ${declared.describe()} is not an array')
+			return error('_Countof of a non-array')
+		}
+		if declared.count > 0 {
+			count = declared.count
+		} else if declared.vla {
+			// A variable-length array's bound is computed where the declaration
+			// runs, so the count is that expression evaluated where the
+			// `_Countof` is asked. Measured on gcc 16.2.1, `int v[n];
+			// _Countof(v)` is how many elements v has at the time.
+			bounds := p.vla_bound_exprs(declared.vla_id)
+			if bounds.len > 0 {
+				bound = bounds[0]
+			}
+		}
+		if bound == none && count == 0 {
+			p.error_at(at, 'a constraint violation: _Countof asks how many elements ${spelling} has, and this array has no bound')
+			return error('_Countof of an array with no bound')
+		}
+	} else {
+		// The operand is a unary expression. It is read through
+		// parse_prefix_operand so a chain of `_Countof` counts its nesting once
+		// per link, and nothing it writes is run: the count is a constant, so
+		// the statements the operand appended are dropped the way a sizeof
+		// operand's are.
+		pending := if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1].len
+		} else {
+			0
+		}
+		operand := p.parse_prefix_operand(at)!
+		spelling = describe_operand(operand)
+		if p.is_unresolved(operand) {
+			p.error_at(at, 'unsupported: _Countof asks how many elements ${spelling} has, and this compiler did not resolve its type')
+			return error('no type for the operand')
+		}
+		if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1] = p.compound_pending[p.compound_pending.len - 1][..pending]
+		}
+		typ := operand.typ
+		if !typ.is_array() {
+			p.error_at(at, 'a constraint violation: _Countof asks how many elements an array has, and ${spelling} has type ${typ.describe()}, which is not an array')
+			return error('_Countof of a non-array')
+		}
+		if typ.count > 0 {
+			count = typ.count
+		} else if typ.vla {
+			bounds := p.vla_bound_exprs(typ.vla_id)
+			if bounds.len > 0 {
+				bound = bounds[0]
+			}
+		}
+		if bound == none && count == 0 {
+			p.error_at(at, 'a constraint violation: _Countof asks how many elements ${spelling} has, and this array has no bound')
+			return error('_Countof of an array with no bound')
+		}
+	}
+	if value := bound {
+		return p.size_as_unsigned(value, at)
+	}
+	return ast.Expr(ast.IntLit{
+		value: i64(count)
+		text:  '_Countof(${spelling})'
+		typ:   types.unsigned_long_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// parse_alignof reads `__alignof__` and its operand, which is a type name or an
+// expression, and answers the boundary a value of the operand's type has to
+// start on.
+//
+// gcc 6.12.9 defines it: "The keyword __alignof__ determines the alignment
+// requirement of a function, object, or a type, or the minimum alignment usually
+// required by a type. Its syntax is just like sizeof." The alignment is a fact
+// about the target that the type model already lays an object out with, so it is
+// asked of the model here rather than computed, and the answer is a constant the
+// way a size is: the operand is not evaluated.
+//
+// The constant has the type the target gives size_t, which is unsigned long
+// here, the same as `sizeof`'s and `_Countof`'s, so the three compose without a
+// conversion between them.
+fn (mut p Parser) parse_alignof(at tokenize.Token) !ast.Expr {
+	p.next() // __alignof__
+	mut spelling := ''
+	mut alignment := 0
+	if p.at_punct('(') && p.starts_declaration(p.peek_at(1)) {
+		p.next() // (
+		spec, d, _ := p.parse_type_name_parts(0)!
+		if !p.expect_punct(')') {
+			return error('unclosed __alignof__')
+		}
+		declared := p.declared_type(spec.clause, d)
+		spelling = p.spelling_of(spec, d.pointer_count())
+		alignment = p.representation.align_of(declared) or {
+			p.error_at(at, 'unsupported: __alignof__ asks how ${spelling} is aligned, and this compiler has no alignment for it')
+			return error('no alignment for the type')
+		}
+	} else {
+		pending := if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1].len
+		} else {
+			0
+		}
+		operand := p.parse_prefix_operand(at)!
+		spelling = describe_operand(operand)
+		if p.is_unresolved(operand) {
+			p.error_at(at, 'unsupported: __alignof__ asks how ${spelling} is aligned, and this compiler did not resolve its type')
+			return error('no type for the operand')
+		}
+		if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1] = p.compound_pending[p.compound_pending.len - 1][..pending]
+		}
+		alignment = p.representation.align_of(operand.typ) or {
+			p.error_at(at, 'unsupported: __alignof__ asks how ${spelling} is aligned, and this compiler has no alignment for ${operand.typ.describe()}')
+			return error('no alignment for the operand')
+		}
+	}
+	return ast.Expr(ast.IntLit{
+		value: i64(alignment)
+		text:  '__alignof__(${spelling})'
 		typ:   types.unsigned_long_type()
 		line:  at.line
 		col:   at.col

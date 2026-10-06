@@ -8571,11 +8571,48 @@ fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !voi
 		e.diagnostics << problem(conditional.line, conditional.col, 'unsupported: a conditional whose arms have a 128-bit type is not implemented')
 		return error('128-bit conditional')
 	}
+	if conditional.omitted_middle {
+		return e.emit_reuse_conditional(conditional, depth)
+	}
 	e.emit_condition(conditional.cond, depth + 1, conditional.line, conditional.col)!
 	else_label := e.label()
 	end_label := e.label()
 	e.branch(.branch_zero, else_label, conditional.line, conditional.col)!
 	e.emit_conditional_arm(conditional.then_expr, conditional.typ, depth)!
+	e.jump(end_label)!
+	e.place(else_label)
+	e.emit_conditional_arm(conditional.else_expr, conditional.typ, depth)!
+	e.place(end_label)
+}
+
+// emit_reuse_conditional writes the GNU `a ?: b`, whose middle operand was left
+// out and is the condition's own value. The condition is evaluated once and the
+// value it leaves is the middle operand's: measured on gcc 16.2.1, `x++ ?: y`
+// steps x a single time and is worth the value x held before the step, so a shape
+// that read the condition twice would run its side effect twice.
+//
+// The test and the branch leave the value where the condition's own evaluation
+// put it, in the register a value lives in, so no temporary is needed to keep it:
+// for an integer or pointer condition the truth test writes no register, and for
+// a floating condition the test reads the floating-point register and leaves it
+// alone. The arm the condition selects is then that same value, and only the
+// conversion to the type the conditional is worth is left to make, which is the
+// conversion `emit_conditional_arm` makes for a written arm.
+fn (mut e Emitter) emit_reuse_conditional(conditional ast.Conditional, depth int) !void {
+	condition := conditional.cond
+	e.emit_condition(condition, depth + 1, conditional.line, conditional.col)!
+	else_label := e.label()
+	end_label := e.label()
+	e.branch(.branch_zero, else_label, conditional.line, conditional.col)!
+	if conditional.typ.is_floating() {
+		if conditional.typ.kind == .float {
+			e.convert_to_single(condition, conditional.line, conditional.col)!
+		} else {
+			e.convert_to_double(condition, conditional.line, conditional.col)!
+		}
+	} else if e.eight_byte_integer(conditional.typ) {
+		e.extend_operand_to_word(condition, conditional.line, conditional.col)!
+	}
 	e.jump(end_label)!
 	e.place(else_label)
 	e.emit_conditional_arm(conditional.else_expr, conditional.typ, depth)!
