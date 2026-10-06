@@ -136,8 +136,7 @@ fn (mut e Emitter) emit_long_double_complex_into(dest Slot, expr ast.Expr, depth
 	}
 	if expr is ast.Unary {
 		if expr.op == '-' {
-			e.diagnostics << problem(line, col, 'unsupported: the negation of ${types.complex_long_double_type().describe()} is not computed here; the x87 stack has no negate for the extended format, and the arithmetic that would stand in for one is not emitted')
-			return error('long double complex negate')
+			return e.emit_long_double_complex_negation(dest, expr, depth)
 		}
 		if expr.op == '+' {
 			source := e.complex_object(expr.expr, depth + 1)!
@@ -290,6 +289,29 @@ fn (mut e Emitter) emit_long_double_complex_sum(dest Slot, binary ast.Binary, le
 	for which < 2 {
 		e.extended_component_step(frame, left.offset + which * step, right.offset + which * step,
 			dest.offset + which * step, binary.op, line, col)!
+		which++
+	}
+}
+
+// emit_long_double_complex_negation writes the negation of an extended complex
+// value: each component's sign is flipped where it sits on the x87 stack, with
+// the same `fchs` the scalar extended type's negation uses. The instruction
+// changes the sign bit and rounds nothing, so a component that is -0.0 becomes
+// +0.0 and stays a different value from +0.0, a NaN keeps its payload and takes
+// the other sign, and an infinity takes the opposite sign. gcc 16.2.1 emits the
+// same `fchs` for each component at -O0, measured on
+// `long double _Complex g(long double _Complex a) { return -a; }`.
+fn (mut e Emitter) emit_long_double_complex_negation(dest Slot, unary ast.Unary, depth int) !void {
+	line := unary.line
+	col := unary.col
+	source := e.complex_object(unary.expr, depth + 1)!
+	frame := e.frame_pointer(line, col)!
+	step := complex_long_double_component
+	mut which := 0
+	for which < 2 {
+		e.push_extended_component(frame, source.offset + which * step, line, col)!
+		e.append(e.target.extended_negate())
+		e.pop_extended_component(frame, dest.offset + which * step, line, col)!
 		which++
 	}
 }
