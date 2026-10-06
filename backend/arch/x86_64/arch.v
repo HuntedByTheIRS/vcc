@@ -991,6 +991,17 @@ pub fn extended_negate() []u8 {
 	return [u8(0xd9), u8(0xe0)] // fchs
 }
 
+// extended_absolute clears the sign of the long double at the top of the x87
+// stack, which is the magnitude the extended complex quotient's scaling tests
+// read. `fabs` changes the sign bit in place and rounds nothing, so the
+// magnitude of -0.0 is +0.0 and the magnitude of a NaN is the NaN with a clear
+// sign. gcc 16.2.1 emits the same byte for the same question at -O0, measured
+// on `long double f(long double x) { return __builtin_fabsl(x); }` as
+// `fldt 16(%rbp); fabs`.
+pub fn extended_absolute() []u8 {
+	return [u8(0xd9), u8(0xe1)] // fabs
+}
+
 fn scalar_indirect_move(prefix u8, address Register, operand Register, store bool) ![]u8 {
 	if operand.width != 16 {
 		return error('${name}: a floating value is moved through a sixteen-byte register, and ${operand.name} is not one')
@@ -2649,6 +2660,7 @@ pub:
 	double_to_unsigned_int          fn (Register, Register) ![]u8                     = unsafe { nil }
 	double_to_unsigned_word         fn (Register, Register, Register, Register) ![]u8 = unsafe { nil }
 	exchange_indirect               fn (Register, Register, int) ![]u8                = unsafe { nil }
+	extended_absolute               fn () []u8                            = unsafe { nil }
 	extended_arithmetic             fn (string) ![]u8                     = unsafe { nil }
 	extended_compare_zero           fn (string, Register, Register) ![]u8 = unsafe { nil }
 	extended_comparison             fn (string, Register, Register) ![]u8 = unsafe { nil }
@@ -2795,6 +2807,7 @@ pub fn encoders() Encoders {
 		double_to_unsigned_int:          &double_to_unsigned_int
 		double_to_unsigned_word:         &double_to_unsigned_word
 		exchange_indirect:               &exchange_indirect
+		extended_absolute:               &extended_absolute
 		extended_arithmetic:             &extended_arithmetic
 		extended_compare_zero:           &extended_compare_zero
 		extended_comparison:             &extended_comparison

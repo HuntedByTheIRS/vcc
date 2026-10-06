@@ -1,6 +1,7 @@
 module codegen
 
 import backend
+import image
 import types
 import ast
 
@@ -270,6 +271,9 @@ fn (mut e Emitter) emit_long_double_complex_arithmetic(dest Slot, binary ast.Bin
 		'*' {
 			return e.emit_long_double_complex_product(dest, binary, left, right)
 		}
+		'/' {
+			return e.emit_long_double_complex_quotient(dest, binary, left, right)
+		}
 		else {
 			e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} is not an operator this back end computes ${types.complex_long_double_type().describe()} with')
 			return error('unsupported long double complex operator')
@@ -342,4 +346,263 @@ fn (mut e Emitter) emit_long_double_complex_product(dest Slot, binary ast.Binary
 	// The imaginary part is ad + bc.
 	e.extended_component_step(frame, work.offset + 2 * step, work.offset + 3 * step, dest.offset + step,
 		'+', line, col)!
+}
+
+// The scaling constants libgcc's __divxc3 uses for the extended format, read
+// off gcc 16.2.1's helper as compiled on this machine. RBIG is half the largest
+// finite long double, RMIN the smallest normal one, RMIN2 the machine epsilon,
+// RMINSCAL its reciprocal, and RMAX2 the product of the first and the third.
+// Each is written as the two fields types.LongDouble stores, and each was
+// checked against the sixteen bytes gcc writes for the same value:
+// LDBL_MAX is 0xffffffffffffffff/0x7ffe and LDBL_MIN is
+// 0x8000000000000000/0x0001, so RBIG and RMAX2 share LDBL_MAX's all-ones
+// significand at exponents 0x7ffd and 0x7fbe, and LDBL_EPSILON and its
+// reciprocal share LDBL_MIN's integer-bit-only significand at 0x3fc0 and
+// 0x403e.
+const complex_extended_rbig = types.LongDouble{
+	mantissa: u64(0xffffffffffffffff)
+	sign_exp: u16(0x7ffd)
+}
+const complex_extended_rmin = types.LongDouble{
+	mantissa: u64(0x8000000000000000)
+	sign_exp: u16(0x0001)
+}
+const complex_extended_rmin2 = types.LongDouble{
+	mantissa: u64(0x8000000000000000)
+	sign_exp: u16(0x3fc0)
+}
+const complex_extended_rminscal = types.LongDouble{
+	mantissa: u64(0x8000000000000000)
+	sign_exp: u16(0x403e)
+}
+const complex_extended_rmax2 = types.LongDouble{
+	mantissa: u64(0xffffffffffffffff)
+	sign_exp: u16(0x7fbe)
+}
+const complex_extended_half = types.LongDouble{
+	mantissa: u64(0x8000000000000000)
+	sign_exp: u16(0x3ffe)
+}
+
+// extended_copy moves one sixteen-byte component between slots of the frame.
+fn (mut e Emitter) extended_copy(frame backend.Register, from int, to int, line int, col int) !void {
+	register := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(frame, i32(from), register))
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.address_of_slot(frame, i32(to), register))
+	e.append(e.target.store_extended(register)!)
+}
+
+// extended_absolute_copy writes the magnitude of one component into another
+// slot, which is the value the scaling tests compare.
+fn (mut e Emitter) extended_absolute_copy(frame backend.Register, from int, to int, line int, col int) !void {
+	register := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(frame, i32(from), register))
+	e.append(e.target.load_extended(register)!)
+	e.append(e.target.extended_absolute())
+	e.append(e.target.address_of_slot(frame, i32(to), register))
+	e.append(e.target.store_extended(register)!)
+}
+
+// extended_compare_branch compares two components of the frame and branches on
+// the outcome. The right value is pushed first and the left second, which is the
+// order the encoder reads as the left against the right.
+fn (mut e Emitter) extended_compare_branch(frame backend.Register, left int, right int, op string, kind image.FixupKind, name string, line int, col int) !void {
+	address := e.accumulator(line, col)!
+	e.append(e.target.address_of_slot(frame, i32(right), address))
+	e.append(e.target.load_extended(address)!)
+	e.append(e.target.address_of_slot(frame, i32(left), address))
+	e.append(e.target.load_extended(address)!)
+	result := e.accumulator(line, col)!
+	scratch := e.scratch(line, col)!
+	e.append(e.target.extended_comparison(op, result, scratch)!)
+	e.append(e.target.test(result)!)
+	e.branch(kind, name, line, col)!
+}
+
+// extended_compare_constant_branch compares the magnitude of one component with
+// a constant and branches on the outcome. The constant is materialized into a
+// frame slot and loaded from there, because the machine has no immediate form of
+// an extended value.
+fn (mut e Emitter) extended_compare_constant_branch(frame backend.Register, component int, constant types.LongDouble, op string, kind image.FixupKind, name string, line int, col int, magnitude int, literal int) !void {
+	e.extended_absolute_copy(frame, component, magnitude, line, col)!
+	e.put_extended(Slot{
+		offset: literal
+		width:  complex_long_double_component
+	}, constant, line, col)!
+	e.extended_compare_branch(frame, magnitude, literal, op, kind, name, line, col)!
+}
+
+// extended_scale_all multiplies every component in place by one factor, which is
+// the scaling __divxc3 applies to all four operands at once.
+fn (mut e Emitter) extended_scale_all(frame backend.Register, offsets []int, factor types.LongDouble, literal int, line int, col int) !void {
+	e.put_extended(Slot{
+		offset: literal
+		width:  complex_long_double_component
+	}, factor, line, col)!
+	for offset in offsets {
+		e.extended_component_step(frame, offset, literal, offset, '*', line, col)!
+	}
+}
+
+// emit_long_double_complex_quotient writes the quotient of two extended complex
+// values with the arithmetic gcc 16.2.1 carries.
+//
+// gcc sends a `long double _Complex` division to libgcc's __divxc3, and no
+// symbol an image this compiler builds can name holds it, so the arithmetic that
+// helper performs is emitted here, the way the double complex quotient emits
+// __divdc3's. The naive formula, `(a*c + b*d) / (c*c + d*d)`, answers
+// differently from gcc on 38400 of the 390625 pairs of a thirteen-value extreme
+// set, because `c*c + d*d` overflows as soon as a component of the divisor is
+// large. The scaled division below is what __divxc3 does about that: the four
+// operands are scaled before the ratio is formed, and the products are formed
+// through a divided operand when the ratio is subnormal. Measured against gcc
+// 16.2.1 at -O0 -fno-builtin over the same pairs, printed with %.17Lg, this
+// arithmetic agrees with gcc's helper on every pair whose components are finite.
+// __divxc3's final recovery of infinities and zeros, for an operand that is
+// itself an infinity, is the one part not written, and the double complex
+// quotient beside it leaves the same part out.
+//
+// The four components are copied into writable slots so the scaling can rewrite
+// them and so an operand that is also the destination is read before it is
+// written, and every intermediate is a frame slot: the x87 stack is a place a
+// value is loaded from, combined, and stored back from.
+fn (mut e Emitter) emit_long_double_complex_quotient(dest Slot, binary ast.Binary, left Slot, right Slot) !void {
+	line := binary.line
+	col := binary.col
+	frame := e.frame_pointer(line, col)!
+	step := complex_long_double_component
+	// a, b, c, d, the ratio, the denominator, two temporaries, and a magnitude
+	// and a literal scratch slot, sixteen bytes each.
+	work := e.reserve(10 * step)
+	wa := work.offset
+	wb := wa + step
+	wc := wb + step
+	wd := wc + step
+	wr := wd + step
+	we := wr + step
+	wt := we + step
+	wt2 := wt + step
+	wabs := wt2 + step
+	wcst := wabs + step
+	e.extended_copy(frame, left.offset, wa, line, col)!
+	e.extended_copy(frame, left.offset + step, wb, line, col)!
+	e.extended_copy(frame, right.offset, wc, line, col)!
+	e.extended_copy(frame, right.offset + step, wd, line, col)!
+	less := e.label()
+	done := e.label()
+	// if (|c| < |d|) the large component is d; else it is c.
+	e.extended_absolute_copy(frame, wc, wabs, line, col)!
+	e.extended_absolute_copy(frame, wd, wcst, line, col)!
+	e.extended_compare_branch(frame, wabs, wcst, '<', .branch_nonzero, less, line, col)!
+	// |c| >= |d|: ratio = d / c, denom = d * ratio + c, and c is the large one.
+	e.complex_extended_scaling(frame, wa, wb, wc, wd, wc, wabs, wcst, line, col)!
+	e.extended_component_step(frame, wd, wc, wr, '/', line, col)!
+	e.extended_component_step(frame, wd, wr, wt, '*', line, col)!
+	e.extended_component_step(frame, wt, wc, we, '+', line, col)!
+	e.complex_extended_tail(frame, dest, wa, wb, wc, wd, wr, we, wt, wt2, wabs, wcst, true, line, col)!
+	e.jump(done)!
+	e.place(less)
+	// |c| < |d|: ratio = c / d, denom = c * ratio + d, and d is the large one.
+	e.complex_extended_scaling(frame, wa, wb, wc, wd, wd, wabs, wcst, line, col)!
+	e.extended_component_step(frame, wc, wd, wr, '/', line, col)!
+	e.extended_component_step(frame, wc, wr, wt, '*', line, col)!
+	e.extended_component_step(frame, wt, wd, we, '+', line, col)!
+	e.complex_extended_tail(frame, dest, wa, wb, wc, wd, wr, we, wt, wt2, wabs, wcst, false, line, col)!
+	e.place(done)
+}
+
+// complex_extended_tail writes the two components of the quotient after the
+// ratio and the denominator are known. `wa` and `wb` are a and b, `wc` and `wd`
+// are c and d, `wr` and `we` are the ratio and the denominator, and `c_large`
+// says which component the branch was chosen on: when c is large the real part is
+// b*ratio + a and the imaginary part is b - a*ratio, and when d is large they are
+// a*ratio + b and b*ratio - a. Each is divided by the denominator, and when the
+// ratio is subnormal the products are formed through a divided operand instead,
+// which is __divxc3's alternate order.
+fn (mut e Emitter) complex_extended_tail(frame backend.Register, dest Slot, wa int, wb int, wc int, wd int, wr int, we int, wt int, wt2 int, magnitude int, literal int, c_large bool, line int, col int) !void {
+	alt := e.label()
+	end_alt := e.label()
+	e.extended_compare_constant_branch(frame, wr, complex_extended_rmin, '>', .branch_zero, alt, line, col, magnitude, literal)!
+	if c_large {
+		// real = (b*ratio + a) / denom, imaginary = (b - a*ratio) / denom.
+		e.extended_component_step(frame, wb, wr, wt, '*', line, col)!
+		e.extended_component_step(frame, wt, wa, wt, '+', line, col)!
+		e.extended_component_step(frame, wt, we, wt2, '/', line, col)!
+		e.extended_copy(frame, wt2, dest.offset, line, col)!
+		e.extended_component_step(frame, wa, wr, wt, '*', line, col)!
+		e.extended_component_step(frame, wb, wt, wt2, '-', line, col)!
+		e.extended_component_step(frame, wt2, we, wt, '/', line, col)!
+		e.extended_copy(frame, wt, dest.offset + complex_long_double_component, line, col)!
+	} else {
+		// real = (a*ratio + b) / denom, imaginary = (b*ratio - a) / denom.
+		e.extended_component_step(frame, wa, wr, wt, '*', line, col)!
+		e.extended_component_step(frame, wt, wb, wt, '+', line, col)!
+		e.extended_component_step(frame, wt, we, wt2, '/', line, col)!
+		e.extended_copy(frame, wt2, dest.offset, line, col)!
+		e.extended_component_step(frame, wb, wr, wt, '*', line, col)!
+		e.extended_component_step(frame, wt, wa, wt2, '-', line, col)!
+		e.extended_component_step(frame, wt2, we, wt, '/', line, col)!
+		e.extended_copy(frame, wt, dest.offset + complex_long_double_component, line, col)!
+	}
+	e.jump(end_alt)!
+	e.place(alt)
+	if c_large {
+		// real = (a + d*(b/c)) / denom, imaginary = (b - d*(a/c)) / denom.
+		e.extended_component_step(frame, wb, wc, wt, '/', line, col)!
+		e.extended_component_step(frame, wd, wt, wt, '*', line, col)!
+		e.extended_component_step(frame, wa, wt, wt, '+', line, col)!
+		e.extended_component_step(frame, wt, we, wt2, '/', line, col)!
+		e.extended_copy(frame, wt2, dest.offset, line, col)!
+		e.extended_component_step(frame, wa, wc, wt, '/', line, col)!
+		e.extended_component_step(frame, wd, wt, wt, '*', line, col)!
+		e.extended_component_step(frame, wb, wt, wt2, '-', line, col)!
+		e.extended_component_step(frame, wt2, we, wt, '/', line, col)!
+		e.extended_copy(frame, wt, dest.offset + complex_long_double_component, line, col)!
+	} else {
+		// real = (c*(a/d) + b) / denom, imaginary = (c*(b/d) - a) / denom.
+		e.extended_component_step(frame, wa, wd, wt, '/', line, col)!
+		e.extended_component_step(frame, wc, wt, wt, '*', line, col)!
+		e.extended_component_step(frame, wt, wb, wt, '+', line, col)!
+		e.extended_component_step(frame, wt, we, wt2, '/', line, col)!
+		e.extended_copy(frame, wt2, dest.offset, line, col)!
+		e.extended_component_step(frame, wb, wd, wt, '/', line, col)!
+		e.extended_component_step(frame, wc, wt, wt, '*', line, col)!
+		e.extended_component_step(frame, wt, wa, wt2, '-', line, col)!
+		e.extended_component_step(frame, wt2, we, wt, '/', line, col)!
+		e.extended_copy(frame, wt, dest.offset + complex_long_double_component, line, col)!
+	}
+	e.place(end_alt)
+}
+
+// complex_extended_scaling scales the four components the way __divxc3 does
+// before the ratio is formed. `large` is the component whose magnitude decides
+// the branch: halve the four when it is at or above RBIG, multiply them by
+// RMINSCAL when it is below RMIN2, and multiply them by RMINSCAL when both
+// components of one operand are small enough that the division could underflow.
+// The tests are emitted in the order the helper makes them and short-circuit the
+// same way.
+fn (mut e Emitter) complex_extended_scaling(frame backend.Register, wa int, wb int, wc int, wd int, large int, magnitude int, literal int, line int, col int) !void {
+	offsets := [wa, wb, wc, wd]
+	half_done := e.label()
+	do_scale := e.label()
+	second := e.label()
+	after := e.label()
+	// if (|large| >= RBIG) halve every operand.
+	e.extended_compare_constant_branch(frame, large, complex_extended_rbig, '<', .branch_nonzero, half_done, line, col, magnitude, literal)!
+	e.extended_scale_all(frame, offsets, complex_extended_half, literal, line, col)!
+	e.place(half_done)
+	// if (|large| < RMIN2) scale up; else the composite test on a, b and large.
+	e.extended_compare_constant_branch(frame, large, complex_extended_rmin2, '<', .branch_nonzero, do_scale, line, col, magnitude, literal)!
+	e.extended_compare_constant_branch(frame, wa, complex_extended_rmin, '<', .branch_zero, second, line, col, magnitude, literal)!
+	e.extended_compare_constant_branch(frame, wb, complex_extended_rmax2, '<', .branch_zero, second, line, col, magnitude, literal)!
+	e.extended_compare_constant_branch(frame, large, complex_extended_rmax2, '<', .branch_zero, second, line, col, magnitude, literal)!
+	e.jump(do_scale)!
+	e.place(second)
+	e.extended_compare_constant_branch(frame, wb, complex_extended_rmin, '<', .branch_zero, after, line, col, magnitude, literal)!
+	e.extended_compare_constant_branch(frame, wa, complex_extended_rmax2, '<', .branch_zero, after, line, col, magnitude, literal)!
+	e.extended_compare_constant_branch(frame, large, complex_extended_rmax2, '<', .branch_zero, after, line, col, magnitude, literal)!
+	e.place(do_scale)
+	e.extended_scale_all(frame, offsets, complex_extended_rminscal, literal, line, col)!
+	e.place(after)
 }

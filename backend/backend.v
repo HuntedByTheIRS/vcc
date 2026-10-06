@@ -1048,6 +1048,12 @@ pub fn (t &Target) extended_negate() []u8 {
 	return t.encoders.extended_negate()
 }
 
+// extended_absolute clears the sign of the long double at the top of the x87
+// stack, which is the magnitude a scaling test reads.
+pub fn (t &Target) extended_absolute() []u8 {
+	return t.encoders.extended_absolute()
+}
+
 pub fn (t &Target) move_double(dst Register, src Register) ![]u8 {
 	return t.encoders.move_double(t.describe(dst), t.describe(src))
 }
