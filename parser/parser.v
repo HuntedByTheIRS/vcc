@@ -1542,6 +1542,14 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	if t.kind == .identifier && t.text == 'sizeof' {
 		return p.parse_sizeof(t)
 	}
+	// `_Countof` is a keyword-like spelling rather than a name the program may
+	// declare, so it is routed here the way `sizeof` is, before an ordinary
+	// identifier would be read as a call. gcc 16.2.1 carries it as a reserved
+	// word the same way and reads `_Countof(a)` as a count rather than as a call
+	// to a function nothing declares, which is the defect this routing removes.
+	if t.kind == .identifier && t.text == '_Countof' {
+		return p.parse_countof(t)
+	}
 	// `__extension__` marks the expression after it as an extension and is worth
 	// nothing itself. glibc writes it inside tgmath.h to keep a strict mode quiet
 	// about the statement expressions the macros use. The name is in the reserved
@@ -2205,6 +2213,125 @@ fn (mut p Parser) parse_sizeof(at tokenize.Token) !ast.Expr {
 	return ast.Expr(ast.IntLit{
 		value: i64(size)
 		text:  'sizeof(${spelling})'
+		typ:   types.unsigned_long_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// parse_countof reads `_Countof` and its operand, which is a type name or an
+// expression, and answers how many elements the outermost dimension of the array
+// has.
+//
+// gcc 6.12.6 defines it: "The keyword _Countof determines the number of elements
+// of an array operand. Its syntax is similar to sizeof. The operand must be a
+// parenthesized complete array type name or an expression of such a type." The
+// answer is the outermost bound and not the product of the bounds, which is the
+// whole difference from `sizeof`: measured on gcc 16.2.1, `_Countof(int [7][3])`
+// is 7 where `sizeof(int [7][3])` is 84, and `_Countof` of `char s[] = "hello"`
+// is 6, the array the initializer gave it and not the address its name decays to.
+//
+// The operand is not evaluated and its type is not decayed, exactly as a sizeof
+// operand is not, so an array keeps its array type and the count is read off it
+// rather than off a pointer. The constant has the type the target gives size_t,
+// which is unsigned long here, so the answer is unsigned like `sizeof`'s.
+//
+// An operand that is not an array type is a constraint violation, named with the
+// type the operand has and the place it was written.
+fn (mut p Parser) parse_countof(at tokenize.Token) !ast.Expr {
+	p.next() // _Countof
+	mut spelling := ''
+	mut count := 0
+	mut bound := ?ast.Expr(none)
+	if p.at_punct('(') && p.starts_declaration(p.peek_at(1)) {
+		// The operand is written as a type name. A brace list after the closing
+		// parenthesis makes it a compound literal whose element type names an
+		// array whose bound the brackets did not write, and that bound is the
+		// initializer's own count: `_Countof((int[]){1, 2, 3})` is 3. The list
+		// is read only for that count and nothing is stored, the same way a
+		// `sizeof` of a compound literal reads it.
+		p.next() // (
+		spec, d, _ := p.parse_type_name_parts(0)!
+		if !p.expect_punct(')') {
+			return error('unclosed _Countof')
+		}
+		mut declared := p.declared_type(spec.clause, d)
+		if p.at_punct('{') {
+			list := p.parse_brace_initializer(true) or {
+				return error('_Countof compound literal')
+			}
+			if declared.is_array() && d.array_count() <= 0 {
+				named := brace_array_count(list.elements)
+				if named > 0 {
+					declared = types.array_of(declared.element() or { declared }, named)
+				}
+			}
+		}
+		spelling = p.spelling_of(spec, d.pointer_count())
+		if !declared.is_array() {
+			p.error_at(at, 'a constraint violation: _Countof asks how many elements an array has, and ${declared.describe()} is not an array')
+			return error('_Countof of a non-array')
+		}
+		if declared.count > 0 {
+			count = declared.count
+		} else if declared.vla {
+			// A variable-length array's bound is computed where the declaration
+			// runs, so the count is that expression evaluated where the
+			// `_Countof` is asked. Measured on gcc 16.2.1, `int v[n];
+			// _Countof(v)` is how many elements v has at the time.
+			bounds := p.vla_bound_exprs(declared.vla_id)
+			if bounds.len > 0 {
+				bound = bounds[0]
+			}
+		}
+		if bound == none && count == 0 {
+			p.error_at(at, 'a constraint violation: _Countof asks how many elements ${spelling} has, and this array has no bound')
+			return error('_Countof of an array with no bound')
+		}
+	} else {
+		// The operand is a unary expression. It is read through
+		// parse_prefix_operand so a chain of `_Countof` counts its nesting once
+		// per link, and nothing it writes is run: the count is a constant, so
+		// the statements the operand appended are dropped the way a sizeof
+		// operand's are.
+		pending := if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1].len
+		} else {
+			0
+		}
+		operand := p.parse_prefix_operand(at)!
+		spelling = describe_operand(operand)
+		if p.is_unresolved(operand) {
+			p.error_at(at, 'unsupported: _Countof asks how many elements ${spelling} has, and this compiler did not resolve its type')
+			return error('no type for the operand')
+		}
+		if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1] = p.compound_pending[p.compound_pending.len - 1][..pending]
+		}
+		typ := operand.typ
+		if !typ.is_array() {
+			p.error_at(at, 'a constraint violation: _Countof asks how many elements an array has, and ${spelling} has type ${typ.describe()}, which is not an array')
+			return error('_Countof of a non-array')
+		}
+		if typ.count > 0 {
+			count = typ.count
+		} else if typ.vla {
+			bounds := p.vla_bound_exprs(typ.vla_id)
+			if bounds.len > 0 {
+				bound = bounds[0]
+			}
+		}
+		if bound == none && count == 0 {
+			p.error_at(at, 'a constraint violation: _Countof asks how many elements ${spelling} has, and this array has no bound')
+			return error('_Countof of an array with no bound')
+		}
+	}
+	if value := bound {
+		return p.size_as_unsigned(value, at)
+	}
+	return ast.Expr(ast.IntLit{
+		value: i64(count)
+		text:  '_Countof(${spelling})'
 		typ:   types.unsigned_long_type()
 		line:  at.line
 		col:   at.col

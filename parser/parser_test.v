@@ -301,6 +301,54 @@ fn test_sizeof_of_a_parenthesised_name_is_the_size_of_the_variable() {
 	assert (expr as ast.IntLit).value == 1
 }
 
+// `_Countof` answers the number of elements of the outermost dimension of an
+// array operand, and not the product of the bounds `sizeof` gives. Measured on
+// gcc 16.2.1: `_Countof(a)` for `int a[7]` is 7, `_Countof(int [7][3])` is 7, and
+// `_Countof(s)` for `char s[] = "hello"` is 6, the array the initializer gave it.
+// The operand is not decayed, so a name of array type keeps its array type.
+fn test_countof_answers_the_element_count_of_an_array() {
+	named := parsed('int main(void) { int a[7]; return _Countof(a); }')
+	assert named.diagnostics.len == 0
+	from_name := named.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert (from_name as ast.IntLit).value == 7
+	assert (from_name as ast.IntLit).typ.describe() == 'unsigned long'
+	// A type name written as the operand carries its own outermost bound, and
+	// the bound is the outer one and not the product of every dimension.
+	from_type := parsed('int main(void) { return _Countof(int[7][3]); }')
+	assert from_type.diagnostics.len == 0
+	typed := from_type.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (typed as ast.IntLit).value == 7
+	// An array whose bound the initializer gave keeps that bound, terminator and
+	// all, rather than decaying to the address of its first element.
+	from_string := parsed('int main(void) { char s[] = "hello"; return _Countof(s); }')
+	assert from_string.diagnostics.len == 0
+	// The initializer is written as one store per character plus the terminator,
+	// so the return is the statement the body ends with.
+	texted := from_string.unit.decls[0].body[from_string.unit.decls[0].body.len - 1].expr or {
+		assert false
+		return
+	}
+	assert (texted as ast.IntLit).value == 6
+}
+
+// An operand that is not an array type is a constraint violation, and the
+// refusal names the type the operand has and the place it was written. Measured
+// on gcc 16.2.1, which rejects `_Countof(x)` for an int with `invalid
+// application of '_Countof' to type 'int'`.
+fn test_countof_of_a_non_array_is_a_constraint_violation() {
+	result := parsed('int main(void) { int x = 5; return _Countof(x); }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('a constraint violation')
+	assert result.diagnostics[0].msg.contains('int')
+	assert result.diagnostics[0].line == 1
+}
+
 // typeof is a specifier whose operand is a type name or an expression, and what
 // it names is the type of that operand: a declaration written through it is a
 // declaration of the type behind the name, which is why the reading is checked

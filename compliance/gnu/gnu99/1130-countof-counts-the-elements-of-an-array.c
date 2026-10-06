@@ -4,8 +4,6 @@
  * determines the number of elements of an array operand. Its syntax is similar
  * to sizeof. The operand must be a parenthesized complete array type name or an
  * expression of such a type. ... _Countof (int [7][3]); // returns 7"
- *
- * unimplemented: _Countof.
  */
 
 #include <stdio.h>
