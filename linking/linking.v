@@ -164,9 +164,13 @@ pub fn link(units []image.Program, options Options) !image.Program {
 			copies << name
 		}
 	}
+	labels := merge_labels(units, layout)
+	place_of_entry := entry_place_of(units, layout, labels, options.entry)
 	mut merged := image.Program{
 		text:                merge_text(units, layout)
-		labels:              merge_labels(units, layout)
+		labels:              labels
+		stub:                has_stub(units)
+		entry_place:         place_of_entry
 		string_blob:         read_only.blob
 		strings:             read_only.strings
 		wide_strings:        read_only.wide_strings
@@ -236,6 +240,37 @@ pub fn link(units []image.Program, options Options) !image.Program {
 // at its base. The units are read in the order they were given and the bases are
 // the layout's, so the same units produce the same bytes every run. A second
 // full copy of a unit is never kept: its bytes move into this blob once.
+// has_stub says whether any unit of the link opens with the process stub the
+// kernel jumps to. A link of this compiler's own output has one; a link of start
+// files has none, and begins at the function the link's entry names.
+fn has_stub(units []image.Program) bool {
+	for unit in units {
+		if unit.stub {
+			return true
+		}
+	}
+	return false
+}
+
+// entry_place_of is where in the merged text the process begins, which is what
+// the container writes as the entry point. The unit that opens with the stub is
+// the place when the link has one, since the kernel lands on the stub. A link of
+// start files has no stub and begins at the function its entry names, which is
+// what the merged labels hold for that name. Neither answer is the start of the
+// merged text: the gathered `.init` and `.fini` runs are placed there, and the
+// branch at the end of the first fragment is written to reach into the next.
+fn entry_place_of(units []image.Program, layout place.Layout, labels map[string]int, entry string) int {
+	for i, unit in units {
+		if unit.stub {
+			return layout.text_bases[i]
+		}
+	}
+	if entry == '' {
+		return 0
+	}
+	return labels[entry] or { 0 }
+}
+
 fn merge_text(units []image.Program, layout place.Layout) []u8 {
 	mut text := []u8{len: layout.text_len}
 	for i, unit in units {

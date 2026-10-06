@@ -583,6 +583,13 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 			diagnostics: emitter.diagnostics
 		}
 	}
+	// The unit opens with the process stub when the emitter wrote one: a program
+	// gets it, and a stub-only unit is nothing but it. A link unit, an object and
+	// a shared object get none, which is what tells the linker that the place the
+	// process begins is a name the link resolved rather than this unit's stub.
+	if !opts.compile_only && !opts.link && opts.link_kind != .shared {
+		emitter.program.stub = true
+	}
 	// A diagnostic that stops the compile means the translation unit was not
 	// emitted, so the image goes away with it. A warning does not: this back
 	// end raises one for a construct the standard does not have and the flags
@@ -637,6 +644,10 @@ pub fn start_stub(entry string, opts Options) Result {
 			diagnostics: emitter.diagnostics
 		}
 	}
+	// The unit is the process stub and nothing else, which is what tells the
+	// linker that the place the process begins is this unit's text rather than a
+	// name the link resolved.
+	emitter.program.stub = true
 	return Result{
 		program:     emitter.program
 		target:      target

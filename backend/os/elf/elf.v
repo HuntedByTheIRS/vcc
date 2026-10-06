@@ -329,7 +329,7 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	// A shared object has no entry point: the loader calls the initializers and
 	// then whatever the program that loaded it names, and there is no place in
 	// the file for the kernel to jump to.
-	entry := if shared { u64(0) } else { base + u64(sections.text) }
+	entry := if shared { u64(0) } else { base + u64(sections.text + program.entry_place) }
 	e_type := if shared { elf_type_dyn } else { elf_type_exec }
 	emit_header(mut output, target, entry, e_type, header_count)
 	emit_program_headers(mut output, target, sections, program, interp.len, libraries.len,

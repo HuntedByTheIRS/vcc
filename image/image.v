@@ -304,6 +304,14 @@ pub mut:
 	// unit that carries neither has a run of length zero.
 	init_run CodeRun
 	fini_run CodeRun
+	// stub says this unit opens with the process stub the kernel jumps to. A
+	// program has one, and a link carries one in a unit of its own; a unit read
+	// from a relocatable object has none.
+	stub bool
+	// entry_place is where in the merged text the process begins, which is the
+	// number the container writes into the header. It is not the start of the
+	// text: the gathered `.init` and `.fini` runs are placed there.
+	entry_place int
 	// read_only_alignment is the strictest alignment any read-only section of
 	// this unit asked for. A unit read from an object carries the alignment its
 	// sections declared, and a sixteen-byte constant a compiler loads in one
