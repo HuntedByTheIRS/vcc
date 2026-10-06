@@ -488,6 +488,19 @@ fn merge_globals(units []image.Program, layout place.Layout, definitions map[str
 	return globals
 }
 
+// eh_frame_place is where an offset in a unit's read-only data lands: the place
+// it moved to when it is inside the part of that data which is this unit's
+// `.eh_frame` fragment, and its own unit's read-only data otherwise. The merge
+// gathers the fragments into one table, so an object a unit defines inside one
+// moves with it.
+fn eh_frame_place(unit image.Program, offset int, read_only_base int, run_base int) int {
+	fragment := unit.eh_frame_run
+	if fragment.len <= 0 || offset < fragment.base || offset >= fragment.base + fragment.len {
+		return offset + read_only_base
+	}
+	return run_base + (offset - fragment.base)
+}
+
 // merge_read_only_globals rebases each object a unit defines in read-only data
 // into the merged read-only data. The offsets count from that blob's start, not
 // the writable data's, and the defining unit's slot is the one that binds: a
@@ -506,7 +519,7 @@ fn merge_read_only_globals(units []image.Program, layout place.Layout, definitio
 				continue
 			}
 			globals[key] = image.GlobalSlot{
-				offset: slot.offset + layout.string_bases[i]
+				offset: eh_frame_place(unit, slot.offset, layout.string_bases[i], layout.eh_frame_bases[i])
 				width:  slot.width
 			}
 		}
@@ -616,7 +629,8 @@ fn definition_at(units []image.Program, layout place.Layout, definition symbols.
 			return error('the link binds ${name} to an object in read-only data unit ${definition.unit} defines and has no slot for')
 		}
 		return image.Definition{
-			offset: slot.offset + layout.string_bases[definition.unit]
+			offset: eh_frame_place(units[definition.unit], slot.offset, layout.string_bases[definition.unit],
+				layout.eh_frame_bases[definition.unit])
 		}
 	}
 	if definition.tls {

@@ -101,7 +101,8 @@ pub fn lay(units []image.Program, globals_alignment int, read_only_alignment int
 	// data, one after another in unit order, because a scan that starts at one
 	// of them has to reach the rest: the unwinder reads the table from the
 	// fragment a start file points at and stops at the first record whose
-	// length is zero.
+	// length is zero. The fragments are packed byte to byte, the way a link packs
+	// them into one output section, because a gap of zero bytes ends the scan.
 	for unit in units {
 		run := unit.eh_frame_run
 		alignment := if run.alignment > 1 { run.alignment } else { 1 }
