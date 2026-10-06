@@ -315,7 +315,7 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	put(mut output, sections.strings, program.string_blob)
 	put(mut output, sections.globals, program.globals_blob)
 	put(mut output, sections.tls, program.tls_blob)
-	emit_bound_slots(mut output, program, sections, base)
+	emit_bound_slots(mut output, program, sections, base)!
 	emit_extra_slots(mut output, program, sections, extra, base)!
 	emit_symbols(mut output, program, sections, symbol_names, indices, external, base, exports,
 		kind)
@@ -682,7 +682,7 @@ fn iplt_end(program image.Program, sections Sections) int {
 	return sections.rela + irelative_count(program, got_extra_names(program)) * elf_relocation_size
 }
 
-fn emit_bound_slots(mut output []u8, program image.Program, sections Sections, base u64) {
+fn emit_bound_slots(mut output []u8, program image.Program, sections Sections, base u64) ! {
 	// The two names the startup walks the relocation array between are answered by
 	// the container rather than by a unit, so their slots hold the array's ends.
 	for i, name in program.imports {
@@ -695,6 +695,16 @@ fn emit_bound_slots(mut output []u8, program image.Program, sections Sections, b
 	}
 	for i, name in program.imports {
 		definition := program.bound[name] or { continue }
+		// A thread-local this image holds is reached the way any other one is:
+		// the code reads the slot and adds it to the thread pointer, so the
+		// slot holds how far below that pointer the variable lies rather than
+		// an address. Writing the address instead and reading it through the
+		// thread pointer lands somewhere no page holds, which is what a printf
+		// that touches `errno` did.
+		if name in program.tls_slots {
+			put_u64(mut output, sections.got + i * 8, u64(tpoff_of(program, name, 0)!))
+			continue
+		}
 		at := if definition.function {
 			sections.text + definition.offset
 		} else {
