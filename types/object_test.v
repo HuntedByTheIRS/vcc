@@ -77,6 +77,13 @@ fn test_the_size_and_alignment_of_every_scalar() {
 	// is sixteen bytes aligned to sixteen like the extended type, and it is a
 	// separate kind because its format is IEEE binary128 and not x87 extended.
 	assert size_of(float128_type()) == 16 && align_of(float128_type()) == 16
+	// The three decimal floating types take four, eight and sixteen bytes and
+	// are aligned to their own size. Measured on gcc 16.2.1 on this target,
+	// `sizeof(_Decimal32)` and `_Alignof(_Decimal32)` are both 4, and likewise
+	// 8 for `_Decimal64` and 16 for `_Decimal128`.
+	assert size_of(decimal_type(.decimal32)) == 4 && align_of(decimal_type(.decimal32)) == 4
+	assert size_of(decimal_type(.decimal64)) == 8 && align_of(decimal_type(.decimal64)) == 8
+	assert size_of(decimal_type(.decimal128)) == 16 && align_of(decimal_type(.decimal128)) == 16
 	assert size_of(complex_float_type()) == 8 && align_of(complex_float_type()) == 4
 	assert size_of(complex_double_type()) == 16 && align_of(complex_double_type()) == 8
 	assert size_of(complex_long_double_type()) == 32 && align_of(complex_long_double_type()) == 16

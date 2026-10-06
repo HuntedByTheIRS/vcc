@@ -417,6 +417,20 @@ pub fn from_target(target backend.Target) Description {
 	// exactly what the back end does and does not compute with it.
 	sizes[Kind.float128] = 16
 	aligns[Kind.float128] = 16
+	// The three decimal floating types. Measured on gcc 16.2.1 on this target:
+	// `sizeof(_Decimal32)` is 4 with `_Alignof(_Decimal32)` 4, `sizeof(_Decimal64)`
+	// is 8 with its alignment 8, and `sizeof(_Decimal128)` is 16 with its
+	// alignment 16. The widths are carried for the questions about the size of a
+	// type - `sizeof(_Decimal32)` is folded from here and a member of one decides
+	// where the member after it starts - and not as a form the back end has:
+	// the emitter has no instruction for a decimal value and refuses one by
+	// name. See `decimal_type`, `decimal_digits` and `decimal_bias`.
+	sizes[Kind.decimal32] = 4
+	aligns[Kind.decimal32] = 4
+	sizes[Kind.decimal64] = 8
+	aligns[Kind.decimal64] = 8
+	sizes[Kind.decimal128] = 16
+	aligns[Kind.decimal128] = 16
 	// A complex type is two components of its real type, one after the other:
 	// `float _Complex` is two floats and `double _Complex` is two doubles.
 	// Measured on this target with gcc 16.2.1 on a program that printed

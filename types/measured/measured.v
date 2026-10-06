@@ -72,6 +72,15 @@ pub fn representation() types.Representation {
 	// this target with `sizeof(_Float128)` and `_Alignof(_Float128)`, both 16.
 	sizes[types.Kind.float128] = 16
 	aligns[types.Kind.float128] = 16
+	// The three decimal floating types. Measured on gcc 16.2.1 on this target
+	// with `sizeof` and `_Alignof`: `_Decimal32` is 4/4, `_Decimal64` is 8/8 and
+	// `_Decimal128` is 16/16, so each starts on a boundary its own width.
+	sizes[types.Kind.decimal32] = 4
+	aligns[types.Kind.decimal32] = 4
+	sizes[types.Kind.decimal64] = 8
+	aligns[types.Kind.decimal64] = 8
+	sizes[types.Kind.decimal128] = 16
+	aligns[types.Kind.decimal128] = 16
 	sizes[types.Kind.complex_float] = 8
 	aligns[types.Kind.complex_float] = 4
 	sizes[types.Kind.complex_double] = 16

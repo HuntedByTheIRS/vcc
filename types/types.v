@@ -1,6 +1,7 @@
 module types
 
 import math
+import decimal
 
 // The types of the language, and the questions the standard asks about them.
 //
@@ -57,6 +58,22 @@ pub enum Kind {
 	// on this target, `sizeof(_Float128)` and `_Alignof(_Float128)` are both
 	// 16.
 	float128
+	// The three decimal floating types, GNU C's `_Decimal32`, `_Decimal64`
+	// and `_Decimal128`. Each stores a decimal coefficient and a power of ten
+	// rather than a binary significand, so a value written in decimal is kept
+	// exactly and not rounded to a binary fraction. The standard's sizes are
+	// 4, 8 and 16 bytes, and gcc 16.2.1 on this machine stores them with the
+	// binary integer decimal encoding, which its own preprocessor reports as
+	// `__DECIMAL_BID_FORMAT__ 1`. Measured on gcc 16.2.1 on this target:
+	// `sizeof(_Decimal32)`, `sizeof(_Decimal64)` and `sizeof(_Decimal128)`
+	// are 4, 8 and 16, and each `_Alignof` is that same number. The three are
+	// a family of their own: gcc refuses `1.5df + 1.5` with `cannot mix
+	// operands of decimal floating and other floating types`, so a decimal
+	// type is not a wider `double` and its rank only orders it against the
+	// other two.
+	decimal32
+	decimal64
+	decimal128
 	complex_float
 	complex_double
 	complex_long_double
@@ -255,9 +272,21 @@ pub fn (k Kind) is_unsigned() bool {
 }
 
 // is_floating says whether the kind is a real floating type. The complex types
-// are not here: they are a pair of floating values, not a floating value.
+// are not here: they are a pair of floating values, not a floating value. The
+// decimal types are: their radix is ten rather than two, and the standard still
+// makes them floating types, so `_Decimal32` promotes to nothing and converts to
+// and from the floating types like any other.
 pub fn (k Kind) is_floating() bool {
-	return k in [Kind.float, .double, .long_double, .float128]
+	return k in [Kind.float, .double, .long_double, .float128, .decimal32, .decimal64, .decimal128]
+}
+
+// is_decimal says whether the kind is one of the three decimal floating types.
+// It is the question the reader asks a literal's suffix and the emitter asks a
+// value, and it is separate from is_floating because everything that moves a
+// value through the floating-point register file has no form for one of these:
+// a decimal value travels as its own encoding and not as a binary significand.
+pub fn (k Kind) is_decimal() bool {
+	return k in [Kind.decimal32, .decimal64, .decimal128]
 }
 
 // is_extended says whether a kind is one this target stores in sixteen bytes of
@@ -337,6 +366,15 @@ pub fn (k Kind) is_unsigned_integer() bool {
 // the conversions follow at both ends of it: `__int128` added to any integer type
 // the standard has is `__int128`, and added to `float` it is `float`. A kind with
 // no rank in that order answers -1: nothing arithmetic may be asked of it.
+//
+// The decimal types rank among themselves and above every integer, measured with
+// `_Generic` on gcc 16.2.1: `_Decimal32 + 1` is `_Decimal32`, and `_Decimal32 +
+// _Decimal64` is `_Decimal64`. They are placed after `float128` and before the
+// complex types because gcc refuses to mix one with a binary floating type
+// (`cannot mix operands of decimal floating and other floating types`), so the
+// order between the two families is not observable and is written here only so
+// that the rank of a decimal is above every integer and below nothing it may
+// meet.
 pub fn (k Kind) rank() int {
 	return match k {
 		.bool_ { 0 }
@@ -350,9 +388,12 @@ pub fn (k Kind) rank() int {
 		.double { 8 }
 		.long_double { 9 }
 		.float128 { 10 }
-		.complex_float { 11 }
-		.complex_double { 12 }
-		.complex_long_double { 13 }
+		.decimal32 { 11 }
+		.decimal64 { 12 }
+		.decimal128 { 13 }
+		.complex_float { 14 }
+		.complex_double { 15 }
+		.complex_long_double { 16 }
 		else { -1 }
 	}
 }
@@ -636,6 +677,9 @@ fn (t Type) describe_unqualified() string {
 		.double { return 'double' }
 		.long_double { return 'long double' }
 		.float128 { return '__float128' }
+		.decimal32 { return '_Decimal32' }
+		.decimal64 { return '_Decimal64' }
+		.decimal128 { return '_Decimal128' }
 		.complex_float { return 'float _Complex' }
 		.complex_double { return 'double _Complex' }
 		.complex_long_double { return 'long double _Complex' }
@@ -829,6 +873,85 @@ pub fn float128_type() Type {
 	}
 }
 
+// decimal_type is the type of a decimal floating constant or object: one of the
+// three `_Decimal32`, `_Decimal64` and `_Decimal128`, chosen by the kind. Each is
+// complete, and its size and alignment are the description's answer and not this
+// function's: the model carries 4, 8 and 16 with an alignment equal to the size,
+// measured on gcc 16.2.1 on this target where `sizeof(_Decimal32)` is 4 and
+// `_Alignof(_Decimal32)` is 4, and likewise for the other two. A kind that is not
+// one of the three answers the 128-bit type rather than a type nothing named,
+// because every caller reaches this with a kind it read from a suffix or a
+// specifier.
+pub fn decimal_type(kind Kind) Type {
+	return Type{
+		kind:     if kind.is_decimal() { kind } else { Kind.decimal128 }
+		complete: true
+	}
+}
+
+// decimal_format is the decimal module's format for one of the three decimal kinds,
+// which is where that kind's precision, range, bias and encoding live: the `decimal`
+// module was written from the bytes gcc 16.2.1 wrote for a table of literals, and its
+// own comment is the layout. This function is the one place the model and that module
+// meet. A kind that is not one of the three answers the 64-bit format, which is what
+// the module's own `from_kind` answers for a name it does not know, and no caller
+// reaches this with a kind it did not read from a decimal suffix or specifier.
+pub fn (k Kind) decimal_format() decimal.Format {
+	return match k {
+		.decimal32 { decimal.Format.decimal32 }
+		.decimal128 { decimal.Format.decimal128 }
+		else { decimal.Format.decimal64 }
+	}
+}
+
+// decimal_digits is the number of significant decimal digits a format keeps,
+// which is the precision a constant of the type is rounded to: 7 for `_Decimal32`,
+// 16 for `_Decimal64` and 34 for `_Decimal128`. They are the standard's values and
+// they are what the encoding has room for, measured on gcc 16.2.1 on this target
+// where the preprocessor reports `__DEC32_MANT_DIG__ 7`, `__DEC64_MANT_DIG__ 16`
+// and `__DEC128_MANT_DIG__ 34` under a GNU dialect. The number itself is the
+// `decimal` module's to answer, so that the precision the reader rounds to and the
+// precision the encoding has room for cannot drift apart.
+pub fn decimal_digits(kind Kind) int {
+	return kind.decimal_format().digits()
+}
+
+// decimal_exponent_max is the largest power of ten a normal value of the format
+// may be scaled by, which is Emax in the standard's terms: 96 for `_Decimal32`,
+// 384 for `_Decimal64` and 6144 for `_Decimal128`. A constant whose exponent is
+// past it is one the format cannot hold, and gcc says so rather than writing a
+// value: measured on gcc 16.2.1, `double x = 1e97df;` is `warning: floating
+// constant exceeds range of '_Decimal32' [-Woverflow]`, and the same warning names
+// `_Decimal64` at `1e385dd` and `_Decimal128` at `1e6145dl`. The number is the
+// `decimal` module's, for the same reason the precision is.
+pub fn decimal_exponent_max(kind Kind) int {
+	return kind.decimal_format().exponent_max()
+}
+
+// decimal_bias is the value the binary integer decimal encoding adds to a value's
+// power of ten before storing it, which the standard fixes at 101 for
+// `_Decimal32`, 398 for `_Decimal64` and 6176 for `_Decimal128`. The number is the
+// `decimal` module's, which measured it.
+//
+// Measured on gcc 16.2.1 on this machine, which reports `__DECIMAL_BID_FORMAT__ 1`
+// from `gcc -dM -E - </dev/null`, by storing a value in a union and reading the
+// bytes back (the byte order below is the order they sit in memory):
+//
+//	1.0df  0a 00 00 32
+//	1.0dd  0a 00 00 00 00 00 a0 31
+//	1.0dl  0a 00 00 00 00 00 00 00 00 00 00 00 00 00 3e 30
+//	1e0dd  01 00 00 00 00 00 c0 31
+//
+// gcc keeps `1.0` as the coefficient 10 scaled by 10^-1, so the exponent field in
+// the first three rows is the bias minus one: 100, 397 and 6175. The last row is
+// the coefficient 1 at the power ten, so its field is the bias itself, which fixes
+// the three numbers. The shape those fields sit in is the `decimal` module's
+// comment; what the model needs is the number, and the probe above is what answers
+// it.
+pub fn decimal_bias(kind Kind) int {
+	return kind.decimal_format().bias()
+}
+
 pub fn complex_float_type() Type {
 	return Type{
 		kind:     .complex_float
@@ -873,6 +996,9 @@ pub fn scalar(kind Kind) ?Type {
 		.double { double_type() }
 		.long_double { long_double_type() }
 		.float128 { float128_type() }
+		.decimal32 { decimal_type(Kind.decimal32) }
+		.decimal64 { decimal_type(Kind.decimal64) }
+		.decimal128 { decimal_type(Kind.decimal128) }
 		.complex_float { complex_float_type() }
 		.complex_double { complex_double_type() }
 		.complex_long_double { complex_long_double_type() }
@@ -1275,6 +1401,78 @@ pub fn long_double_from_double(value f64) LongDouble {
 		mantissa: u64(0x8000000000000000) | (fraction << u64(11))
 		sign_exp: sign | u16(field + 15360)
 	}
+}
+
+// Decimal is the value of a decimal floating constant: the sign, the decimal
+// digits, a power of ten and whether the value is a number at all, rather than a
+// host number, because no host type here holds one and because a decimal constant
+// is read exactly rather than rounded to a binary fraction. It is the same idea as
+// `LongDouble`, which keeps an extended-precision value's own fields for the same
+// reason.
+//
+// digits are ASCII `'0'` to `'9'`, most significant first, with no leading zero,
+// and an empty list means the value is zero. exponent is an int and the value is
+// (-1)^sign * digits * 10^exponent, so `1.0dd` is sign false, digits "10" and
+// exponent -1 - the digits as the source wrote them, which is what gcc stores -
+// and the `0dd` a source wrote is sign false, no digits, and whatever exponent
+// the source wrote, because the encoding of a zero carries its exponent.
+// `special` is `.infinity` for a value the source wrote past the format's range,
+// which gcc reads as an infinity rather than refusing. The width the value is
+// stored at is the kind: see `decimal_type`, and `decimal_digits` for how many
+// digits that width keeps.
+pub struct Decimal {
+pub mut:
+	kind     Kind
+	sign     bool
+	digits   []u8
+	exponent int
+	special  decimal.Special = .finite
+}
+
+// value is the decimal module's value for this constant, which is the form the
+// encoding takes: the module holds the arithmetic, the rounding and the bytes, and
+// this type holds only what a type in this compiler has to answer about a constant.
+pub fn (v Decimal) value() decimal.Value {
+	return decimal.Value{
+		sign:     v.sign
+		digits:   v.digits
+		exponent: v.exponent
+		special:  v.special
+	}
+}
+
+// decimal_format is the decimal module's format for this constant, which is the
+// precision, the range and the encoding the kind names.
+pub fn (v Decimal) decimal_format() decimal.Format {
+	return v.kind.decimal_format()
+}
+
+// is_zero says whether the value is a zero of either sign. A zero keeps no
+// digits, which is what this asks; the exponent a zero carries is still its own.
+pub fn (v Decimal) is_zero() bool {
+	return v.digits.len == 0
+}
+
+// digits_text is the digits as text, which is what a diagnostic and the printer
+// write. A zero has no digits and answers "0".
+pub fn (v Decimal) digits_text() string {
+	if v.digits.len == 0 {
+		return '0'
+	}
+	return v.digits.bytestr()
+}
+
+// text is the value spelled the way the standard's decimal-to-string conversion
+// writes it: a sign, a leading digit, a point and the rest of the digits, then
+// `E` and the exponent. It is what `-print-ast` shows, so the digits and the
+// power of ten are both readable in the dump rather than only in a debugger.
+pub fn (v Decimal) text() string {
+	sign := if v.sign { '-' } else { '' }
+	digits := v.digits_text()
+	if v.digits.len <= 1 {
+		return '${sign}${digits}E${v.exponent}'
+	}
+	return '${sign}${digits[..1]}.${digits[1..]}E${v.exponent}'
 }
 
 // enum_underlying_kind is the integer kind an enum's enumerators require, from
