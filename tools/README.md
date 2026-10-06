@@ -111,7 +111,8 @@ optional.
 Two corpora with one contract each, run by one runner: `regression/` is a program
 per bug the compiler has already fixed, and `goldens/` is a program per behaviour
 whose output is recorded. A regression case is held to silence and an exit
-status; a golden is held to the bytes in a `.expected` file.
+status; a golden is held to the bytes in a `.expected` file. Both are shaped the
+same way: a directory per standard.
 
 ```sh
 v run tools/regress.vsh                        # build the tree, then run every case
@@ -126,15 +127,19 @@ v run tools/regress.vsh --count                # print how many cases there are
 A regression case is named `NNNN-group-individual.c` and has `int main(void)`. It
 prints nothing and exits zero while the compiler behaves; a line of output or a
 non-zero exit is the regression the file was added for. A golden case has the
-same name shape and a `.expected` file beside it: the program prints to stdout
-and exits zero, and its stdout has to equal the expected bytes, line for line and
-byte for byte.
+same name shape with a `.expected` file beside it in the same dialect directory:
+the program prints to stdout and exits zero, and its stdout has to equal the
+expected bytes, line for line and byte for byte.
 
-Both corpora compile with `-std=gnu99 -w -lm -x c`: `gnu99` because a case may
-reach a system header that refuses the `c99` spelling, `-w` because a case is not
-required to be warning-clean, `-lm` for the math a case may touch, and `-x c` so
-the compiler reads the file as C rather than guessing from a name it did not
-write. Cases run in parallel, eight at a time by default (`-j N`).
+A case's directory is the standard it is compiled under: the leaf name is the
+`-std=` spelling, so `regression/iso/c99/` is compiled `-std=c99` and
+`regression/gnu/gnu99/` `-std=gnu99`. Every case in both corpora today compiles
+under strict ISO C99, so they all sit under `iso/c99`; a case this compiler
+accepts only in a GNU dialect goes under `gnu/`. Every case compiles with the
+standard of its directory plus `-w` because a case is not required to be
+warning-clean, `-lm` for the math a case may touch, and `-x c` so the compiler
+reads the file as C rather than guessing from a name it did not write. Cases run
+in parallel, eight at a time by default (`-j N`).
 
 Each directory has a floor on its case count: losing a case is a failure and
 adding one is not, so the floor is a floor and not an equality, the same

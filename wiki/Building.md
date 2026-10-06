@@ -104,8 +104,8 @@ a compiler that errors on `-bt25` fails a build it was supposed to serve.
 | `extensions/` | the `-fvcc-exts=` interface, built on the extension rows in `standard/` |
 | `tools/` | gate, benchmark and corpus scripts; not part of the compiler |
 | `compliance/` | the conformance corpus, one directory per standard: one C program per standard-library check, run by `tools/compliance.vsh` |
-| `regression/` | one C program per bug that must not come back, run by `tools/regress.vsh` |
-| `goldens/` | C programs whose recorded output is compared byte for byte, so a change in behavior shows as a diff |
+| `regression/` | one C program per bug that must not come back, one directory per standard, run by `tools/regress.vsh` |
+| `goldens/` | C programs whose recorded output is compared byte for byte, one directory per standard |
 
 The C in `compliance/`, `regression/` and `goldens/` is the only C in the
 tree, and it is input the compiler is handed rather than part of the compiler

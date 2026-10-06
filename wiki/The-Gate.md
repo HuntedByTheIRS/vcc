@@ -86,9 +86,9 @@ fewer than 906 checks. Both floors are floors and not equalities: adding tests
 needs no edit here, losing them is a failure. A test carrying a
 `requires-define: NAME` line is skipped unless `--define` names it, because
 running it with the construct off would pass by not compiling the thing under
-test. The mode is `-std=gnu99`, and
+test. Each test compiles with the standard of its directory, and
 [compliance/README.md](https://github.com/HuntedByTheIRS/vcc/blob/main/compliance/README.md)
-says why, and why `-lm` is not optional.
+says why the corpus is split and why `-lm` is not optional.
 
 ## The regression and golden corpora
 
@@ -113,14 +113,17 @@ v run tools/regress.vsh --list                 # print what would run
 v run tools/regress.vsh --count                # print how many cases there are
 ```
 
-Both corpora compile with `-std=gnu99 -w -lm -x c`: `gnu99` because a case may
-reach a system header that refuses the `c99` spelling, `-w` because a case is
-not required to be warning-clean, `-lm` for the math a case may touch, and
-`-x c` so the compiler reads the file as C rather than guessing from a name it
-did not write. Cases run in parallel, eight at a time by default (`-j N`). Each
-directory has a floor on its case count: losing a case is a failure and adding
-one is not. The count `--count` prints is the number the regressions badge in
-the README reads.
+A case's directory is the standard it is compiled under: the leaf name is the
+`-std=` spelling, so `regression/iso/c99/` is compiled `-std=c99` and
+`regression/gnu/gnu99/` `-std=gnu99`. Every case in both corpora today compiles
+under strict ISO C99, so they all sit under `iso/c99`; a case this compiler
+accepts only in a GNU dialect goes under `gnu/`. Every case compiles with the
+standard of its directory plus `-w` because a case is not required to be
+warning-clean, `-lm` for the math a case may touch, and `-x c` so the compiler
+reads the file as C rather than guessing from a name it did not write. Cases run
+in parallel, eight at a time by default (`-j N`). Each directory has a floor on
+its case count: losing a case is a failure and adding one is not. The count
+`--count` prints is the number the regressions badge in the README reads.
 
 ## The benchmark harness
 
