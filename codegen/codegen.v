@@ -160,11 +160,14 @@ struct Slot {
 	// address has to ask, so it asks this.
 	captured bool
 	// capture_owner is the symbol of the function whose frame a captured slot
-	// lives in. Only the frame of the function a nested function is written in
-	// is a register away: an object of a function further out would take a walk
-	// of the chain, which is not written, so a use of such an object is refused
-	// by name where it is used.
+	// lives in, and capture_depth is how many chain links a nested function walks
+	// to stand in that frame: one for the function it is written in, two for that
+	// function's own enclosing function, and so on. The chain is a list of frame
+	// pointers - each frame keeps the one it was handed in a chain slot of its
+	// own - so the walk is one load per link, and a link whose frame was never
+	// handed over is a use this compiler refuses by name.
 	capture_owner string
+	capture_depth int
 }
 
 // is_array says the slot holds an array, whether its size was written or is
@@ -257,6 +260,18 @@ struct LabelUse {
 struct PendingNested {
 	decl   ast.FnDecl
 	scopes []map[string]Slot
+	// outer_chains is the static chain of the function this definition is
+	// written in, and of the functions around that one: the frames a nested
+	// function walks through to reach an object more than one function out.
+	outer_chains []ChainLink
+}
+
+// ChainLink is one step of a nested function's static chain: the symbol of the
+// function whose frame the step leads to, and the slot that frame keeps its own
+// chain in, which is where the step after it is read from.
+struct ChainLink {
+	symbol string
+	slot   Slot
 }
 
 // Emitter writes one translation unit into a Program. It owns statement and
@@ -419,6 +434,13 @@ mut:
 	// none for a function defined at the top level, which has no enclosing
 	// frame to reach.
 	chain ?Slot
+	// chain_links is the rest of the static chain: one entry per function
+	// further out than the one this function is written in, in the order the
+	// walk reads them. The first entry is the chain slot of the function this
+	// function is written in, which is the frame the chain handed over at the
+	// call already reached, and the entries after it are the chain slots of the
+	// functions around that one.
+	chain_links []ChainLink
 	// function_symbol is the symbol of the function being emitted and
 	// enclosing_symbol that of the function it is written in, both as the
 	// reader mangled them and both empty at the top level. A nested function
@@ -1187,20 +1209,17 @@ fn collect_nested(stmts []ast.Stmt) []ast.FnDecl {
 //
 // A nested function reaches the frame of the function it is written in through
 // one chain link: a call hands that frame pointer over in the chain register and
-// the entry stores it in the chain slot. An object of a function further out
-// would take a walk of the chain, which is not written, and neither is a captured
-// object this back end moves with an instruction that cannot take the chain
-// register as its base: an object of either floating type, a 128-bit integer, a
+// the entry stores it in the chain slot. An object of a function further out is
+// one more link per function, because each frame keeps the pointer it was handed
+// in a chain slot of its own, and the walk reads those slots in turn. An object
+// this back end moves with an instruction that cannot take the chain register as
+// its base is refused here, by name, where the object is used, rather than
+// addressed wrongly: an object of either floating type, a 128-bit integer, a
 // long double, a complex object, a variable-length array and an object of an
-// aggregate type. Both are refused here, by name, where the object is used,
-// rather than addressed wrongly.
+// aggregate type.
 fn (mut e Emitter) slot_base_register(slot Slot, line int, col int) !backend.Register {
 	if !slot.captured {
 		return e.frame_pointer(line, col)
-	}
-	if slot.capture_owner != e.enclosing_symbol {
-		e.diagnostics << problem(line, col, 'unsupported: ${e.function_symbol} uses an object declared in ${slot.capture_owner}, and only an object of the function it is written in is reached through the static chain')
-		return error('an object captured from a function further out')
 	}
 	if slot.floating || slot.single || slot.wide || slot.long_double || slot.complex || slot.vla
 		|| (slot.bytes > 0 && slot.count == 0) {
@@ -1214,6 +1233,18 @@ fn (mut e Emitter) slot_base_register(slot Slot, line int, col int) !backend.Reg
 	register := e.static_chain(line, col)!
 	base := e.frame_pointer(line, col)!
 	e.append(e.target.load_slot(base, i32(chain.offset), register, e.target.word_size)!)
+	mut walked := 1
+	for link in e.chain_links {
+		if walked >= slot.capture_depth {
+			break
+		}
+		e.append(e.target.load_slot(register, i32(link.slot.offset), register, e.target.word_size)!)
+		walked++
+	}
+	if walked < slot.capture_depth {
+		e.diagnostics << problem(line, col, 'unsupported: ${e.function_symbol} uses an object declared in ${slot.capture_owner}, and the chain of enclosing frames does not reach that function')
+		return error('an object captured from a function the chain does not reach')
+	}
 	return register
 }
 
@@ -1221,8 +1252,9 @@ fn (mut e Emitter) slot_base_register(slot Slot, line int, col int) !backend.Reg
 // written in into the chain register, where the callee reads it on entry. A
 // nested function of this function is handed this function's frame; a nested
 // function of the function this one is written in is handed the frame this one
-// was itself handed, so two functions written side by side in one body see the
-// same enclosing objects.
+// was itself handed, and a nested function of a function further out is handed
+// the frame that walk leads to, so every function written inside one body reads
+// the same enclosing objects.
 fn (mut e Emitter) load_call_chain(owner string, line int, col int) !void {
 	register := e.static_chain(line, col)!
 	if owner == e.function_symbol {
@@ -1230,17 +1262,60 @@ fn (mut e Emitter) load_call_chain(owner string, line int, col int) !void {
 		e.append(e.target.move_register64(register, base)!)
 		return
 	}
-	if owner == e.enclosing_symbol {
-		chain := e.chain or {
-			e.diagnostics << problem(line, col, 'internal: ${e.function_symbol} calls a nested function of its enclosing function and has no static chain')
-			return error('no static chain')
-		}
-		base := e.frame_pointer(line, col)!
-		e.append(e.target.load_slot(base, i32(chain.offset), register, e.target.word_size)!)
-		return
+	// The frames this call can hand over, in the order the walk reaches them: the
+	// function this one is written in first, then the functions around it, each
+	// reached by reading the chain slot of the frame before it.
+	chain := e.chain or {
+		e.diagnostics << problem(line, col, 'internal: ${e.function_symbol} calls a nested function written outside it and has no static chain')
+		return error('no static chain')
 	}
-	e.diagnostics << problem(line, col, 'unsupported: ${e.function_symbol} calls a nested function written in ${owner}, and only a nested function of this function or of the function it is written in is called')
-	return error('a nested function out of reach')
+	mut names := [e.enclosing_symbol]
+	mut slots := [chain]
+	for link in e.chain_links {
+		names << link.symbol
+		slots << link.slot
+	}
+	mut found := -1
+	for i, name in names {
+		if name == owner {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		e.diagnostics << problem(line, col, 'unsupported: ${e.function_symbol} calls a nested function written in ${owner}, and the chain of enclosing frames does not reach that function')
+		return error('a nested function out of reach')
+	}
+	mut carried := false
+	for i, slot in slots {
+		if i > found {
+			break
+		}
+		if !carried {
+			base := e.frame_pointer(line, col)!
+			e.append(e.target.load_slot(base, i32(slot.offset), register, e.target.word_size)!)
+			carried = true
+			continue
+		}
+		e.append(e.target.load_slot(register, i32(slot.offset), register, e.target.word_size)!)
+	}
+}
+
+// reachable_chains is the static chain of this function, in the order a walk
+// reads it: the chain slot of the function this one is written in first, which
+// is read from this function's own frame, and then the chain slots of the
+// functions around that one, each read from the frame the step before it
+// reached. It is empty for a function defined at the top level, which is written
+// in no frame at all.
+fn (e Emitter) reachable_chains() []ChainLink {
+	chain := e.chain or { return e.chain_links }
+	mut links := []ChainLink{cap: e.chain_links.len + 1}
+	links << ChainLink{
+		symbol: e.enclosing_symbol
+		slot:   chain
+	}
+	links << e.chain_links
+	return links
 }
 
 // record_nested keeps a nested function until the function that writes it is
@@ -1249,21 +1324,27 @@ fn (mut e Emitter) load_call_chain(owner string, line int, col int) !void {
 // offsets belong to is the enclosing one: the nested function's own frame does
 // not hold them, so each is reached from the chain.
 //
-// An object already marked captured came from a function further out and keeps
-// its owner, which is one link more than the nested function can walk, so a use
-// of it is refused where it is used.
+// An object already marked captured came from a function further out, and the
+// copy the nested function gets is one link deeper than this function's own: the
+// definition stands one function further from the frame the object lives in, and
+// the chain it walks is this function's chain with this function's own chain slot
+// in front of it.
 fn (mut e Emitter) record_nested(decl ast.FnDecl) {
 	mut scopes := []map[string]Slot{cap: e.scopes.len}
 	for scope in e.scopes {
 		mut marked := map[string]Slot{}
 		for name, slot in scope {
 			captured := if slot.captured {
-				slot
+				Slot{
+					...slot
+					capture_depth: slot.capture_depth + 1
+				}
 			} else {
 				Slot{
 					...slot
 					captured:      true
 					capture_owner: e.function_symbol
+					capture_depth: 1
 				}
 			}
 			marked[name] = captured
@@ -1271,8 +1352,9 @@ fn (mut e Emitter) record_nested(decl ast.FnDecl) {
 		scopes << marked
 	}
 	e.pending_nested << PendingNested{
-		decl:   decl
-		scopes: scopes
+		decl:         decl
+		scopes:       scopes
+		outer_chains: e.reachable_chains()
 	}
 }
 
@@ -1282,9 +1364,13 @@ fn (mut e Emitter) record_nested(decl ast.FnDecl) {
 // inside it, and they are put away afterwards: the enclosing function is done
 // with its scopes, and the next function starts with none.
 fn (mut e Emitter) emit_nested(pending PendingNested) !void {
+	scopes := e.scopes
+	links := e.chain_links
 	e.scopes = pending.scopes
+	e.chain_links = pending.outer_chains
 	e.emit_function(pending.decl)!
-	e.scopes = []
+	e.scopes = scopes
+	e.chain_links = links
 }
 
 // emit_function writes one function: its frame, its parameters into their slots,

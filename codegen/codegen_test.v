@@ -5376,15 +5376,25 @@ fn test_a_nested_function_inside_a_nested_function_is_emitted() {
 	assert run_image(emitted.bytes) == 5
 }
 
-fn test_an_object_two_functions_out_is_refused_by_name() {
-	// The chain a nested function is handed reaches the frame of the function it
-	// is written in and no further. An object two functions out would take a walk
-	// of the chain, which is not written, so the use is refused by name rather
-	// than read from the wrong frame.
-	emitted := emit(translation_unit('int main() { int n = 1; int f(void) { int g(void) { return n; } return g(); } return f(); }'),
+fn test_an_object_two_functions_out_is_read_through_two_chain_links() {
+	// The chain is one link per enclosing function and each frame keeps the
+	// pointer it was handed in a chain slot of its own, so an object two
+	// functions out is reached by walking the chain: g reads `n` from main's
+	// frame, one link past the frame f handed it.
+	emitted := emit(translation_unit('int main() { int n = 4; int f(void) { int g(void) { return n; } return g(); } return f(); }'),
 		Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('reached through the static chain')
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
+}
+
+fn test_a_nested_function_calls_one_written_two_functions_out() {
+	// A call puts the callee's enclosing frame in the chain register, and the
+	// frame of a function two functions out is the end of a two-link walk:
+	// gfun is written in main, so inner's call runs the walk.
+	emitted := emit(translation_unit('int main() { int gfun(int a) { return a + 1; } int outer(int x) { int inner(int y) { return y + gfun(0); } return inner(x); } return outer(4); }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 5
 }
 
 fn test_an_object_of_a_type_the_chain_cannot_carry_is_refused_by_name() {
