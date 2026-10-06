@@ -210,6 +210,19 @@ mut:
 	at   int
 }
 
+// Cleanup is one object a block has to run a function on when the block ends:
+// the object's name and type, and the function the object's
+// `__attribute__((cleanup(name)))` named. GCC 6.4.1 gives that function one
+// parameter, a pointer to the object, so the call this is emitted as is the
+// function with the object's address.
+struct Cleanup {
+	name     string
+	typ      types.Type
+	function string
+	line     int
+	col      int
+}
+
 // LabelUse is where a goto named a label: the position the diagnostic about a
 // label nothing defines belongs at.
 struct LabelUse {
@@ -358,6 +371,19 @@ mut:
 	// match scope identities across the two walks. It is empty for a function
 	// that declares no variable-length array.
 	vla_label_counts map[string]int
+	// cleanups is the stack of blocks being emitted, one entry per scope in
+	// scopes and in the same order: the objects declared in that block with
+	// `__attribute__((cleanup(name)))`, in the order they were declared. A
+	// block runs them where it ends, innermost first and within one block in
+	// reverse declaration order, and every way control leaves a block runs
+	// them too: a return, a break, a continue or a goto.
+	cleanups [][]Cleanup
+	// cleanup_label_counts is, for every named label of the function being
+	// emitted, how many of those cleanup blocks enclose it. A goto runs the
+	// cleanups of the blocks between itself and its target, and the count is
+	// what names them without the emitter having to match scope identities
+	// across the two walks. It is empty for a function that declares none.
+	cleanup_label_counts map[string]int
 	// frame_used is how many bytes of frame the function being emitted has
 	// claimed: its parameters, its locals and the slots an expression needs.
 	frame_used int
@@ -1111,6 +1137,13 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	if function_has_vla(decl.body) {
 		e.vla_label_counts = vla_label_counts(decl.body)
 	}
+	// A goto that leaves a block whose objects carry a cleanup runs them before
+	// it jumps, and this pre-pass records how many such blocks enclose each
+	// named label, for the same reason the one above does.
+	e.cleanup_label_counts = map[string]int{}
+	if function_has_cleanups(decl.body) {
+		e.cleanup_label_counts = cleanup_label_counts(decl.body)
+	}
 	e.push_scope()
 	// The numbers a walk through the unnamed arguments starts from are this
 	// function's and not the last one's, so they are reset here whatever the
@@ -1407,6 +1440,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	e.callees = []Slot{}
 	e.slot_base = 0
 	e.vla_saves = []int{}
+	e.cleanups = [][]Cleanup{}
 	e.wide_left = []Slot{}
 	e.wide_right = []Slot{}
 	e.wide_scratch = []Slot{}
@@ -1535,6 +1569,10 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 			// return type is void (6.8.6.4p1), and it leaves the way a return with
 			// a value does once the value is written: the frame is closed and
 			// control goes back to the caller.
+			//
+			// The objects the body's blocks asked a cleanup for run here, because
+			// this is a place control leaves them all at once.
+			e.run_cleanups_above(0)!
 			e.append(e.target.frame_epilogue())
 			return
 		}
@@ -1544,6 +1582,12 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 	if e.returning == 'void' {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: return with a value in a function that returns void')
 		return error('return with a value')
+	}
+	if e.cleanups_live() {
+		// The objects this function's blocks asked a cleanup for run where the
+		// function leaves, which a return is. The value goes through the frame
+		// on the way, so that the calls and the value do not share a register.
+		return e.emit_return_with_cleanups(expr, stmt)
 	}
 	if e.return_class.bytes > 0 {
 		if e.return_class.count > 2 {
@@ -1628,6 +1672,44 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 	}
 	e.emit_expr(expr)!
 	e.convert_to_return(expr, stmt.line, stmt.col)!
+	e.append(e.target.frame_epilogue())
+}
+
+// emit_return_with_cleanups hands a value back out of a function whose blocks
+// declared objects with a cleanup attribute. The value is computed first and
+// parked in the frame, the cleanups run, and the value goes back where the
+// caller reads it: a cleanup is a call, and a call clobbers the register a
+// result is handed back in, so a value left in that register across the call
+// would not be the value the program returned.
+//
+// A value handed back as an object is refused rather than written. Parking one
+// needs its bytes copied out of the object first, and an object the cleanups may
+// be about to free is not a thing to read afterwards; a scalar, a float and a
+// double are one value and park in one slot.
+fn (mut e Emitter) emit_return_with_cleanups(expr ast.Expr, stmt ast.Stmt) !void {
+	if e.return_class.bytes > 0 || e.returning_complex_long_double || e.writes_a_128(e.returning)
+		|| e.writes_a_long_double(e.returning) {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a return of an object out of a function whose blocks carry a cleanup attribute')
+		return error('object return with cleanups')
+	}
+	e.emit_expr(expr)!
+	e.convert_to_return(expr, stmt.line, stmt.col)!
+	floating := e.returning == 'float' || e.returning == 'double'
+	// The value gets a slot of its own rather than one of the expression slots,
+	// because the calls below evaluate their own arguments through those and
+	// would write over what is parked here.
+	value := e.reserve(e.target.word_size)
+	if floating {
+		e.store_float_accumulator(value, e.returning == 'float', stmt.line, stmt.col)!
+	} else {
+		e.store_accumulator(value, stmt.line, stmt.col)!
+	}
+	e.run_cleanups_above(0)!
+	if floating {
+		e.load_float_accumulator(value, e.returning == 'float', stmt.line, stmt.col)!
+	} else {
+		e.load_accumulator(value, stmt.line, stmt.col)!
+	}
 	e.append(e.target.frame_epilogue())
 }
 
@@ -1756,6 +1838,20 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	// because that is what says how the four operations over a list may treat it.
 	if abi.is_argument_list(stmt.resolved()) {
 		e.argument_lists << stmt.decl_name
+	}
+	if stmt.cleanup() != '' && e.cleanups.len > 0 {
+		// The object is in the block this declaration sits in, and the function
+		// its cleanup attribute named runs on it where that block ends. The
+		// record is kept here rather than where the block is closed because the
+		// block is emitted as it is read, and the slot the object got is what
+		// the call needs the address of, not the name alone.
+		e.cleanups[e.cleanups.len - 1] << Cleanup{
+			name:     stmt.decl_name
+			typ:      stmt.resolved()
+			function: stmt.cleanup()
+			line:     stmt.line
+			col:      stmt.col
+		}
 	}
 	init := stmt.init or { return }
 	if slot.long_double && slot.count == 0 {
@@ -3380,6 +3476,10 @@ fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
 		// the storage those blocks claimed goes back before the jump, so a body
 		// that declared a variable-length array does not leak it by breaking out.
 		e.restore_vla_scopes_above(e.loops[e.loops.len - 1].scopes_at_entry)
+		// The objects those blocks asked a cleanup for run too, for the same
+		// reason: the block's own exit is not reached when control jumps out of
+		// it.
+		e.run_cleanups_above(e.cleanup_scopes_below(e.loops[e.loops.len - 1].scopes_at_entry))!
 		e.jump(e.loops[e.loops.len - 1].break_to)!
 		return
 	}
@@ -3387,6 +3487,7 @@ fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
 	for at >= 0 {
 		if !e.loops[at].is_switch {
 			e.restore_vla_scopes_above(e.loops[at].scopes_at_entry)
+			e.run_cleanups_above(e.cleanup_scopes_below(e.loops[at].scopes_at_entry))!
 			e.jump(e.loops[at].continue_to)!
 			return
 		}
@@ -3644,6 +3745,15 @@ fn (mut e Emitter) emit_goto(stmt ast.Stmt) !void {
 			}
 		}
 		e.restore_stack_pointer(active[at])
+	}
+	// A goto that leaves a block whose objects asked a cleanup for one runs them
+	// before it jumps, in the order the blocks were entered, innermost first. The
+	// label's enclosing blocks are a prefix of the goto's, so the count of the
+	// ones that declared such an object names what is being left behind. A label
+	// this function does not define has no count, and the undefined label is
+	// reported where the function's labels are placed.
+	if e.cleanups_live() {
+		e.run_cleanups_above(e.cleanup_label_counts[label])!
 	}
 	e.jump(e.named_label(label))!
 }
@@ -4045,9 +4155,20 @@ fn (mut e Emitter) callee_slot(depth int) Slot {
 fn (mut e Emitter) push_scope() {
 	e.scopes << map[string]Slot{}
 	e.vla_saves << vla_no_save
+	e.cleanups << []Cleanup{}
 }
 
 fn (mut e Emitter) pop_scope() {
+	// The objects a block declared with `__attribute__((cleanup(name)))` run
+	// where the block ends, a block at a time and within one block in reverse
+	// declaration order, before the block's storage goes back. A call that
+	// cannot be written has already recorded its diagnostic, and the run fails
+	// on that rather than on a missing instruction, so the error is not carried
+	// out of a function every scope's exit would otherwise have to be fallible
+	// through.
+	if e.cleanups.len > 0 {
+		e.run_cleanups_of_scope(e.cleanups.len - 1) or {}
+	}
 	// A block that claimed a variable-length array's storage gives it back where
 	// the block ends: the stack pointer goes back to what it was before the
 	// block's first such declaration subtracted from it, so a loop whose body
@@ -4058,6 +4179,9 @@ fn (mut e Emitter) pop_scope() {
 			e.restore_stack_pointer(offset)
 		}
 		e.vla_saves.pop()
+	}
+	if e.cleanups.len > 0 {
+		e.cleanups.pop()
 	}
 	e.scopes.pop()
 }
@@ -4087,6 +4211,97 @@ fn (mut e Emitter) restore_vla_scopes_above(depth int) {
 		}
 		at++
 	}
+}
+
+// run_cleanups_of_scope runs the objects one block declared with
+// `__attribute__((cleanup(name)))`, in reverse declaration order, which is the
+// order GCC 6.4.1 gives them.
+fn (mut e Emitter) run_cleanups_of_scope(at int) !void {
+	if at < 0 || at >= e.cleanups.len {
+		return
+	}
+	list := e.cleanups[at]
+	mut i := list.len - 1
+	for i >= 0 {
+		e.emit_cleanup_call(list[i])!
+		i--
+	}
+}
+
+// run_cleanups_above runs every cleanup block after the `enclosing`-th one that
+// has any, innermost first. `enclosing` is how many such blocks the place
+// control is going to sits inside, so what runs is the blocks being left behind:
+// every block for a return, and the blocks between a goto and its target, a
+// break and its loop, or a continue and its loop.
+fn (mut e Emitter) run_cleanups_above(enclosing int) !void {
+	mut declared := []int{}
+	for at, list in e.cleanups {
+		if list.len > 0 {
+			declared << at
+		}
+	}
+	mut i := declared.len - 1
+	for i >= enclosing {
+		e.run_cleanups_of_scope(declared[i])!
+		i--
+	}
+}
+
+// cleanup_scopes_below is how many cleanup blocks lie below a scope depth, which
+// is what a break or a continue leaving that depth has to run.
+fn (e Emitter) cleanup_scopes_below(depth int) int {
+	mut count := 0
+	for at := 0; at < depth && at < e.cleanups.len; at++ {
+		if e.cleanups[at].len > 0 {
+			count++
+		}
+	}
+	return count
+}
+
+// cleanups_live says whether any block being emitted declared an object with a
+// cleanup attribute. It is the question a return turns on, and the one the
+// pre-pass that counted the blocks around each label was worth running for.
+fn (e Emitter) cleanups_live() bool {
+	for list in e.cleanups {
+		if list.len > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// emit_cleanup_call writes the call a cleanup attribute asks for: the named
+// function with the address of the object. GCC 6.4.1 gives the function one
+// parameter, a pointer to a type compatible with the object, and the address is
+// the same one `&object` writes anywhere else.
+fn (mut e Emitter) emit_cleanup_call(c Cleanup) !void {
+	object := ast.Expr(ast.Ident{
+		name: c.name
+		typ:  c.typ
+		line: c.line
+		col:  c.col
+	})
+	address := ast.Expr(ast.Unary{
+		op:   '&'
+		expr: object
+		typ:  types.pointer_to(c.typ)
+		line: c.line
+		col:  c.col
+	})
+	call := ast.Expr(ast.Call{
+		name: c.function
+		args: [address]
+		typ:  types.void_type()
+		line: c.line
+		col:  c.col
+	})
+	e.emit_expression_statement(ast.Stmt{
+		kind: .expr_stmt
+		expr: call
+		line: c.line
+		col:  c.col
+	})!
 }
 
 // VlaCounter counts, for each named label of a function, how many scopes that
@@ -4191,6 +4406,108 @@ fn statement_has_vla(stmt ast.Stmt) bool {
 		.while_stmt { return function_has_vla(stmt.body) || function_has_vla(stmt.step) }
 		.do_while_stmt { return function_has_vla(stmt.body) }
 		.switch_stmt { return function_has_vla(stmt.body) }
+		else { return false }
+	}
+}
+
+// CleanupCounter counts, for each named label of a function, how many blocks
+// that declared an object with a cleanup attribute enclose it. It is the walk
+// VlaCounter makes over a different mark, and the reason is the same: a goto
+// that leaves such a block runs what the block asked for before it jumps, and
+// the count of them names which blocks are being left.
+struct CleanupCounter {
+mut:
+	active []bool
+	counts map[string]int
+}
+
+fn cleanup_label_counts(body []ast.Stmt) map[string]int {
+	mut counter := CleanupCounter{
+		counts: map[string]int{}
+	}
+	counter.scope(body)
+	return counter.counts
+}
+
+fn (mut c CleanupCounter) scope(stmts []ast.Stmt) {
+	c.active << false
+	for stmt in stmts {
+		c.statement(stmt)
+	}
+	c.active.pop()
+}
+
+fn (mut c CleanupCounter) statement(stmt ast.Stmt) {
+	match stmt.kind {
+		.block { c.scope(stmt.body) }
+		.var_decl {
+			if stmt.cleanup() != '' && c.active.len > 0 {
+				c.active[c.active.len - 1] = true
+			}
+		}
+		.if_stmt {
+			if stmt.then_body.len > 0 {
+				c.scope(stmt.then_body)
+			}
+			if stmt.else_body.len > 0 {
+				c.scope(stmt.else_body)
+			}
+		}
+		.while_stmt {
+			if stmt.body.len > 0 {
+				c.scope(stmt.body)
+			}
+			// A for loop's step runs in the scope around the loop, which is
+			// where emission writes it, so it is walked without opening a scope.
+			for step in stmt.step {
+				c.statement(step)
+			}
+		}
+		.do_while_stmt {
+			if stmt.body.len > 0 {
+				c.scope(stmt.body)
+			}
+		}
+		.switch_stmt {
+			if stmt.body.len > 0 {
+				c.scope(stmt.body)
+			}
+		}
+		.label_stmt {
+			mut enclosing := 0
+			for declared in c.active {
+				if declared {
+					enclosing++
+				}
+			}
+			c.counts[stmt.label()] = enclosing
+		}
+		else {}
+	}
+}
+
+// function_has_cleanups says whether any statement in a function declares an
+// object with a cleanup attribute, so that the label pre-pass runs only where a
+// goto could have a call to make before it jumps.
+fn function_has_cleanups(stmts []ast.Stmt) bool {
+	for stmt in stmts {
+		if statement_has_cleanups(stmt) {
+			return true
+		}
+	}
+	return false
+}
+
+fn statement_has_cleanups(stmt ast.Stmt) bool {
+	match stmt.kind {
+		.block { return function_has_cleanups(stmt.body) }
+		.var_decl { return stmt.cleanup() != '' }
+		.if_stmt {
+			return function_has_cleanups(stmt.then_body) || function_has_cleanups(stmt.else_body)
+		}
+		.while_stmt { return function_has_cleanups(stmt.body) || function_has_cleanups(stmt.step) }
+		.do_while_stmt { return function_has_cleanups(stmt.body) }
+		.switch_stmt { return function_has_cleanups(stmt.body) }
 		else { return false }
 	}
 }

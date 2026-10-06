@@ -5,7 +5,6 @@
  * function scope variables ... The function must take one parameter, a pointer
  * to a type compatible with the variable."
  *
- * unimplemented: the cleanup attribute.
  */
 
 #include <stdio.h>
