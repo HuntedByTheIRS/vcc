@@ -25,9 +25,10 @@ A case's directory is the standard it is compiled under: the leaf name is the
     regression/gnu/gnu11/   empty
     regression/gnu/gnu17/   empty
 
-Every case in the corpus today compiles under strict ISO C99, so they all sit
-under `iso/c99`. A case this compiler accepts only in a GNU dialect belongs in
-`gnu/` beside its ISO sibling.
+Most cases in the corpus compile under strict ISO C99 and sit in `iso/c99`. A
+case this compiler accepts only in a GNU dialect belongs in `gnu/` beside its
+ISO sibling: `gnu/gnu99/` holds the first of them, the cleanup attribute
+compiled `-std=gnu99`.
 
 ## Naming
 
