@@ -28,16 +28,16 @@ digits, so the corpus has room for 10,000 tests; the first thousand are the
 checks cut from `monolithic.c`, and the numbering went to four digits when the
 three ran out.
 
-## A test is a program the compiler accepts, or one it must refuse
+## A test is a program the compiler accepts, one it must refuse, or one it cannot read yet
 
 Most tests are programs a conforming implementation accepts: each compiles, runs
 on its own, and exits non-zero when its check fails.
 
-68 of them are the other way round. Each is a program that breaks a Constraint
-or a syntax rule of ISO/IEC 9899:1999, so a conforming implementation owes a
+68 of them are the other way round. Each is a program that breaks a Constraint or
+a syntax rule of ISO/IEC 9899:1999, so a conforming implementation owes a
 diagnostic for it, and the test has a line saying so:
 
-    /* 0999: a program that breaks a constraint, so the compiler must refuse it
+    /* 0999: a-subscript-on-a-scalar
      *
      * ISO/IEC 9899:1999 6.5.2.1p1: one of the expressions shall have type
      * pointer to object type, the other expression shall have integer type.
@@ -57,6 +57,31 @@ rather than to gcc: `sizeof` of a function and of void, an equality between a
 pointer and an integer, a declaration that declares nothing, and the two
 initializers that write past the object they initialize.
 
+3 more are programs the standard allows and this compiler cannot read yet. The
+test says which construct, and the run counts it as a gap rather than a failure:
+
+    /* 1097: complex-multiplication-and-division-for-every-type
+     *
+     * ISO/IEC 9899:1999 7.3.3p1: the multiplicative operators have their usual
+     * meaning for complex operands.
+     *
+     * unimplemented: the division of a long double _Complex.
+     *
+     * gcc 16.2.1 compiles this program, runs it silent and exits 0, so the
+     * program conforms to this clause and what is missing is this compiler.
+     * What this compiler says instead:
+     *
+     *     unsupported: / is not an operator this back end computes long double
+     *     _Complex with
+     */
+
+Such a test is measured twice over: gcc compiles it, runs it and it exits 0, so
+the program is right, and this compiler's refusal is the gap. The program is a
+check with its own assertions, so the day this compiler takes it the test runs,
+and a gap that compiles is reported by name as a line that can go: the corpus
+does not keep a gap that has closed. What these tests hold is the list of what is
+left, one construct per file, and the run prints that list.
+
 ## Why 159 tests sit under gnu/gnu99 and not iso/c99
 
 Measured on this compiler, each test compiled on its own:
@@ -68,12 +93,13 @@ Measured on this compiler, each test compiled on its own:
   159th, `0941-assert-a-true-expression-does-nothing`, uses `assert()`, whose
   glibc expansion under strict ISO needs a construct this back end does not
   evaluate yet.
-- Under `-std=gnu99` the 999 programs compile and run. The 68 that must be
-  refused are refused under either mode.
+- Under `-std=gnu99` the 1054 accepted programs compile and run. The 68 that must
+  be refused are refused under either mode, and so are the 3 that this compiler
+  cannot read yet.
 
-So the 840 that hold under strict `-std=c99` are in `iso/c99`, the 159 that
-need the GNU dialect are in `gnu/gnu99`, and the 68 that must be refused are in
-`iso/c99` beside the accepted programs.
+So `iso/c99` holds the 895 programs that hold under strict `-std=c99`, the 68
+that must be refused, and the 3 that are not implemented yet, and `gnu/gnu99`
+holds the 159 that need the GNU dialect: 1125 test files.
 
 ## Running it
 
@@ -83,7 +109,7 @@ That builds the compiler from this tree, compiles and runs every test under the
 standard of the directory it sits in, runs `monolithic.c` as well, and fails
 when a test exits non-zero, prints something it should not, when the compiler
 refuses a test it should accept or accepts a test it should refuse, when fewer
-than 1067 test files are present, or when the monolith holds fewer than 906
+than 1125 test files are present, or when the monolith holds fewer than 906
 checks. `tools/README.md` says what the script checks in more detail.
 
 `monolithic.c` is the file the corpus arrived as, kept whole at the root: 12,340
@@ -102,8 +128,9 @@ accepts only when `NAME` is defined, so it is skipped unless asked for:
     v run tools/compliance.vsh --define C99_TRIGRAPHS
 
 The run's summary line says how many tests passed, how many were refused, how
-many failed, and how many were skipped. The refused count is the constraint
-tests the corpus asked about that the compiler turned down; a test the compiler
+many are not implemented yet, how many failed, and how many were skipped, and it
+names the construct behind each gap. The refused count is the constraint tests
+the corpus asked about that the compiler turned down; a test the compiler
 compiles instead is a failure, and the problem list names it.
 
 `-lm` is not optional: the corpus calls `cabsl`, `csqrtl` and `cpowl`.

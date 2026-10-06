@@ -94,7 +94,7 @@ describes the current source rather than one from an earlier edit. It fails on a
 test that does not build, a test that exits non-zero, a test that prints
 something other than the two lines the corpus prints on purpose, a test that
 expects a refusal the compiler does not make or an acceptance it does not give, a
-test file count below 1067, and a `monolithic.c` run that holds fewer than 906
+test file count below 1125, and a `monolithic.c` run that holds fewer than 906
 checks. Both floors are floors and not equalities: adding tests needs no edit
 here, losing them is a failure.
 
@@ -108,6 +108,12 @@ or a syntax rule of ISO/IEC 9899:1999, so a conforming implementation owes a
 diagnostic for it. The refusal is the check: the test passes when the compiler
 refuses to compile it, and fails when the compiler compiles it. Such a test is
 never run.
+
+A test carrying an `unimplemented:` line is the other way round: a program the
+standard allows that this compiler cannot read yet. Its refusal is counted as a
+gap and the construct is named in the run's output, and the program is written as
+a check with assertions of its own, so the day the compiler takes it the test
+runs and the run says the line can go. gcc builds and runs every one of them.
 
 Every test compiles with the standard of its directory and `-lm`;
 `compliance/README.md` says why the corpus is split and why `-lm` is not

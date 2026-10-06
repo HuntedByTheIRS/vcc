@@ -83,15 +83,18 @@ v run tools/compliance.vsh --count                # print how many tests there a
 The runner refuses a test that does not build, a test that exits non-zero, a
 test that prints something other than the two lines the corpus prints on
 purpose, a test that expects a refusal the compiler does not make or an
-acceptance it does not give, a test file count below 1067, and a `monolithic.c`
+acceptance it does not give, a test file count below 1125, and a `monolithic.c`
 run that holds fewer than 906 checks. Both floors are floors and not equalities:
 adding tests needs no edit here, losing them is a failure. A test carrying a
 `requires-define: NAME` line is skipped unless `--define` names it, because
 running it with the construct off would pass by not compiling the thing under
 test. A test carrying an `expects-refusal:` line is a program that breaks a
 Constraint or a syntax rule, so a conforming implementation owes a diagnostic
-for it: the refusal is the check, and the test is never run. Each test compiles
-with the standard of its directory, and
+for it: the refusal is the check, and the test is never run. A test carrying an
+`unimplemented:` line is a program the standard allows that this compiler cannot
+read yet: the refusal is counted as a gap and named in the run's output, and the
+program's own assertions are what run the day the compiler takes it. Each test
+compiles with the standard of its directory, and
 [compliance/README.md](https://github.com/HuntedByTheIRS/vcc/blob/main/compliance/README.md)
 says why the corpus is split and why `-lm` is not optional.
 
