@@ -4,8 +4,6 @@
  * __builtin_bswap16 (uint16_t x) ... Built-in Function: uint32_t
  * __builtin_bswap32 (uint32_t x) Similar to __builtin_bswap16, except the
  * argument and return types are 32-bit."
- *
- * unimplemented: __builtin_bswap16 and __builtin_bswap32.
  */
 
 #include <stdio.h>

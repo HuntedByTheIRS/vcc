@@ -1625,6 +1625,42 @@ pub fn bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {
 	return out
 }
 
+// byte_swap_32 encodes `bswap r32`, which reverses the four bytes of a register:
+// 0x01020304 becomes 0x04030201. Measured on gcc 16.2.1 at -O2 on this machine,
+// `unsigned b(unsigned x) { return __builtin_bswap32(x); }` is `bswap %edi`, and
+// the instruction is the whole of that builtin. The register is named by the low
+// three bits of the opcode, and the prefix byte reaches the second eight.
+pub fn byte_swap_32(reg Register) ![]u8 {
+	mut out := []u8{cap: 3}
+	if reg.code >= 8 {
+		out << u8(0x41) // REX.B
+	}
+	out << u8(0x0f)
+	out << u8(0xc8 | (reg.code & 0x07))
+	return out
+}
+
+// byte_swap_16 encodes `rol ax, 8` and the widening that follows it. There is no
+// 16-bit bswap, so the two bytes of the low word are exchanged by rotating that
+// word eight bits, which is what gcc writes at -O0 without movbe: measured on
+// gcc 16.2.1, `unsigned short w(unsigned short x) { return
+// __builtin_bswap16(x); }` is `rolw $8, %ax`. The rotation leaves whatever the
+// register held above that word, and the builtin's value is a uint16_t whose use
+// is a wider integer, so the word is then zero-extended into the whole register
+// with a movzx. That is the byte_swap_16 instruction: a rotate and a widening.
+pub fn byte_swap_16(reg Register) ![]u8 {
+	mut out := []u8{cap: 8}
+	out << u8(0x66) // operand-size prefix: the rotation is of the low word
+	if reg.code >= 8 {
+		out << u8(0x41) // REX.B
+	}
+	out << u8(0xc1) // rotate r/m16 by an immediate
+	out << u8(0xc0 | (reg.code & 0x07)) // mod 11, /0: rol
+	out << u8(0x08) // by eight bits, which is half a word
+	out << zero_extend_half(reg)! // the word's value in the whole register, zero above
+	return out
+}
+
 // bit_scan_reverse encodes `bsr`: the index of the highest set bit of the source
 // into the destination. It is bit_scan_forward with the other direction, opcode
 // 0f bd, and the same operand encoding; the source and the destination may be the
@@ -2649,6 +2685,8 @@ pub:
 	and_immediate                   fn (Register, i32) ![]u8            = unsafe { nil }
 	and_reg64                       fn (Register, Register) ![]u8       = unsafe { nil }
 	bit_scan_forward                fn (Register, Register, bool) ![]u8 = unsafe { nil }
+	byte_swap_16                    fn (Register) ![]u8                 = unsafe { nil }
+	byte_swap_32                    fn (Register) ![]u8                 = unsafe { nil }
 	call_register                   fn (Register) ![]u8                 = unsafe { nil }
 	call_rel32                      fn (i32) []u8                       = unsafe { nil }
 	call_rip_slot                   fn (i32) []u8                       = unsafe { nil }
@@ -2797,6 +2835,8 @@ pub fn encoders() Encoders {
 		and_immediate:                   &and_immediate
 		and_reg64:                       &and_reg64
 		bit_scan_forward:                &bit_scan_forward
+		byte_swap_16:                    &byte_swap_16
+		byte_swap_32:                    &byte_swap_32
 		call_register:                   &call_register
 		call_rel32:                      &call_rel32
 		call_rip_slot:                   &call_rip_slot

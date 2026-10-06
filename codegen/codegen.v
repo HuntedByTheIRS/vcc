@@ -9268,6 +9268,20 @@ fn (mut e Emitter) emit_return_address(call ast.Call) !void {
 	e.append(e.target.load_slot(base, i32(e.target.word_size), register, e.target.word_size)!)
 }
 
+// emit_byte_swap answers `__builtin_bswap16` and `__builtin_bswap32` with the
+// instruction that reverses a value's bytes. The argument is evaluated into the
+// accumulator, where the instruction works in place, and the two builtins differ
+// only in which width the back end swaps.
+fn (mut e Emitter) emit_byte_swap(call ast.Call, depth int) !void {
+	e.emit_expr_at(call.args[0], depth + 1)!
+	register := e.accumulator(call.line, call.col)!
+	if call.name == '__builtin_bswap16' {
+		e.append(e.target.byte_swap_16(register)!)
+	} else {
+		e.append(e.target.byte_swap_32(register)!)
+	}
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -9342,6 +9356,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		'__builtin_unreachable', '__builtin_trap' {
 			e.append(e.target.unreachable())
 			return
+		}
+		'__builtin_bswap16', '__builtin_bswap32' {
+			return e.emit_byte_swap(call, depth)
 		}
 		'atexit' {
 			// glibc defines atexit in libc_nonshared.a, the static half of

@@ -720,6 +720,18 @@ pub fn (t &Target) count_leading(dst Register, src Register, wide bool) ![]u8 {
 	return t.encoders.count_leading(t.describe(dst), t.describe(src), wide)
 }
 
+// byte_swap_16 and byte_swap_32 answer the two byte-swapping builtins: they
+// reverse the two bytes of a value's low word and the four bytes of a value,
+// respectively. The 32-bit form is the machine's own bswap; the 16-bit one is a
+// rotate of the low word and a widening of it into the register.
+pub fn (t &Target) byte_swap_16(reg Register) ![]u8 {
+	return t.encoders.byte_swap_16(t.describe(reg))
+}
+
+pub fn (t &Target) byte_swap_32(reg Register) ![]u8 {
+	return t.encoders.byte_swap_32(t.describe(reg))
+}
+
 // The two widenings a conversion between the value classes needs. A byte is
 // widened with its sign kept, which is what converting a value to a char is; a
 // word is widened into the whole register, which is what converting an int to a

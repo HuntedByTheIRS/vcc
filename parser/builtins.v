@@ -35,7 +35,8 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
 	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p',
-	'__builtin_object_size', '__builtin_return_address', '__builtin_unreachable', '__builtin_trap']
+	'__builtin_object_size', '__builtin_return_address', '__builtin_unreachable', '__builtin_trap',
+	'__builtin_bswap16', '__builtin_bswap32']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -114,6 +115,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_unreachable', '__builtin_trap' {
 			return p.parse_no_argument_builtin(at)
+		}
+		'__builtin_bswap16', '__builtin_bswap32' {
+			return p.parse_byte_swap(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -734,6 +738,39 @@ fn (mut p Parser) parse_no_argument_builtin(at tokenize.Token) !ast.Expr {
 		name: at.text
 		args: []
 		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_byte_swap reads `__builtin_bswap16` and `__builtin_bswap32`, which answer
+// the argument with the order of its bytes reversed. The answer's type is the
+// width the name asks for: uint16_t for the first and uint32_t for the second,
+// which is what gcc gives each. An operand that is not an integer is refused by
+// name: these reverse the bytes of an integer, and gcc does not convert a float
+// or a pointer into one here.
+fn (mut p Parser) parse_byte_swap(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 1 {
+		p.error_at(at, 'unsupported: ${at.text} takes one value')
+		return error('the argument of ${at.text}')
+	}
+	if !p.is_unresolved(args[0]) {
+		operand := p.value_type(args[0])
+		if operand.kind != .unknown && !operand.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} reverses the bytes of an integer, and ${describe_operand(args[0])} is ${operand.describe()}')
+			return error('the operand of ${at.text}')
+		}
+	}
+	typ := if at.text == '__builtin_bswap16' {
+		types.unsigned_short_type()
+	} else {
+		types.unsigned_int_type()
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: args
+		typ:  typ
 		line: at.line
 		col:  at.col
 	})
