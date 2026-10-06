@@ -3,13 +3,9 @@
  * ISO/IEC 9899:1999 7.3.2p1: the additive operators have their usual
  * meaning for complex operands.
  *
- * unimplemented: the negation of a long double _Complex.
- *
- * gcc 16.2.1 compiles this program, runs it silent and exits 0, so the
- * program conforms to this clause and what is missing is this compiler.
- * What this compiler says instead:
- *
- *     unsupported: the negation of long double _Complex is not computed here; the x87 stack ha
+ * The negation of a `long double _Complex` flips the sign of each component
+ * with the same x87 negate the scalar extended type uses, which is the
+ * instruction gcc 16.2.1 emits for it at -O0.
  */
 
 #include <complex.h>

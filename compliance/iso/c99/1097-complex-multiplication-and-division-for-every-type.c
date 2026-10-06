@@ -3,13 +3,10 @@
  * ISO/IEC 9899:1999 7.3.3p1: the multiplicative operators have their usual
  * meaning for complex operands.
  *
- * unimplemented: the division of a long double _Complex.
- *
- * gcc 16.2.1 compiles this program, runs it silent and exits 0, so the
- * program conforms to this clause and what is missing is this compiler.
- * What this compiler says instead:
- *
- *     unsupported: / is not an operator this back end computes long double _Complex with
+ * The quotient of a `long double _Complex` is the scaled division C99's Annex
+ * G.5.1 describes, which is the arithmetic libgcc's __divxc3 carries. It is
+ * emitted here rather than called, because no symbol an image this compiler
+ * builds can name holds the helper.
  */
 
 #include <complex.h>

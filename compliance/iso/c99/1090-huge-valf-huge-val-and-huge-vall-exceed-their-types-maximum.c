@@ -3,13 +3,10 @@
  * ISO/IEC 9899:1999 7.12p3: HUGE_VALF, HUGE_VAL and HUGE_VALL expand to
  * positive constant expressions of type float, double and long double.
  *
- * unimplemented: HUGE_VALL, which glibc defines as 1e10000L.
- *
- * gcc 16.2.1 compiles this program, runs it silent and exits 0, so the
- * program conforms to this clause and what is missing is this compiler.
- * What this compiler says instead:
- *
- *     1e10000L: the constant is outside the range this reader converts
+ * Outside a GNU dialect glibc defines HUGE_VALL as `1e10000L`, a decimal
+ * constant past every value the extended format reaches. The standard leaves
+ * its value undefined and gcc 16.2.1 reads it as an infinity, which is what
+ * this compiler does too.
  */
 
 #include <float.h>

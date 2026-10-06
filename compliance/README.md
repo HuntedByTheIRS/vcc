@@ -57,30 +57,26 @@ rather than to gcc: `sizeof` of a function and of void, an equality between a
 pointer and an integer, a declaration that declares nothing, and the two
 initializers that write past the object they initialize.
 
-3 more are programs the standard allows and this compiler cannot read yet. The
-test says which construct, and the run counts it as a gap rather than a failure:
+The third kind of test is a program the standard allows and this compiler
+cannot read yet. It carries an `unimplemented: X` line instead of
+`expects-refusal:`, and the runner counts the build's refusal as a gap rather
+than a failure and names the construct in the run:
 
-    /* 1097: complex-multiplication-and-division-for-every-type
+    /* 1099: a-construct-this-compiler-does-not-read-yet
      *
-     * ISO/IEC 9899:1999 7.3.3p1: the multiplicative operators have their usual
-     * meaning for complex operands.
+     * ISO/IEC 9899:1999 <clause>: <the rule the program follows>.
      *
-     * unimplemented: the division of a long double _Complex.
-     *
-     * gcc 16.2.1 compiles this program, runs it silent and exits 0, so the
-     * program conforms to this clause and what is missing is this compiler.
-     * What this compiler says instead:
-     *
-     *     unsupported: / is not an operator this back end computes long double
-     *     _Complex with
+     * unimplemented: <the construct this compiler does not read>.
      */
 
 Such a test is measured twice over: gcc compiles it, runs it and it exits 0, so
 the program is right, and this compiler's refusal is the gap. The program is a
 check with its own assertions, so the day this compiler takes it the test runs,
 and a gap that compiles is reported by name as a line that can go: the corpus
-does not keep a gap that has closed. What these tests hold is the list of what is
-left, one construct per file, and the run prints that list.
+does not keep a gap that has closed. No test carries the line today. The three
+it carried at the last count were HUGE_VALL, whose glibc definition is
+`1e10000L`, and the division of a `long double _Complex` and its negation;
+closing them removed the lines with them.
 
 ## Why 159 tests sit under gnu/gnu99 and not iso/c99
 
@@ -93,13 +89,12 @@ Measured on this compiler, each test compiled on its own:
   159th, `0941-assert-a-true-expression-does-nothing`, uses `assert()`, whose
   glibc expansion under strict ISO needs a construct this back end does not
   evaluate yet.
-- Under `-std=gnu99` the 1054 accepted programs compile and run. The 68 that must
-  be refused are refused under either mode, and so are the 3 that this compiler
-  cannot read yet.
+- Under `-std=gnu99` the 1057 accepted programs compile and run. The 68 that must
+  be refused are refused under either mode.
 
-So `iso/c99` holds the 895 programs that hold under strict `-std=c99`, the 68
-that must be refused, and the 3 that are not implemented yet, and `gnu/gnu99`
-holds the 159 that need the GNU dialect: 1125 test files.
+So `iso/c99` holds the 898 programs that hold under strict `-std=c99` and the 68
+that must be refused, and `gnu/gnu99` holds the 159 that need the GNU dialect:
+1125 test files.
 
 ## Running it
 
