@@ -671,7 +671,28 @@ fn hash_size(symbol_count int) int {
 // base is zero, so what the slot holds is the file offset; `emit_relocations`
 // pairs it with the R_X86_64_RELATIVE entry that adds the real base when the
 // object is mapped.
+// iplt_end is where the array of IRELATIVE entries this image carries stops. The
+// array is what the C library's startup walks, from the name at its front to the
+// name at its back, calling each entry's resolver. A link defines those two
+// names itself, and the object reaches them through the global offset table, so
+// the container is what writes their slots: a slot nothing writes holds zero and
+// the walk is empty, which leaves every ifunc slot holding its resolver instead
+// of the implementation the resolver would have chosen.
+fn iplt_end(program image.Program, sections Sections) int {
+	return sections.rela + irelative_count(program, got_extra_names(program)) * elf_relocation_size
+}
+
 fn emit_bound_slots(mut output []u8, program image.Program, sections Sections, base u64) {
+	// The two names the startup walks the relocation array between are answered by
+	// the container rather than by a unit, so their slots hold the array's ends.
+	for i, name in program.imports {
+		if name == '__rela_iplt_start' {
+			put_u64(mut output, sections.got + i * 8, base + u64(sections.rela))
+		}
+		if name == '__rela_iplt_end' {
+			put_u64(mut output, sections.got + i * 8, base + u64(iplt_end(program, sections)))
+		}
+	}
 	for i, name in program.imports {
 		definition := program.bound[name] or { continue }
 		at := if definition.function {
@@ -1281,6 +1302,18 @@ fn relocation_section(sections Sections, place image.RelocationPlace) int {
 // relocation can carry: one of the unit's own section keys, an imported function
 // reached through its stub, or a symbol some unit of the link defines.
 fn relocation_referent_of(program image.Program, sections Sections, name string) !int {
+	// The array of IRELATIVE entries this image carries is the container's, so its
+	// two ends are answered here, before any table a name could be bound in. The C
+	// library's startup walks from the first to the second and asks each entry's
+	// resolver for the implementation to put in the slot that entry names. A link
+	// defines these two names itself; a link that leaves them to the rule for an
+	// undefined weak symbol gives both the value zero, and the walk is empty.
+	if name == '__rela_iplt_start' {
+		return sections.rela
+	}
+	if name == '__rela_iplt_end' {
+		return sections.rela + irelative_count(program, got_extra_names(program)) * elf_relocation_size
+	}
 	match name {
 		image.section_key_text { return sections.text }
 		image.section_key_rodata { return sections.strings }
@@ -1401,6 +1434,18 @@ fn relocation_value(program image.Program, sections Sections, base u64, extra []
 // asked with a kind and a name rather than a reference, because the same
 // question is asked of a reference in the code and of one in the writable data.
 fn referent_of(program image.Program, sections Sections, kind image.FixupKind, name string, extra []string) !int {
+	// The array of IRELATIVE entries this image carries is the container's, so its
+	// two ends are answered here, before any table a name could be bound in. The C
+	// library's startup walks from the first to the second and asks each entry's
+	// resolver for the implementation to put in the slot that entry names. A link
+	// defines these two names itself; a link that leaves them to the rule for an
+	// undefined weak symbol gives both the value zero, and the walk is empty.
+	if name == '__rela_iplt_start' {
+		return sections.rela
+	}
+	if name == '__rela_iplt_end' {
+		return iplt_end(program, sections)
+	}
 	match kind {
 		.call_local, .jump_local, .branch_zero, .branch_nonzero, .function_address {
 			return sections.text + (program.labels[name] or {
