@@ -349,24 +349,47 @@ fn dialect_messages(processed preprocess.Result, opts cli.Options) []tokenize.Di
 // for these and for nothing else, so a name one unit defines is never a reason
 // to pull a member that also defines it.
 fn link_needs(units []unit.Program) map[string]bool {
-	mut provided := map[string]bool{}
-	for entry in units {
-		for name, _ in entry.defined {
-			provided[name] = true
-		}
-		for name, _ in entry.globals {
-			provided[name] = true
-		}
-	}
+	provided := link_provides(units)
 	mut needed := map[string]bool{}
 	for entry in units {
 		for symbol in entry.imports {
-			if symbol !in provided {
+			if symbol !in provided && symbol !in entry.weak_imports {
 				needed[symbol] = true
 			}
 		}
 	}
 	return needed
+}
+
+// link_provides is the names the units of a link define, which is the other half
+// of link_needs: a name in it is answered, so no archive has to be asked for it.
+// The set grows as members are pulled, because a member's own definitions answer
+// the references of the members that follow it.
+fn link_provides(units []unit.Program) map[string]bool {
+	mut provided := map[string]bool{}
+	for entry in units {
+		provided_with(mut provided, entry)
+	}
+	return provided
+}
+
+// provided_with adds one unit's definitions to a set of names a link already
+// answers. A definition is a function this unit defines and an object whose
+// storage it holds, which is a name in `globals` that is not a copy of a
+// library's: a unit that only refers to an external object puts a slot in
+// `globals` for it too. A name the unit gives internal linkage is no answer to
+// another unit's reference (6.2.2p2), so it stays out.
+fn provided_with(mut provided map[string]bool, entry unit.Program) {
+	for name, _ in entry.defined {
+		if name !in entry.internal {
+			provided[name] = true
+		}
+	}
+	for name, _ in entry.globals {
+		if name !in entry.copy_objects && name !in entry.internal {
+			provided[name] = true
+		}
+	}
 }
 
 // pull_archives pulls the members of every archive that answer a name the link
@@ -380,7 +403,7 @@ fn link_needs(units []unit.Program) map[string]bool {
 // order and the same link writes the same bytes. A member nothing refers to
 // stays out, which is what makes a library of many objects cost only the parts
 // the program asks for.
-fn pull_archives(archives []archive.Archive, target backend.Target, mut needed map[string]bool) ![]unit.Program {
+fn pull_archives(archives []archive.Archive, target backend.Target, mut needed map[string]bool, mut provided map[string]bool) ![]unit.Program {
 	mut pulled := map[string]bool{}
 	mut out := []unit.Program{}
 	mut again := true
@@ -390,7 +413,12 @@ fn pull_archives(archives []archive.Archive, target backend.Target, mut needed m
 			mut names := parts.index.keys()
 			names.sort()
 			for name in names {
-				if !needed[name] {
+				// A name no unit of the link defines yet is the only one a member
+				// is pulled for. It is the rule ld follows, and what keeps the C
+				// library's copy of a name the runtime's own crt1.o already
+				// defines from joining the link: two definitions of one name are
+				// what a link refuses.
+				if !needed[name] || provided[name] {
 					continue
 				}
 				index := parts.index[name]
@@ -404,8 +432,16 @@ fn pull_archives(archives []archive.Archive, target backend.Target, mut needed m
 					return error('${member.name}: ${err.msg()}')
 				}
 				for symbol in entry.imports {
-					needed[symbol] = true
+					// A member's references are reasons to reach into an archive
+					// only while nothing in the link answers them: a name a unit
+					// defines is answered already. A weak one is not a reason even
+					// when nothing defines it, because an undefined weak symbol
+					// stands for zero.
+					if symbol !in provided && symbol !in entry.weak_imports {
+						needed[symbol] = true
+					}
 				}
+				provided_with(mut provided, entry)
 				out << entry
 				again = true
 			}
@@ -429,6 +465,20 @@ fn read_unit(path string, target backend.Target) !unit.Program {
 fn has_constructors(units []unit.Program) bool {
 	for unit in units {
 		if unit.init_array.count > 0 || unit.fini_array.count > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// has_tls says whether any unit of the link defines thread-local storage. A
+// static program that holds one has to be started by the C library, which is
+// what sets the thread pointer up: the loader does that for a dynamic program,
+// and a program this compiler starts with its own stub has nothing to do it, so
+// every read of a thread-local would read whatever the pointer happened to hold.
+fn has_tls(units []unit.Program) bool {
+	for unit in units {
+		if unit.tls_size > 0 {
 			return true
 		}
 	}
@@ -573,21 +623,29 @@ fn link_inputs(opts cli.Options) {
 			}
 		}
 	}
-	// A static link that reaches a library is started by the C library's own
-	// entry point instead of by a stub this compiler writes: the library's
-	// startup is what sets the thread pointer up, runs the constructors and
-	// reaches `main`, and a program that calls printf without any of that dies
-	// before it prints. Whether this link is one of those is whether its units
-	// name a function or an object none of them defines.
+	// A link that carries a constructor table is started by the C library's own
+	// entry point rather than by a stub this compiler writes, and so is a static
+	// link that reaches a library.
+	//
+	// The constructor table is the reason. glibc's loader runs the initializers
+	// of every object it maps except the program itself: `call_init` returns
+	// when the map has no name and is an executable, and the main program's name
+	// is emptied as it is mapped. The initializers of the program are run by the
+	// C library's startup instead, which walks `__init_array_start` to
+	// `__init_array_end` - two names the linker answers for, because it is what
+	// knows where the tables landed. A program this compiler starts with its own
+	// stub calls `main` with its constructors never run, and a constructor that
+	// does not run is a wrong answer rather than a missing feature.
 	//
 	// The start files come from the system's own description, resolved in the
 	// directories a link searches, and they go around the units in the order a
 	// link puts them: crt1.o holds the entry point, so it is what the merged
 	// text begins with and what the image's entry point is.
-	reach := output_kind == .static_program && needs_a_library(units)
+	reach := has_constructors(units) || (output_kind == .static_program
+		&& (needs_a_library(units) || has_tls(units)))
 	mut entry := if output_kind == .shared { '' } else { 'main' }
 	if reach {
-		before, after := target.start_file_paths(.static_program, opts.library_dirs) or {
+		before, after := target.start_file_paths(output_kind, opts.library_dirs) or {
 			abort(err.msg())
 			return
 		}
@@ -608,14 +666,19 @@ fn link_inputs(opts cli.Options) {
 				return
 			}
 		}
-		for path in target.static_support_libraries(opts.library_dirs) {
-			source := read_source(path) or {
-				abort('cannot read ${path}: ${err.msg()}')
-				return
-			}
-			archives << archive.read(source.bytes()) or {
-				abort('${path}: ${err.msg()}')
-				return
+		// A static link resolves the library's own objects out of its archives. A
+		// dynamic one reaches the same names in the shared library the image
+		// already asks the loader for, so it pulls no archive of its own.
+		if output_kind == .static_program {
+			for path in target.static_support_libraries(opts.library_dirs) {
+				source := read_source(path) or {
+					abort('cannot read ${path}: ${err.msg()}')
+					return
+				}
+				archives << archive.read(source.bytes()) or {
+					abort('${path}: ${err.msg()}')
+					return
+				}
 			}
 		}
 		entry = '_start'
@@ -640,20 +703,21 @@ fn link_inputs(opts cli.Options) {
 	// the first unit is the stub, whose one import is the entry, so `main` is
 	// wanted from the start.
 	if archives.len > 0 {
+		mut provided := link_provides(units)
 		mut needed := link_needs(units)
-		units << pull_archives(archives, target, mut needed) or {
+		units << pull_archives(archives, target, mut needed, mut provided) or {
 			abort(err.msg())
 			return
 		}
 	}
-	// A constructor table is run by whoever starts the program: the loader for a
-	// dynamic one, the C library's own startup for a static one, which walks the
-	// table by its two end names. A static program with neither has nothing to
-	// walk it and the stub this compiler writes calls `main` and leaves, so the
-	// constructor would be silently skipped. A wrong answer that is quiet is the
-	// worst outcome available, so such a link stops here and names the pair.
-	if output_kind == .static_program && !reach && has_constructors(units) {
-		abort("a static program with a constructor needs the C library's startup to run it, and this link reaches no library: the constructor would never run")
+	// A constructor table that arrived with a member pulled out of an archive is
+	// one the program's own startup would have to walk, and this link is not
+	// started by the library: the stub calls `main` and leaves, so the
+	// constructor would be skipped in silence. The decision above is made from
+	// the units the command line named, and this is the one case an archive can
+	// still add to it.
+	if !reach && output_kind != .shared && has_constructors(units) {
+		abort('a member pulled out of an archive carries a constructor, and this link is not started by the C library: name the library with -l, or the constructor would never run')
 		return
 	}
 	mut started := time.now()
