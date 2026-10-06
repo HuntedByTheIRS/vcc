@@ -1,5 +1,6 @@
 # gnu/gnu99
 
-Empty today: every case in the corpus compiles under strict ISO C99 and sits in
-`../c99/`. A case this compiler accepts only in a GNU dialect belongs here,
-where `tools/regress.vsh` compiles it with `-std=gnu99`.
+Cases here are compiled `-std=gnu99`, which is what a construct only a GNU
+dialect accepts needs. The first pins the cleanup attribute: the call for an
+object of an inner block runs where that block ends, and does not reach out of
+the block the object belongs to.
