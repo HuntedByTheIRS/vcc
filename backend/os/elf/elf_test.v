@@ -322,3 +322,282 @@ fn test_a_shared_object_is_the_same_every_run() {
 	tables := se_tables(first, 0)
 	assert se_symbol_of(first, tables, 'a').index < se_symbol_of(first, tables, 'b').index
 }
+
+// se_phdr_of is where the program header of a kind begins, or -1 when the image
+// has none. A program has no section header table, so the program header table
+// is the only map of its parts.
+fn se_phdr_of(bytes []u8, kind u32) int {
+	for i in 0 .. int(se16(bytes, 56)) {
+		at := se_phdr_at(bytes, i)
+		if se32(bytes, at) == kind {
+			return at
+		}
+	}
+	return -1
+}
+
+// se_dynamic_has says whether the dynamic table names a tag at all, which is
+// how a test tells an entry that is absent from one whose value is zero.
+fn se_dynamic_has(bytes []u8, tag u64) bool {
+	offset := se_dynamic_offset(bytes)
+	for i in 0 .. se_dynamic_size(bytes) / elf_dynamic_entry_size {
+		if se64(bytes, offset + i * elf_dynamic_entry_size) == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// se_dynamic_value is the value of the entry a tag names, and none when the
+// table has no such entry.
+fn se_dynamic_value(bytes []u8, tag u64) ?u64 {
+	offset := se_dynamic_offset(bytes)
+	for i in 0 .. se_dynamic_size(bytes) / elf_dynamic_entry_size {
+		if se64(bytes, offset + i * elf_dynamic_entry_size) == tag {
+			return se64(bytes, offset + i * elf_dynamic_entry_size + 8)
+		}
+	}
+	return none
+}
+
+// se_relocation_of finds the first entry of a kind in the table the dynamic
+// segment names, and se_relocation_count_of says how many there are.
+fn se_relocation_of(bytes []u8, tables SeTables, kind u64) SeRelocation {
+	for i in 0 .. tables.relasz / elf_relocation_size {
+		at := tables.rela + i * elf_relocation_size
+		info := se64(bytes, at + 8)
+		if info & 0xffffffff == kind {
+			return SeRelocation{
+				offset: se64(bytes, at)
+				info:   info
+				addend: i64(se64(bytes, at + 16))
+			}
+		}
+	}
+	return SeRelocation{}
+}
+
+fn se_relocation_count_of(bytes []u8, tables SeTables, kind u64) int {
+	mut count := 0
+	for i in 0 .. tables.relasz / elf_relocation_size {
+		if se64(bytes, tables.rela + i * elf_relocation_size + 8) & 0xffffffff == kind {
+			count++
+		}
+	}
+	return count
+}
+
+// A wide reference is an eight-byte field and all eight bytes are written: the
+// distance is a 64-bit one, so a value whose upper half is not zero reaches the
+// field instead of being cut to its low thirty-two bits the way a narrow field
+// is. The addend here is 2^32, which is what puts a bit in the upper half.
+fn test_a_wide_direct_reference_fills_eight_bytes() {
+	target := se_target()
+	mut program := image.Program{}
+	program.text = []u8{len: 32, init: u8(0)}
+	program.labels['target'] = 24
+	program.relocations << image.Relocation{
+		offset: 4
+		kind:   .direct
+		name:   'target'
+		addend: int(i64(1) << 32)
+		width:  .wide
+	}
+	bytes := write(program, target, .static_program) or {
+		panic('the static program was not written: ${err.msg()}')
+	}
+	// A static program is not shared, so its entry point is the load base plus
+	// the text offset, which is all that reaches the code of a program with no
+	// section headers.
+	text := int(se64(bytes, 24)) - int(target.load_base)
+	assert se64(bytes, text + 4) == u64(0x1_0000_0014) // (text + 24) + 2^32 - (text + 4)
+	assert se32(bytes, text + 4) == u32(0x14) // the low half of the same number
+	assert se32(bytes, text + 8) == u32(1) // and the high half, which a narrow field drops
+}
+
+// A tpoff reference is measured from the thread pointer, which sits at the end
+// of the block rounded up to its alignment, so the value is the name's place in
+// the block minus that rounded size. A block of twenty bytes aligned to sixteen
+// rounds to thirty-two, and a name at four is twenty-eight below the pointer.
+fn test_a_tpoff_reference_is_measured_from_the_end_of_the_rounded_block() {
+	target := se_target()
+	mut program := image.Program{}
+	program.text = []u8{len: 8, init: u8(0)}
+	program.tls_blob = []u8{len: 20, init: u8(0)}
+	program.tls_size = 20
+	program.tls_alignment = 16
+	program.tls_labels['x'] = 4
+	program.relocations << image.Relocation{
+		offset: 0
+		kind:   .tpoff
+		name:   'x'
+		width:  .narrow
+	}
+	bytes := write(program, target, .static_program) or {
+		panic('the static program was not written: ${err.msg()}')
+	}
+	text := int(se64(bytes, 24)) - int(target.load_base)
+	// roundup(20, 16) is 32, and 4 - 32 is -28.
+	assert i32(se32(bytes, text)) == -28
+}
+
+// A thread-local block turns into a PT_TLS header, and it is a header of its own
+// for every kind: it adds one to the four a dynamic program has, the three a
+// shared object has, and the two a static program has. The header names where
+// the initialization image was placed, the bytes to copy out of it, and the
+// block's rounded size and alignment, which is what the runtime reads.
+fn test_a_thread_local_block_writes_a_pt_tls_header() {
+	target := se_target()
+	mut program := image.Program{}
+	program.tls_blob = []u8{len: 12, init: u8(0)}
+	program.tls_size = 12
+	program.tls_alignment = 8
+	bytes := write(program, target, .static_program) or {
+		panic('the static program was not written: ${err.msg()}')
+	}
+	assert se16(bytes, 56) == 3 // the load, the stack, and the block
+	at := se_phdr_of(bytes, elf_ph_type_tls)
+	assert at >= 0
+	assert se32(bytes, at + 4) == elf_ph_flags_read
+	// The one PT_LOAD maps the whole file at the load base, so a virtual address
+	// is the base plus the file offset and p_vaddr has to agree with p_offset.
+	assert se64(bytes, at + 16) == target.load_base + se64(bytes, at + 8)
+	assert se64(bytes, at + 32) == 12 // p_filesz: the initialization image
+	assert se64(bytes, at + 40) == 16 // p_memsz: roundup(12, 8)
+	assert se64(bytes, at + 48) == 8 // p_align
+	// The same block adds one to the other two kinds' header counts.
+	dynamic := write(program, target, .program) or {
+		panic('the dynamic program was not written: ${err.msg()}')
+	}
+	assert se16(dynamic, 56) == 5
+	shared := write(program, target, .shared) or {
+		panic('the shared object was not written: ${err.msg()}')
+	}
+	assert se16(shared, 56) == 4
+}
+
+// A program with no thread-local storage writes no PT_TLS header, and its header
+// count is the one the kind always has: the block's header is not carried when
+// there is no block.
+fn test_a_program_without_thread_local_storage_writes_no_pt_tls_header() {
+	target := se_target()
+	mut program := image.Program{}
+	program.text = []u8{len: 8, init: u8(0)}
+	bytes := write(program, target, .static_program) or {
+		panic('the static program was not written: ${err.msg()}')
+	}
+	assert se16(bytes, 56) == 2
+	assert se_phdr_of(bytes, elf_ph_type_tls) == -1
+}
+
+// A constructor table is named in the dynamic table by its address and its size,
+// eight bytes per entry. The two tables lie in the writable data at the offsets
+// the program gave, so their addresses differ by sixteen when the init table is
+// at eight and the fini table at twenty-four. A program with no table names
+// neither, and a static program writes no dynamic table to name one in.
+fn test_a_constructor_table_is_named_in_the_dynamic_table() {
+	target := se_target()
+	mut program := image.Program{}
+	program.globals_blob = []u8{len: 32, init: u8(0)}
+	program.init_array = image.ConstructorTable{
+		offset: 8
+		count:  2
+	}
+	program.fini_array = image.ConstructorTable{
+		offset: 24
+		count:  1
+	}
+	bytes := write(program, target, .program) or {
+		panic('the dynamic program was not written: ${err.msg()}')
+	}
+	init := se_dynamic_value(bytes, dt_init_array) or { panic('no DT_INIT_ARRAY') }
+	fini := se_dynamic_value(bytes, dt_fini_array) or { panic('no DT_FINI_ARRAY') }
+	assert se_dynamic_value(bytes, dt_init_arraysz) or { panic('no DT_INIT_ARRAYSZ') } == 16
+	assert se_dynamic_value(bytes, dt_fini_arraysz) or { panic('no DT_FINI_ARRAYSZ') } == 8
+	assert fini - init == 16
+	// The address is one the loader maps, inside the image the file became.
+	assert init >= target.load_base
+	assert init < target.load_base + u64(bytes.len)
+	// A program with no constructor table names none of the four entries.
+	plain := write(image.Program{}, target, .program) or {
+		panic('the dynamic program was not written: ${err.msg()}')
+	}
+	assert !se_dynamic_has(plain, dt_init_array)
+	assert !se_dynamic_has(plain, dt_fini_array)
+	// And a static program writes no dynamic table at all for them to live in.
+	static_bytes := write(program, target, .static_program) or {
+		panic('the static program was not written: ${err.msg()}')
+	}
+	assert se_dynamic_offset(static_bytes) == 0
+}
+
+// A name whose definition is a resolver has its slot filled by asking the
+// resolver, not by the loader copying an address, so the slot gets an
+// R_X86_64_IRELATIVE entry: the entry names the slot, names no symbol, and its
+// addend is the resolver's own address, which the loader calls. The slot holds
+// that address too, which is what a bound name's slot always holds, and a bound
+// name that is not an ifunc gets no such entry.
+fn test_an_ifunc_name_gets_an_irelative_entry_for_its_slot() {
+	target := se_target()
+	mut program := image.Program{}
+	program.text = []u8{len: 16, init: u8(0x90)}
+	program.imports << 'memcpy'
+	program.bound['memcpy'] = image.Definition{
+		offset:   4
+		function: true
+	}
+	program.ifuncs['memcpy'] = true
+	program.imports << 'plain'
+	program.bound['plain'] = image.Definition{
+		offset:   0
+		function: true
+	}
+	bytes := write(program, target, .program) or {
+		panic('the dynamic program was not written: ${err.msg()}')
+	}
+	tables := se_tables(bytes, target.load_base)
+	assert se_relocation_count_of(bytes, tables, relocation_irelative) == 1
+	entry := se_relocation_of(bytes, tables, relocation_irelative)
+	// The resolver is the definition: the code's start, which the entry point
+	// names, plus the definition's offset.
+	resolver := se64(bytes, 24) + 4
+	assert entry.addend == i64(resolver)
+	// The entry names the slot, and the slot already holds the resolver so the
+	// loader has an address to call before it writes the answer over it.
+	assert se64(bytes, int(entry.offset - target.load_base)) == resolver
+}
+
+// The tpoff the container writes has to agree with the runtime that places the
+// thread pointer, and the way to know it does is to run a program that reads a
+// thread-local and stops with what it read. The code moves one byte out of
+// fs:[tpoff] and exits with it; the value comes out of the block the runtime
+// copied from the image, so a wrong offset reads a byte of something else.
+fn test_a_thread_local_reads_its_initial_value_through_the_pointer() {
+	target := se_target()
+	held := target.reg('eax') or { panic('no eax register') }
+	mut program := image.Program{}
+	// movzx eax, byte ptr fs:[disp32]: the fs prefix and the instruction, then
+	// the four bytes of the field a tpoff reference fills in at offset five.
+	program.text = [u8(0x64), 0x0f, 0xb6, 0x04, 0x25, 0, 0, 0, 0]
+	exit := target.exit_sequence_from(held) or { panic('no exit sequence: ${err.msg()}') }
+	program.text << exit
+	program.tls_blob = [u8(42)]
+	program.tls_size = 1
+	program.tls_alignment = 1
+	program.tls_labels['x'] = 0
+	program.relocations << image.Relocation{
+		offset: 5
+		kind:   .tpoff
+		name:   'x'
+		width:  .narrow
+	}
+	bytes := write(program, target, .program) or {
+		panic('the dynamic program was not written: ${err.msg()}')
+	}
+	path := os.join_path(os.temp_dir(), 'vcc_elf_tls_${os.getpid()}')
+	os.write_file_array(path, bytes) or { panic(err) }
+	os.chmod(path, 0o755) or { panic(err) }
+	result := os.execute(os.quoted_path(path))
+	os.rm(path) or {}
+	assert result.exit_code == 42
+}

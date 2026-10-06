@@ -48,17 +48,24 @@ const elf_type_dyn = u16(3)
 
 const elf_header_size = u16(64)
 const elf_program_header_size = u16(56)
-// PT_INTERP, PT_LOAD, PT_DYNAMIC and PT_GNU_STACK, in that order, always all
-// four. It is how many headers a program the kernel starts with a loader has: a
-// shared object has no interpreter, so it writes the three that are left, and a
-// static program has no interpreter and no dynamic table, so it writes two.
-// program_header_count is what decides.
+// PT_INTERP, PT_LOAD, PT_DYNAMIC and PT_GNU_STACK, in that order. It is how many
+// headers a program the kernel starts with a loader has: a shared object has no
+// interpreter, so it writes the three that are left, and a static program has no
+// interpreter and no dynamic table, so it writes two. An image that defines
+// thread-local storage adds a PT_TLS header after the dynamic one, for every
+// kind. program_header_count is what decides.
 const elf_program_header_count = u16(4)
 
 // The program header types this container uses.
 pub const elf_ph_type_load = u32(1)
 pub const elf_ph_type_dynamic = u32(2)
 pub const elf_ph_type_interp = u32(3)
+// PT_TLS names the thread-local storage the image defines. The kernel does not
+// map it; the runtime reads it before the first instruction runs and gives every
+// thread its own copy of the block: p_filesz bytes copied from p_vaddr, then
+// p_memsz - p_filesz zeroed. p_vaddr has to lie inside a PT_LOAD that is mapped
+// from the file, because that copy reads it from there.
+pub const elf_ph_type_tls = u32(7)
 const elf_ph_type_gnu_stack = u32(0x6474E551)
 
 // The segment permissions, combined where a segment needs more than one.
@@ -78,13 +85,30 @@ pub const dt_relasz = u64(8)
 const dt_relaent = u64(9)
 const dt_strsz = u64(10)
 const dt_syment = u64(11)
+// The two tables of function addresses the runtime calls around the program's
+// own code. Each table is named by where it is and how many bytes it is, which
+// is why a non-empty one costs two entries: the address and the size. They only
+// exist in an image with a dynamic table, because the table is how the runtime
+// learns of them.
+pub const dt_init_array = u64(25)
+pub const dt_fini_array = u64(26)
+pub const dt_init_arraysz = u64(27)
+pub const dt_fini_arraysz = u64(28)
 
 // dynamic_entry_count is how many entries the dynamic table holds: the eight
 // that describe the image's own tables, one DT_NEEDED per library it runs
-// against, and the null that ends it. It is a function rather than a constant
-// because the library count is not known until the command line has been read.
-fn dynamic_entry_count(library_count int) int {
-	return 9 + library_count
+// against, two for each of the constructor tables the image has, and the null
+// that ends it. It is a function rather than a constant because the library
+// count and the two table counts are not known until the program has been read.
+fn dynamic_entry_count(library_count int, init_array_count int, fini_array_count int) int {
+	mut count := 9 + library_count
+	if init_array_count > 0 {
+		count += 2
+	}
+	if fini_array_count > 0 {
+		count += 2
+	}
+	return count
 }
 
 // A relocation that asks the loader to write a symbol's address into a slot.
@@ -109,6 +133,13 @@ pub const relocation_absolute = u64(1)
 // that is not position independent writes for a variable it names out of a
 // shared library.
 pub const relocation_copy = u64(5)
+// A relocation that asks the loader to call a resolver and write what it answers
+// into the eight bytes the entry names. A name defined by an ifunc is a function
+// whose definition is a resolver: the address the program should call is not
+// settled until the resolver has run and picked one for the machine it is on.
+// The entry names the slot the resolver's answer goes in, and its addend is the
+// resolver's own address. It is R_X86_64_IRELATIVE in this machine's psABI.
+pub const relocation_irelative = u64(37)
 
 // The st_info byte of every symbol this image imports: global, and of function
 // type. The symbols are undefined, which is to say the value comes from
@@ -152,6 +183,10 @@ struct Sections {
 	// globals is the storage of the objects defined at the top level: the only
 	// part of the image the program writes to as it runs.
 	globals int
+	// tls is where the thread-local block's initialization image landed. It
+	// lies in the same loaded region as the writable data, because the runtime
+	// copies it out of the image and a copy reads from what the file mapped.
+	tls     int
 	dynsym  int
 	hash    int
 	got     int
@@ -256,10 +291,21 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	// top-level object through the table.
 	extra := got_extra_names(program)
 	relative := relative_count(program, kind, extra)
-	relocation_total := external + program.copy_objects.len + loader_data + relative
-	header_count := program_header_count(kind)
+	// The slots an ifunc name is reached through: each gets an IRELATIVE entry
+	// beside whatever the loader already writes there, so the resolver's answer
+	// replaces the address of the resolver itself.
+	irelative := irelative_count(program, extra)
+	relocation_total := external + program.copy_objects.len + loader_data + relative +
+		irelative
+	// A thread-local block turns into a PT_TLS header, and a dynamic table the
+	// runtime reads turns into a PT_DYNAMIC header. The two are counted here
+	// because the header table's size is what every offset after it counts
+	// from, and the layout has to know before it places the first part.
+	has_tls := program.tls_size > 0
+	has_dynamic := kind != .static_program
+	header_count := program_header_count(kind, has_tls)
 	sections := layout(program, target, interp.len, dynstr.len, libraries.len, external,
-		exports.len, extra.len, relocation_total, header_count)
+		exports.len, extra.len, relocation_total, header_count, has_dynamic)
 	// The image a Linux kernel starts is built here. The name is not `image`,
 	// because that is the module whose Program this function was handed.
 	mut output := []u8{len: sections.total, init: u8(0)}
@@ -268,6 +314,7 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	put(mut output, sections.dynstr, dynstr)
 	put(mut output, sections.strings, program.string_blob)
 	put(mut output, sections.globals, program.globals_blob)
+	put(mut output, sections.tls, program.tls_blob)
 	emit_bound_slots(mut output, program, sections, base)
 	emit_extra_slots(mut output, program, sections, extra, base)!
 	emit_symbols(mut output, program, sections, symbol_names, indices, external, base, exports)
@@ -275,8 +322,8 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	emit_relocations(mut output, program, sections, indices, external, base, loader_data,
 		extra, shared)!
 	// A static program writes no table here, and no header points at one.
-	if header_count > 2 {
-		emit_dynamic(mut output, sections, dynstr.len, needed, base, relocation_total)
+	if has_dynamic {
+		emit_dynamic(mut output, sections, program, dynstr.len, needed, base, relocation_total)
 	}
 	// A shared object has no entry point: the loader calls the initializers and
 	// then whatever the program that loaded it names, and there is no place in
@@ -284,7 +331,8 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	entry := if shared { u64(0) } else { base + u64(sections.text) }
 	e_type := if shared { elf_type_dyn } else { elf_type_exec }
 	emit_header(mut output, target, entry, e_type, header_count)
-	emit_program_headers(mut output, target, sections, interp.len, libraries.len, header_count, base)
+	emit_program_headers(mut output, target, sections, program, interp.len, libraries.len,
+		kind, has_tls, base)
 	patch(mut output, program, target, sections, base, extra)!
 	return output
 }
@@ -324,13 +372,19 @@ fn check_kind(program image.Program, kind linux.LinkKind) ! {
 // dynamic program names its interpreter and has four, a shared object has the
 // load, dynamic and stack headers, and a static program has the load and stack
 // headers alone, because it carries no dynamic table for a loader to read and
-// nothing loads it.
-fn program_header_count(kind linux.LinkKind) int {
-	return match kind {
+// nothing loads it. An image with thread-local storage adds one more, the PT_TLS
+// header the runtime reads the block out of, and it is a header of its own for
+// every kind that defines a thread-local.
+fn program_header_count(kind linux.LinkKind, has_tls bool) int {
+	mut count := match kind {
 		.program { int(elf_program_header_count) }
 		.static_program { 2 }
 		.shared { 3 }
 	}
+	if has_tls {
+		count++
+	}
+	return count
 }
 
 // external_imports is how many of the program's names in `imports` a library has
@@ -381,6 +435,26 @@ fn relative_count(program image.Program, kind linux.LinkKind, extra []string) in
 	}
 	for fixup in program.data_fixups {
 		if fixup.kind != .import_address {
+			count++
+		}
+	}
+	return count
+}
+
+// irelative_count is how many slots the image fills by asking a resolver: one
+// per slot it writes for a name `program.ifuncs` marks, which is a name whose
+// definition is a resolver that picks the function to call. The slots are the
+// bound imports' own and the extra names', the same two runs `got_slot` answers
+// for, and a name with no slot in the image is reached directly and needs none.
+fn irelative_count(program image.Program, extra []string) int {
+	mut count := 0
+	for name in program.imports {
+		if name in program.bound && name in program.ifuncs {
+			count++
+		}
+	}
+	for name in extra {
+		if name in program.ifuncs {
 			count++
 		}
 	}
@@ -486,7 +560,7 @@ fn got_slot(program image.Program, sections Sections, name string, extra []strin
 // is how many entries the relocation table holds, because it is not the symbol
 // count: a shared object carries entries that name no symbol, and a program
 // carries entries for addresses in its data.
-fn layout(program image.Program, target backend.Target, interp_len int, dynstr_len int, library_count int, external int, export_count int, got_extra int, relocation_total int, header_count int) Sections {
+fn layout(program image.Program, target backend.Target, interp_len int, dynstr_len int, library_count int, external int, export_count int, got_extra int, relocation_total int, header_count int, has_dynamic bool) Sections {
 	mut offset := int(elf_header_size) + header_count * int(elf_program_header_size)
 	interp := offset
 	offset = align(offset + interp_len, 8)
@@ -509,6 +583,15 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	offset = align(offset, gl)
 	globals := offset
 	offset = align(offset + program.globals_blob.len, 8)
+	// The thread-local block's initialization image sits in the writable data,
+	// inside the one PT_LOAD segment the file maps, because the runtime copies
+	// it out of p_vaddr and that read has to find the file's bytes. It is
+	// aligned to the block's own alignment, which is what PT_TLS's p_align
+	// says and keeps p_vaddr congruent to p_offset modulo p_align.
+	tls_align := if program.tls_alignment > 1 { program.tls_alignment } else { 1 }
+	offset = align(offset, tls_align)
+	tls := offset
+	offset = align(offset + program.tls_blob.len, 8)
 	dynsym := offset
 	// One null entry the container requires, then one per external imported
 	// function, one per object this image holds a copy of, and one per name the
@@ -535,11 +618,11 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	offset = align(offset + relocation_total * elf_relocation_size, 8)
 	// A static program carries no dynamic table: no loader runs before it and
 	// nothing reads one, which is the shape a reader looks for to tell a static
-	// program from one a loader finishes. Its header count is the same number
-	// that leaves the header out.
+	// program from one a loader finishes.
 	dynamic := offset
-	if header_count > 2 {
-		offset = align(offset + dynamic_entry_count(library_count) * elf_dynamic_entry_size, 8)
+	if has_dynamic {
+		offset = align(offset + dynamic_entry_count(library_count, program.init_array.count,
+			program.fini_array.count) * elf_dynamic_entry_size, 8)
 	}
 	return Sections{
 		interp:  interp
@@ -548,6 +631,7 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 		dynstr:  dynstr
 		strings: strings
 		globals: globals
+		tls:     tls
 		dynsym:  dynsym
 		hash:    hash
 		got:     got
@@ -596,6 +680,15 @@ fn emit_bound_slots(mut output []u8, program image.Program, sections Sections, b
 fn emit_extra_slots(mut output []u8, program image.Program, sections Sections, extra []string, base u64) ! {
 	for i, name in extra {
 		at := relocation_referent_of(program, sections, name)!
+		// A slot a `.gottpoff` reference reads holds how far the thread-local
+		// lies below the thread pointer rather than its address: the code loads
+		// the slot and reaches the variable through the thread pointer. The
+		// offset is known here because the whole thread-local block is this
+		// image's, which is what the initial-exec model needs.
+		if name in program.tls_slots {
+			put_u64(mut output, sections.got + (program.imports.len + i) * 8, u64(tpoff_of(program, name, 0)!))
+			continue
+		}
 		put_u64(mut output, sections.got + (program.imports.len + i) * 8, base + u64(at))
 	}
 }
@@ -631,7 +724,11 @@ fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbo
 		}
 		at := sections.dynsym + indices[i] * elf_symbol_size
 		put_u32(mut output, at, u32(symbol_names[name]))
-		output[at + 4] = symbol_global_function
+		output[at + 4] = if name in program.weak_imports {
+			symbol_weak_function
+		} else {
+			symbol_global_function
+		}
 	}
 	for i, name in program.copy_objects {
 		at := sections.dynsym + (external + i + 1) * elf_symbol_size
@@ -717,6 +814,12 @@ fn emit_hash(mut output []u8, program image.Program, sections Sections, external
 // `imports`, which is where its slot is, and the symbol it names is the import's
 // index in the dynamic table, which is a different number as soon as one import
 // is bound.
+//
+// The run at the end is the ifuncs': a slot the image wrote for a name whose
+// definition is a resolver gets an R_X86_64_IRELATIVE entry, which tells the
+// loader to call the resolver and store what it answers. The entry names no
+// symbol, because the answer is not a name's address, and its addend is the
+// resolver's own address, which the loader calls.
 fn emit_relocations(mut output []u8, program image.Program, sections Sections, indices []int, external int, base u64, loader_data int, extra []string, shared bool) ! {
 	mut entry := 0
 	for i, name in program.imports {
@@ -815,14 +918,50 @@ fn emit_relocations(mut output []u8, program image.Program, sections Sections, i
 			entry++
 		}
 	}
+	// The slots an ifunc name is reached through. The slot already holds the
+	// resolver's address, because a bound name's slot gets its definition and
+	// the definition of an ifunc is the resolver; the IRELATIVE entry is what
+	// tells the loader to call it and replace that address with the answer.
+	// The entry names no symbol and its addend is the resolver's address, which
+	// is what the loader calls. A name no slot stands for is reached directly
+	// and needs none.
+	for i, name in program.imports {
+		if name !in program.bound || name !in program.ifuncs {
+			continue
+		}
+		definition := program.bound[name] or { continue }
+		resolver := if definition.function {
+			sections.text + definition.offset
+		} else {
+			sections.globals + definition.offset
+		}
+		where := sections.rela + entry * elf_relocation_size
+		put_u64(mut output, where, base + u64(sections.got + i * 8))
+		put_u64(mut output, where + 8, relocation_irelative)
+		put_u64(mut output, where + 16, base + u64(resolver))
+		entry++
+	}
+	for i, name in extra {
+		if name !in program.ifuncs {
+			continue
+		}
+		resolver := relocation_referent_of(program, sections, name)!
+		where := sections.rela + entry * elf_relocation_size
+		put_u64(mut output, where, base + u64(sections.got + (program.imports.len + i) * 8))
+		put_u64(mut output, where + 8, relocation_irelative)
+		put_u64(mut output, where + 16, base + u64(resolver))
+		entry++
+	}
 }
 
 // emit_dynamic writes the table that tells the loader what the image needs: each
 // library it runs against, where the tables are, and how big each record in them
 // is. The DT_NEEDED entries come first and are the only part of the table whose
 // length depends on the command line; a static program has none, so its table
-// describes only its own parts.
-fn emit_dynamic(mut output []u8, sections Sections, dynstr_len int, needed []int, base u64, relocation_total int) {
+// describes only its own parts. The two constructor tables are named by address
+// and size when the image has them, and they lie in the writable data, so the
+// address is the load base plus the storage's own offset.
+fn emit_dynamic(mut output []u8, sections Sections, program image.Program, dynstr_len int, needed []int, base u64, relocation_total int) {
 	mut entries := [][]u64{}
 	for offset in needed {
 		entries << [dt_needed, u64(offset)]
@@ -835,6 +974,14 @@ fn emit_dynamic(mut output []u8, sections Sections, dynstr_len int, needed []int
 	entries << [dt_relaent, u64(elf_relocation_size)]
 	entries << [dt_strsz, u64(dynstr_len)]
 	entries << [dt_syment, u64(elf_symbol_size)]
+	if program.init_array.count > 0 {
+		entries << [dt_init_array, base + u64(sections.globals + program.init_array.offset)]
+		entries << [dt_init_arraysz, u64(program.init_array.count * 8)]
+	}
+	if program.fini_array.count > 0 {
+		entries << [dt_fini_array, base + u64(sections.globals + program.fini_array.offset)]
+		entries << [dt_fini_arraysz, u64(program.fini_array.count * 8)]
+	}
 	entries << [dt_null, u64(0)]
 	for i, entry in entries {
 		put_u64(mut output, sections.dynamic + i * elf_dynamic_entry_size, entry[0])
@@ -869,15 +1016,16 @@ fn emit_header(mut output []u8, target backend.Target, entry u64, e_type u16, he
 }
 
 // emit_program_headers writes the program headers the kernel and the loader read
-// before any of the code runs: the interpreter when there is one, the one
-// segment that maps the whole image, the dynamic table when there is one, and
-// the stack. `header_count` is which of those four: four is all of them, three
-// leaves the interpreter out, and two leaves the dynamic table out as well.
-fn emit_program_headers(mut output []u8, target backend.Target, sections Sections, interp_len int, library_count int, header_count int, base u64) {
+// before any of the code runs: the interpreter when the kind has one, the one
+// segment that maps the whole image, the dynamic table when the kind has one,
+// the thread-local block when the image defines one, and the stack. The kind
+// settles the first three, and a thread-local is a header of its own for every
+// kind, which is why it is passed in rather than read off the kind.
+fn emit_program_headers(mut output []u8, target backend.Target, sections Sections, program image.Program, interp_len int, library_count int, kind linux.LinkKind, has_tls bool, base u64) {
 	mut at := int(elf_header_size)
 	// PT_INTERP: the loader the kernel hands the process to. Only a dynamic
 	// program names one; the other two kinds write no header here.
-	if header_count > 3 {
+	if kind == .program {
 		put_u32(mut output, at, elf_ph_type_interp)
 		put_u32(mut output, at + 4, elf_ph_flags_read)
 		put_u64(mut output, at + 8, u64(sections.interp))
@@ -903,15 +1051,33 @@ fn emit_program_headers(mut output []u8, target backend.Target, sections Section
 	// PT_DYNAMIC: the table the loader reads. A static program writes no such
 	// header, because it writes no such table: nothing loads it and nothing
 	// reads one, and a reader that finds none calls it statically linked.
-	if header_count > 2 {
+	if kind != .static_program {
+		size := u64(dynamic_entry_count(library_count, program.init_array.count,
+			program.fini_array.count) * elf_dynamic_entry_size)
 		put_u32(mut output, at, elf_ph_type_dynamic)
 		put_u32(mut output, at + 4, elf_ph_flags_read | elf_ph_flags_write)
 		put_u64(mut output, at + 8, u64(sections.dynamic))
 		put_u64(mut output, at + 16, base + u64(sections.dynamic))
 		put_u64(mut output, at + 24, base + u64(sections.dynamic))
-		put_u64(mut output, at + 32, u64(dynamic_entry_count(library_count) * elf_dynamic_entry_size))
-		put_u64(mut output, at + 40, u64(dynamic_entry_count(library_count) * elf_dynamic_entry_size))
+		put_u64(mut output, at + 32, size)
+		put_u64(mut output, at + 40, size)
 		put_u64(mut output, at + 48, 8)
+		at += int(elf_program_header_size)
+	}
+	// PT_TLS: the thread-local block. It is read-only, and its p_vaddr is where
+	// the initialization image sits inside the segment that maps the file,
+	// because the runtime copies p_filesz bytes out of it. p_memsz is the
+	// block's size rounded to its alignment, the same roundup the runtime does,
+	// and it is longer than p_filesz when a zero-filled part follows the image.
+	if has_tls {
+		put_u32(mut output, at, elf_ph_type_tls)
+		put_u32(mut output, at + 4, elf_ph_flags_read)
+		put_u64(mut output, at + 8, u64(sections.tls))
+		put_u64(mut output, at + 16, base + u64(sections.tls))
+		put_u64(mut output, at + 24, base + u64(sections.tls))
+		put_u64(mut output, at + 32, u64(program.tls_blob.len))
+		put_u64(mut output, at + 40, u64(tls_memsz(program)))
+		put_u64(mut output, at + 48, u64(tls_alignment_of(program)))
 		at += int(elf_program_header_size)
 	}
 	// PT_GNU_STACK: the stack is readable and writable and not executable, which
@@ -1027,22 +1193,29 @@ fn patch(mut output []u8, program image.Program, target backend.Target, sections
 		referent := referent_of(program, sections, fixup.kind, fixup.name, extra)!
 		put_u64(mut output, sections.globals + fixup.offset, base + u64(referent + fixup.addend))
 	}
-	// The references a unit carried as relocations are four-byte fields the unit
-	// already wrote, so only the field is filled in: the value is the distance
-	// from the field to what the name stands for, and the object's own addend is
-	// added to the name's address. A call's addend is minus four, which is the
-	// psABI's way of measuring the distance from the end of the field while
-	// naming where the instruction began. `place` says which of the unit's blobs
-	// the field is in, because an unwind table refers to the code from a blob of
-	// its own, and `kind` says whether the name stands for itself or for its
-	// global offset table slot.
+	// The references a unit carried as relocations are fields the unit already
+	// wrote, so only the field is filled in, and how wide it is decides how many
+	// bytes of the answer go there. A narrow field is four bytes and this
+	// compiler's own references and an instruction's displacement are narrow; a
+	// wide field is eight and an unwind table's entries and an eight-byte
+	// address are wide. A `.direct` value is the distance from the field to what
+	// the name stands for, with the object's own addend added to the name's
+	// address; a call's addend is minus four, which is the psABI's way of
+	// measuring the distance from the end of the field while naming where the
+	// instruction began. A `.got` value is the same distance, to the name's
+	// global offset table slot rather than to the name. An `.absolute` value is
+	// the address itself, and when the name is empty it is the addend alone,
+	// which is how a constant an absolute symbol names arrives. A `.tpoff` value
+	// is how far below the thread pointer the name lies. `place` says which of
+	// the unit's blobs the field is in, because an unwind table refers to the
+	// code from a blob of its own.
 	for relocation in program.relocations {
 		field := relocation_section(sections, relocation.place) + relocation.offset
-		referent := match relocation.kind {
-			.direct { relocation_referent_of(program, sections, relocation.name)! }
-			.got { got_slot(program, sections, relocation.name, extra)! }
+		value := relocation_value(program, sections, base, extra, field, relocation)!
+		match relocation.width {
+			.narrow { put_u32(mut output, field, u32(i32(value))) }
+			.wide { put_u64(mut output, field, u64(value)) }
 		}
-		put_u32(mut output, field, u32(i32(referent + relocation.addend - field)))
 	}
 	// Each stub jumps through the slot of the import it stands for: the
 	// displacement is measured from the end of the stub, and the loader writes
@@ -1065,6 +1238,7 @@ fn relocation_section(sections Sections, place image.RelocationPlace) int {
 	return match place {
 		.text { sections.text }
 		.read_only { sections.strings }
+		.tls { sections.tls }
 		.data { sections.globals }
 	}
 }
@@ -1087,6 +1261,15 @@ fn relocation_referent_of(program image.Program, sections Sections, name string)
 			return sections.plt + i * plt_stub_size
 		}
 	}
+	// A name the linker answers with the image's own start is offset zero here:
+	// every address in the image is this offset plus the base, so a reference
+	// that measures from a place in the image and one that writes the address
+	// both come out right.
+	if definition := program.bound[name] {
+		if definition.image_base {
+			return 0
+		}
+	}
 	if offset := program.labels[name] {
 		return sections.text + offset
 	}
@@ -1094,6 +1277,69 @@ fn relocation_referent_of(program image.Program, sections Sections, name string)
 		return sections.globals + slot.offset
 	}
 	return error('${name} is named by a relocation and no unit of this link defines it and no stub stands for it')
+}
+
+// tls_alignment_of is the alignment the thread-local block asks for: the
+// strictest any member asked for, and at least one, because a block whose
+// members all asked for a byte still begins on a byte boundary.
+fn tls_alignment_of(program image.Program) int {
+	return if program.tls_alignment > 1 { program.tls_alignment } else { 1 }
+}
+
+// tls_memsz is the storage the thread-local block asks for at run time: the
+// unit's tls_size rounded up to the block's alignment. glibc's
+// __libc_setup_tls rounds the p_memsz it reads from PT_TLS the same way,
+// roundup(memsz, align), and puts the thread pointer at the end of that rounded
+// block, so a tpoff measured against anything else points at the wrong byte.
+fn tls_memsz(program image.Program) int {
+	return align(program.tls_size, tls_alignment_of(program))
+}
+
+// tpoff_of is how far below the thread pointer a thread-local lies. The thread
+// pointer sits at the end of the block, so the offset is the name's place in
+// the block plus its addend minus the block's rounded size:
+//
+//	tls_labels[name] + addend - tls_memsz
+//
+// Written as an address difference it is (tls_vaddr + tls_labels[name]) + addend
+// - (tls_vaddr + tls_memsz), where tls_vaddr is where the initialization image
+// was placed; the placement cancels out, which is why the offset does not depend
+// on where the image was loaded. The size is rounded as roundup(tls_size,
+// tls_alignment), the rounding __libc_setup_tls does, because the thread pointer
+// goes at the end of the rounded block and the offset has to agree with it.
+fn tpoff_of(program image.Program, name string, addend int) !i64 {
+	offset := program.tls_labels[name] or {
+		return error('${name} is measured from the thread pointer and is not a thread-local of this image')
+	}
+	return i64(offset + addend - tls_memsz(program))
+}
+
+// relocation_value is the number a relocatable reference carries once every
+// address is settled. `field` is where the field itself is, because a direct or
+// global-offset reference is a distance from it and the absolute and tpoff kinds
+// are not. An empty name with the absolute kind is a constant rather than a
+// place, and the addend is the whole of it.
+fn relocation_value(program image.Program, sections Sections, base u64, extra []string, field int, relocation image.Relocation) !i64 {
+	match relocation.kind {
+		.direct {
+			return i64(relocation_referent_of(program, sections, relocation.name)! +
+				relocation.addend - field)
+		}
+		.got {
+			return i64(got_slot(program, sections, relocation.name, extra)! +
+				relocation.addend - field)
+		}
+		.absolute {
+			if relocation.name == '' {
+				return i64(relocation.addend)
+			}
+			return i64(base) + i64(relocation_referent_of(program, sections, relocation.name)! +
+				relocation.addend)
+		}
+		.tpoff {
+			return tpoff_of(program, relocation.name, relocation.addend)!
+		}
+	}
 }
 
 // referent_of is where one reference points, as an offset into the image. It is
