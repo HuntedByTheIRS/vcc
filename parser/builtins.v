@@ -34,7 +34,7 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	// declaration for a spelling in the compiler's own namespace.
 	'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
-	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll']
+	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -101,6 +101,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_ctz', '__builtin_ctzll', '__builtin_clz', '__builtin_clzll' {
 			return p.parse_bit_count(at)
+		}
+		'__builtin_constant_p' {
+			return p.parse_constant_p(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -599,6 +602,25 @@ fn (mut p Parser) parse_bit_count(at tokenize.Token) !ast.Expr {
 		line: at.line
 		col:  at.col
 	})
+}
+
+// parse_constant_p answers `__builtin_constant_p(x)`: 1 when the argument is an
+// integer constant expression this reader can evaluate, 0 when it is not. The
+// answer is a value, not code, so it is folded exactly where it is written and
+// the argument is never emitted: gcc's builtin asks whether the expression is
+// known at compile time and does not evaluate it. `__builtin_constant_p(3)` and
+// `__builtin_constant_p(2 + 3)` are 1, and `__builtin_constant_p(x)` for a
+// variable is 0, which is what `constant_value` answers with and what the test
+// asks for. gcc gives the answer the type int.
+fn (mut p Parser) parse_constant_p(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	operand := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_constant_p')
+		return error('unclosed __builtin_constant_p')
+	}
+	answer := if _ := p.constant_value(operand) { i64(1) } else { i64(0) }
+	return integer_constant(answer, '${at.text}(${describe_operand(operand)})', at, types.Kind.int_)
 }
 
 // The builtins that are a value rather than a question about a declaration: the
