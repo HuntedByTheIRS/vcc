@@ -14,12 +14,14 @@ import image
 // merge allocates its output at, so each blob is built once at its final size.
 pub struct Layout {
 pub mut:
-	text_bases    []int
-	string_bases  []int
-	globals_bases []int
-	text_len      int
-	string_len    int
-	globals_len   int
+	text_bases     []int
+	string_bases   []int
+	eh_frame_len   int
+	eh_frame_bases []int
+	globals_bases  []int
+	text_len       int
+	string_len     int
+	globals_len    int
 	// tls_bases is where each unit's thread-local storage begins in the merged
 	// block and tls_len is how long the whole block is, which is what a
 	// `tpoff` reference measures from: the block sits below the thread pointer
@@ -69,6 +71,7 @@ pub fn lay(units []image.Program, globals_alignment int, read_only_alignment int
 	mut layout := Layout{
 		text_bases:     []int{cap: units.len}
 		string_bases:   []int{cap: units.len}
+		eh_frame_bases: []int{cap: units.len}
 		globals_bases:  []int{cap: units.len}
 		tls_bases:      []int{cap: units.len}
 		init_bases:     []int{cap: units.len}
@@ -94,6 +97,19 @@ pub fn lay(units []image.Program, globals_alignment int, read_only_alignment int
 	layout.text_len = layout.init_run_len + layout.fini_run_len
 	step := if globals_alignment > 0 { globals_alignment } else { 1 }
 	string_step := if read_only_alignment > 0 { read_only_alignment } else { 1 }
+	// The gathered `.eh_frame` fragments come first in the merged read-only
+	// data, one after another in unit order, because a scan that starts at one
+	// of them has to reach the rest: the unwinder reads the table from the
+	// fragment a start file points at and stops at the first record whose
+	// length is zero.
+	for unit in units {
+		run := unit.eh_frame_run
+		alignment := if run.alignment > 1 { run.alignment } else { 1 }
+		layout.eh_frame_len = align_up(layout.eh_frame_len, alignment)
+		layout.eh_frame_bases << layout.eh_frame_len
+		layout.eh_frame_len += run.len
+	}
+	layout.string_len = layout.eh_frame_len
 	for unit in units {
 		layout.text_bases << layout.text_len
 		layout.text_len += unit.text.len

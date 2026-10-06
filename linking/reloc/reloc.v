@@ -37,7 +37,7 @@ pub:
 // starts somewhere else; a section key keeps its spelling, since the container
 // reads it as a place in a merged blob rather than as a symbol. How wide the
 // field is comes across unchanged, because the container writes that many bytes.
-pub fn relocations(unit image.Program, unit_index int, text_base int, string_base int, globals_base int, tls_base int, init_run_base int, fini_run_base int, tables Tables, mut out []image.Relocation) {
+pub fn relocations(unit image.Program, unit_index int, text_base int, string_base int, globals_base int, tls_base int, init_run_base int, fini_run_base int, eh_frame_base int, tables Tables, mut out []image.Relocation) {
 	for relocation in unit.relocations {
 		mut addend := relocation.addend
 		mut name := relocation.name
@@ -57,6 +57,14 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 		if relocation.place == .text {
 			field = text_field(unit, relocation.offset, text_base, init_run_base, fini_run_base)
 		}
+		// A field inside the unit's `.eh_frame` fragment moves with the gathered
+		// table, which the merge laid out with the other units' fragments rather
+		// than where this unit's read-only data landed.
+		if relocation.place == .read_only {
+			if at := eh_frame_field(unit, relocation.offset, eh_frame_base) {
+				field = at
+			}
+		}
 		if relocation.place == .data {
 			if at := table_field(relocation.offset, tables) {
 				field = at
@@ -67,7 +75,11 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 				addend += text_base
 			}
 			image.section_key_rodata {
-				addend += string_base
+				if at := eh_frame_field(unit, addend, eh_frame_base) {
+					addend = at
+				} else {
+					addend += string_base
+				}
 			}
 			image.section_key_data {
 				addend += globals_base
@@ -91,6 +103,18 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 // code: inside the run the merge gathered the fragment into, when the offset is
 // within one of the two fragments it moves, and at the unit's own text base
 // otherwise.
+// eh_frame_field is where a field at `offset` in a unit's read-only data lands
+// when it is inside the part of it that is this unit's `.eh_frame` fragment. The
+// merge gathers those fragments into one table, and a scan from any one of them
+// has to reach the rest, so a field inside one moves with it.
+fn eh_frame_field(unit image.Program, offset int, eh_frame_base int) ?int {
+	run := unit.eh_frame_run
+	if run.len <= 0 || offset < run.base || offset >= run.base + run.len {
+		return none
+	}
+	return eh_frame_base + (offset - run.base)
+}
+
 fn text_field(unit image.Program, offset int, text_base int, init_run_base int, fini_run_base int) int {
 	if unit.init_run.len > 0 && offset >= unit.init_run.base
 		&& offset < unit.init_run.base + unit.init_run.len {

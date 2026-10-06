@@ -308,6 +308,11 @@ pub mut:
 	// program has one, and a link carries one in a unit of its own; a unit read
 	// from a relocatable object has none.
 	stub bool
+	// eh_frame_run is the unit's `.eh_frame` fragment: where it sits in the
+	// unit's read-only data and how long it is. The merge gathers every unit's
+	// fragment into one table, because the unwinder scans from one of them and
+	// expects to reach the rest.
+	eh_frame_run CodeRun
 	// entry_place is where in the merged text the process begins, which is the
 	// number the container writes into the header. It is not the start of the
 	// text: the gathered `.init` and `.fini` runs are placed there.

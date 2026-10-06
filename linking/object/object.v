@@ -236,8 +236,9 @@ struct Layout {
 	read_only_alignment int
 	// init_run and fini_run are the two code sections the merge gathers with the
 	// same-named section of every other unit.
-	init_run image.CodeRun
-	fini_run image.CodeRun
+	init_run     image.CodeRun
+	eh_frame_run image.CodeRun
+	fini_run     image.CodeRun
 	// tls_blob is the initialized image of the thread-local storage this unit
 	// defines, and tls_size is how much storage the block asks for in all,
 	// which is longer when a zero-filled `.tbss` follows the image. The base
@@ -291,6 +292,7 @@ pub fn read(bytes []u8, target backend.Target) !image.Program {
 		globals_alignment:   layout.alignment
 		read_only_alignment: layout.read_only_alignment
 		init_run:            layout.init_run
+		eh_frame_run:        layout.eh_frame_run
 		fini_run:            layout.fini_run
 		labels:              map[string]int{}
 		defined:             map[string]bool{}
@@ -409,6 +411,7 @@ fn lay_out(bytes []u8, sections []Section) !Layout {
 	mut alignment := 8
 	mut read_only_alignment := 0
 	mut init_run := image.CodeRun{}
+	mut eh_frame_run := image.CodeRun{}
 	mut fini_run := image.CodeRun{}
 	for i, s in sections {
 		if blob_of[i] != .code {
@@ -445,6 +448,13 @@ fn lay_out(bytes []u8, sections []Section) !Layout {
 			read_only_alignment = gap
 		}
 		base_of[i] = read_only.len
+		if s.name == '.eh_frame' {
+			eh_frame_run = image.CodeRun{
+				base:      read_only.len
+				len:       int(s.size)
+				alignment: int(s.addralign)
+			}
+		}
 		copy_section(mut read_only, bytes, s)
 	}
 	// The ordinary writable sections keep section order, and the constructor
@@ -543,6 +553,7 @@ fn lay_out(bytes []u8, sections []Section) !Layout {
 		read_only:           read_only
 		read_only_alignment: read_only_alignment
 		init_run:            init_run
+		eh_frame_run:        eh_frame_run
 		fini_run:            fini_run
 		writable:            writable
 		alignment:           alignment

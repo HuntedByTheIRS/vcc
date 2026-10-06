@@ -406,6 +406,14 @@ fn merge_read_only(units []image.Program, layout place.Layout) ReadOnly {
 	mut strings := map[string]int{}
 	mut wide_strings := map[string]int{}
 	mut doubles := map[string]int{}
+	// The gathered fragments are copied again at the front of the merged
+	// read-only data, which is where a reference into one of them was moved to.
+	for i, unit in units {
+		run := unit.eh_frame_run
+		if run.len > 0 {
+			fill(mut blob, layout.eh_frame_bases[i], unit.string_blob[run.base..run.base + run.len])
+		}
+	}
 	for i, unit in units {
 		base := layout.string_bases[i]
 		fill(mut blob, base, unit.string_blob)
@@ -548,7 +556,8 @@ fn merge_relocations(units []image.Program, layout place.Layout) []image.Relocat
 	for i, unit in units {
 		reloc.relocations(unit, i, layout.text_bases[i], layout.string_bases[i],
 			layout.globals_bases[i], layout.tls_bases[i], layout.init_run_bases[i],
-			layout.fini_run_bases[i], tables_of(unit, layout, i), mut relocations)
+			layout.fini_run_bases[i], layout.eh_frame_bases[i], tables_of(unit, layout, i), mut
+			relocations)
 	}
 	return relocations
 }
