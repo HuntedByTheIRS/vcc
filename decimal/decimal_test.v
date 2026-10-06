@@ -38,6 +38,16 @@ const measured = [
 	'1e-6df 2f800001',
 	'1e96df 5f8f4240',
 	'1e-95df 03000001',
+	// Measured from the golden's own run rather than from the vector table: the
+	// padded coefficient of a power of ten past the exponent field (`1e384dd` is
+	// a coefficient of 1000000000000000 at a power of 369, which lands the biased
+	// exponent exactly on 767, the last one before the large form's marker), the
+	// same value canonical in `_Decimal64` (biased 494 fits, so no padding), and
+	// the 128-bit widths at the canonical and the large boundaries.
+	'1e384dd 5fe38d7ea4c68000',
+	'1e96dd 3dc0000000000001',
+	'3.5dl 303e0000000000000000000000000023',
+	'1234567890123456789012345678901234.0dl 30403cde6fff9732de825cd07e96aff2',
 	'8388607.0df 32ffffff',
 	'8388608.0df 6ca00000',
 	'8388609.0df 6ca00001',
