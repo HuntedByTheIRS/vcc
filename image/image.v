@@ -317,6 +317,12 @@ pub mut:
 	tls_blob      []u8
 	tls_size      int
 	tls_alignment int
+	// tls_labels is where each thread-local this unit defines lies in that
+	// storage, which is what a `.tpoff` reference to the name measures from
+	// the end of the image's whole block. It is a map of its own rather than a
+	// part of `labels`, because a label is an address in the code and this is
+	// an offset in storage that every thread gets its own copy of.
+	tls_labels map[string]int
 	// init_array and fini_array are the two tables of function addresses the
 	// container has to tell the runtime about: the entries to run before the
 	// program's own code and those to run after it. They lie in the writable
