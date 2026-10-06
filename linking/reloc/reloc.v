@@ -175,7 +175,30 @@ pub fn data_fixups(unit image.Program, unit_index int, globals_base int, text_ba
 		mut kind := fixup.kind
 		mut name := fixup.name
 		mut addend := fixup.addend
-		if fixup.kind == .import_address {
+		if fixup.name == image.section_key_text || fixup.name == image.section_key_rodata
+			|| fixup.name == image.section_key_data {
+			// A reference to a section's content rather than to a name: what the
+			// unit called a read-only object of its own, this reader keys by the
+			// section it lies in. The reference is a place, not a symbol, so it is
+			// not looked up among the link's definitions: a lookup would miss,
+			// leave an import kind behind, and leave the field holding nothing,
+			// which is what a locale object's pointer to the ctype tables did.
+			// The merged copy of the section starts elsewhere, so the byte gains
+			// its blob's base the way a section reference does.
+			kind = .section_address
+			match fixup.name {
+				image.section_key_text {
+					addend += text_base
+				}
+				image.section_key_rodata {
+					addend += string_base
+				}
+				image.section_key_data {
+					addend += globals_base
+				}
+				else {}
+			}
+		} else if fixup.kind == .import_address {
 			if definition := definitions[fixup.name] {
 				kind = if definition.function { .function_address } else { .global_address }
 			}
