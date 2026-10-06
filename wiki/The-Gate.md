@@ -58,14 +58,17 @@ badge and the runner do not disagree about what a case is.
 
 `v run tools/compliance.vsh` compiles and runs the corpus under `compliance/`.
 The suite says the compiler does what its own tests say; this corpus says it
-agrees with a C program nobody wrote for it, one that checks about nine
-hundred of its own answers against the standard library.
+agrees with C programs nobody wrote for it, checking about nine hundred of its
+answers against the standard library.
 
-The corpus is one directory of small tests: `monolithic.c` is the file it
-arrived as, and `NNN-name.c` beside it is one of its checks with the
-declarations and statements that check needs. Each test is a program, so the
-runner is a work queue: it compiles and runs all of them in parallel (`-j`,
-eight by default) and reports the test file and the line in it that failed.
+The tests live in a directory per standard, and the directory is the mode: the
+leaf name is the `-std=` spelling, so `compliance/iso/c99/` is compiled
+`-std=c99` and `compliance/gnu/gnu99/` `-std=gnu99`. `monolithic.c` is the file
+the corpus arrived as, kept at the root, and `NNN-name.c` inside a dialect
+directory is one of its checks with the declarations and statements that check
+needs. Each test is a program, so the runner is a work queue: it compiles and
+runs all of them in parallel (`-j`, eight by default) and reports the suite, the
+test file and the line in it that failed.
 
 ```sh
 v run tools/compliance.vsh                        # build the tree, then run everything
@@ -110,14 +113,14 @@ v run tools/regress.vsh --list                 # print what would run
 v run tools/regress.vsh --count                # print how many cases there are
 ```
 
-Both corpora compile with the flags `compliance.vsh` uses: `-std=gnu99`
-because a case may reach a system header that refuses the `c99` spelling, `-w`
-because a case is not required to be warning-clean, `-lm` for the math a case
-may touch, and `-x c` so the compiler reads the file as C rather than guessing
-from a name it did not write. Cases run in parallel, eight at a time by
-default (`-j N`). Each directory has a floor on its case count: losing a case
-is a failure and adding one is not. The count `--count` prints is the number
-the regressions badge in the README reads.
+Both corpora compile with `-std=gnu99 -w -lm -x c`: `gnu99` because a case may
+reach a system header that refuses the `c99` spelling, `-w` because a case is
+not required to be warning-clean, `-lm` for the math a case may touch, and
+`-x c` so the compiler reads the file as C rather than guessing from a name it
+did not write. Cases run in parallel, eight at a time by default (`-j N`). Each
+directory has a floor on its case count: losing a case is a failure and adding
+one is not. The count `--count` prints is the number the regressions badge in
+the README reads.
 
 ## The benchmark harness
 

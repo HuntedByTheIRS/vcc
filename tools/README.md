@@ -67,9 +67,9 @@ directory is still this compiler's source and gets no such pass.
 ## compliance.vsh
 
 The corpus under `compliance/`, compiled by the tree and run. The suite says the
-compiler does what its own tests say; this says it agrees with a C program nobody
-wrote for it, one that checks about nine hundred of its own answers against the
-standard library.
+compiler does what its own tests say; this says it agrees with C programs nobody
+wrote for it, checking about nine hundred of its answers against the standard
+library.
 
 ```sh
 v run tools/compliance.vsh                        # build the tree, then run everything
@@ -80,11 +80,14 @@ v run tools/compliance.vsh --list                 # print what would run
 v run tools/compliance.vsh --count                # print how many tests there are
 ```
 
-The corpus is one directory of small tests: `monolithic.c` is the file it
-arrived as, and `NNN-name.c` beside it is one of its checks with the
-declarations and statements that check needs. Each test is a program, so the
-runner is a work queue: it compiles and runs all of them in parallel (`-j`,
-eight by default) and reports the test file and the line in it that failed.
+The tests live in a directory per standard, and the directory is the mode: the
+leaf name is the `-std=` spelling, so `compliance/iso/c99/` is compiled
+`-std=c99` and `compliance/gnu/gnu99/` `-std=gnu99`. `monolithic.c` is the file
+the corpus arrived as, kept at the root, and `NNN-name.c` inside a dialect
+directory is one of its checks with the declarations and statements that check
+needs. Each test is a program, so the runner is a work queue: it compiles and
+runs all of them in parallel (`-j`, eight by default) and reports the suite, the
+test file and the line in it that failed.
 
 It builds the tree under test first unless `--compiler` names a binary, so the run
 describes the current source rather than one from an earlier edit. It fails on a
@@ -99,7 +102,8 @@ compiler accepts only when `NAME` is defined, and is skipped unless `--define`
 names it. Running it with the construct off would pass by not compiling the
 thing under test.
 
-The mode is `-std=gnu99`; `compliance/README.md` says why, and why `-lm` is not
+Every test compiles with the standard of its directory and `-lm`;
+`compliance/README.md` says why the corpus is split and why `-lm` is not
 optional.
 
 ## regress.vsh
@@ -126,12 +130,11 @@ same name shape and a `.expected` file beside it: the program prints to stdout
 and exits zero, and its stdout has to equal the expected bytes, line for line and
 byte for byte.
 
-Both corpora compile with the flags `compliance.vsh` uses, for the same reasons:
-`-std=gnu99` because a case may reach a system header that refuses the `c99`
-spelling, `-w` because a case is not required to be warning-clean, `-lm` for the
-math a case may touch, and `-x c` so the compiler reads the file as C rather than
-guessing from a name it did not write. Cases run in parallel, eight at a time by
-default (`-j N`).
+Both corpora compile with `-std=gnu99 -w -lm -x c`: `gnu99` because a case may
+reach a system header that refuses the `c99` spelling, `-w` because a case is not
+required to be warning-clean, `-lm` for the math a case may touch, and `-x c` so
+the compiler reads the file as C rather than guessing from a name it did not
+write. Cases run in parallel, eight at a time by default (`-j N`).
 
 Each directory has a floor on its case count: losing a case is a failure and
 adding one is not, so the floor is a floor and not an equality, the same

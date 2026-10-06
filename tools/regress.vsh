@@ -24,11 +24,11 @@
 //     NNNN-group-individual.expected byte for byte, because a golden is the
 //     exact bytes and not a shape that resembles them.
 //
-// Both corpora compile with the flags compliance.vsh uses, for the same
-// reasons: gnu99 because a case may reach a system header that refuses the c99
-// spelling, -w because a case is not required to be warning-clean under this
-// compiler, -lm for the math a case may touch, and -x c so the compiler reads
-// the file as C rather than guessing from a name it did not write.
+// Both corpora compile with -std=gnu99 -w -lm -x c: gnu99 because a case may
+// reach a system header that refuses the c99 spelling, -w because a case is not
+// required to be warning-clean under this compiler, -lm for the math a case may
+// touch, and -x c so the compiler reads the file as C rather than guessing from
+// a name it did not write.
 //
 // The floors below are the number of cases that landed in each directory.
 // Losing one is a failure and adding one is not, so they are floors and not

@@ -197,9 +197,10 @@ build, the test suite, the links between root markdown files, and the workflows.
 
 C lives in the three test directories and nowhere else, and all of it is C the
 compiler is handed rather than C the compiler is built from. `compliance/` holds
-one program per C99 answer, `regression/` one per behaviour that was once broken,
-and `goldens/` one per program whose printed output is recorded beside it.
-`tools/compliance.vsh` compiles and runs every file under `compliance/` and the
+one program per standard answer under a directory per standard, `regression/` one
+per behaviour that was once broken, and `goldens/` one per program whose printed
+output is recorded beside it. `tools/compliance.vsh` compiles and runs every test
+under `compliance/` with the standard of the directory it sits in, and the
 12,340-line `monolithic.c` with it, `tools/regress.vsh` does the same for the
 other two directories, and `tools/bench.vsh` measures wall time and peak memory
 against the vendored tcc, which is where a speed claim gets its number.

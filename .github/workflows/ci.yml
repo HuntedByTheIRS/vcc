@@ -133,12 +133,13 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The one check that measures this compiler against a C library rather than
-  # against its own tests: the corpus under compliance/ is one small test per C99
-  # answer, about nine hundred of them, and each one is compiled and run on its
-  # own. It has a runner to itself because its cost is a thousand compiles rather
-  # than one test suite, and because a corpus that fails and a gate that fails are
-  # two different answers to two different questions. The price is a second build
-  # of the same pinned V; the pin itself is in one place, above.
+  # against its own tests: the corpus under compliance/ is one small test per
+  # answer, in a directory per C standard, and each one is compiled and run on
+  # its own under the standard of the directory it sits in. It has a runner to
+  # itself because its cost is a thousand compiles rather than one test suite,
+  # and because a corpus that fails and a gate that fails are two different
+  # answers to two different questions. The price is a second build of the same
+  # pinned V; the pin itself is in one place, above.
   compliance:
     name: compliance
     runs-on: ubuntu-latest

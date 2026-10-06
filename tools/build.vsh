@@ -311,7 +311,7 @@ fn usage() {
 	println('  build [-o PATH]   build the compiler only')
 	println('  test              the unit suite, `v test .`')
 	println('  gate              tools/gate.vsh')
-	println('  compliance        the C99 corpus under compliance/')
+	println('  compliance        the corpus under compliance/, a directory per standard')
 	println('  regress           the regression and golden corpora')
 	println('  corpora           compliance and regress together')
 	println('  bench [args]      tools/bench.vsh, args passed through')

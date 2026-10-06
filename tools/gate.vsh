@@ -14,7 +14,7 @@ import os
 const c_source_extensions = ['.c', '.h', '.cc', '.cpp', '.hpp', '.S', '.s']
 
 // The directories that may hold C, as input to the compiler rather than as part
-// of it: the C99 corpus under compliance/, one program per fixed bug under
+// of it: the corpus under compliance/, one program per fixed bug under
 // regression/, and the recorded-output programs under goldens/.
 const test_c_directories = ['compliance/', 'regression/', 'goldens/']
 
@@ -76,7 +76,7 @@ fn check_formatting(root string) []string {
 // sources in the tree, and C interop in the compiler's own sources. A test
 // directory holds C the compiler is handed rather than C the compiler is built
 // from, so a C source there is the directory's purpose and not a break in the
-// rule: compliance/ is the C99 corpus, regression/ one program per bug that must
+// rule: compliance/ is the corpus, regression/ one program per bug that must
 // not come back, goldens/ the programs whose output is compared against a
 // recording. Everywhere else a C source is a failure. The interop scan below has
 // no such exception for a test directory, because a .v file there is still this

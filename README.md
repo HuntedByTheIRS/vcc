@@ -222,8 +222,9 @@ above, so the number is written by the runner rather than kept by hand. The case
 in `regression/` and `goldens/` are counted the same way and move that number
 too. `tools/regress.vsh` runs `regression/`, one program per bug that must not
 come back, and `goldens/`, whose recorded output is compared byte for byte, and
-`tools/compliance.vsh` runs the C99 corpus under `compliance/`, which checks the
-compiler against the standard rather than against its own tests.
+`tools/compliance.vsh` runs the corpus under `compliance/`, one directory per
+standard, which checks the compiler against the standard rather than against its
+own tests.
 
 ## Where it's going
 
@@ -315,7 +316,7 @@ the call and `-O2` folds it. `-fno-builtin` takes the fold back.
 | `linking/` | the in-house linker: N units of one link in, one image out |
 | `extensions/` | the `-fvcc-exts=` interface, built on the rows in `standard/features.v` |
 | `tools/` | gate, benchmark and corpus scripts; not part of the compiler |
-| `compliance/` | the C99 conformance corpus: one C program per standard-library check, run by `tools/compliance.vsh` |
+| `compliance/` | the conformance corpus, one directory per standard: one C program per standard-library check, run by `tools/compliance.vsh` |
 | `regression/` | one C program per bug that must not come back, run by `tools/regress.vsh` |
 | `goldens/` | C programs whose recorded output is compared byte for byte, so a change in behavior shows as a diff |
 | `wiki/` | the pages of the GitHub wiki, copied there by the wiki workflow on a push to main |

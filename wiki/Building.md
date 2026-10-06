@@ -103,7 +103,7 @@ a compiler that errors on `-bt25` fails a build it was supposed to serve.
 | `image/` | the emitted unit: machine code, the data it reads, the references between them |
 | `extensions/` | the `-fvcc-exts=` interface, built on the extension rows in `standard/` |
 | `tools/` | gate, benchmark and corpus scripts; not part of the compiler |
-| `compliance/` | the C99 conformance corpus: one C program per standard-library check, run by `tools/compliance.vsh` |
+| `compliance/` | the conformance corpus, one directory per standard: one C program per standard-library check, run by `tools/compliance.vsh` |
 | `regression/` | one C program per bug that must not come back, run by `tools/regress.vsh` |
 | `goldens/` | C programs whose recorded output is compared byte for byte, so a change in behavior shows as a diff |
 
