@@ -126,6 +126,12 @@ mut:
 	// body is being read, and is set aside and given back around each top-level
 	// definition so one function's nested names do not leak into the next.
 	nested_names map[string]string
+	// nested_declared is the nested functions a block has written without a body,
+	// with the place each was written. A nested function is emitted from the
+	// definition it is, so a declaration only puts a name in scope: gcc reads a
+	// definition of a declared name as the static one against the declaration's
+	// own linkage and refuses the pair, and so does this reader.
+	nested_declared map[string]tokenize.Token
 	// nested_used is every nested symbol already handed out, so two nested
 	// functions may share a written name in different blocks without landing on
 	// one symbol: a name the file repeats gets a number appended to it.
@@ -244,13 +250,14 @@ pub fn parse(tokens []tokenize.Token) Result {
 // that names what could not be answered instead of a number this file invented.
 pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 	mut p := Parser{
-		tokens:         tokens
-		scopes:         types.new_table()
-		representation: representation_of(target)
-		declared:       map[string]bool{}
-		ident_span:     map[string]IdentSpan{}
-		nested_names:   map[string]string{}
-		nested_used:    map[string]bool{}
+		tokens:          tokens
+		scopes:          types.new_table()
+		representation:  representation_of(target)
+		declared:        map[string]bool{}
+		ident_span:      map[string]IdentSpan{}
+		nested_names:    map[string]string{}
+		nested_declared: map[string]tokenize.Token{}
+		nested_used:     map[string]bool{}
 	}
 	p.declare_argument_list()
 	p.index_identifiers()
@@ -400,8 +407,20 @@ fn (mut p Parser) parse_block() ![]ast.Stmt {
 	}
 	p.next()
 	p.scopes.enter()
+	// A nested function's name is visible to the end of the block it is written
+	// in, as any other declaration is, so the names this block adds are taken
+	// away when it ends and the block around it goes on with the names it had.
+	// That is also what lets two blocks written one after another each define a
+	// nested function of one name: the second is a name of its own, and the
+	// symbol it is emitted under is numbered.
+	outer_names := p.nested_names.clone()
+	outer_declared := p.nested_declared.clone()
+	p.nested_names = outer_names.clone()
+	p.nested_declared = outer_declared.clone()
 	defer {
 		p.scopes.leave()
+		p.nested_names = outer_names
+		p.nested_declared = outer_declared
 	}
 	mut stmts := []ast.Stmt{}
 	for {

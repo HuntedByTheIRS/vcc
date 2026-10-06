@@ -5409,6 +5409,24 @@ fn test_a_nested_function_reads_and_writes_a_captured_object_of_any_type() {
 	assert run_image(emitted.bytes) == 14
 }
 
+fn test_two_blocks_each_define_a_nested_function_of_one_name() {
+	// Two blocks written one after another are two scopes, so each defines a
+	// function of its own under a symbol of its own: the program answers 0 when
+	// each block calls the function it defined.
+	emitted := emit(translation_unit('int main() { { int f(void) { return 1; } if (f() != 1) return 1; } { int f(void) { return 2; } if (f() != 2) return 1; } return 0; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
+fn test_a_nested_function_declared_without_a_body_writes_no_code() {
+	// A declaration puts the name in scope and emits nothing, which is what gcc
+	// gives a declaration whose body never comes.
+	emitted := emit(translation_unit('int main() { int f(void); return 0; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_the_address_of_a_nested_function_is_a_trampoline_that_carries_its_frame() {
 	// A call through a pointer carries no chain register, and `add` reads `n` out
 	// of main's frame, so the address of a nested function is a stub that puts

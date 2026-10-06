@@ -2703,20 +2703,28 @@ fn (mut p Parser) parse_nested_function(spec DeclSpec, d Declarator) ?ast.Stmt {
 		p.skip_declaration()
 		return none
 	}
-	if d.name in p.nested_names {
-		p.error_at(d.name_at, 'unsupported: a second nested function named ${d.name} in one function, and this compiler keeps one nested name for each function')
+	if d.name in p.nested_names && d.name !in p.nested_declared {
+		p.error_at(d.name_at, 'a nested function named ${d.name} already has a body in this block')
 		p.skip_declaration()
 		return none
 	}
 	if !p.at_punct('{') {
-		// A nested function that is only declared names a function with no body
-		// in this translation unit. The tree defines what it emits, and a
-		// declaration of a nested function that nothing defines is a call the
-		// link would have to answer for out of a symbol this compiler never
-		// writes, so it is refused by name rather than half-read.
-		p.error_at(d.name_at, 'unsupported: a nested function is implemented as a definition, and this declaration writes no body')
+		// A nested function written as a declaration puts a name in scope for the
+		// rest of the block and writes no code. gcc reads one whose body never
+		// comes, and a call to a name nothing defines is the symbol the link has
+		// to answer for, so there is nothing here to emit and nothing to report.
+		p.nested_names[d.name] = p.nested_symbol(parent, d.name)
+		p.nested_declared[d.name] = d.name_at
 		p.skip_declaration()
 		return none
+	}
+	if d.name in p.nested_declared {
+		// gcc refuses this pair and the reason is a linkage one: the definition
+		// of a nested function is static, and a declaration of one that says
+		// nothing about linkage is not the same declaration, so the two cannot be
+		// one function. Measured on gcc 16.2.1: "error: static declaration of 'f'
+		// follows non-static declaration".
+		p.error_at(d.name_at, 'a nested function named ${d.name} is declared and then defined, and the definition of a nested function is static where its declaration is not')
 	}
 	mangled := p.nested_symbol(parent, d.name)
 	p.nested_names[d.name] = mangled

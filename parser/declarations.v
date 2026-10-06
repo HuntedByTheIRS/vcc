@@ -809,15 +809,18 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				previous_symbol := p.function_symbol
 				previous_enclosing := p.enclosing_symbol
 				previous_names := p.nested_names
+				previous_declared := p.nested_declared
 				p.current_function = d.name
 				p.function_symbol = d.name
 				p.enclosing_symbol = ''
 				p.nested_names = map[string]string{}
+				p.nested_declared = map[string]tokenize.Token{}
 				body := p.parse_block()
 				p.current_function = previous_function
 				p.function_symbol = previous_symbol
 				p.enclosing_symbol = previous_enclosing
 				p.nested_names = previous_names
+				p.nested_declared = previous_declared
 				p.scopes.leave()
 				statements := body or { return decls }
 				// A definition with no name has been reported and has no

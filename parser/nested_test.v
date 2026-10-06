@@ -99,14 +99,22 @@ fn test_a_nested_function_carries_its_parameters_and_body() {
 	assert nested[0].body.len == 1
 }
 
-fn test_a_nested_function_that_writes_no_body_is_refused_by_name() {
-	// A function declared inside a body and never defined has no storage this
-	// compiler can give it: a nested function is emitted as the definition it
-	// is, so a declaration of one is refused by name rather than half-read.
+fn test_a_nested_function_declared_without_a_body_is_read() {
+	// gcc reads a nested function declared inside a body and gives it no code:
+	// the name is in scope for the rest of the block and nothing is emitted for
+	// it. Measured on gcc 16.2.1: `int main(void) { int f(void); return 0; }`
+	// compiles and exits 0.
 	result := parse_nested('int main(void) { int f(void); return 0; }')
+	assert result.diagnostics.len == 0
+}
+
+fn test_a_nested_function_declared_and_then_defined_is_reported() {
+	// The definition of a nested function is static and a declaration of one that
+	// says nothing about linkage is not, so gcc refuses the pair, and this reader
+	// reports it where the definition is written.
+	result := parse_nested('int main(void) { int f(void); int f(void) { return 1; } return 0; }')
 	assert result.diagnostics.len == 1
-	assert result.diagnostics[0].msg.contains('nested function')
-	assert result.diagnostics[0].msg.contains('writes no body')
+	assert result.diagnostics[0].msg.contains('is declared and then defined')
 }
 
 fn test_the_name_of_a_nested_function_written_as_a_value_is_read() {
@@ -120,8 +128,17 @@ fn test_the_name_of_a_nested_function_written_as_a_value_is_read() {
 	assert nested_decls(result).len == 1
 }
 
-fn test_two_nested_functions_with_one_name_in_one_function_are_refused() {
-	result := parse_nested('int main(void) { int f(void) { return 1; } { int f(void) { return 2; } } return 0; }')
-	assert result.diagnostics.len >= 1
-	assert result.diagnostics[0].msg.contains('a second nested function named f')
+fn test_two_blocks_each_define_a_nested_function_of_one_name() {
+	// A nested function's name is visible to the end of the block it is written
+	// in, so two blocks are two scopes and the two functions are two functions:
+	// the symbols they are emitted under are numbered apart, which is what the
+	// written names being equal does not say.
+	result := parse_nested('int main(void) { { int f(void) { return 1; } } { int f(void) { return 2; } } return 0; }')
+	assert result.diagnostics.len == 0
+}
+
+fn test_two_definitions_of_one_nested_name_in_one_block_are_reported() {
+	result := parse_nested('int main(void) { int f(void) { return 1; } int f(void) { return 2; } return 0; }')
+	assert result.diagnostics.len == 1
+	assert result.diagnostics[0].msg.contains('already has a body')
 }
