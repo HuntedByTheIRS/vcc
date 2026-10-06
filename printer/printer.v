@@ -135,7 +135,12 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 				out << '${indent}label ${stmt.label()} at ${stmt.line}:${stmt.col}'
 			}
 			.goto_stmt {
-				out << '${indent}goto ${stmt.label()} at ${stmt.line}:${stmt.col}'
+				if target := stmt.goto_expr() {
+					out << '${indent}computed goto at ${stmt.line}:${stmt.col}'
+					dump_expression(target, depth + 1, mut out)
+				} else {
+					out << '${indent}goto ${stmt.label()} at ${stmt.line}:${stmt.col}'
+				}
 			}
 			.asm_stmt {
 				out << '${indent}asm statement ${stmt.asm_spelling()} at ${stmt.line}:${stmt.col}'

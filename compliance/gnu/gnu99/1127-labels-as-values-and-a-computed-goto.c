@@ -4,8 +4,6 @@
  * the current function (or a containing function) with the unary operator '&&'.
  * The value has type void *. ... To use these values, you need to be able to
  * jump to one. This is done with the computed goto statement, goto *exp;."
- *
- * unimplemented: the address of a label taken with && and a computed goto.
  */
 
 #include <stdio.h>

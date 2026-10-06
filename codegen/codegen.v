@@ -3653,6 +3653,20 @@ fn (mut e Emitter) emit_case_label(stmt ast.Stmt, is_default bool) !void {
 // written before the place it lands on. What is not settled until then is
 // whether a label of that name is written at all.
 fn (mut e Emitter) emit_goto(stmt ast.Stmt) !void {
+	if target := stmt.goto_expr() {
+		// A computed goto jumps to the address the expression is worth, so the
+		// value is evaluated and the machine jumps to the register holding it.
+		// The named-label machinery is not involved: the program wrote an
+		// address and not a name, and whether that address names a label of
+		// this function is not a question the compiler asks, which is what gcc
+		// does with `goto *p` as well. No variable-length array's stack is
+		// given back, because there is no label name to say which scope the
+		// target is in; gcc leaves that to the program too.
+		e.emit_expr(target)!
+		register := e.accumulator(stmt.line, stmt.col)!
+		e.append(e.target.jump_register(register)!)
+		return
+	}
 	label := stmt.label()
 	if !(label in e.goto_used) {
 		e.goto_used[label] = LabelUse{
@@ -5880,6 +5894,12 @@ fn describe_target(expr ast.Expr) string {
 }
 
 fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
+	if unary.op == '&&' {
+		// The address of a label, `&&name`. The operand is a label name and
+		// not a value to read, so it is not evaluated here: what is written is
+		// the address of the place the label names.
+		return e.emit_label_address(unary)
+	}
 	if unary.op == '&' {
 		// Taking an address is not a computation on a value: the operand is not
 		// read at all, and what is taken is where it lives. The depth travels
@@ -8500,7 +8520,10 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 			}
 		}
 		ast.Unary {
-			if expr.op == '!' {
+			if expr.op == '&&' {
+				// The address of a label is a `void *`, so the machine's word.
+				e.target.word_size
+			} else if expr.op == '!' {
 				4
 			} else if expr.op == '&' {
 				// The address of a value is a pointer, whatever the width of the
@@ -8749,6 +8772,29 @@ fn (mut e Emitter) emit_function_address(name string, line int, col int) !void {
 	} else {
 		e.reference(e.target.load_slot_value(register, 0), .import_address, name, e.target.name_of(register))
 	}
+}
+
+// emit_label_address leaves the address of a label in the accumulator, which is
+// the value of `&&name`. The label is a place in the function being emitted, so
+// its address is a reference the layout fills in, the same reference a function
+// designator's address is and through the same kind: the layout resolves a
+// label name against the function's own label table. Writing the name is a use
+// of the label, so a name no label statement writes is reported once the whole
+// function has been emitted, exactly as a goto to one is.
+fn (mut e Emitter) emit_label_address(unary ast.Unary) !void {
+	if unary.expr !is ast.Ident {
+		e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of a label is taken with && and what follows must be a label name')
+		return error('no label name')
+	}
+	name := unary.expr.name
+	if !(name in e.goto_used) {
+		e.goto_used[name] = LabelUse{
+			line: unary.line
+			col:  unary.col
+		}
+	}
+	register := e.accumulator(unary.line, unary.col)!
+	e.reference(e.target.address_of(register, 0), .function_address, e.named_label(name), e.target.name_of(register))
 }
 
 // is_function_name says whether a name is a function this unit names, whether it

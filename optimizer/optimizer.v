@@ -315,19 +315,26 @@ fn rewrite_body(body []ast.Stmt, opts Options) []ast.Stmt {
 		if value := stmt.deref() {
 			deref = rewrite(value, opts, 0)
 		}
+		// A computed goto's operand is an expression like any other, so it is
+		// rewritten too; the ordinary `goto name;` carries no expression.
+		mut goto_expr := ?ast.Expr(none)
+		if value := stmt.goto_expr() {
+			goto_expr = rewrite(value, opts, 0)
+		}
 		// The name a goto jumps to and the constant a case label names are not
 		// expressions, so they are carried over as they are: a rewrite that
 		// dropped them would turn a jump into a jump to nothing. They are
 		// carried in an extra part built only when there is one to carry, so
 		// that a statement with none of them is a statement of the size it was.
 		mut extra := ?&ast.StmtExtra(none)
-		if deref != none || stmt.label() != '' || stmt.kind == .case_stmt {
+		if deref != none || stmt.label() != '' || stmt.kind == .case_stmt || goto_expr != none {
 			extra = &ast.StmtExtra{
 				deref:           deref
 				label:           stmt.label()
 				case_value:      stmt.case_value()
 				case_value_high: stmt.case_value_high()
 				case_is_range:   stmt.case_is_range()
+				goto_expr:       goto_expr
 			}
 		}
 		out << ast.Stmt{
@@ -428,6 +435,7 @@ fn rewrite_leaf(expr ast.Expr, opts Options, depth int) ast.Expr {
 			return ast.Expr(ast.Unary{
 				op:   expr.op
 				expr: rewrite(expr.expr, opts, depth + 1)
+				typ:  expr.typ
 				line: expr.line
 				col:  expr.col
 			})

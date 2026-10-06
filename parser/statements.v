@@ -1145,6 +1145,31 @@ fn (mut p Parser) statement_under_label() ![]ast.Stmt {
 // the jump is emitted.
 fn (mut p Parser) parse_goto_statement() ![]ast.Stmt {
 	t := p.next() // goto
+	// `goto *expr;` is a computed goto: the operand is an address and control
+	// goes there, so no label name is involved. The expression is read where it
+	// stands, and a `goto *` with nothing after the star is refused by the
+	// expression reader, which names the token it found. What the address names
+	// is not a question this reader asks: measured on gcc 16.2.1, `goto *p` for
+	// any scalar expression is accepted and the address is the program's.
+	if p.at_punct('*') {
+		p.next() // *
+		expr := p.parse_expression() or {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		if !p.expect_punct(';') {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		return [ast.Stmt{
+			kind:  .goto_stmt
+			extra: &ast.StmtExtra{
+				goto_expr: expr
+			}
+			line:  t.line
+			col:   t.col
+		}]
+	}
 	if p.peek().kind != .identifier {
 		p.error_at(p.peek(), 'unsupported: expected a label name after goto, found ${describe(p.peek())}')
 		p.skip_statement()

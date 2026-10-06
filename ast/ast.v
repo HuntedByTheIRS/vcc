@@ -417,6 +417,11 @@ pub:
 	// object named `x` in the same function are two different names, and only
 	// the label one is a place to jump to.
 	label string
+	// goto_expr is the operand of a computed goto, `goto *expr;`, and none for
+	// the ordinary `goto name;` form, whose target is in label. A computed
+	// goto jumps to the address the expression is worth, so no label name is
+	// involved and label is empty for it.
+	goto_expr ?Expr
 	// asm_text is the instruction text of a statement-level GNU asm, with the
 	// escapes of its adjacent string literals resolved and the literals joined.
 	// It is empty both for the barrier and for a statement whose only string
@@ -524,6 +529,14 @@ pub fn (stmt Stmt) label() string {
 		return extra.label
 	}
 	return ''
+}
+
+@[inline]
+pub fn (stmt Stmt) goto_expr() ?Expr {
+	if extra := stmt.extra {
+		return extra.goto_expr
+	}
+	return none
 }
 
 @[inline]
