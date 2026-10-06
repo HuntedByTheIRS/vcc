@@ -5409,6 +5409,29 @@ fn test_a_nested_function_reads_and_writes_a_captured_object_of_any_type() {
 	assert run_image(emitted.bytes) == 14
 }
 
+fn test_the_address_of_a_nested_function_is_a_trampoline_that_carries_its_frame() {
+	// A call through a pointer carries no chain register, and `add` reads `n` out
+	// of main's frame, so the address of a nested function is a stub that puts
+	// that frame in the chain register before jumping into the code. The stack
+	// the stub lives on is executable, so the image says so.
+	emitted := emit(translation_unit('int main() { int n = 5; int add(int v) { return v + n; } int (*fp)(int) = add; return fp(3) == 8 ? 0 : 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert emitted.program.executable_stack
+	assert run_image(emitted.bytes) == 0
+}
+
+fn test_a_nested_functions_address_carries_the_frame_the_call_is_written_in() {
+	// The frame the stub carries is the one the address is taken in, not the one
+	// the function is written in: taking the address inside a nested function
+	// hands the callee that function's enclosing frame, which is where the
+	// objects it reads live.
+	emitted := emit(translation_unit('int main() { int n = 5; int add(int v) { return v + n; } int outer(void) { int (*fp)(int) = add; return fp(2); } return outer() == 7 ? 0 : 1; }'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 0
+}
+
 fn test_a_nested_function_takes_the_address_of_an_object_it_is_written_beside() {
 	// The address of an enclosing object is the chain plus the object's offset,
 	// so a read through it reads the enclosing frame and the step below writes

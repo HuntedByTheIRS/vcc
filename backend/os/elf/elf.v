@@ -1144,10 +1144,16 @@ fn emit_program_headers(mut output []u8, target backend.Target, sections Section
 		put_u64(mut output, at + 48, u64(tls_alignment_of(program)))
 		at += int(elf_program_header_size)
 	}
-	// PT_GNU_STACK: the stack is readable and writable and not executable, which
-	// is what a program that never runs code from it should say.
+	// PT_GNU_STACK: the stack is readable and writable, and executable only when
+	// the program runs code out of it, which is what a nested function's address
+	// needs: the stub that carries the enclosing frame is written into the frame
+	// and jumped into.
 	put_u32(mut output, at, elf_ph_type_gnu_stack)
-	put_u32(mut output, at + 4, elf_ph_flags_read | elf_ph_flags_write)
+	put_u32(mut output, at + 4, elf_ph_flags_read | elf_ph_flags_write | if program.executable_stack {
+		elf_ph_flags_execute
+	} else {
+		u32(0)
+	})
 	put_u64(mut output, at + 48, 0x10)
 }
 

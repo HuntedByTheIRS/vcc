@@ -2800,17 +2800,17 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 			return p.parse_builtin_expression(t)!
 		}
 
-		// A nested function is visible under the name it was written with, but
-		// only so that the body can call it. Its address needs a trampoline, a
-		// small stub that puts the enclosing frame pointer into the chain
-		// register before jumping into the function, which this compiler does
-		// not write: a use of the name that is not a call is refused here, by
-		// name, rather than resolved to an object that is not there.
+		// A nested function is a function of its own, so a use of the name that
+		// is not a call asks for the address of its code: 6.3.2.1 makes a
+		// function designator, written where a value is wanted, the pointer to
+		// the function. The name is emitted under the symbol the enclosing
+		// function gives it, and the emitter writes the trampoline that carries
+		// the enclosing frame into a call through that pointer.
 		if t.text in p.nested_names && !p.at_punct('(') {
-			p.error_at(t, 'unsupported: the name ${t.text} is a nested function, and taking its address or using it as a value is not implemented')
+			symbol := p.nested_names[t.text]
 			return ast.Expr(ast.Ident{
-				name: t.text
-				typ:  p.resolve(t.text)
+				name: symbol
+				typ:  p.resolve(symbol)
 				line: t.line
 				col:  t.col
 			})

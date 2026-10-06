@@ -9591,6 +9591,9 @@ fn apply_constant(binary ast.Binary, left i64, right i64) ?i64 {
 // while it is written, so it is filled in either way.
 fn (mut e Emitter) emit_function_address(name string, line int, col int) !void {
 	register := e.accumulator(line, col)!
+	if owner := e.nested_functions[name] {
+		return e.emit_nested_trampoline(name, owner, line, col)
+	}
 	if name in e.program.defined {
 		e.reference(e.target.address_of(register, 0), .function_address, name, e.target.name_of(register))
 		return
@@ -9608,6 +9611,52 @@ fn (mut e Emitter) emit_function_address(name string, line int, col int) !void {
 	} else {
 		e.reference(e.target.load_slot_value(register, 0), .import_address, name, e.target.name_of(register))
 	}
+}
+
+// The trampoline a nested function's address is: three instructions that put the
+// frame the function reads its enclosing objects in into the chain register,
+// put the function's own code address into a register of its own, and jump
+// through it. The frame and the address are the two immediate words, which are
+// written into the frame from the registers, so the bytes here are only the
+// instructions around them.
+const trampoline_bytes = 32
+const trampoline_frame_move = u32(0xBA49) // movabs %r10, imm64
+const trampoline_code_move = u32(0xBB49) // movabs %r11, imm64
+const trampoline_jump = u32(0xFF41) // jmp *%r11
+const trampoline_jump_last = 0xE3
+const trampoline_frame_at = 2
+const trampoline_code_at = 12
+const trampoline_jump_at = 20
+
+// emit_nested_trampoline leaves the address of the trampoline a call through a
+// nested function's address arrives at, in the accumulator. A nested function is
+// entered with the frame pointer of the function it is written in, in the chain
+// register, and a call through a pointer carries no such register with it: the
+// trampoline is what does, so the address of a nested function is the address of
+// the stub rather than of its code.
+//
+// The stub is written into this function's own frame when the address is taken,
+// so its life is the life of the activation that took the address, which is the
+// life C gives a nested function's address.
+fn (mut e Emitter) emit_nested_trampoline(name string, owner string, line int, col int) !void {
+	stub := e.reserve(trampoline_bytes)
+	e.program.executable_stack = true
+	e.load_call_chain(owner, line, col)!
+	chain := e.static_chain(line, col)!
+	base := e.frame_pointer(line, col)!
+	register := e.accumulator(line, col)!
+	e.append(e.target.move_immediate32(register, trampoline_frame_move)!)
+	e.append(e.target.store_slot(base, i32(stub.offset + trampoline_frame_at - 2), register, 2)!)
+	e.append(e.target.store_slot(base, i32(stub.offset + trampoline_frame_at), chain, e.target.word_size)!)
+	e.append(e.target.move_immediate32(register, trampoline_code_move)!)
+	e.append(e.target.store_slot(base, i32(stub.offset + trampoline_code_at - 2), register, 2)!)
+	e.reference(e.target.address_of(register, 0), .function_address, name, e.target.name_of(register))
+	e.append(e.target.store_slot(base, i32(stub.offset + trampoline_code_at), register, e.target.word_size)!)
+	e.append(e.target.move_immediate32(register, trampoline_jump)!)
+	e.append(e.target.store_slot(base, i32(stub.offset + trampoline_jump_at), register, 2)!)
+	e.append(e.target.move_immediate32(register, trampoline_jump_last)!)
+	e.append(e.target.store_slot(base, i32(stub.offset + trampoline_jump_at + 2), register, 1)!)
+	return e.leave_address(stub, line, col)
 }
 
 // emit_label_address leaves the address of a label in the accumulator, which is

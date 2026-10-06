@@ -109,13 +109,15 @@ fn test_a_nested_function_that_writes_no_body_is_refused_by_name() {
 	assert result.diagnostics[0].msg.contains('writes no body')
 }
 
-fn test_the_name_of_a_nested_function_is_not_a_value() {
-	// Its address needs a trampoline, which this compiler does not write, so a
-	// use of the name that is not a call is refused by name rather than resolved
-	// to an object that is not there.
+fn test_the_name_of_a_nested_function_written_as_a_value_is_read() {
+	// A function designator written where a value is wanted is the address of
+	// the function, and a nested function is emitted under the symbol its
+	// enclosing function gives it, so the name is read as that symbol rather
+	// than refused. The emitter writes the trampoline the value needs, which is
+	// what is not the reader's business.
 	result := parse_nested('int main(void) { int f(void) { return 1; } int (*p)(void) = f; return 0; }')
-	assert result.diagnostics.len >= 1
-	assert result.diagnostics[0].msg.contains('is a nested function')
+	assert result.diagnostics.len == 0
+	assert nested_decls(result).len == 1
 }
 
 fn test_two_nested_functions_with_one_name_in_one_function_are_refused() {

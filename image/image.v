@@ -223,6 +223,11 @@ pub mut:
 pub struct Program {
 pub mut:
 	text []u8
+	// executable_stack is set when the code runs instructions it wrote into its
+	// own frame, which is what taking the address of a nested function does: the
+	// stub that carries the enclosing frame lives on the stack, so the container
+	// has to say the stack is executable.
+	executable_stack bool
 	// fixups are the references the layout has to fill in.
 	fixups []Fixup
 	// data_fixups are the references the layout has to write into the storage
