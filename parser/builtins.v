@@ -34,7 +34,8 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	// declaration for a spelling in the compiler's own namespace.
 	'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
-	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p']
+	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p',
+	'__builtin_object_size']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -104,6 +105,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_constant_p' {
 			return p.parse_constant_p(at)
+		}
+		'__builtin_object_size' {
+			return p.parse_object_size(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -621,6 +625,60 @@ fn (mut p Parser) parse_constant_p(at tokenize.Token) !ast.Expr {
 	}
 	answer := if _ := p.constant_value(operand) { i64(1) } else { i64(0) }
 	return integer_constant(answer, '${at.text}(${describe_operand(operand)})', at, types.Kind.int_)
+}
+
+// parse_object_size answers `__builtin_object_size(ptr, type)`, which is a
+// constant number of bytes from the object the pointer names to the end of it,
+// when the reader knows the object at the call. gcc folds it at the call for the
+// shapes whose size is a fact about the declaration the operand was handed, and
+// `__builtin_object_size(buf, 0)` for `char buf[32]` is 32 while
+// `__builtin_object_size("hello", 0)` is 6, the size of the char[6] the string
+// literal is.
+//
+// The operand's own type is read and not decayed, exactly as `sizeof` reads its
+// operand: an array's size is the whole array and not the address its name is
+// worth everywhere else. When the object is not one whose size this reader can
+// state - a pointer that may name anything - gcc's answer for type 0 and 1 is
+// (size_t) -1 and for type 2 and 3 is (size_t) 0, and those are folded rather
+// than a number this compiler did not compute.
+//
+// The result has the type size_t, which is what gcc gives it.
+fn (mut p Parser) parse_object_size(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	operand := p.parse_expression()!
+	if !p.expect_punct(',') {
+		p.error_at(at, 'unsupported: __builtin_object_size takes the pointer and the type of the answer')
+		return error('the type of the answer')
+	}
+	kind_expr := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_object_size')
+		return error('unclosed __builtin_object_size')
+	}
+	kind := p.constant_value(kind_expr) or {
+		p.error_at(at, 'unsupported: __builtin_object_size takes a constant for the type of the answer, and this compiler cannot read that one')
+		return error('the type of the answer is not a constant')
+	}
+	if kind < 0 || kind > 3 {
+		p.error_at(at, 'unsupported: __builtin_object_size takes a type of 0, 1, 2 or 3, and ${kind} is not one')
+		return error('the type of the answer is out of range')
+	}
+	if p.is_unresolved(operand) {
+		p.error_at(at, 'unsupported: __builtin_object_size asks how many bytes ${describe_operand(operand)} names, and this compiler did not resolve its type')
+		return error('no type for the operand')
+	}
+	mut size := i64(-1)
+	if known := p.representation.size_of(operand.typ) {
+		// A pointer's own type has no object size: what it names is elsewhere. An
+		// array, an object and a literal do, and that is what the answer is.
+		if operand.typ.kind != .pointer {
+			size = i64(known)
+		}
+	}
+	if size < 0 && kind >= 2 {
+		size = 0
+	}
+	return integer_constant(size, '${at.text}(${describe_operand(operand)}, ${kind})', at, types.Kind.unsigned_long)
 }
 
 // The builtins that are a value rather than a question about a declaration: the
