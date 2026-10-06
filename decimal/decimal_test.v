@@ -11,43 +11,9 @@ module decimal
 // then rounded to the format's precision. That is what gcc stores, so a literal
 // round trip is a fair test of the encoder.
 fn literal(text string, f Format) Value {
-	mut body := text
-	mut sign := false
-	if body.starts_with('-') {
-		sign = true
-		body = body[1..]
-	}
 	// The suffix names the format and is not part of the number.
-	body = body[..body.len - 2]
-	mut exponent := 0
-	mut epos := -1
-	for i, c in body {
-		if c == `e` || c == `E` {
-			epos = i
-			break
-		}
-	}
-	if epos >= 0 {
-		exponent = body[epos + 1..].int()
-		body = body[..epos]
-	}
-	mut digits := []u8{}
-	mut point := -1
-	for i, c in body {
-		if c == `.` {
-			point = i
-			break
-		}
-	}
-	if point >= 0 {
-		digits = body[..point].bytes()
-		frac := body[point + 1..].bytes()
-		digits << frac
-		exponent -= frac.len
-	} else {
-		digits = body.bytes()
-	}
-	return from_digits(digits, exponent, sign).round(f)
+	body := text[..text.len - 2]
+	return from_text(body, f)
 }
 
 fn hex_of(bytes []u8) string {

@@ -107,6 +107,51 @@ pub fn from_kind(kind string) Format {
 	}
 }
 
+// clamp brings a value into the format's range the way gcc does with a literal
+// that is outside it: a value above the largest the format holds becomes an
+// infinity and one below the smallest becomes a zero, both keeping the sign.
+// Measured on gcc 16.2.1, which warns (`floating constant exceeds range of
+// '_Decimal32'`, or `floating constant truncated to zero`) and stores that
+// value. The caller reports; this only says what the value becomes.
+pub fn (v Value) clamp(f Format) Value {
+	if v.special != .finite || v.digits.len == 0 {
+		return v
+	}
+	// The power of ten of the leading digit is what the range is about: the
+	// format holds anything from the smallest power it can name up to its
+	// exponent maximum with all the digits it keeps.
+	leading := v.exponent + v.digits.len - 1
+	if leading > f.exponent_max() {
+		return Value{
+			sign:    v.sign
+			special: .infinity
+		}
+	}
+	if leading < -f.bias() {
+		return Value{
+			sign: v.sign
+		}
+	}
+	return v
+}
+
+// from_suffix names the format a decimal constant's suffix writes: `df` is a
+// `_Decimal32`, `dd` a `_Decimal64` and `dl` a `_Decimal128`, either case. An
+// empty answer means the suffix is not one of them, and the reader is the one
+// that says so.
+pub fn from_suffix(text string) ?Format {
+	if text.ends_with('df') || text.ends_with('DF') {
+		return .decimal32
+	}
+	if text.ends_with('dd') || text.ends_with('DD') {
+		return .decimal64
+	}
+	if text.ends_with('dl') || text.ends_with('DL') {
+		return .decimal128
+	}
+	return none
+}
+
 // Special is what a value is when it is not a number: the encodings carry an
 // infinity and two NaN forms in the place a coefficient would be.
 pub enum Special {
@@ -139,6 +184,53 @@ pub fn zero(sign bool) Value {
 // is_zero says whether the value is a zero of either sign.
 pub fn (v Value) is_zero() bool {
 	return v.special == .finite && v.digits.len == 0
+}
+
+// from_text reads a decimal constant's body — the digits, the point and the
+// exponent, with the suffix already taken off — into a value. The digits are
+// taken as written with the point removed and the exponent adjusted for it, then
+// rounded to the format's precision: that is what gcc stores, which is why
+// `1.0dd` is a coefficient of ten with a power of minus one rather than a
+// coefficient of one, and why `1234567.0df` loses its last zero (decimal32 keeps
+// seven digits and the value has eight).
+pub fn from_text(body string, f Format) Value {
+	mut text := body
+	mut sign := false
+	if text.starts_with('-') {
+		sign = true
+		text = text[1..]
+	} else if text.starts_with('+') {
+		text = text[1..]
+	}
+	mut exponent := 0
+	mut epos := -1
+	for i, c in text {
+		if c == `e` || c == `E` {
+			epos = i
+			break
+		}
+	}
+	if epos >= 0 {
+		exponent = text[epos + 1..].int()
+		text = text[..epos]
+	}
+	mut digits := []u8{}
+	mut point := -1
+	for i, c in text {
+		if c == `.` {
+			point = i
+			break
+		}
+	}
+	if point >= 0 {
+		digits = text[..point].bytes()
+		frac := text[point + 1..].bytes()
+		digits << frac
+		exponent -= frac.len
+	} else {
+		digits = text.bytes()
+	}
+	return from_digits(digits, exponent, sign).round(f)
 }
 
 // from_digits reads a value from the digits the source wrote: leading zeros are
