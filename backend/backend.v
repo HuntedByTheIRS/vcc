@@ -701,6 +701,13 @@ pub fn (t &Target) memory_fence() []u8 {
 	return t.encoders.memory_fence()
 }
 
+// unreachable is the machine's undefined instruction, which marks a point
+// control is not meant to reach. The language's `__builtin_unreachable` and
+// `__builtin_trap` are both this instruction on a machine that has one.
+pub fn (t &Target) unreachable() []u8 {
+	return t.encoders.unreachable()
+}
+
 // bit_scan_forward is the index of the lowest set bit, which is what the two
 // count-trailing builtins are worth. `wide` asks for the eight-byte form.
 pub fn (t &Target) bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {
@@ -711,6 +718,26 @@ pub fn (t &Target) bit_scan_forward(dst Register, src Register, wide bool) ![]u8
 // two count-leading builtins are worth. `wide` asks for the eight-byte form.
 pub fn (t &Target) count_leading(dst Register, src Register, wide bool) ![]u8 {
 	return t.encoders.count_leading(t.describe(dst), t.describe(src), wide)
+}
+
+// byte_swap_16 and byte_swap_32 answer the two byte-swapping builtins: they
+// reverse the two bytes of a value's low word and the four bytes of a value,
+// respectively. The 32-bit form is the machine's own bswap; the 16-bit one is a
+// rotate of the low word and a widening of it into the register.
+pub fn (t &Target) byte_swap_16(reg Register) ![]u8 {
+	return t.encoders.byte_swap_16(t.describe(reg))
+}
+
+pub fn (t &Target) byte_swap_32(reg Register) ![]u8 {
+	return t.encoders.byte_swap_32(t.describe(reg))
+}
+
+// bit_count is the number of one bits in a 32-bit value, which is what
+// `__builtin_popcount` and, masked to its low bit, `__builtin_parity` ask for. It
+// takes a second register to sum through because the count is computed a field at
+// a time rather than read off in one instruction.
+pub fn (t &Target) bit_count(dst Register, scratch Register) ![]u8 {
+	return t.encoders.bit_count(t.describe(dst), t.describe(scratch))
 }
 
 // The two widenings a conversion between the value classes needs. A byte is

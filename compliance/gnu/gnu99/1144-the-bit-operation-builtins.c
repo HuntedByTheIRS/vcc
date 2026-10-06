@@ -4,8 +4,6 @@
  * (unsigned int x) Returns the number of 1-bits in x. ... int __builtin_parity
  * (unsigned int x) Returns the parity of x, i.e. the number of 1-bits in x
  * modulo 2."
- *
- * unimplemented: __builtin_popcount, __builtin_clz, __builtin_ctz and __builtin_parity.
  */
 
 #include <stdio.h>

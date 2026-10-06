@@ -9652,6 +9652,121 @@ fn (mut e Emitter) emit_count_leading(call ast.Call, depth int) !void {
 	e.append(e.target.count_leading(accumulator, accumulator, call.name == '__builtin_clzll')!)
 }
 
+// emit_return_address answers `__builtin_return_address(0)` with the address the
+// call that reached this function left. A frame opens with `push rbp; mov rbp,
+// rsp`, so the saved frame pointer is at [rbp] and the return address is the word
+// above it at [rbp + word_size]: one load and the answer is that word. The
+// emitter's frames are all frame-pointer based, which is what makes the word a
+// fixed offset from the frame pointer rather than something to walk for.
+fn (mut e Emitter) emit_return_address(call ast.Call) !void {
+	base := e.frame_pointer(call.line, call.col)!
+	register := e.accumulator(call.line, call.col)!
+	e.append(e.target.load_slot(base, i32(e.target.word_size), register, e.target.word_size)!)
+}
+
+// emit_byte_swap answers `__builtin_bswap16` and `__builtin_bswap32` with the
+// instruction that reverses a value's bytes. The argument is evaluated into the
+// accumulator, where the instruction works in place, and the two builtins differ
+// only in which width the back end swaps.
+fn (mut e Emitter) emit_byte_swap(call ast.Call, depth int) !void {
+	e.emit_expr_at(call.args[0], depth + 1)!
+	register := e.accumulator(call.line, call.col)!
+	if call.name == '__builtin_bswap16' {
+		e.append(e.target.byte_swap_16(register)!)
+	} else {
+		e.append(e.target.byte_swap_32(register)!)
+	}
+}
+
+// emit_bit_operation answers `__builtin_popcount` with the number of one bits in
+// the argument, and `__builtin_parity` with that number masked to its low bit,
+// which is the parity the standard defines. The argument is evaluated into the
+// accumulator, the count is computed there through a scratch register, and the
+// parity is one more mask: the count's lowest bit is 1 exactly when the number of
+// one bits is odd.
+fn (mut e Emitter) emit_bit_operation(call ast.Call, depth int) !void {
+	e.emit_expr_at(call.args[0], depth + 1)!
+	register := e.accumulator(call.line, call.col)!
+	scratch := e.scratch(call.line, call.col)!
+	e.append(e.target.bit_count(register, scratch)!)
+	if call.name == '__builtin_parity' {
+		e.append(e.target.and_immediate(register, 1)!)
+	}
+}
+
+// emit_overflow answers `__builtin_add_overflow` and `__builtin_mul_overflow`: the
+// two operands are added or multiplied and the result the operation wraps to is
+// stored through the third argument, while the answer is the machine's signed
+// overflow flag. The operands are evaluated into slots first, because an operand can
+// be an expression that calls a function and the registers have to be free for it;
+// then they are loaded into the accumulator and the scratch register, and the add or
+// imul raises the overflow flag on the pair. The flag is read at once, before
+// anything that could overwrite it, and the wrapped result in the accumulator and
+// that flag are what the call leaves: the result is stored through the pointer and
+// the flag is widened into the accumulator for the value the expression is worth.
+// All three are int - the reader refuses another type - so the width is one word's
+// low four bytes at every step.
+fn (mut e Emitter) emit_overflow(call ast.Call, depth int) !void {
+	overflow := call.name == '__builtin_mul_overflow'
+	a_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[0], depth + 1)!
+	e.store_accumulator(a_slot, call.line, call.col)!
+	b_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[1], depth + 2)!
+	e.store_accumulator(b_slot, call.line, call.col)!
+	pointer_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[2], depth + 3)!
+	e.store_accumulator(pointer_slot, call.line, call.col)!
+	base := e.frame_pointer(call.line, call.col)!
+	accumulator := e.accumulator(call.line, call.col)!
+	scratch := e.scratch(call.line, call.col)!
+	pointer := e.remainder(call.line, call.col)!
+	e.load_accumulator(a_slot, call.line, call.col)!
+	e.append(e.target.load_slot(base, i32(b_slot.offset), scratch, e.target.word_size)!)
+	if overflow {
+		e.append(e.target.multiply(accumulator, scratch)!)
+	} else {
+		e.append(e.target.add(accumulator, scratch)!)
+	}
+	// The flags the operation left are the answer. They are read into the scratch
+	// register now: the widen, the loads below and the store all leave the flags
+	// alone, but reading them here is what the machine's one-shot flag register asks.
+	e.append(e.target.set_condition(backend.Condition.overflow, scratch)!)
+	e.append(e.target.widen_byte(scratch)!)
+	// The result the operation wrapped to, through the pointer the third argument was.
+	e.append(e.target.load_slot(base, i32(pointer_slot.offset), pointer, e.target.word_size)!)
+	e.append(e.target.store_indirect(pointer, accumulator, 4)!)
+	// And the answer itself: the overflow flag, which the widen has already made 0 or 1.
+	e.append(e.target.move_register32(accumulator, scratch)!)
+}
+
+// emit_alloc answers `__builtin_alloca(size)`: it claims `size` bytes on the
+// calling function's stack and leaves their address in the accumulator. The size is
+// rounded up to the boundary a call needs and subtracted from the stack pointer, the
+// same two steps a variable-length array's declaration makes, so the storage sits
+// below the frame and every access through the frame pointer is untouched; the value
+// the stack pointer became is the address the call is worth.
+//
+// The lifetime is what separates this from a variable-length array: the standard
+// says an alloca'd object lives until the function returns, so no block saves and
+// restores the stack pointer around this call, and the frame's own epilogue, which
+// puts the stack pointer back to the frame pointer, is what gives the storage back
+// at the end. The size is widened to a word first, so an int argument arrives at the
+// subtraction as the value it is and not with whatever the register held above it.
+fn (mut e Emitter) emit_alloc(call ast.Call, depth int) !void {
+	e.emit_expr_at(call.args[0], depth + 1)!
+	e.extend_operand_to_word(call.args[0], call.line, call.col)!
+	register := e.accumulator(call.line, call.col)!
+	e.append(e.target.add_immediate(register, frame_alignment - 1))
+	e.append(e.target.and_immediate(register, -frame_alignment)!)
+	e.append(e.target.sub_rsp_register(register)!)
+	stack := e.target.stack_pointer() or {
+		e.diagnostics << problem(call.line, call.col, '${e.target.name}: the machine has no stack pointer to claim __builtin_alloca storage against')
+		return error('no stack pointer')
+	}
+	e.append(e.target.move_register64(register, stack)!)
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -9719,6 +9834,25 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		'__builtin_clz', '__builtin_clzll' {
 			return e.emit_count_leading(call, depth)
+		}
+		'__builtin_return_address' {
+			return e.emit_return_address(call)
+		}
+		'__builtin_unreachable', '__builtin_trap' {
+			e.append(e.target.unreachable())
+			return
+		}
+		'__builtin_bswap16', '__builtin_bswap32' {
+			return e.emit_byte_swap(call, depth)
+		}
+		'__builtin_popcount', '__builtin_parity' {
+			return e.emit_bit_operation(call, depth)
+		}
+		'__builtin_add_overflow', '__builtin_mul_overflow' {
+			return e.emit_overflow(call, depth)
+		}
+		'__builtin_alloca' {
+			return e.emit_alloc(call, depth)
 		}
 		'atexit' {
 			// glibc defines atexit in libc_nonshared.a, the static half of

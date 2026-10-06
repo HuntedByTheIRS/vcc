@@ -4,8 +4,6 @@
  * Function: void * __builtin_return_address (unsigned int level) This function
  * returns the return address of the current function, or of one of its callers.
  * A value of 0 yields the return address of the current function."
- *
- * unimplemented: __builtin_return_address.
  */
 
 #include <stdio.h>

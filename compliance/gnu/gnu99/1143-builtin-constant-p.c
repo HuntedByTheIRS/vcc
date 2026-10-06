@@ -4,8 +4,6 @@
  * function __builtin_constant_p to determine if the expression exp is known to
  * be constant at compile time ... The function returns the integer 1 if the
  * argument is known to be a compile-time constant and 0 if it is not."
- *
- * unimplemented: __builtin_constant_p.
  */
 
 #include <stdio.h>

@@ -4,8 +4,6 @@
  * __builtin_object_size (const void * ptr, int type) This built-in construct
  * returns a constant number of bytes from ptr to the end of the object ptr
  * pointer points to (if known at compile time)."
- *
- * unimplemented: __builtin_object_size.
  */
 
 #include <stdio.h>

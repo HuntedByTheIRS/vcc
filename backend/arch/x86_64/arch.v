@@ -1213,6 +1213,16 @@ pub fn trap() []u8 {
 	return [u8(0x0f), 0x05]
 }
 
+// unreachable encodes `ud2`, the undefined instruction: the processor raises an
+// invalid-opcode fault and never returns to the code the compiler emitted after
+// it. It is what both `__builtin_unreachable` and `__builtin_trap` are on this
+// machine, the first because a point control reaches is undefined and an
+// instruction the processor refuses is the honest way to say so, the second
+// because gcc stops the program the same way.
+pub fn unreachable() []u8 {
+	return [u8(0x0f), 0x0b]
+}
+
 // The encoders below have the same shape: each takes the displacement it should
 // carry and returns the finished instruction. Nothing about the length depends
 // on the displacement, so an emitter that does not know the address yet reserves
@@ -1612,6 +1622,87 @@ pub fn bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {
 	out << u8(0x0f)
 	out << u8(0xbc)
 	out << u8(0xc0 | ((dst.code & 0x07) << 3) | (src.code & 0x07)) // mod 11: the source is a register
+	return out
+}
+
+// byte_swap_32 encodes `bswap r32`, which reverses the four bytes of a register:
+// 0x01020304 becomes 0x04030201. Measured on gcc 16.2.1 at -O2 on this machine,
+// `unsigned b(unsigned x) { return __builtin_bswap32(x); }` is `bswap %edi`, and
+// the instruction is the whole of that builtin. The register is named by the low
+// three bits of the opcode, and the prefix byte reaches the second eight.
+pub fn byte_swap_32(reg Register) ![]u8 {
+	mut out := []u8{cap: 3}
+	if reg.code >= 8 {
+		out << u8(0x41) // REX.B
+	}
+	out << u8(0x0f)
+	out << u8(0xc8 | (reg.code & 0x07))
+	return out
+}
+
+// byte_swap_16 encodes `rol ax, 8` and the widening that follows it. There is no
+// 16-bit bswap, so the two bytes of the low word are exchanged by rotating that
+// word eight bits, which is what gcc writes at -O0 without movbe: measured on
+// gcc 16.2.1, `unsigned short w(unsigned short x) { return
+// __builtin_bswap16(x); }` is `rolw $8, %ax`. The rotation leaves whatever the
+// register held above that word, and the builtin's value is a uint16_t whose use
+// is a wider integer, so the word is then zero-extended into the whole register
+// with a movzx. That is the byte_swap_16 instruction: a rotate and a widening.
+pub fn byte_swap_16(reg Register) ![]u8 {
+	mut out := []u8{cap: 8}
+	out << u8(0x66) // operand-size prefix: the rotation is of the low word
+	if reg.code >= 8 {
+		out << u8(0x41) // REX.B
+	}
+	out << u8(0xc1) // rotate r/m16 by an immediate
+	out << u8(0xc0 | (reg.code & 0x07)) // mod 11, /0: rol
+	out << u8(0x08) // by eight bits, which is half a word
+	out << zero_extend_half(reg)! // the word's value in the whole register, zero above
+	return out
+}
+
+// bit_count encodes the number of one bits in a 32-bit value: `__builtin_popcount`.
+// This machine's popcnt is part of SSE4.2, which is not the baseline this tree
+// targets, and the tree already refuses to use lzcnt for the same reason, so the
+// count is the portable bit-twiddling sequence rather than an instruction the
+// baseline may not have. It is Hacker's Delight's popcount, which sums the bits a
+// field at a time: two-bit fields, then nibbles, then bytes, then the whole word.
+// Each step's mask keeps only the field it is summing, so the arithmetic never
+// carries into a neighbouring field.
+//
+// The sequence runs at the word width because the tree's shift and mask encoders
+// are word-width; a 32-bit value in the destination is widened to a clean word
+// first with a register-to-itself move, which on this machine writes the low half
+// and zeroes the upper half, so the wider shifts below see the 32-bit value and
+// not whatever the register happened to hold above it. `scratch` is a second
+// register the sequence needs; the destination is returned holding the count.
+pub fn bit_count(dst Register, scratch Register) ![]u8 {
+	mut out := []u8{cap: 64}
+	out << mov_reg32(dst, dst)! // the low word in a word register, nothing above it
+	// x = x - ((x >> 1) & 0x55555555): each two-bit field becomes its own count
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 1)!
+	out << and_immediate(scratch, 0x55555555)!
+	out << sub_reg32(dst, scratch)!
+	// x = (x & 0x33333333) + ((x >> 2) & 0x33333333): each four-bit field its count
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 2)!
+	out << and_immediate(scratch, 0x33333333)!
+	out << and_immediate(dst, 0x33333333)!
+	out << add_reg32(dst, scratch)!
+	// x = (x + (x >> 4)) & 0x0f0f0f0f: each byte its count
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 4)!
+	out << add_reg32(dst, scratch)!
+	out << and_immediate(dst, 0x0f0f0f0f)!
+	// x += x >> 8; x += x >> 16; x &= 0x3f: the four byte counts become the total
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 8)!
+	out << add_reg32(dst, scratch)!
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 16)!
+	out << add_reg32(dst, scratch)!
+	out << and_immediate(dst, 0x3f)! // the count of a 32-bit word is at most 32
 	return out
 }
 
@@ -2079,6 +2170,10 @@ fn one_operand(reg Register, group u8) ![]u8 {
 // the other are the flags of the borrow, and every order of the pair follows from
 // the carry flag of that subtraction and the flags of the subtraction of the high
 // words.
+//
+// The last one is not a comparison of two values but the signed-overflow flag on
+// its own, which is what the arithmetic-with-overflow-checking builtins read after
+// their add or multiply: seto and setno are the instructions, and overflow is seto.
 pub enum Condition {
 	equal
 	not_equal
@@ -2090,6 +2185,7 @@ pub enum Condition {
 	below_or_equal
 	above
 	above_or_equal
+	overflow
 }
 
 // code is the low nibble the machine numbers each order with.
@@ -2105,6 +2201,7 @@ pub fn (c Condition) code() u8 {
 		.below_or_equal { 0x96 }
 		.above { 0x97 }
 		.above_or_equal { 0x93 }
+		.overflow { 0x90 }
 	}
 }
 
@@ -2638,7 +2735,10 @@ pub:
 	align_stack                     fn () []u8                          = unsafe { nil }
 	and_immediate                   fn (Register, i32) ![]u8            = unsafe { nil }
 	and_reg64                       fn (Register, Register) ![]u8       = unsafe { nil }
+	bit_count                       fn (Register, Register) ![]u8       = unsafe { nil }
 	bit_scan_forward                fn (Register, Register, bool) ![]u8 = unsafe { nil }
+	byte_swap_16                    fn (Register) ![]u8                 = unsafe { nil }
+	byte_swap_32                    fn (Register) ![]u8                 = unsafe { nil }
 	call_register                   fn (Register) ![]u8                 = unsafe { nil }
 	call_rel32                      fn (i32) []u8                       = unsafe { nil }
 	call_rip_slot                   fn (i32) []u8                       = unsafe { nil }
@@ -2758,6 +2858,7 @@ pub:
 	test_reg32                      fn (Register) ![]u8                     = unsafe { nil }
 	test_reg64                      fn (Register) ![]u8                     = unsafe { nil }
 	trap                            fn () []u8                              = unsafe { nil }
+	unreachable                     fn () []u8                              = unsafe { nil }
 	unsigned_int_to_double          fn (Register, Register) ![]u8           = unsafe { nil }
 	unsigned_word_to_double         fn (Register, Register, Register) ![]u8 = unsafe { nil }
 	xor_reg64                       fn (Register, Register) ![]u8           = unsafe { nil }
@@ -2785,7 +2886,10 @@ pub fn encoders() Encoders {
 		align_stack:                     &align_stack
 		and_immediate:                   &and_immediate
 		and_reg64:                       &and_reg64
+		bit_count:                       &bit_count
 		bit_scan_forward:                &bit_scan_forward
+		byte_swap_16:                    &byte_swap_16
+		byte_swap_32:                    &byte_swap_32
 		call_register:                   &call_register
 		call_rel32:                      &call_rel32
 		call_rip_slot:                   &call_rip_slot
@@ -2905,6 +3009,7 @@ pub fn encoders() Encoders {
 		test_reg32:                      &test_reg32
 		test_reg64:                      &test_reg64
 		trap:                            &trap
+		unreachable:                     &unreachable
 		unsigned_int_to_double:          &unsigned_int_to_double
 		unsigned_word_to_double:         &unsigned_word_to_double
 		xor_reg64:                       &xor_reg64

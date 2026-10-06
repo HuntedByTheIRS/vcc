@@ -34,7 +34,10 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	// declaration for a spelling in the compiler's own namespace.
 	'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
-	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll']
+	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p',
+	'__builtin_object_size', '__builtin_return_address', '__builtin_unreachable', '__builtin_trap',
+	'__builtin_bswap16', '__builtin_bswap32', '__builtin_popcount', '__builtin_parity',
+	'__builtin_add_overflow', '__builtin_mul_overflow', '__builtin_alloca']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -101,6 +104,30 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_ctz', '__builtin_ctzll', '__builtin_clz', '__builtin_clzll' {
 			return p.parse_bit_count(at)
+		}
+		'__builtin_constant_p' {
+			return p.parse_constant_p(at)
+		}
+		'__builtin_object_size' {
+			return p.parse_object_size(at)
+		}
+		'__builtin_return_address' {
+			return p.parse_return_address(at)
+		}
+		'__builtin_unreachable', '__builtin_trap' {
+			return p.parse_no_argument_builtin(at)
+		}
+		'__builtin_bswap16', '__builtin_bswap32' {
+			return p.parse_byte_swap(at)
+		}
+		'__builtin_popcount', '__builtin_parity' {
+			return p.parse_bit_operation(at)
+		}
+		'__builtin_add_overflow', '__builtin_mul_overflow' {
+			return p.parse_overflow(at)
+		}
+		'__builtin_alloca' {
+			return p.parse_alloc(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -596,6 +623,264 @@ fn (mut p Parser) parse_bit_count(at tokenize.Token) !ast.Expr {
 		name: at.text
 		args: args
 		typ:  types.int_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_constant_p answers `__builtin_constant_p(x)`: 1 when the argument is an
+// integer constant expression this reader can evaluate, 0 when it is not. The
+// answer is a value, not code, so it is folded exactly where it is written and
+// the argument is never emitted: gcc's builtin asks whether the expression is
+// known at compile time and does not evaluate it. `__builtin_constant_p(3)` and
+// `__builtin_constant_p(2 + 3)` are 1, and `__builtin_constant_p(x)` for a
+// variable is 0, which is what `constant_value` answers with and what the test
+// asks for. gcc gives the answer the type int.
+fn (mut p Parser) parse_constant_p(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	operand := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_constant_p')
+		return error('unclosed __builtin_constant_p')
+	}
+	answer := if _ := p.constant_value(operand) { i64(1) } else { i64(0) }
+	return integer_constant(answer, '${at.text}(${describe_operand(operand)})', at, types.Kind.int_)
+}
+
+// parse_object_size answers `__builtin_object_size(ptr, type)`, which is a
+// constant number of bytes from the object the pointer names to the end of it,
+// when the reader knows the object at the call. gcc folds it at the call for the
+// shapes whose size is a fact about the declaration the operand was handed, and
+// `__builtin_object_size(buf, 0)` for `char buf[32]` is 32 while
+// `__builtin_object_size("hello", 0)` is 6, the size of the char[6] the string
+// literal is.
+//
+// The operand's own type is read and not decayed, exactly as `sizeof` reads its
+// operand: an array's size is the whole array and not the address its name is
+// worth everywhere else. When the object is not one whose size this reader can
+// state - a pointer that may name anything - gcc's answer for type 0 and 1 is
+// (size_t) -1 and for type 2 and 3 is (size_t) 0, and those are folded rather
+// than a number this compiler did not compute.
+//
+// The result has the type size_t, which is what gcc gives it.
+fn (mut p Parser) parse_object_size(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	operand := p.parse_expression()!
+	if !p.expect_punct(',') {
+		p.error_at(at, 'unsupported: __builtin_object_size takes the pointer and the type of the answer')
+		return error('the type of the answer')
+	}
+	kind_expr := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_object_size')
+		return error('unclosed __builtin_object_size')
+	}
+	kind := p.constant_value(kind_expr) or {
+		p.error_at(at, 'unsupported: __builtin_object_size takes a constant for the type of the answer, and this compiler cannot read that one')
+		return error('the type of the answer is not a constant')
+	}
+	if kind < 0 || kind > 3 {
+		p.error_at(at, 'unsupported: __builtin_object_size takes a type of 0, 1, 2 or 3, and ${kind} is not one')
+		return error('the type of the answer is out of range')
+	}
+	if p.is_unresolved(operand) {
+		p.error_at(at, 'unsupported: __builtin_object_size asks how many bytes ${describe_operand(operand)} names, and this compiler did not resolve its type')
+		return error('no type for the operand')
+	}
+	mut size := i64(-1)
+	if known := p.representation.size_of(operand.typ) {
+		// A pointer's own type has no object size: what it names is elsewhere. An
+		// array, an object and a literal do, and that is what the answer is.
+		if operand.typ.kind != .pointer {
+			size = i64(known)
+		}
+	}
+	if size < 0 && kind >= 2 {
+		size = 0
+	}
+	return integer_constant(size, '${at.text}(${describe_operand(operand)}, ${kind})', at, types.Kind.unsigned_long)
+}
+
+// parse_return_address reads `__builtin_return_address(level)`, which is the
+// address the current function returns to. Only level 0 is answered: that is the
+// word at [rbp+8] of this frame, the return address the `call` that reached this
+// function left, and it is the only one this frame can state. A level above zero
+// asks for an address further up the frame chain, which this compiler does not
+// walk, so it is refused by name rather than answered with this frame's word.
+//
+// gcc gives the result the type void *.
+fn (mut p Parser) parse_return_address(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	level_expr := p.parse_expression()!
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unclosed __builtin_return_address')
+		return error('unclosed __builtin_return_address')
+	}
+	level := p.constant_value(level_expr) or {
+		p.error_at(at, 'unsupported: __builtin_return_address walks the frame chain by a constant level, and this compiler cannot read that one')
+		return error('the level is not a constant')
+	}
+	if level != 0 {
+		p.error_at(at, 'unsupported: __builtin_return_address reads the return address of a caller ${level} frames up, and this compiler answers level 0 only')
+		return error('a level above zero')
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_return_address'
+		args: []
+		typ:  types.pointer_to(types.void_type())
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_no_argument_builtin reads the two builtins that take nothing and answer
+// nothing: `__builtin_unreachable()` marks a point control is not supposed to
+// reach, and `__builtin_trap()` stops the program there. Both are void, and both
+// arrive as an expression statement, so the call the reader builds is what the
+// back end answers with the machine's own undefined instruction.
+fn (mut p Parser) parse_no_argument_builtin(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unsupported: ${at.text} takes no arguments')
+		return error('the arguments of ${at.text}')
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: []
+		typ:  types.void_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_byte_swap reads `__builtin_bswap16` and `__builtin_bswap32`, which answer
+// the argument with the order of its bytes reversed. The answer's type is the
+// width the name asks for: uint16_t for the first and uint32_t for the second,
+// which is what gcc gives each. An operand that is not an integer is refused by
+// name: these reverse the bytes of an integer, and gcc does not convert a float
+// or a pointer into one here.
+fn (mut p Parser) parse_byte_swap(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 1 {
+		p.error_at(at, 'unsupported: ${at.text} takes one value')
+		return error('the argument of ${at.text}')
+	}
+	if !p.is_unresolved(args[0]) {
+		operand := p.value_type(args[0])
+		if operand.kind != .unknown && !operand.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} reverses the bytes of an integer, and ${describe_operand(args[0])} is ${operand.describe()}')
+			return error('the operand of ${at.text}')
+		}
+	}
+	typ := if at.text == '__builtin_bswap16' {
+		types.unsigned_short_type()
+	} else {
+		types.unsigned_int_type()
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: args
+		typ:  typ
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_bit_operation reads `__builtin_popcount` and `__builtin_parity`, which
+// answer the number of one bits in the argument and that number modulo two. gcc
+// gives both the type int, and both are emitted as the machine's bit count with
+// the second masked to its low bit. An operand that is not an integer is refused
+// by name, for the same reason the counts of zero bits refuse one.
+fn (mut p Parser) parse_bit_operation(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 1 {
+		p.error_at(at, 'unsupported: ${at.text} takes one value')
+		return error('the argument of ${at.text}')
+	}
+	if !p.is_unresolved(args[0]) {
+		operand := p.value_type(args[0])
+		if operand.kind != .unknown && !operand.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} counts the one bits of an integer, and ${describe_operand(args[0])} is ${operand.describe()}')
+			return error('the operand of ${at.text}')
+		}
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: args
+		typ:  types.int_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_overflow reads `__builtin_add_overflow` and `__builtin_mul_overflow`, which
+// add or multiply two values, store the result the operation wraps to through the
+// third argument, and answer nonzero when it overflowed. The three are ints here:
+// the answer is an int, and both operands and the object the third argument points
+// at have to be int, because the overflow the back end reads is the signed one the
+// machine's add and imul raise, and a wider, narrower or unsigned operand would be
+// checked by a different flag. An operand of another type is refused by name rather
+// than computed with a check that does not fit it.
+fn (mut p Parser) parse_overflow(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 3 {
+		p.error_at(at, 'unsupported: ${at.text} takes two values and the address of the result')
+		return error('the arguments of ${at.text}')
+	}
+	names := ['the first operand', 'the second operand']
+	for i, name in names {
+		if p.is_unresolved(args[i]) {
+			continue
+		}
+		operand := p.value_type(args[i])
+		if operand.kind != .unknown && operand.kind != .int_ {
+			p.error_at(at, 'unsupported: ${at.text} checks an int ${name}, and it is ${operand.describe()}')
+			return error('the operand of ${at.text}')
+		}
+	}
+	if !p.is_unresolved(args[2]) {
+		pointer := p.value_type(args[2])
+		pointee := pointer.pointee() or {
+			p.error_at(at, 'unsupported: ${at.text} stores its result through the third argument, and ${describe_operand(args[2])} is ${pointer.describe()}')
+			return error('the result pointer of ${at.text}')
+		}
+		if pointee.kind != .int_ {
+			p.error_at(at, 'unsupported: ${at.text} stores an int result, and ${describe_operand(args[2])} points at ${pointee.describe()}')
+			return error('the result pointer of ${at.text}')
+		}
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: args
+		typ:  types.int_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_alloc reads `__builtin_alloca(size)`, which claims `size` bytes on the
+// calling function's stack and answers the address they begin at. The answer is a
+// void *, which is the address the back end leaves in the accumulator after it
+// lowers the stack pointer. The size is a value of size_t's kind: gcc's builtin
+// takes size_t, and an operand that is not an integer has no byte count to read,
+// so it is refused by name.
+fn (mut p Parser) parse_alloc(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 1 {
+		p.error_at(at, 'unsupported: ${at.text} takes the number of bytes to claim')
+		return error('the size of ${at.text}')
+	}
+	if !p.is_unresolved(args[0]) {
+		size := p.value_type(args[0])
+		if size.kind != .unknown && !size.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} takes a size in bytes, and ${describe_operand(args[0])} is ${size.describe()}')
+			return error('the size of ${at.text}')
+		}
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_alloca'
+		args: args
+		typ:  types.pointer_to(types.void_type())
 		line: at.line
 		col:  at.col
 	})
