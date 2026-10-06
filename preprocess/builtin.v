@@ -354,6 +354,7 @@ fn (mut p Processor) define_builtins() {
 			name:          definition.name
 			function_like: definition.params.len > 0
 			params:        definition.params
+			variadic_name: ''
 			body:          tokenize.lex_fragment(definition.body, standard.has_digraphs(p.opts.dialect))
 			file:          '<built-in>'
 			line:          1

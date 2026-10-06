@@ -266,6 +266,7 @@ fn (mut p Processor) apply_command_line_defines() {
 		mut body := ''
 		mut params := []string{}
 		mut variadic := false
+		mut variadic_name := ''
 		mut function_like := false
 		if at := define.index('=') {
 			name = define[..at]
@@ -284,8 +285,14 @@ fn (mut p Processor) apply_command_line_defines() {
 						if param == '' {
 							continue
 						}
-						if param == '...' {
+						// `name...` is the GNU spelling that names the variable
+						// arguments, the same shape `#define` accepts.
+						if param.ends_with('...') {
 							variadic = true
+							named := param[..param.len - 3].trim_space()
+							if named != '' {
+								variadic_name = named
+							}
 							continue
 						}
 						params << param
@@ -299,6 +306,7 @@ fn (mut p Processor) apply_command_line_defines() {
 			function_like: function_like
 			params:        params
 			variadic:      variadic
+			variadic_name: variadic_name
 			body:          tokenize.lex_fragment(body, standard.has_digraphs(p.opts.dialect))
 			file:          '<command line>'
 			line:          1
@@ -926,6 +934,7 @@ fn (mut p Processor) define(tok tokenize.Token, args string) {
 	name := tokens[0].text
 	mut params := []string{}
 	mut variadic := false
+	mut variadic_name := ''
 	// A macro takes arguments when the parameter list is against the name and
 	// not merely somewhere on the line: `#define F (x) x` defines an
 	// object-like macro F whose body is `(x) x`, which is C's rule and not an
@@ -943,8 +952,16 @@ fn (mut p Processor) define(tok tokenize.Token, args string) {
 			if param == '' {
 				continue
 			}
-			if param == '...' {
+			// The list may end with `...`, which gives the variable arguments
+			// no name and leaves the replacement writing __VA_ARGS__, or with
+			// the GNU spelling `name...`, which names them and lets the
+			// replacement write that name exactly as it would __VA_ARGS__.
+			if param.ends_with('...') {
 				variadic = true
+				named := param[..param.len - 3].trim_space()
+				if named != '' {
+					variadic_name = named
+				}
 				continue
 			}
 			params << param
@@ -956,6 +973,7 @@ fn (mut p Processor) define(tok tokenize.Token, args string) {
 		function_like: function_like
 		params:        params
 		variadic:      variadic
+		variadic_name: variadic_name
 		body:          tokenize.lex_fragment(body_text, standard.has_digraphs(p.opts.dialect))
 		file:          p.frames.last().path
 		line:          tok.line

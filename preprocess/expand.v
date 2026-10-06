@@ -309,10 +309,17 @@ fn (mut p Processor) expand_call(macro Macro, use_args Arguments, site Piece) []
 
 // substitute is the replacement itself: every parameter is replaced by its
 // argument, # stringizes the argument it is in front of, ## joins the tokens
-// around it into one, and __VA_ARGS__ stands for the arguments after the named
-// parameters.
+// around it into one, and the variadic name stands for the arguments after the
+// named parameters. That name is __VA_ARGS__ under the standard `...` spelling,
+// and whatever name the GNU `name...` spelling gave it under that one.
 fn (mut p Processor) substitute(macro Macro, arguments Arguments, site Piece) []Piece {
 	tok := site.tok
+	// The variable arguments are written __VA_ARGS__ under the standard `...`
+	// spelling and under whatever name a GNU `name...` parameter list gave them.
+	// The replacement body writes the one or the other, and this is the name it
+	// may write; it is also the name `, ##` looks for, so the two spellings take
+	// the same road through the code below.
+	va_name := if macro.variadic_name == '' { '__VA_ARGS__' } else { macro.variadic_name }
 	mut lists := arguments.lists.clone()
 	// `F()` is one empty argument to a macro that takes one, and no arguments
 	// at all to a macro that takes none: the count is what tells the two
@@ -362,7 +369,7 @@ fn (mut p Processor) substitute(macro Macro, arguments Arguments, site Piece) []
 			}
 			rest << lists[index]
 		}
-		args['__VA_ARGS__'] = rest
+		args[va_name] = rest
 	}
 	mut out := []Piece{}
 	mut i := 0
@@ -408,7 +415,7 @@ fn (mut p Processor) substitute(macro Macro, arguments Arguments, site Piece) []
 				i += 2
 				continue
 			}
-			if macro.variadic && next.text == '__VA_ARGS__' && out.len > 0 && out.last().tok.kind == .punct && out.last().tok.text == ',' {
+			if macro.variadic && next.text == va_name && out.len > 0 && out.last().tok.kind == .punct && out.last().tok.text == ',' {
 				// With arguments, the same spelling writes the comma and the
 				// tokens out as they are: a comma joined to the token after it
 				// is not a paste anybody means.

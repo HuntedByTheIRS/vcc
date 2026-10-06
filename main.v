@@ -1012,7 +1012,14 @@ fn print_macros(macros []preprocess.Macro) {
 		if macro.takes_arguments() {
 			mut params := macro.params.clone()
 			if macro.variadic {
-				params << '...'
+				// The standard spelling writes `...`; the GNU spelling that named
+				// its variable arguments writes the name back before the dots,
+				// which is how gcc's -dM prints a macro defined that way.
+				params << if macro.variadic_name == '' {
+					'...'
+				} else {
+					macro.variadic_name + '...'
+				}
 			}
 			head += '(${params.join(', ')})'
 		}

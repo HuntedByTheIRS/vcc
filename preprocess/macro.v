@@ -14,10 +14,16 @@ pub:
 	function_like bool
 	// params is empty for an object-like macro. For a function-like one it is
 	// the parameter names in order, and variadic is set when the list ended
-	// with `...`.
+	// with `...` or with the GNU spelling `name...`.
 	params   []string
 	variadic bool
-	body     []tokenize.Token
+	// variadic_name is the name the variable arguments are written under inside
+	// the replacement. The standard `...` spelling leaves it empty, and the
+	// replacement writes them as __VA_ARGS__; the GNU spelling `name...` names
+	// them the way the parameter list did, and the replacement writes that name
+	// exactly where it would have written __VA_ARGS__.
+	variadic_name string
+	body          []tokenize.Token
 	// file, line and col are where the definition was written, which is what a
 	// diagnostic about the macro has to point at.
 	file string
