@@ -4,8 +4,6 @@
  * "These built-in functions ... use the operands to perform simple arithmetic
  * operations together with checking whether the operations overflowed. ...
  * Built-in Function: bool __builtin_add_overflow (type1 a, type2 b, type3 * res)"
- *
- * unimplemented: __builtin_add_overflow and __builtin_mul_overflow.
  */
 
 #include <stdio.h>

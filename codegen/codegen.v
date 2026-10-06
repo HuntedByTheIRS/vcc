@@ -9298,6 +9298,52 @@ fn (mut e Emitter) emit_bit_operation(call ast.Call, depth int) !void {
 	}
 }
 
+// emit_overflow answers `__builtin_add_overflow` and `__builtin_mul_overflow`: the
+// two operands are added or multiplied and the result the operation wraps to is
+// stored through the third argument, while the answer is the machine's signed
+// overflow flag. The operands are evaluated into slots first, because an operand can
+// be an expression that calls a function and the registers have to be free for it;
+// then they are loaded into the accumulator and the scratch register, and the add or
+// imul raises the overflow flag on the pair. The flag is read at once, before
+// anything that could overwrite it, and the wrapped result in the accumulator and
+// that flag are what the call leaves: the result is stored through the pointer and
+// the flag is widened into the accumulator for the value the expression is worth.
+// All three are int - the reader refuses another type - so the width is one word's
+// low four bytes at every step.
+fn (mut e Emitter) emit_overflow(call ast.Call, depth int) !void {
+	overflow := call.name == '__builtin_mul_overflow'
+	a_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[0], depth + 1)!
+	e.store_accumulator(a_slot, call.line, call.col)!
+	b_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[1], depth + 2)!
+	e.store_accumulator(b_slot, call.line, call.col)!
+	pointer_slot := e.reserve(e.target.word_size)
+	e.emit_expr_at(call.args[2], depth + 3)!
+	e.store_accumulator(pointer_slot, call.line, call.col)!
+	base := e.frame_pointer(call.line, call.col)!
+	accumulator := e.accumulator(call.line, call.col)!
+	scratch := e.scratch(call.line, call.col)!
+	pointer := e.remainder(call.line, call.col)!
+	e.load_accumulator(a_slot, call.line, call.col)!
+	e.append(e.target.load_slot(base, i32(b_slot.offset), scratch, e.target.word_size)!)
+	if overflow {
+		e.append(e.target.multiply(accumulator, scratch)!)
+	} else {
+		e.append(e.target.add(accumulator, scratch)!)
+	}
+	// The flags the operation left are the answer. They are read into the scratch
+	// register now: the widen, the loads below and the store all leave the flags
+	// alone, but reading them here is what the machine's one-shot flag register asks.
+	e.append(e.target.set_condition(backend.Condition.overflow, scratch)!)
+	e.append(e.target.widen_byte(scratch)!)
+	// The result the operation wrapped to, through the pointer the third argument was.
+	e.append(e.target.load_slot(base, i32(pointer_slot.offset), pointer, e.target.word_size)!)
+	e.append(e.target.store_indirect(pointer, accumulator, 4)!)
+	// And the answer itself: the overflow flag, which the widen has already made 0 or 1.
+	e.append(e.target.move_register32(accumulator, scratch)!)
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -9378,6 +9424,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		'__builtin_popcount', '__builtin_parity' {
 			return e.emit_bit_operation(call, depth)
+		}
+		'__builtin_add_overflow', '__builtin_mul_overflow' {
+			return e.emit_overflow(call, depth)
 		}
 		'atexit' {
 			// glibc defines atexit in libc_nonshared.a, the static half of

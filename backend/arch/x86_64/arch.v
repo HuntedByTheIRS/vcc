@@ -2170,6 +2170,10 @@ fn one_operand(reg Register, group u8) ![]u8 {
 // the other are the flags of the borrow, and every order of the pair follows from
 // the carry flag of that subtraction and the flags of the subtraction of the high
 // words.
+//
+// The last one is not a comparison of two values but the signed-overflow flag on
+// its own, which is what the arithmetic-with-overflow-checking builtins read after
+// their add or multiply: seto and setno are the instructions, and overflow is seto.
 pub enum Condition {
 	equal
 	not_equal
@@ -2181,6 +2185,7 @@ pub enum Condition {
 	below_or_equal
 	above
 	above_or_equal
+	overflow
 }
 
 // code is the low nibble the machine numbers each order with.
@@ -2196,6 +2201,7 @@ pub fn (c Condition) code() u8 {
 		.below_or_equal { 0x96 }
 		.above { 0x97 }
 		.above_or_equal { 0x93 }
+		.overflow { 0x90 }
 	}
 }
 

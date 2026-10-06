@@ -36,7 +36,8 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
 	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p',
 	'__builtin_object_size', '__builtin_return_address', '__builtin_unreachable', '__builtin_trap',
-	'__builtin_bswap16', '__builtin_bswap32', '__builtin_popcount', '__builtin_parity']
+	'__builtin_bswap16', '__builtin_bswap32', '__builtin_popcount', '__builtin_parity',
+	'__builtin_add_overflow', '__builtin_mul_overflow']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -121,6 +122,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_popcount', '__builtin_parity' {
 			return p.parse_bit_operation(at)
+		}
+		'__builtin_add_overflow', '__builtin_mul_overflow' {
+			return p.parse_overflow(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -795,6 +799,51 @@ fn (mut p Parser) parse_bit_operation(at tokenize.Token) !ast.Expr {
 		if operand.kind != .unknown && !operand.kind.is_integer() {
 			p.error_at(at, 'unsupported: ${at.text} counts the one bits of an integer, and ${describe_operand(args[0])} is ${operand.describe()}')
 			return error('the operand of ${at.text}')
+		}
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: args
+		typ:  types.int_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_overflow reads `__builtin_add_overflow` and `__builtin_mul_overflow`, which
+// add or multiply two values, store the result the operation wraps to through the
+// third argument, and answer nonzero when it overflowed. The three are ints here:
+// the answer is an int, and both operands and the object the third argument points
+// at have to be int, because the overflow the back end reads is the signed one the
+// machine's add and imul raise, and a wider, narrower or unsigned operand would be
+// checked by a different flag. An operand of another type is refused by name rather
+// than computed with a check that does not fit it.
+fn (mut p Parser) parse_overflow(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 3 {
+		p.error_at(at, 'unsupported: ${at.text} takes two values and the address of the result')
+		return error('the arguments of ${at.text}')
+	}
+	names := ['the first operand', 'the second operand']
+	for i, name in names {
+		if p.is_unresolved(args[i]) {
+			continue
+		}
+		operand := p.value_type(args[i])
+		if operand.kind != .unknown && operand.kind != .int_ {
+			p.error_at(at, 'unsupported: ${at.text} checks an int ${name}, and it is ${operand.describe()}')
+			return error('the operand of ${at.text}')
+		}
+	}
+	if !p.is_unresolved(args[2]) {
+		pointer := p.value_type(args[2])
+		pointee := pointer.pointee() or {
+			p.error_at(at, 'unsupported: ${at.text} stores its result through the third argument, and ${describe_operand(args[2])} is ${pointer.describe()}')
+			return error('the result pointer of ${at.text}')
+		}
+		if pointee.kind != .int_ {
+			p.error_at(at, 'unsupported: ${at.text} stores an int result, and ${describe_operand(args[2])} points at ${pointee.describe()}')
+			return error('the result pointer of ${at.text}')
 		}
 	}
 	return ast.Expr(ast.Call{
