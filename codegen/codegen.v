@@ -878,6 +878,10 @@ fn (mut e Emitter) build() ![]u8 {
 		// undefined reference.
 		mut requested := e.program.imports.clone()
 		requested << e.program.copy_objects
+		// A weak import is not a name a library has to answer, whatever brought
+		// the image here: an undefined weak symbol stands for zero, which is what
+		// the runtime's own startup files reach their optional hooks with.
+		requested = requested.filter(it !in e.program.weak_imports)
 		unresolved := linux.unresolved_imports(requested, e.libraries, dirs)
 		if unresolved.len > 0 {
 			for name in unresolved {

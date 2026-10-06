@@ -52,6 +52,17 @@ pub mut:
 	// object_imports is the union of the units' object_imports. It stays a
 	// subset of `imports`, which is what the field means in one unit.
 	object_imports map[string]bool
+	// weak_imports is the union of the units' weak_imports: every name in
+	// `imports` a unit named weakly and none defines. A link does not have to
+	// answer one - an undefined weak symbol stands for zero - so these names
+	// are left out of the libraries a link asks and the merged image writes
+	// them with the weak binding.
+	weak_imports map[string]bool
+	// tls_slots is the union of the units' tls_slots: every name whose global
+	// offset table slot holds how far a thread-local lies below the thread
+	// pointer rather than its address. The merged image writes those slots as
+	// numbers, so the fact has to survive the merge.
+	tls_slots map[string]bool
 	// libraries is the union of the units' libraries in first-seen order.
 	libraries []string
 	// copy_objects is the union of the units' copy_objects in first-seen order,
@@ -82,6 +93,8 @@ pub fn collect(units []image.Program) !Names {
 		weak:           map[string]bool{}
 		internal:       map[string]bool{}
 		object_imports: map[string]bool{}
+		weak_imports:   map[string]bool{}
+		tls_slots:      map[string]bool{}
 	}
 	for i, unit in units {
 		for name, _ in unit.defined {
@@ -138,6 +151,12 @@ pub fn collect(units []image.Program) !Names {
 			if name in names.imports {
 				names.object_imports[name] = true
 			}
+		}
+		for name, _ in unit.weak_imports {
+			names.weak_imports[name] = true
+		}
+		for name, _ in unit.tls_slots {
+			names.tls_slots[name] = true
 		}
 		for name in unit.libraries {
 			if name !in names.libraries {

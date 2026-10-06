@@ -77,11 +77,34 @@ pub fn link(units []image.Program, options Options) !image.Program {
 	arrays['__init_array_end'] = layout.constructor_base + layout.init_len
 	arrays['__fini_array_start'] = layout.constructor_base + layout.init_len
 	arrays['__fini_array_end'] = layout.constructor_base + layout.init_len + layout.fini_len
+	// The preinit table is a third one, and it is empty: a preinit function runs
+	// before the one that starts the program, which is a place this compiler
+	// generates no code for and no unit of a link can put one in. Both ends name
+	// the same place, so a startup that walks them between the two finds
+	// nothing, which is the answer an image with no preinit table gives.
+	arrays['__preinit_array_start'] = layout.constructor_base
+	arrays['__preinit_array_end'] = layout.constructor_base
 	for name, offset in arrays {
 		if name in names.imports {
 			bound[name] = image.Definition{
 				offset: offset
 			}
+		}
+	}
+	// Two more names the runtime's own startup reaches for are the link's to
+	// answer, because they are about the image rather than about a symbol in it:
+	// `__ehdr_start` is where the image begins, which is what a program reads to
+	// find its own program headers, and `_end` is where its writable data stops,
+	// which is where a program that grows a heap out of the image starts.
+	//
+	// The region between `__bss_start` and `_end` is the storage that has no
+	// bytes in the file, and this image has none: every zero it holds is written
+	// into the file, so the region is empty and both ends and `_edata` name the
+	// same place. Answering with the start of the writable data would have the C
+	// library zero the initializers it just loaded.
+	if '__ehdr_start' in names.imports {
+		bound['__ehdr_start'] = image.Definition{
+			image_base: true
 		}
 	}
 	// The references a unit carried as relocations are merged like its fixups,
@@ -147,6 +170,8 @@ pub fn link(units []image.Program, options Options) !image.Program {
 		internal:          names.internal
 		imports:           names.imports
 		object_imports:    names.object_imports
+		weak_imports:      names.weak_imports
+		tls_slots:         names.tls_slots
 		libraries:         names.libraries
 		copy_objects:      copies
 		bound:             bound
@@ -176,7 +201,10 @@ pub fn link(units []image.Program, options Options) !image.Program {
 	// message is its message.
 	mut requested := []string{cap: names.imports.len + copies.len}
 	for name in names.imports {
-		if name !in bound {
+		// A weak import is the one name a link does not have to answer, so it is
+		// not asked of any library: `unresolved_imports` would report it and this
+		// link would refuse a program that runs.
+		if name !in bound && name !in names.weak_imports {
 			requested << name
 		}
 	}
