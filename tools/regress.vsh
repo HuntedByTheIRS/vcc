@@ -42,8 +42,8 @@
 import os
 import time
 
-const regression_floor = 44
-const goldens_floor = 16
+const regression_floor = 47
+const goldens_floor = 18
 
 const compile_head = '-x c -std='
 const compile_tail = ' -w -lm'
