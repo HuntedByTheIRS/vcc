@@ -132,6 +132,29 @@ pub const features = [
 		pedantic:  'the atomic builtins and the count-trailing and count-leading builtins'
 		status:    .implemented
 	},
+	// The rest of the GNU compiler's own builtins this tree reads, the same kind
+	// of reserved-namespace spelling as the row above and by the same measured
+	// reasoning: gcc 16.2.1 accepts each of them under `-std=c99 -pedantic-errors`
+	// with empty stderr, because the double underscore is the compiler's own
+	// namespace and no program can write a declaration for it. So no ISO mode is
+	// made to refuse them, and a strict mode reports a construct from this row
+	// only when asked, under -Wpedantic or -pedantic-errors. `__builtin_constant_p`
+	// and `__builtin_object_size` are folded where they are written,
+	// `__builtin_return_address`, `__builtin_bswap16/32`, `__builtin_popcount`,
+	// `__builtin_parity`, the two overflow-checking builtins, `__builtin_alloca`
+	// and the two no-return builtins are emitted as instructions, and every one of
+	// them is read in `parser/builtins.v`.
+	Feature{
+		spellings: ['__builtin_constant_p', '__builtin_object_size', '__builtin_return_address',
+			'__builtin_unreachable', '__builtin_trap', '__builtin_bswap16', '__builtin_bswap32',
+			'__builtin_popcount', '__builtin_parity', '__builtin_add_overflow', '__builtin_mul_overflow',
+			'__builtin_alloca']
+		since:     .none
+		gnu:       true
+		extension: ''
+		pedantic:  'the constant-fold, object-size, return-address, unreachable, trap, byte-swap, bit-count, overflow-check and stack-allocation builtins'
+		status:    .implemented
+	},
 	// A GNU statement expression, `({ ... })`, is marked by two tokens with nothing
 	// between them and not by a word, so its spelling here is the pair and the
 	// check joins two tokens to find it. The tree reads the construct, so the row
