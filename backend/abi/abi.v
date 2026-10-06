@@ -98,7 +98,12 @@ pub const extended_bytes = 16
 pub const extended_alignment = 16
 
 pub fn travels_on_the_x87_stack(typ types.Type) bool {
-	return typ.kind == .long_double
+	// This back end carries `_Float128` in the same sixteen-byte storage and the
+	// same x87 conversions as `long double`, so a value of it travels the same
+	// way. gcc's own convention for `_Float128` is the SSE register file, which
+	// is what a program mixing this compiler's objects with gcc's would notice;
+	// a program this compiler builds whole is consistent with itself.
+	return typ.kind.is_extended()
 }
 
 // PairPlaces is where the two eightbytes of an object of two of them go, and it is

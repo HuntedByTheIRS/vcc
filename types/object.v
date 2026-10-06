@@ -397,6 +397,16 @@ pub fn from_target(target backend.Target) Description {
 	// x87 stack, which is what the conversions at the end of this file describe.
 	sizes[Kind.long_double] = 16
 	aligns[Kind.long_double] = 16
+	// `_Float128` is the GNU 128-bit floating type. Its format on this target
+	// is IEEE binary128, which is not the extended format a long double holds,
+	// and this back end computes its arithmetic in the x87 extended format; the
+	// storage width is the same sixteen bytes and the model carries it so that
+	// `sizeof(_Float128)` is 16 and an object of the type is laid out. Measured
+	// on gcc 16.2.1 on this target: `sizeof(_Float128)` and `_Alignof(_Float128)`
+	// are both 16. See `Kind.is_extended` and `codegen/long_double.v` for
+	// exactly what the back end does and does not compute with it.
+	sizes[Kind.float128] = 16
+	aligns[Kind.float128] = 16
 	// A complex type is two components of its real type, one after the other:
 	// `float _Complex` is two floats and `double _Complex` is two doubles.
 	// Measured on this target with gcc 16.2.1 on a program that printed

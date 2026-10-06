@@ -116,6 +116,14 @@ pub fn usual_arithmetic_conversions(a Type, b Type, rep Representation) !Type {
 	if !a.is_arithmetic() || !b.is_arithmetic() {
 		return error('the usual arithmetic conversions need two arithmetic types, and ${a.describe()} and ${b.describe()} are not both arithmetic')
 	}
+	if a.kind == .float128 || b.kind == .float128 {
+		// `_Float128` ranks above every type the standard has, which is where
+		// gcc's own conversion rank puts it: measured with `_Generic` on gcc
+		// 16.2.1, `_Float128` with any of them is `_Float128`. The arithmetic
+		// on the result is refused by name in the back end, which is where the
+		// difference between the two 128-bit floating formats would show.
+		return float128_type()
+	}
 	if a.kind == .long_double || b.kind == .long_double {
 		return long_double_type()
 	}

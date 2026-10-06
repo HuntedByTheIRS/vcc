@@ -36,7 +36,7 @@ const type_qualifiers = ['const', 'volatile', 'restrict', '_Atomic', '__const', 
 // builtin_types are the type words of the language. A type can also be a name
 // this file has typedef'd, which is why the parser carries that list.
 const builtin_types = ['void', 'char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double',
-	'_Bool', '_Complex', '_Imaginary', '__int128']
+	'_Bool', '_Complex', '_Imaginary', '__int128', '__float128']
 
 // bitint_words are the spellings that open a _BitInt specifier. C23 added the
 // type, and its width is written in parentheses after the word: `_BitInt(128)`
@@ -81,7 +81,7 @@ const keywords = ['_Atomic', '_BitInt', '_Bool', '_Complex', '_Imaginary', '_Thr
 	'unsigned', 'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
 	'__extension__', '__inline', '__inline__', '__int128', '__restrict', '__restrict__', '__signed',
 	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile',
-	'__volatile__']
+	'__volatile__', '__float128']
 
 // is_keyword says whether a spelling is one of the reserved words. Nothing in the
 // language may use one as an identifier, so the question is asked by the declarator
@@ -1504,8 +1504,8 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 	// truncated towards zero, which is the conversion an assignment makes
 	// and the reason neither of these needs a diagnostic of its own.
 	init, init_float := initializer_for(data_type, data_init, data_init_float)
-	if data_init_long != none && data_type != 'long double' {
-		p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is a long double constant')
+	if data_init_long != none && data_type != 'long double' && data_type != '__float128' {
+		p.error_at(data_at, 'unsupported: ${data_name} is defined with the type ${data_type}, and its initializer is a constant of a 128-bit floating type')
 		return false
 	}
 	mut starts_at_zero := true
@@ -1519,14 +1519,15 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 			starts_at_zero = false
 		}
 	}
-	if data_type == 'long double' && data_init_long == none && !starts_at_zero {
-		// An object of the extended type at the top level starts at the
+	if (data_type == 'long double' || data_type == '__float128') && data_init_long == none
+		&& !starts_at_zero {
+		// An object of a 128-bit floating type at the top level starts at the
 		// constant its initializer names when that constant is one of the
 		// type, and at zero when there is nothing to start it at, which is
 		// what the unsized storage in the image already holds. A constant of
 		// another type is a conversion at load time, which this reader does
 		// not write into the image.
-		p.error_at(data_at, 'unsupported: ${data_name} is a long double, and its initializer is not a long double constant: converting a constant of another type to the extended format at load time is not written into the image')
+		p.error_at(data_at, 'unsupported: ${data_name} is a ${data_type}, and its initializer is not a constant of a 128-bit floating type: converting a constant of another type to that storage at load time is not written into the image')
 		return false
 	}
 	if spec.auto_deduced {
@@ -1864,6 +1865,30 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 			// exponent word, so flipping that bit is what `-12.0L` and `-0.0L`
 			// mean; without it every signed long double constant at file scope
 			// carried the positive value.
+			signed := if sign < 0 {
+				types.LongDouble{
+					mantissa: value.mantissa
+					sign_exp: value.sign_exp ^ 0x8000
+				}
+			} else {
+				value
+			}
+			return NumberConstant{
+				number: FileConstant{
+					long_floating: signed
+				}
+				at:     t
+			}
+		}
+		if is_float128_constant(t.text) {
+			// A `_Float128` constant at file scope carries its value the same
+			// way a long double constant does, and the sign travels with it
+			// the same way: the two types share this storage, which is the
+			// topic of the comment on the `float128` kind.
+			value := parse_float128_literal(t.text) or {
+				p.error_at(t, err.msg())
+				return none
+			}
 			signed := if sign < 0 {
 				types.LongDouble{
 					mantissa: value.mantissa
@@ -3820,12 +3845,12 @@ fn (mut p Parser) constant_expr(constant NumberConstant) ast.Expr {
 // double are both conversions the language makes, so neither is reported, and a
 // float object takes a floating initializer the same way a double does.
 fn initializer_for(written string, integer ?i64, floating ?f64) (?i64, ?f64) {
-	if written == 'long double' {
-		// A long double object holds a value a host double cannot represent, so
-		// the conversion of a double or an integer constant into one is not made
-		// here: the constant's own extended-format value travels in its own
-		// field, and a constant without one is refused where the bytes would be
-		// written.
+	if written == 'long double' || written == '__float128' {
+		// A 128-bit floating object holds a value a host double cannot
+		// represent, so the conversion of a double or an integer constant into
+		// one is not made here: the constant's own 128-bit value travels in
+		// its own field, and a constant without one is refused where the bytes
+		// would be written.
 		return none, none
 	}
 	mut value := integer
@@ -3910,14 +3935,14 @@ fn (p Parser) cast_file_constant(typ types.Type, operand FileConstant) ?FileCons
 // than read as a zero, because a zero in the storage is a value the declaration
 // did not write.
 fn (mut p Parser) initializer_list_for(written string, elements []BraceElement, name string, at tokenize.Token) ([]i64, []f64) {
-	if written == 'long double' {
-		// An array of long doubles would be a table of sixteen-byte extended
+	if written == 'long double' || written == '__float128' {
+		// An array of 128-bit floating values would be a table of sixteen-byte
 		// constants, and the two lists this returns carry an integer or a
-		// double; a long double value fits in neither. The elements are refused
+		// double; a value of one fits in neither. The elements are refused
 		// by name rather than dropped, because the storage they would have gone
 		// into starts zeroed and a program reading the table would get zeros
 		// with no diagnostic.
-		p.error_at(at, 'unsupported: ${name} is an array of long doubles with a brace initializer, and the extended constants of one have no field to be written into at file scope here')
+		p.error_at(at, 'unsupported: ${name} is an array of ${written} values with a brace initializer, and the 128-bit constants of one have no field to be written into at file scope here')
 		return []i64{}, []f64{}
 	}
 	if written == 'double' || written == 'float' {

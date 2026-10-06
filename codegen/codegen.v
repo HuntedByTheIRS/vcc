@@ -1974,7 +1974,7 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 	e.emit_expr_at(unary.expr, depth + 1)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
-	if unary.typ.kind == .long_double {
+	if unary.typ.kind.is_extended() {
 		// A write through an address of the extended type is the store an
 		// object of the type makes, at the address the pointer holds: sixteen
 		// bytes are not a width the machine moves in one instruction.
@@ -2065,7 +2065,7 @@ fn (mut e Emitter) assign_compound(stmt ast.Stmt, depth int) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= to an object of ${written} is not implemented, and this back end keeps one value of a complex type in a register')
 		return error('complex compound assignment')
 	}
-	if destination.typ.kind == .long_double {
+	if destination.typ.kind.is_extended() {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the compound assignment ${stmt.compound}= to an object of ${written} is not one this back end makes at the width of the type')
 		return error('long double compound assignment')
 	}
@@ -3105,7 +3105,7 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
 	address_register := e.scratch(stmt.line, stmt.col)!
-	if index.typ.kind == .long_double {
+	if index.typ.kind.is_extended() {
 		// An element of the extended type, at an address computed from a
 		// pointer: the value goes in through the path an object of the type
 		// uses, and the expression has not been emitted yet because that path
@@ -3862,7 +3862,7 @@ fn (e Emitter) type_width(written string) ?int {
 	// `_Alignof(long double)`, which is the size the model lays an object of the
 	// type out with; the back end needs the same number here for the storage of
 	// a top-level object and for the width of the sixteen bytes a copy moves.
-	if written == 'long double' {
+	if written == 'long double' || written == '__float128' {
 		return long_double_bytes
 	}
 	if written == 'float' {
@@ -4502,7 +4502,7 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 	// register file this walk is about: it lives in memory, so no path that asks
 	// this question computes with it. The guard is here rather than in each arm
 	// because a long double reaches them all as `is_floating`.
-	if expr.typ.kind == .long_double {
+	if expr.typ.kind.is_extended() {
 		return false
 	}
 	return match expr {
@@ -4628,7 +4628,7 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 	}
 	// The same guard floating_at carries: the extended type is not a value of
 	// this register file at either width.
-	if expr.typ.kind == .long_double {
+	if expr.typ.kind.is_extended() {
 		return false
 	}
 	return match expr {
@@ -5172,7 +5172,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.append(e.target.move_immediate32(register, u32(expr.value))!)
 		}
 		ast.FloatLit {
-			if expr.typ.kind == .long_double {
+			if expr.typ.kind.is_extended() {
 				// A long double constant is materialized into a frame
 				// temporary. Its value is sixteen bytes and not a register
 				// width, so what the expression is worth is the address of them.
@@ -5628,7 +5628,7 @@ fn (mut e Emitter) emit_general_index(expr ast.Index, depth int) !void {
 		return
 	}
 	address := e.accumulator(expr.line, expr.col)!
-	if expr.typ.kind == .long_double {
+	if expr.typ.kind.is_extended() {
 		// An element of the extended type is the address emit_element_address
 		// left, which is what a value of the type is worth.
 		return
@@ -6423,7 +6423,7 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		e.diagnostics << pedantic(cast.line, cast.col, message)
 		return e.emit_expr_at(cast.expr, depth + 1)
 	}
-	if target.kind == .long_double {
+	if target.kind.is_extended() {
 		// A conversion to the extended type: a source of the same type is the
 		// same value, and anything else is converted into a temporary whose
 		// address the conversion is worth.
@@ -6762,7 +6762,7 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 		e.append(e.target.load_double_indirect(address, double_register)!)
 		return
 	}
-	if unary.typ.kind == .long_double {
+	if unary.typ.kind.is_extended() {
 		// The object at the address is a long double, whose value is the address
 		// of its sixteen bytes: there is no register to read them into.
 		return
@@ -8235,13 +8235,13 @@ fn (mut e Emitter) emit_conditional(conditional ast.Conditional, depth int) !voi
 	if conditional.cond is ast.IntLit {
 		value := (conditional.cond as ast.IntLit).value
 		arm := if value != 0 { conditional.then_expr } else { conditional.else_expr }
-		if conditional.typ.kind == .long_double {
+		if conditional.typ.kind.is_extended() {
 			temp := e.extended_temp(arm, depth + 1)!
 			return e.leave_address(temp, conditional.line, conditional.col)
 		}
 		return e.emit_conditional_arm(arm, conditional.typ, depth)
 	}
-	if conditional.typ.kind == .long_double {
+	if conditional.typ.kind.is_extended() {
 		// The two arms are values of the extended type, and a value of that type
 		// is the address of its sixteen bytes, so the branch carries the address
 		// of whichever arm ran the way it carries a register elsewhere.

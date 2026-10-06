@@ -801,7 +801,7 @@ fn constant_double(expr ast.Expr) ?f64 {
 // folder reads, and the extended value, so the emitter is never handed a long
 // double literal with nothing of the extended type to write.
 fn float_constant(value f64, typ types.Type, text string, at tokenize.Token) ast.Expr {
-	if typ.kind == .long_double {
+	if typ.kind.is_extended() {
 		return ast.Expr(ast.FloatLit{
 			value:      value
 			long_value: types.long_double_from_double(value)

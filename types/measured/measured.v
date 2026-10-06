@@ -68,6 +68,10 @@ pub fn representation() types.Representation {
 	aligns[types.Kind.double] = 8
 	sizes[types.Kind.long_double] = 16
 	aligns[types.Kind.long_double] = 16
+	// `_Float128` is the GNU 128-bit floating type. Measured on gcc 16.2.1 on
+	// this target with `sizeof(_Float128)` and `_Alignof(_Float128)`, both 16.
+	sizes[types.Kind.float128] = 16
+	aligns[types.Kind.float128] = 16
 	sizes[types.Kind.complex_float] = 8
 	aligns[types.Kind.complex_float] = 4
 	sizes[types.Kind.complex_double] = 16

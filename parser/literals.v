@@ -102,6 +102,31 @@ fn is_long_double_constant(text string) bool {
 	return last == `l` || last == `L`
 }
 
+// is_float128_constant says whether a floating constant is written with the
+// `f128` suffix, which C's Annex G and gcc give the `_Float128` type. The check
+// is asked only of a token the floating reader would take, so `1f128` - which is
+// not a floating constant, having no point and no exponent - is not one.
+fn is_float128_constant(text string) bool {
+	return text.len > 4 && (text.ends_with('f128') || text.ends_with('F128'))
+}
+
+// parse_float128_literal reads a `_Float128` constant into the value it names.
+// The digits are read by the same exact reader a long double constant uses, so
+// the value is rounded once to sixty-four bits of significand; see the comment
+// on the `float128` kind for what this back end does and does not compute with
+// a value of the type. The suffix is four characters, so the body the readers
+// take is the spelling with `f128` removed.
+fn parse_float128_literal(text string) !types.LongDouble {
+	if !is_float128_constant(text) {
+		return error('${text}: not a _Float128 constant')
+	}
+	body := text[..text.len - 4]
+	if body.len > 1 && body[0] == `0` && (body[1] == `x` || body[1] == `X`) {
+		return parse_hex_long_double(text, body)
+	}
+	return parse_decimal_long_double(text, body)
+}
+
 // parse_long_double_literal reads a long double constant into the value it
 // names, in the extended format the target gives `long double`.
 //

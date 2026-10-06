@@ -4,8 +4,6 @@
  * support additional floating types, which are not supported by all targets.
  * __float128 is available on i386, x86_64, IA-64, LoongArch and hppa HP-UX ...
  * other than HP-UX, __float128 is an alias for _Float128."
- *
- * unimplemented: the _Float128 type.
  */
 
 #include <stdio.h>

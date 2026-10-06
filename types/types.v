@@ -45,6 +45,18 @@ pub enum Kind {
 	float
 	double
 	long_double
+	// float128 is the GNU 128-bit floating type, `_Float128` and the
+	// `__float128` its header typedefs it to. gcc gives it the IEEE binary128
+	// interchange format, which this target stores in the same sixteen bytes
+	// its x87 extended `long double` uses. The kind is its own so that the
+	// name is a type of its own rather than a second spelling of `long
+	// double`, which holds a different format. What this back end does with a
+	// value of it is written on `is_extended` and in `codegen/long_double.v`:
+	// it stores, copies and converts one, and its arithmetic is computed in
+	// the x87 extended format, which is not binary128. Measured on gcc 16.2.1
+	// on this target, `sizeof(_Float128)` and `_Alignof(_Float128)` are both
+	// 16.
+	float128
 	complex_float
 	complex_double
 	complex_long_double
@@ -237,7 +249,20 @@ pub fn (k Kind) is_unsigned() bool {
 // is_floating says whether the kind is a real floating type. The complex types
 // are not here: they are a pair of floating values, not a floating value.
 pub fn (k Kind) is_floating() bool {
-	return k in [Kind.float, .double, .long_double]
+	return k in [Kind.float, .double, .long_double, .float128]
+}
+
+// is_extended says whether a kind is one this target stores in sixteen bytes of
+// memory and reads and writes through the x87 stack: `long double`, whose
+// format is the x87 extended one, and `_Float128`, whose format gcc gives as
+// IEEE binary128 and which this back end carries in the same storage and the
+// same conversions. The two are distinct kinds because their formats are
+// different; the shared answer is about how many bytes the object is and which
+// machine paths move those bytes. Arithmetic on a `_Float128` therefore runs in
+// the x87 extended format and is not IEEE binary128 arithmetic: see the comment
+// in `codegen/long_double.v`.
+pub fn (k Kind) is_extended() bool {
+	return k == .long_double || k == .float128
 }
 
 pub fn (k Kind) is_complex() bool {
@@ -316,9 +341,10 @@ pub fn (k Kind) rank() int {
 		.float { 7 }
 		.double { 8 }
 		.long_double { 9 }
-		.complex_float { 10 }
-		.complex_double { 11 }
-		.complex_long_double { 12 }
+		.float128 { 10 }
+		.complex_float { 11 }
+		.complex_double { 12 }
+		.complex_long_double { 13 }
 		else { -1 }
 	}
 }
@@ -591,6 +617,7 @@ fn (t Type) describe_unqualified() string {
 		.float { return 'float' }
 		.double { return 'double' }
 		.long_double { return 'long double' }
+		.float128 { return '__float128' }
 		.complex_float { return 'float _Complex' }
 		.complex_double { return 'double _Complex' }
 		.complex_long_double { return 'long double _Complex' }
@@ -774,6 +801,16 @@ pub fn long_double_type() Type {
 	}
 }
 
+// float128_type is the `_Float128` type, whose spelling gcc also writes
+// `__float128`. It is complete and sixteen bytes wide; the format its storage
+// holds is the topic of the comment on the kind and of `is_extended`.
+pub fn float128_type() Type {
+	return Type{
+		kind:     .float128
+		complete: true
+	}
+}
+
 pub fn complex_float_type() Type {
 	return Type{
 		kind:     .complex_float
@@ -817,6 +854,7 @@ pub fn scalar(kind Kind) ?Type {
 		.float { float_type() }
 		.double { double_type() }
 		.long_double { long_double_type() }
+		.float128 { float128_type() }
 		.complex_float { complex_float_type() }
 		.complex_double { complex_double_type() }
 		.complex_long_double { complex_long_double_type() }
