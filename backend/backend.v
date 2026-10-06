@@ -701,6 +701,13 @@ pub fn (t &Target) memory_fence() []u8 {
 	return t.encoders.memory_fence()
 }
 
+// unreachable is the machine's undefined instruction, which marks a point
+// control is not meant to reach. The language's `__builtin_unreachable` and
+// `__builtin_trap` are both this instruction on a machine that has one.
+pub fn (t &Target) unreachable() []u8 {
+	return t.encoders.unreachable()
+}
+
 // bit_scan_forward is the index of the lowest set bit, which is what the two
 // count-trailing builtins are worth. `wide` asks for the eight-byte form.
 pub fn (t &Target) bit_scan_forward(dst Register, src Register, wide bool) ![]u8 {

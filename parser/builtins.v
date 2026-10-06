@@ -35,7 +35,7 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__atomic_load_n', '__atomic_store_n', '__atomic_exchange_n', '__atomic_compare_exchange_n',
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
 	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p',
-	'__builtin_object_size', '__builtin_return_address']
+	'__builtin_object_size', '__builtin_return_address', '__builtin_unreachable', '__builtin_trap']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -111,6 +111,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_return_address' {
 			return p.parse_return_address(at)
+		}
+		'__builtin_unreachable', '__builtin_trap' {
+			return p.parse_no_argument_builtin(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -711,6 +714,26 @@ fn (mut p Parser) parse_return_address(at tokenize.Token) !ast.Expr {
 		name: '__builtin_return_address'
 		args: []
 		typ:  types.pointer_to(types.void_type())
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_no_argument_builtin reads the two builtins that take nothing and answer
+// nothing: `__builtin_unreachable()` marks a point control is not supposed to
+// reach, and `__builtin_trap()` stops the program there. Both are void, and both
+// arrive as an expression statement, so the call the reader builds is what the
+// back end answers with the machine's own undefined instruction.
+fn (mut p Parser) parse_no_argument_builtin(at tokenize.Token) !ast.Expr {
+	p.next() // (
+	if !p.expect_punct(')') {
+		p.error_at(at, 'unsupported: ${at.text} takes no arguments')
+		return error('the arguments of ${at.text}')
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: []
+		typ:  types.void_type()
 		line: at.line
 		col:  at.col
 	})

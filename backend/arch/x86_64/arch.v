@@ -1213,6 +1213,16 @@ pub fn trap() []u8 {
 	return [u8(0x0f), 0x05]
 }
 
+// unreachable encodes `ud2`, the undefined instruction: the processor raises an
+// invalid-opcode fault and never returns to the code the compiler emitted after
+// it. It is what both `__builtin_unreachable` and `__builtin_trap` are on this
+// machine, the first because a point control reaches is undefined and an
+// instruction the processor refuses is the honest way to say so, the second
+// because gcc stops the program the same way.
+pub fn unreachable() []u8 {
+	return [u8(0x0f), 0x0b]
+}
+
 // The encoders below have the same shape: each takes the displacement it should
 // carry and returns the finished instruction. Nothing about the length depends
 // on the displacement, so an emitter that does not know the address yet reserves
@@ -2758,6 +2768,7 @@ pub:
 	test_reg32                      fn (Register) ![]u8                     = unsafe { nil }
 	test_reg64                      fn (Register) ![]u8                     = unsafe { nil }
 	trap                            fn () []u8                              = unsafe { nil }
+	unreachable                     fn () []u8                              = unsafe { nil }
 	unsigned_int_to_double          fn (Register, Register) ![]u8           = unsafe { nil }
 	unsigned_word_to_double         fn (Register, Register, Register) ![]u8 = unsafe { nil }
 	xor_reg64                       fn (Register, Register) ![]u8           = unsafe { nil }
@@ -2905,6 +2916,7 @@ pub fn encoders() Encoders {
 		test_reg32:                      &test_reg32
 		test_reg64:                      &test_reg64
 		trap:                            &trap
+		unreachable:                     &unreachable
 		unsigned_int_to_double:          &unsigned_int_to_double
 		unsigned_word_to_double:         &unsigned_word_to_double
 		xor_reg64:                       &xor_reg64

@@ -9339,6 +9339,10 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		'__builtin_return_address' {
 			return e.emit_return_address(call)
 		}
+		'__builtin_unreachable', '__builtin_trap' {
+			e.append(e.target.unreachable())
+			return
+		}
 		'atexit' {
 			// glibc defines atexit in libc_nonshared.a, the static half of
 			// the C library, and not in the shared libc.so.6 whose dynamic
