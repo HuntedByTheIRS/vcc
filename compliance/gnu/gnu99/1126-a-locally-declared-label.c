@@ -4,8 +4,6 @@
  * in any nested block scope. A local label is just like an ordinary label, but
  * you can only reference it (with a goto statement, or by taking its address)
  * within the block in which it is declared."
- *
- * unimplemented: a local label declared with __label__.
  */
 
 #include <stdio.h>

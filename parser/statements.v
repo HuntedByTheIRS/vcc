@@ -69,6 +69,9 @@ fn (mut p Parser) parse_statement_inner() ![]ast.Stmt {
 		if t.text == '__asm__' || t.text == '__asm' {
 			return p.parse_asm_statement()
 		}
+		if t.text == '__label__' {
+			return p.parse_local_label_declaration()
+		}
 		if t.text == 'return' {
 			return p.parse_return_statement()
 		}
@@ -1065,6 +1068,42 @@ fn (mut p Parser) parse_loop_jump(t tokenize.Token) []ast.Stmt {
 		line: t.line
 		col:  t.col
 	}]
+}
+
+// parse_local_label_declaration reads `__label__ name [, name]* ;`, which
+// declares the names as labels local to the block the declaration sits in. This
+// tree's labels are already names for a place inside one function, which is the
+// namespace the declaration asks for, so the names are read and checked and
+// nothing is declared here: what the declaration adds is a scope restriction
+// gcc enforces and this reader does not, and a goto or a taken address that
+// names one of the names is read by the label machinery that already exists. A
+// declared label the function never writes is accepted, which is what gcc does
+// with `__label__ x;` and no other mention of x.
+fn (mut p Parser) parse_local_label_declaration() ![]ast.Stmt {
+	start := p.next() // __label__
+	for {
+		name := p.peek()
+		if name.kind != .identifier {
+			p.error_at(name, 'unsupported: expected a label name after ${start.text}, found ${describe(name)}')
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		if is_keyword(name.text) {
+			p.error_at(name, 'unsupported: ${name.text} is a keyword and cannot name a label')
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		p.next() // the label name
+		if !p.at_punct(',') {
+			break
+		}
+		p.next() // ,
+	}
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	return []ast.Stmt{}
 }
 
 // parse_label_statement reads `name: stmt`. The label is a place in the
