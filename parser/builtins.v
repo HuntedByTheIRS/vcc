@@ -687,11 +687,31 @@ fn (mut p Parser) parse_object_size(at tokenize.Token) !ast.Expr {
 		p.error_at(at, 'unsupported: __builtin_object_size asks how many bytes ${describe_operand(operand)} names, and this compiler did not resolve its type')
 		return error('no type for the operand')
 	}
+	mut subject := operand.typ
+	// The object the answer is about. `&name` names the object itself, so the answer
+	// is the size of what the operand is the address of, which is what gcc reads:
+	// `__builtin_object_size(&arr, 0)` for `int arr[10]` is 40 and not the eight a
+	// pointer is worth, and `__builtin_object_size(&x, 0)` for an int x is 4.
+	//
+	// Only a name is read this way. `&a[i]`, `&s.m` and `&*p` are the address of a
+	// part of an object, or of whatever a pointer points at, and the bytes from that
+	// address to the end of the object are a question about the part's place in it:
+	// gcc folds those to the containing object's size less the offset, and this
+	// reader answers -1, which is the answer the construct has for an object it
+	// cannot state. A number that is not the object's size would be worse than the
+	// unknown.
+	if operand is ast.Unary {
+		if operand.op == '&' {
+			if operand.expr is ast.Ident {
+				subject = operand.expr.typ
+			}
+		}
+	}
 	mut size := i64(-1)
-	if known := p.representation.size_of(operand.typ) {
+	if known := p.representation.size_of(subject) {
 		// A pointer's own type has no object size: what it names is elsewhere. An
 		// array, an object and a literal do, and that is what the answer is.
-		if operand.typ.kind != .pointer {
+		if subject.kind != .pointer {
 			size = i64(known)
 		}
 	}
