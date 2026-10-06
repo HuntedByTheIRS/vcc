@@ -110,6 +110,28 @@ mut:
 	// assert hands `__PRETTY_FUNCTION__` to __assert_fail under a GNU dialect,
 	// so the C this compiler has to compile reads one.
 	current_function string
+	// function_symbol and enclosing_symbol are the same two functions as the
+	// back end mangles them. A nested function's name is its enclosing
+	// function's symbol and its own name joined by a dot, which a C identifier
+	// cannot spell, so the nested definition has a symbol no top-level name can
+	// collide with. function_symbol is the symbol of the function whose body is
+	// being read and enclosing_symbol that of the function it is written in,
+	// both empty at the top level.
+	function_symbol  string
+	enclosing_symbol string
+	// nested_names maps the name a nested function was written with to the
+	// symbol it is emitted under, for the name's scope: a call inside the
+	// enclosing function names the nested function and the call is written
+	// against the symbol. It holds the nested functions of the function whose
+	// body is being read, and is set aside and given back around each top-level
+	// definition so one function's nested names do not leak into the next.
+	nested_names map[string]string
+	// nested_used is every nested symbol already handed out, so two nested
+	// functions may share a written name in different blocks without landing on
+	// one symbol: a name the file repeats gets a number appended to it.
+	nested_used map[string]bool
+	// nested_serial numbers those repeats.
+	nested_serial int
 	// pending_bounds is a file-scope array bound whose expression names something
 	// this reader did not resolve. Its report waits until the whole file has been
 	// read, because whether a name is declared anywhere is a question only the end
@@ -220,6 +242,8 @@ pub fn parse_for(tokens []tokenize.Token, target ?backend.Target) Result {
 		representation: representation_of(target)
 		declared:       map[string]bool{}
 		ident_span:     map[string]IdentSpan{}
+		nested_names:   map[string]string{}
+		nested_used:    map[string]bool{}
 	}
 	p.declare_argument_list()
 	p.index_identifiers()
@@ -2690,6 +2714,22 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 			return p.parse_builtin_expression(t)!
 		}
 
+		// A nested function is visible under the name it was written with, but
+		// only so that the body can call it. Its address needs a trampoline, a
+		// small stub that puts the enclosing frame pointer into the chain
+		// register before jumping into the function, which this compiler does
+		// not write: a use of the name that is not a call is refused here, by
+		// name, rather than resolved to an object that is not there.
+		if t.text in p.nested_names && !p.at_punct('(') {
+			p.error_at(t, 'unsupported: the name ${t.text} is a nested function, and taking its address or using it as a value is not implemented')
+			return ast.Expr(ast.Ident{
+				name: t.text
+				typ:  p.resolve(t.text)
+				line: t.line
+				col:  t.col
+			})
+		}
+
 		if p.at_punct('.') || p.at_punct('->') {
 			member := p.parse_member_path(t.text, t, p.at_punct('->'), ?ast.Expr(none))!
 			return ast.Expr(*member)
@@ -3070,9 +3110,14 @@ fn (mut p Parser) checked_arguments(signature types.Type, args []ast.Expr, at to
 fn (mut p Parser) call(callee ast.Expr, args []ast.Expr) !ast.Expr {
 	if callee is ast.Ident {
 		name := (callee as ast.Ident).name
+		// A nested function is visible under the name it was written with and
+		// emitted under the symbol its enclosing function gives it. The call is
+		// written against the symbol, which is the name the emitter and the
+		// linker see, and the name it was written with resolves to nothing.
+		symbol := p.nested_names[name] or { name }
 		at := tokenize.Token{
 			kind: .identifier
-			text: name
+			text: symbol
 			line: callee.line
 			col:  callee.col
 		}
@@ -3087,7 +3132,7 @@ fn (mut p Parser) call(callee ast.Expr, args []ast.Expr) !ast.Expr {
 			})
 		}
 		return ast.Expr(ast.Call{
-			name: name
+			name: symbol
 			args: args
 			typ:  typ
 			line: callee.line
