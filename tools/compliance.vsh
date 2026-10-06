@@ -20,7 +20,7 @@
 //
 //   v run tools/compliance.vsh                        # build the tree, then run every test
 //   v run tools/compliance.vsh --compiler /tmp/vcc    # a compiler you already built
-//   v run tools/compliance.vsh --only 017 018         # the named tests only
+//   v run tools/compliance.vsh --only 0017 0018      # the named tests only
 //   v run tools/compliance.vsh --define C99_TRIGRAPHS # include the gated tests
 //   v run tools/compliance.vsh --list                 # print what would run
 //   v run tools/compliance.vsh --count                # print how many tests there are
@@ -29,6 +29,12 @@
 // compiler accepts only when NAME is defined, so it is skipped unless --define
 // names it. The construct is off by default, and running the check with it off
 // would pass by not compiling the thing under test.
+//
+// A test carrying an `expects-refusal:` line is a program that breaks a
+// constraint, so the standard requires a conforming implementation to diagnose
+// it. The refusal is the check: a program that fails to compile has passed, and
+// one the compiler accepts is a finding, because a compiler that takes it has
+// not done what the standard asks. Such a test is never run.
 //
 // The floor below is the number of test files that landed. Losing one is a
 // failure; adding one is not, so it is a floor and not an equality.
@@ -163,9 +169,16 @@ fn main() {
 
 	mut problems := []string{}
 	mut skipped := 0
+	mut refused := 0
 	for outcome in work.outcomes {
 		if outcome.stage == 'skip' {
 			skipped++
+			continue
+		}
+		// a program the standard requires a diagnostic for, which the compiler
+		// refused: the check, and not a problem
+		if outcome.stage == 'refused' {
+			refused++
 			continue
 		}
 		if outcome.stage == 'ok' {
@@ -173,8 +186,8 @@ fn main() {
 		}
 		problems << '${outcome.file}: ${outcome.stage}: ${outcome.detail}'
 	}
-	ran := work.outcomes.len - problems.len - skipped
-	println('ran:        ${ran} passed, ${problems.len} failed, ${skipped} skipped in ${elapsed:.1f}s')
+	passed := work.outcomes.len - problems.len - skipped - refused
+	println('ran:        ${passed} passed, ${refused} refused, ${problems.len} failed, ${skipped} skipped in ${elapsed:.1f}s')
 
 	// the whole corpus in one translation unit, which is what step 3 of the
 	// bootstrap chain compiles and what the check count floor is about
@@ -306,13 +319,20 @@ fn run_one(test Test, compiler string, scratch string, defines []string) Outcome
 	if needs_define(required_define(path), defines) {
 		return Outcome{label, 'skip', 'needs -D${required_define(path)}'}
 	}
+	wants_refusal := expects_refusal(path)
 	stem := test.name.all_before_last('.')
 	slug := suite_slug(test.suite)
 	flags := suite_flags(test.mode, defines)
 	exe := os.join_path(scratch, 'bin', slug, stem)
 	build := os.execute('cd ${os.quoted_path(test.dir)} && ${os.quoted_path(compiler)} ${flags} ${os.quoted_path(test.name)} -o ${os.quoted_path(exe)} 2>&1')
 	if build.exit_code != 0 {
+		if wants_refusal {
+			return Outcome{label, 'refused', ''}
+		}
 		return Outcome{label, 'build', first_lines(build.output, 3)}
+	}
+	if wants_refusal {
+		return Outcome{label, 'accept', 'the standard requires a diagnostic for this program and the compiler compiled it'}
 	}
 	// each test gets its own directory: several write c99_stdio_*.txt, and one
 	// directory for the whole run lets them read each other's leavings
@@ -412,6 +432,20 @@ fn required_define(path string) string {
 		}
 	}
 	return ''
+}
+
+// expects_refusal says whether a test carries the `expects-refusal:` marker,
+// which names it as a program the standard requires a conforming implementation
+// to diagnose. The marker carries no value: which constraint the program breaks
+// is in the test's own comment and not something the runner reads.
+fn expects_refusal(path string) bool {
+	text := os.read_file(path) or { return false }
+	for line in text.split_into_lines() {
+		if line.contains('expects-refusal:') {
+			return true
+		}
+	}
+	return false
 }
 
 fn matches_only(entry string, only []string) bool {
@@ -534,7 +568,7 @@ fn parse_options(args []string) Options {
 
 fn usage() {
 	println('usage: v run tools/compliance.vsh [--compiler PATH] [--define NAME]...')
-	println('                                  [--only NNN]... [-j N] [--list] [--count]')
+	println('                                  [--only NNNN]... [-j N] [--list] [--count]')
 }
 
 fn cleanup_paths(paths []string) {

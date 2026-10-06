@@ -74,7 +74,7 @@ library.
 ```sh
 v run tools/compliance.vsh                        # build the tree, then run everything
 v run tools/compliance.vsh --compiler /tmp/vcc    # a compiler you already built
-v run tools/compliance.vsh --only 017 018         # the tests you name
+v run tools/compliance.vsh --only 0017 0018       # the tests you name
 v run tools/compliance.vsh --define C99_TRIGRAPHS # include the gated tests too
 v run tools/compliance.vsh --list                 # print what would run
 v run tools/compliance.vsh --count                # print how many tests there are
