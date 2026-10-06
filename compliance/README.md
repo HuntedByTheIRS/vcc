@@ -93,18 +93,25 @@ number and title:
      * unimplemented: a case label holding a range of values.
      */
 
-26 tests, numbered 1125 to 1150, name a GNU construct this compiler does not
-read yet: case ranges, a label declared with `__label__`, the address of a label
-and a computed goto, nested functions, `__auto_type`, `_Countof`, `__alignof__`,
-a variadic macro that names its arguments, the `?:` with its middle operand
-omitted, `__FUNCTION__` and `__PRETTY_FUNCTION__`, a structure with no members, a
-cast to a union type, the `[first ... last]` designated initializer, `_Float128`,
-the decimal floating types, the `cleanup` attribute, the built-ins
-`__builtin_add_overflow` and `__builtin_mul_overflow`, a vector type declared
-with `__attribute__((vector_size(N)))`, `__builtin_constant_p`, the bit-operation
-and byte-swapping built-ins, `__builtin_unreachable` and `__builtin_trap`,
-`__builtin_alloca`, `__builtin_object_size`, `__builtin_return_address`, and
-`asm goto`.
+26 tests, numbered 1125 to 1150, name a GNU construct this compiler did not read
+when they were written: case ranges, a label declared with `__label__`, the
+address of a label and a computed goto, nested functions, `__auto_type`,
+`_Countof`, `__alignof__`, a variadic macro that names its arguments, the `?:`
+with its middle operand omitted, `__FUNCTION__` and `__PRETTY_FUNCTION__`, a
+structure with no members, a cast to a union type, the `[first ... last]`
+designated initializer, `_Float128`, the decimal floating types, the `cleanup`
+attribute, the built-ins `__builtin_add_overflow` and `__builtin_mul_overflow`, a
+vector type declared with `__attribute__((vector_size(N)))`,
+`__builtin_constant_p`, the bit-operation and byte-swapping built-ins,
+`__builtin_unreachable` and `__builtin_trap`, `__builtin_alloca`,
+`__builtin_object_size`, `__builtin_return_address`, and `asm goto`.
+
+Twenty-five of the 26 compile and run now. The one that does not is 1139, the
+decimal floating types: `_Decimal32`, `_Decimal64` and `_Decimal128` are refused
+by name where they are written, with the construct and its location, because this
+compiler has no decimal encoding and a number that is not the one the source
+wrote is worse than a refusal. Its `unimplemented:` line is the only one left in
+the range.
 
 Each was compiled and run under `gcc -std=gnu99` first: it exits 0 and prints
 nothing. That is what makes "the program is right and only this compiler is
