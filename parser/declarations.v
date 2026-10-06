@@ -35,8 +35,14 @@ const type_qualifiers = ['const', 'volatile', 'restrict', '_Atomic', '__const', 
 
 // builtin_types are the type words of the language. A type can also be a name
 // this file has typedef'd, which is why the parser carries that list.
+//
+// A word here that no kind in `types/` answers is a type the language has and
+// this compiler does not write, and the reader refuses it by name: that is what
+// `_Imaginary` and the decimal types below are, a refusal with a location rather
+// than the parse accident a word nothing recognises would cause.
 const builtin_types = ['void', 'char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double',
-	'_Bool', '_Complex', '_Imaginary', '__int128', '__float128']
+	'_Bool', '_Complex', '_Imaginary', '_Decimal32', '_Decimal64', '_Decimal128', '__int128',
+	'__float128']
 
 // bitint_words are the spellings that open a _BitInt specifier. C23 added the
 // type, and its width is written in parentheses after the word: `_BitInt(128)`
@@ -83,14 +89,14 @@ const typeof_unqual_words = ['typeof_unqual', '__typeof_unqual__']
 // this reader has not implemented - a cast is where it happens, `(int)d` reads
 // its `int` as a name - and it is refused by the diagnostic for that construct
 // rather than reported a second time as a missing declaration.
-const keywords = ['_Atomic', '_BitInt', '_Bool', '_Complex', '_Imaginary', '_Thread_local', 'auto',
-	'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern',
-	'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short',
-	'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'typeof', 'typeof_unqual', 'union',
-	'unsigned', 'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
-	'__extension__', '__inline', '__inline__', '__int128', '__restrict', '__restrict__', '__signed',
-	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile',
-	'__volatile__', '__auto_type', '__float128']
+const keywords = ['_Atomic', '_BitInt', '_Bool', '_Complex', '_Decimal32', '_Decimal64', '_Decimal128',
+	'_Imaginary', '_Thread_local', 'auto', 'break', 'case', 'char', 'const', 'continue', 'default',
+	'do', 'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long',
+	'register', 'restrict', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch',
+	'typedef', 'typeof', 'typeof_unqual', 'union', 'unsigned', 'void', 'volatile', 'while', '__asm',
+	'__asm__', '__attribute__', '__const', '__const__', '__extension__', '__inline', '__inline__',
+	'__int128', '__restrict', '__restrict__', '__signed', '__signed__', '__thread', '__typeof',
+	'__typeof__', '__typeof_unqual__', '__volatile', '__volatile__', '__auto_type', '__float128']
 
 // is_keyword says whether a spelling is one of the reserved words. Nothing in the
 // language may use one as an identifier, so the question is asked by the declarator

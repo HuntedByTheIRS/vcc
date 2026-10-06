@@ -2351,3 +2351,27 @@ fn test_a_file_scope_auto_without_an_initializer_is_refused_by_name() {
 	assert result.diagnostics.len == 1
 	assert result.diagnostics[0].msg.contains('auto needs an initializer')
 }
+
+// The decimal floating types are types the language has and this compiler does
+// not write. Each is refused by name where the declaration asks for it, rather
+// than left to be read as a name the file never declared: a program that writes
+// one is a program about that construct, and the diagnostic has to say so. The
+// words are reserved here for the same reason, so one of them cannot quietly
+// become an object's name either.
+fn test_a_decimal_floating_type_is_refused_by_name_at_its_declaration() {
+	result := declarations_of('_Decimal32 a = 1;\n_Decimal64 b = 2;\n_Decimal128 c = 3;\n')
+	assert result.diagnostics.len == 3
+	assert result.diagnostics[0].msg.contains('unsupported type _Decimal32')
+	assert result.diagnostics[0].line == 1
+	assert result.diagnostics[1].msg.contains('unsupported type _Decimal64')
+	assert result.diagnostics[2].msg.contains('unsupported type _Decimal128')
+}
+
+// A decimal type resolves to no size, so a `sizeof` of one is refused by name
+// too, which is the other half of the same construct: the test that measures the
+// three types asks for it there as well.
+fn test_a_sizeof_of_a_decimal_floating_type_is_refused_by_name() {
+	result := declarations_of('int f(void) {\n	int n = sizeof(_Decimal32);\n	return n;\n}\n')
+	assert result.diagnostics.len > 0
+	assert result.diagnostics.any(it.msg.contains('_Decimal32'))
+}
