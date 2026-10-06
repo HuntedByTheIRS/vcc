@@ -36,6 +36,13 @@
 // one the compiler accepts is a finding, because a compiler that takes it has
 // not done what the standard asks. Such a test is never run.
 //
+// A test carrying an `unimplemented:` line is the other way round: a program the
+// standard allows, which this compiler does not read yet. The refusal is the
+// state of the compiler and not a problem with the test, so it is counted as a
+// gap and named in the summary. The program is written as a check, and gcc
+// compiles and runs it, so the day this compiler does too the test passes and
+// the stale line is reported: what these tests hold is the list of what is left.
+//
 // The floor below is the number of test files that landed. Losing one is a
 // failure; adding one is not, so it is a floor and not an equality.
 
@@ -170,6 +177,9 @@ fn main() {
 	mut problems := []string{}
 	mut skipped := 0
 	mut refused := 0
+	mut gaps := 0
+	mut gap_list := []string{}
+	mut closed := []string{}
 	for outcome in work.outcomes {
 		if outcome.stage == 'skip' {
 			skipped++
@@ -181,13 +191,33 @@ fn main() {
 			refused++
 			continue
 		}
+		// a construct the standard has and this compiler does not read yet: the
+		// refusal is the state of the compiler, and counting it is what makes
+		// the run say how much of the standard is left
+		if outcome.stage == 'gap' {
+			gaps++
+			gap_list << '${outcome.file}: ${outcome.detail}'
+			continue
+		}
+		// the construct compiles and the check passes, so this is no longer a
+		// gap and the line that said it was one is out of date
+		if outcome.stage == 'closed' {
+			closed << outcome.file
+			continue
+		}
 		if outcome.stage == 'ok' {
 			continue
 		}
 		problems << '${outcome.file}: ${outcome.stage}: ${outcome.detail}'
 	}
-	passed := work.outcomes.len - problems.len - skipped - refused
-	println('ran:        ${passed} passed, ${refused} refused, ${problems.len} failed, ${skipped} skipped in ${elapsed:.1f}s')
+	passed := work.outcomes.len - problems.len - skipped - refused - gaps - closed.len
+	println('ran:        ${passed} passed, ${refused} refused, ${gaps} not implemented, ${problems.len} failed, ${skipped} skipped in ${elapsed:.1f}s')
+	for line in gap_list {
+		println('            ${line}')
+	}
+	for name in closed {
+		println('closed:     ${name} compiles now, so its unimplemented: line can go')
+	}
 
 	// the whole corpus in one translation unit, which is what step 3 of the
 	// bootstrap chain compiles and what the check count floor is about
@@ -320,6 +350,7 @@ fn run_one(test Test, compiler string, scratch string, defines []string) Outcome
 		return Outcome{label, 'skip', 'needs -D${required_define(path)}'}
 	}
 	wants_refusal := expects_refusal(path)
+	gap := unimplemented_construct(path)
 	stem := test.name.all_before_last('.')
 	slug := suite_slug(test.suite)
 	flags := suite_flags(test.mode, defines)
@@ -328,6 +359,9 @@ fn run_one(test Test, compiler string, scratch string, defines []string) Outcome
 	if build.exit_code != 0 {
 		if wants_refusal {
 			return Outcome{label, 'refused', ''}
+		}
+		if gap != '' {
+			return Outcome{label, 'gap', gap}
 		}
 		return Outcome{label, 'build', first_lines(build.output, 3)}
 	}
@@ -347,6 +381,11 @@ fn run_one(test Test, compiler string, scratch string, defines []string) Outcome
 	finding := finding_output(run.output)
 	if finding != '' {
 		return Outcome{label, 'output', first_lines(finding, 3)}
+	}
+	// the construct compiles and the check passes, so the line that says the
+	// compiler cannot do this is out of date
+	if gap != '' {
+		return Outcome{label, 'closed', gap}
 	}
 	return Outcome{label, 'ok', ''}
 }
@@ -446,6 +485,21 @@ fn expects_refusal(path string) bool {
 		}
 	}
 	return false
+}
+
+// unimplemented_construct reads the `unimplemented: X` line a test carries: X is
+// the construct, part of the standard, that this compiler does not read yet. A
+// test carrying one compiles back under `expects-refusal` and lands as a gap, so
+// what the corpus holds is the list of what is left to do rather than a list of
+// what a compiler cannot do. The line goes the day the construct compiles.
+fn unimplemented_construct(path string) string {
+	text := os.read_file(path) or { return '' }
+	for line in text.split_into_lines() {
+		if line.contains('unimplemented:') {
+			return line.all_after('unimplemented:').trim_space()
+		}
+	}
+	return ''
 }
 
 fn matches_only(entry string, only []string) bool {
