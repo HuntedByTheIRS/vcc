@@ -4,8 +4,6 @@
  * "With extended asm you can read and write C variables from assembler and
  * perform jumps from assembler code to C labels. ... asm asm-qualifiers
  * (AssemblerTemplate : OutputOperands : InputOperands : Clobbers : GotoLabels)"
- *
- * unimplemented: an asm goto whose GotoLabels name a C label.
  */
 
 #include <stdio.h>

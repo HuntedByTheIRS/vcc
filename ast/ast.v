@@ -442,6 +442,14 @@ pub:
 	// later pass may not keep across the statement, which is the whole of what
 	// an accepted barrier tells the optimizer.
 	asm_clobbers []string
+	// asm_is_goto says the statement was written `asm goto`, whose fifth list
+	// names the C labels the template may jump to, and asm_goto_labels is that
+	// list, each a label name as the file wrote it. A `%lN` in the template
+	// refers to the Nth of them, counting from zero. This is the shape glibc
+	// uses to reach a label from inside an instruction, which an ordinary goto
+	// cannot do because it is not an instruction.
+	asm_is_goto     bool
+	asm_goto_labels []string
 }
 
 // The rest of this file is how a statement answers for what is in its extra
@@ -575,6 +583,22 @@ pub fn (stmt Stmt) asm_inputs() int {
 pub fn (stmt Stmt) asm_clobbers() []string {
 	if extra := stmt.extra {
 		return extra.asm_clobbers
+	}
+	return []
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_is_goto() bool {
+	if extra := stmt.extra {
+		return extra.asm_is_goto
+	}
+	return false
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_goto_labels() []string {
+	if extra := stmt.extra {
+		return extra.asm_goto_labels
 	}
 	return []
 }

@@ -66,7 +66,7 @@ fn (mut p Parser) parse_statement_inner() ![]ast.Stmt {
 		}]
 	}
 	if t.kind == .identifier {
-		if t.text == '__asm__' || t.text == '__asm' {
+		if t.text == '__asm__' || t.text == '__asm' || p.asm_is_a_statement() {
 			return p.parse_asm_statement()
 		}
 		if t.text == '__label__' {
@@ -171,13 +171,26 @@ fn (mut p Parser) parse_simple_statement() []ast.Stmt {
 // consumed without being kept, because a statement this reader may refuse is
 // not a place to resolve names for.
 fn (mut p Parser) parse_asm_statement() []ast.Stmt {
-	start := p.next() // __asm__ or __asm
-	// The qualifier says the statement may not be deleted when its outputs are
-	// unused. It changes nothing this reader does, and it is read so that the
-	// parenthesis after it is where the reader looks for it.
-	if p.peek().kind == .identifier
-		&& (p.peek().text == 'volatile' || p.peek().text == '__volatile__') {
-		p.next()
+	start := p.next() // __asm__ or __asm or asm
+	// The qualifiers say what the statement is: `volatile` that it may not be
+	// deleted when its outputs are unused, `goto` that its fifth list names the
+	// C labels its template may jump to, and `inline` that it should be inlined.
+	// They change nothing this reader does to the template, and they are read so
+	// that the parenthesis after them is where the reader looks for it. gcc
+	// accepts them in any order, which is why this is a loop and not one test.
+	mut is_goto := false
+	for p.peek().kind == .identifier {
+		word := p.peek().text
+		if word == 'goto' {
+			is_goto = true
+			p.next()
+			continue
+		}
+		if word == 'volatile' || word == '__volatile__' || word == 'inline' {
+			p.next()
+			continue
+		}
+		break
 	}
 	if !p.at_punct('(') {
 		p.error_at(p.peek(), 'unsupported: expected ( after ${start.text}, found ${describe(p.peek())}')
@@ -208,6 +221,7 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 	mut outputs := 0
 	mut inputs := 0
 	mut clobbers := []string{}
+	mut goto_labels := []string{}
 	if p.at_punct(':') {
 		p.next()
 		outputs = p.parse_asm_operands() or {
@@ -226,8 +240,23 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 					p.skip_statement()
 					return []ast.Stmt{}
 				}
+				if p.at_punct(':') {
+					p.next()
+					goto_labels = p.parse_asm_goto_labels() or {
+						p.skip_statement()
+						return []ast.Stmt{}
+					}
+				}
 			}
 		}
+	}
+	// A label list without the keyword is a shape gcc refuses, because the
+	// list has no meaning to a plain asm: it is read here so the refusal names
+	// the missing word rather than the `)` the reader would otherwise want.
+	if goto_labels.len > 0 && !is_goto {
+		p.error_at(start, 'unsupported: an asm statement that names labels must be written asm goto')
+		p.skip_statement()
+		return []ast.Stmt{}
 	}
 	if !p.expect_punct(')') {
 		p.skip_statement()
@@ -240,15 +269,75 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 	return [ast.Stmt{
 		kind:  .asm_stmt
 		extra: &ast.StmtExtra{
-			asm_text:     text
-			asm_spelling: spelling
-			asm_outputs:  outputs
-			asm_inputs:   inputs
-			asm_clobbers: clobbers
+			asm_text:        text
+			asm_spelling:    spelling
+			asm_outputs:     outputs
+			asm_inputs:      inputs
+			asm_clobbers:    clobbers
+			asm_is_goto:     is_goto
+			asm_goto_labels: goto_labels
 		}
 		line:  start.line
 		col:   start.col
 	}]
+}
+
+// parse_asm_goto_labels reads the fifth list of an asm goto, the C labels its
+// template may jump to, and answers with them as the file wrote them. The
+// cursor is just past the `:` that opens the list, and the list ends at the `)`
+// that closes the statement, which the caller reports. Each entry is a label
+// name: a label lives in a namespace of its own, so the name is read without
+// being looked up among the objects in scope, and a keyword is refused because
+// a keyword cannot be a name.
+fn (mut p Parser) parse_asm_goto_labels() ![]string {
+	mut labels := []string{}
+	for {
+		if p.at_punct(')') {
+			return labels
+		}
+		name := p.peek()
+		if name.kind != .identifier {
+			p.error_at(name, 'unsupported: expected a label name in an asm goto label list, found ${describe(name)}')
+			return error('asm goto label')
+		}
+		if is_keyword(name.text) {
+			p.error_at(name, 'unsupported: ${name.text} is a keyword in an asm goto label list and cannot name a label')
+			return error('asm goto label')
+		}
+		p.next()
+		labels << name.text
+		if p.at_punct(',') {
+			p.next()
+			continue
+		}
+		if p.at_punct(')') {
+			return labels
+		}
+		p.error_at(p.peek(), 'unsupported: expected , or ) in an asm goto label list, found ${describe(p.peek())}')
+		return error('asm goto label list')
+	}
+}
+
+// asm_is_a_statement says whether an `asm` at the cursor opens a statement and
+// is not naming an object. The plain spelling is a keyword only in a GNU
+// dialect, and in strict ISO C it is an ordinary identifier, so the word opens
+// an asm statement only where what follows can only be one: the parenthesis of
+// the template, or one of the qualifier words that come before it. A name
+// followed by anything else - `asm = 1;`, `asm [2];` - is left to the
+// expression reader, which is what reads it where asm is not reserved.
+fn (p Parser) asm_is_a_statement() bool {
+	if p.peek().kind != .identifier || p.peek().text != 'asm' {
+		return false
+	}
+	after := p.peek_at(1)
+	if after.kind == .punct {
+		return after.text == '('
+	}
+	if after.kind == .identifier {
+		return after.text == 'goto' || after.text == 'volatile' || after.text == '__volatile__'
+			|| after.text == 'inline'
+	}
+	return false
 }
 
 // parse_asm_operands reads one of the comma-separated operand lists of an asm
@@ -308,7 +397,10 @@ fn (mut p Parser) parse_asm_operands() !int {
 fn (mut p Parser) parse_asm_clobbers() ![]string {
 	mut clobbers := []string{}
 	for {
-		if p.at_punct(')') {
+		// A clobber list may be empty, and the `:` that opens the GotoLabels
+		// list is what ends it: `:::: label` is an empty clobber list followed
+		// by the fifth list, so the `:` closes this one the way `)` does.
+		if p.at_punct(')') || p.at_punct(':') {
 			return clobbers
 		}
 		if p.peek().kind != .string {

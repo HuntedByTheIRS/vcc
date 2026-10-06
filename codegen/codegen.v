@@ -1520,10 +1520,80 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 // skips a `static` definition nothing in the file names before its body is
 // read, and a statement in one of those is never seen at all.
 fn (mut e Emitter) emit_asm(stmt ast.Stmt) !void {
+	if stmt.asm_is_goto() || stmt.asm_goto_labels().len > 0 {
+		return e.emit_asm_goto(stmt)
+	}
 	if stmt.asm_text().len > 0 || stmt.asm_outputs() > 0 || stmt.asm_inputs() > 0 {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm statement ${stmt.asm_spelling()} is not emitted by this compiler')
 		return error('asm statement')
 	}
+}
+
+// emit_asm_goto emits the one shape an asm goto can take here: a template of
+// the form `jmp %lN`, an unconditional jump to the Nth label of the statement's
+// GotoLabels list, counting from zero. That is the shape glibc's helpers use to
+// reach a label, and it is the whole of what a template can mean in this back
+// end: this compiler writes machine code directly and has no assembler to run a
+// general template through, so any other template is refused by name, with its
+// text and its location, rather than guessed at. A template naming a label the
+// list does not hold is refused the same way, and a list with no labels is
+// refused because there is then no label for a template to name.
+fn (mut e Emitter) emit_asm_goto(stmt ast.Stmt) !void {
+	labels := stmt.asm_goto_labels()
+	if stmt.asm_outputs() > 0 || stmt.asm_inputs() > 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm goto ${stmt.asm_spelling()} has operands, and only a template that jumps to a named label is emitted here')
+		return error('asm goto with operands')
+	}
+	if labels.len == 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm goto ${stmt.asm_spelling()} names no label for its template to jump to')
+		return error('asm goto without a label')
+	}
+	index := jump_label_index(stmt.asm_text()) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm goto template ${stmt.asm_spelling()} is not an unconditional jump to a label, and only `jmp %lN` jumping to a named label is emitted here')
+		return error('asm goto template')
+	}
+	if index >= labels.len {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm goto template ${stmt.asm_spelling()} names label ${index}, and its list holds ${labels.len}')
+		return error('asm goto label')
+	}
+	name := labels[index]
+	if !(name in e.goto_used) {
+		e.goto_used[name] = LabelUse{
+			line: stmt.line
+			col:  stmt.col
+		}
+	}
+	e.jump(e.named_label(name))!
+}
+
+// jump_label_index is the label number a `jmp %lN` template names, counting from
+// zero, and none for every other template. This is the one shape the asm goto
+// path emits: an unconditional jump to one of the statement's own labels, with
+// `%l0` the first. Space around the words is allowed, which is what a template
+// written as "jmp %l0\n" leaves; the `%l` and the number are kept together,
+// because that is one operator and gcc reads it that way too.
+fn jump_label_index(text string) ?int {
+	s := text.trim_space()
+	if !s.starts_with('jmp') {
+		return none
+	}
+	rest := s[3..].trim_space()
+	if !rest.starts_with('%l') {
+		return none
+	}
+	digits := rest[2..]
+	if digits.len == 0 {
+		return none
+	}
+	mut value := 0
+	for i in 0 .. digits.len {
+		c := digits[i]
+		if c < 0x30 || c > 0x39 {
+			return none
+		}
+		value = value * 10 + int(c - 0x30)
+	}
+	return value
 }
 
 // emit_return writes the value into the register a function's results arrive in

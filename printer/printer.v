@@ -144,6 +144,13 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			}
 			.asm_stmt {
 				out << '${indent}asm statement ${stmt.asm_spelling()} at ${stmt.line}:${stmt.col}'
+				// An asm goto carries the labels its template may jump to,
+				// which name places in this function the way a goto's target
+				// does, so the printer names them beside the template.
+				labels := stmt.asm_goto_labels()
+				if stmt.asm_is_goto() || labels.len > 0 {
+					out << '${indent}jumping to ${labels.join(', ')}'
+				}
 			}
 		}
 		if expr := stmt.expr {
