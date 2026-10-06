@@ -9282,6 +9282,22 @@ fn (mut e Emitter) emit_byte_swap(call ast.Call, depth int) !void {
 	}
 }
 
+// emit_bit_operation answers `__builtin_popcount` with the number of one bits in
+// the argument, and `__builtin_parity` with that number masked to its low bit,
+// which is the parity the standard defines. The argument is evaluated into the
+// accumulator, the count is computed there through a scratch register, and the
+// parity is one more mask: the count's lowest bit is 1 exactly when the number of
+// one bits is odd.
+fn (mut e Emitter) emit_bit_operation(call ast.Call, depth int) !void {
+	e.emit_expr_at(call.args[0], depth + 1)!
+	register := e.accumulator(call.line, call.col)!
+	scratch := e.scratch(call.line, call.col)!
+	e.append(e.target.bit_count(register, scratch)!)
+	if call.name == '__builtin_parity' {
+		e.append(e.target.and_immediate(register, 1)!)
+	}
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -9359,6 +9375,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		'__builtin_bswap16', '__builtin_bswap32' {
 			return e.emit_byte_swap(call, depth)
+		}
+		'__builtin_popcount', '__builtin_parity' {
+			return e.emit_bit_operation(call, depth)
 		}
 		'atexit' {
 			// glibc defines atexit in libc_nonshared.a, the static half of

@@ -1661,6 +1661,51 @@ pub fn byte_swap_16(reg Register) ![]u8 {
 	return out
 }
 
+// bit_count encodes the number of one bits in a 32-bit value: `__builtin_popcount`.
+// This machine's popcnt is part of SSE4.2, which is not the baseline this tree
+// targets, and the tree already refuses to use lzcnt for the same reason, so the
+// count is the portable bit-twiddling sequence rather than an instruction the
+// baseline may not have. It is Hacker's Delight's popcount, which sums the bits a
+// field at a time: two-bit fields, then nibbles, then bytes, then the whole word.
+// Each step's mask keeps only the field it is summing, so the arithmetic never
+// carries into a neighbouring field.
+//
+// The sequence runs at the word width because the tree's shift and mask encoders
+// are word-width; a 32-bit value in the destination is widened to a clean word
+// first with a register-to-itself move, which on this machine writes the low half
+// and zeroes the upper half, so the wider shifts below see the 32-bit value and
+// not whatever the register happened to hold above it. `scratch` is a second
+// register the sequence needs; the destination is returned holding the count.
+pub fn bit_count(dst Register, scratch Register) ![]u8 {
+	mut out := []u8{cap: 64}
+	out << mov_reg32(dst, dst)! // the low word in a word register, nothing above it
+	// x = x - ((x >> 1) & 0x55555555): each two-bit field becomes its own count
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 1)!
+	out << and_immediate(scratch, 0x55555555)!
+	out << sub_reg32(dst, scratch)!
+	// x = (x & 0x33333333) + ((x >> 2) & 0x33333333): each four-bit field its count
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 2)!
+	out << and_immediate(scratch, 0x33333333)!
+	out << and_immediate(dst, 0x33333333)!
+	out << add_reg32(dst, scratch)!
+	// x = (x + (x >> 4)) & 0x0f0f0f0f: each byte its count
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 4)!
+	out << add_reg32(dst, scratch)!
+	out << and_immediate(dst, 0x0f0f0f0f)!
+	// x += x >> 8; x += x >> 16; x &= 0x3f: the four byte counts become the total
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 8)!
+	out << add_reg32(dst, scratch)!
+	out << mov_reg32(scratch, dst)!
+	out << shr_reg64(scratch, 16)!
+	out << add_reg32(dst, scratch)!
+	out << and_immediate(dst, 0x3f)! // the count of a 32-bit word is at most 32
+	return out
+}
+
 // bit_scan_reverse encodes `bsr`: the index of the highest set bit of the source
 // into the destination. It is bit_scan_forward with the other direction, opcode
 // 0f bd, and the same operand encoding; the source and the destination may be the
@@ -2684,6 +2729,7 @@ pub:
 	align_stack                     fn () []u8                          = unsafe { nil }
 	and_immediate                   fn (Register, i32) ![]u8            = unsafe { nil }
 	and_reg64                       fn (Register, Register) ![]u8       = unsafe { nil }
+	bit_count                       fn (Register, Register) ![]u8       = unsafe { nil }
 	bit_scan_forward                fn (Register, Register, bool) ![]u8 = unsafe { nil }
 	byte_swap_16                    fn (Register) ![]u8                 = unsafe { nil }
 	byte_swap_32                    fn (Register) ![]u8                 = unsafe { nil }
@@ -2834,6 +2880,7 @@ pub fn encoders() Encoders {
 		align_stack:                     &align_stack
 		and_immediate:                   &and_immediate
 		and_reg64:                       &and_reg64
+		bit_count:                       &bit_count
 		bit_scan_forward:                &bit_scan_forward
 		byte_swap_16:                    &byte_swap_16
 		byte_swap_32:                    &byte_swap_32

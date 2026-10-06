@@ -732,6 +732,14 @@ pub fn (t &Target) byte_swap_32(reg Register) ![]u8 {
 	return t.encoders.byte_swap_32(t.describe(reg))
 }
 
+// bit_count is the number of one bits in a 32-bit value, which is what
+// `__builtin_popcount` and, masked to its low bit, `__builtin_parity` ask for. It
+// takes a second register to sum through because the count is computed a field at
+// a time rather than read off in one instruction.
+pub fn (t &Target) bit_count(dst Register, scratch Register) ![]u8 {
+	return t.encoders.bit_count(t.describe(dst), t.describe(scratch))
+}
+
 // The two widenings a conversion between the value classes needs. A byte is
 // widened with its sign kept, which is what converting a value to a char is; a
 // word is widened into the whole register, which is what converting an int to a

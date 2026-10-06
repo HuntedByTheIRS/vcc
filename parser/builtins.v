@@ -36,7 +36,7 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__atomic_fetch_add', '__atomic_fetch_sub', '__atomic_thread_fence', '__builtin_ctz',
 	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p',
 	'__builtin_object_size', '__builtin_return_address', '__builtin_unreachable', '__builtin_trap',
-	'__builtin_bswap16', '__builtin_bswap32']
+	'__builtin_bswap16', '__builtin_bswap32', '__builtin_popcount', '__builtin_parity']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -118,6 +118,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_bswap16', '__builtin_bswap32' {
 			return p.parse_byte_swap(at)
+		}
+		'__builtin_popcount', '__builtin_parity' {
+			return p.parse_bit_operation(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -771,6 +774,33 @@ fn (mut p Parser) parse_byte_swap(at tokenize.Token) !ast.Expr {
 		name: at.text
 		args: args
 		typ:  typ
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_bit_operation reads `__builtin_popcount` and `__builtin_parity`, which
+// answer the number of one bits in the argument and that number modulo two. gcc
+// gives both the type int, and both are emitted as the machine's bit count with
+// the second masked to its low bit. An operand that is not an integer is refused
+// by name, for the same reason the counts of zero bits refuse one.
+fn (mut p Parser) parse_bit_operation(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 1 {
+		p.error_at(at, 'unsupported: ${at.text} takes one value')
+		return error('the argument of ${at.text}')
+	}
+	if !p.is_unresolved(args[0]) {
+		operand := p.value_type(args[0])
+		if operand.kind != .unknown && !operand.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} counts the one bits of an integer, and ${describe_operand(args[0])} is ${operand.describe()}')
+			return error('the operand of ${at.text}')
+		}
+	}
+	return ast.Expr(ast.Call{
+		name: at.text
+		args: args
+		typ:  types.int_type()
 		line: at.line
 		col:  at.col
 	})
