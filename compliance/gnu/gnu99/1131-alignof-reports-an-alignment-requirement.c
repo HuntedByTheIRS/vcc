@@ -5,8 +5,6 @@
  * object, or a type, or the minimum alignment usually required by a type. Its
  * syntax is just like sizeof ... after this declaration: struct foo { int x;
  * char y; } foo1; the value of __alignof__ (foo1.y) is 1"
- *
- * unimplemented: __alignof__.
  */
 
 #include <stdio.h>

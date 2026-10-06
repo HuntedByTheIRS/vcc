@@ -1550,6 +1550,14 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 	if t.kind == .identifier && t.text == '_Countof' {
 		return p.parse_countof(t)
 	}
+	// `__alignof__` is the GNU spelling of `_Alignof`, and like `_Countof` it is
+	// a keyword-like reserved word rather than a callable name: gcc 16.2.1 reads
+	// `__alignof__(x)` as an alignment and never as a call. Routing it here keeps
+	// the name from being read as an ordinary identifier, which is what made the
+	// argument list refuse the type words inside it.
+	if t.kind == .identifier && t.text == '__alignof__' {
+		return p.parse_alignof(t)
+	}
 	// `__extension__` marks the expression after it as an extension and is worth
 	// nothing itself. glibc writes it inside tgmath.h to keep a strict mode quiet
 	// about the statement expressions the macros use. The name is in the reserved
@@ -2332,6 +2340,65 @@ fn (mut p Parser) parse_countof(at tokenize.Token) !ast.Expr {
 	return ast.Expr(ast.IntLit{
 		value: i64(count)
 		text:  '_Countof(${spelling})'
+		typ:   types.unsigned_long_type()
+		line:  at.line
+		col:   at.col
+	})
+}
+
+// parse_alignof reads `__alignof__` and its operand, which is a type name or an
+// expression, and answers the boundary a value of the operand's type has to
+// start on.
+//
+// gcc 6.12.9 defines it: "The keyword __alignof__ determines the alignment
+// requirement of a function, object, or a type, or the minimum alignment usually
+// required by a type. Its syntax is just like sizeof." The alignment is a fact
+// about the target that the type model already lays an object out with, so it is
+// asked of the model here rather than computed, and the answer is a constant the
+// way a size is: the operand is not evaluated.
+//
+// The constant has the type the target gives size_t, which is unsigned long
+// here, the same as `sizeof`'s and `_Countof`'s, so the three compose without a
+// conversion between them.
+fn (mut p Parser) parse_alignof(at tokenize.Token) !ast.Expr {
+	p.next() // __alignof__
+	mut spelling := ''
+	mut alignment := 0
+	if p.at_punct('(') && p.starts_declaration(p.peek_at(1)) {
+		p.next() // (
+		spec, d, _ := p.parse_type_name_parts(0)!
+		if !p.expect_punct(')') {
+			return error('unclosed __alignof__')
+		}
+		declared := p.declared_type(spec.clause, d)
+		spelling = p.spelling_of(spec, d.pointer_count())
+		alignment = p.representation.align_of(declared) or {
+			p.error_at(at, 'unsupported: __alignof__ asks how ${spelling} is aligned, and this compiler has no alignment for it')
+			return error('no alignment for the type')
+		}
+	} else {
+		pending := if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1].len
+		} else {
+			0
+		}
+		operand := p.parse_prefix_operand(at)!
+		spelling = describe_operand(operand)
+		if p.is_unresolved(operand) {
+			p.error_at(at, 'unsupported: __alignof__ asks how ${spelling} is aligned, and this compiler did not resolve its type')
+			return error('no type for the operand')
+		}
+		if p.compound_pending.len > 0 {
+			p.compound_pending[p.compound_pending.len - 1] = p.compound_pending[p.compound_pending.len - 1][..pending]
+		}
+		alignment = p.representation.align_of(operand.typ) or {
+			p.error_at(at, 'unsupported: __alignof__ asks how ${spelling} is aligned, and this compiler has no alignment for ${operand.typ.describe()}')
+			return error('no alignment for the operand')
+		}
+	}
+	return ast.Expr(ast.IntLit{
+		value: i64(alignment)
+		text:  '__alignof__(${spelling})'
 		typ:   types.unsigned_long_type()
 		line:  at.line
 		col:   at.col

@@ -349,6 +349,29 @@ fn test_countof_of_a_non_array_is_a_constraint_violation() {
 	assert result.diagnostics[0].line == 1
 }
 
+// `__alignof__` answers the boundary a value of its operand's type has to start
+// on, which is the same question the type model lays an object out with. Measured
+// on gcc 16.2.1, `struct foo { int x; char y; } foo1; __alignof__(foo1.y)` is 1
+// and `__alignof__(struct foo)` equals `__alignof__(int)`. The constant has the
+// type a size has, so it composes with `sizeof` without a conversion.
+fn test_alignof_answers_the_alignment_of_a_type_and_of_a_member() {
+	from_member := parsed('int main(void) { struct foo { int x; char y; } foo1; return __alignof__(foo1.y); }')
+	assert from_member.diagnostics.len == 0
+	member := from_member.unit.decls[0].body[1].expr or {
+		assert false
+		return
+	}
+	assert (member as ast.IntLit).value == 1
+	assert (member as ast.IntLit).typ.describe() == 'unsigned long'
+	from_type := parsed('int main(void) { return __alignof__(struct foo { int x; char y; }); }')
+	assert from_type.diagnostics.len == 0
+	typed := from_type.unit.decls[0].body[0].expr or {
+		assert false
+		return
+	}
+	assert (typed as ast.IntLit).value == 4
+}
+
 // typeof is a specifier whose operand is a type name or an expression, and what
 // it names is the type of that operand: a declaration written through it is a
 // declaration of the type behind the name, which is why the reading is checked
