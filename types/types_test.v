@@ -122,6 +122,20 @@ fn test_the_conversion_ranks_are_the_standards() {
 	// _Complex`.
 	assert Kind.long_double.rank() < Kind.float128.rank()
 	assert Kind.float128.rank() < Kind.complex_float.rank()
+	// A decimal floating type outranks every integer and every ordinary
+	// floating type, and the three rank among themselves by width. Measured on
+	// gcc 16.2.1 with `_Generic` over the sum of two operands, the answer type
+	// is the wider decimal for every one of those pairs: `_Decimal32 +
+	// _Decimal32` is `_Decimal32`, `_Decimal32 + _Decimal64` is `_Decimal64`,
+	// `_Decimal64 + _Decimal128` is `_Decimal128`, `_Decimal32 + 1` is
+	// `_Decimal32` and `_Decimal128 + 1` is `_Decimal128`. A decimal and an
+	// ordinary floating type cannot be mixed at all - gcc refuses `1.5df + 1.0`
+	// with `cannot mix operands of decimal floating and other floating types` -
+	// so the ranks only have to be ordered above them.
+	assert Kind.float128.rank() < Kind.decimal32.rank()
+	assert Kind.decimal32.rank() < Kind.decimal64.rank()
+	assert Kind.decimal64.rank() < Kind.decimal128.rank()
+	assert Kind.decimal128.rank() < Kind.complex_float.rank()
 	assert Kind.void_.rank() == -1
 }
 
@@ -163,6 +177,43 @@ fn test_the_float128_kind_is_an_extended_type_of_its_own() {
 	assert float128_type().is_floating() && float128_type().kind.is_extended()
 	assert long_double_type().kind.is_extended()
 	assert !long_double_type().same(float128_type())
+}
+
+// The three decimal floating types of GNU C are `_Decimal32`, `_Decimal64` and
+// `_Decimal128`: complete types of their own kind, and floating types, because
+// their radix is ten rather than two - clause 6.2.5p10 names decimal floating
+// types beside float, double and long double. Measured on gcc 16.2.1 on this
+// target, each is a distinct type of four, eight and sixteen bytes, and the
+// precision each keeps is 7, 16 and 34 significant decimal digits
+// (`__DEC32_MANT_DIG__`, `__DEC64_MANT_DIG__` and `__DEC128_MANT_DIG__`), with
+// the largest power of ten 96, 384 and 6144.
+fn test_the_decimal_kinds_are_floating_types_of_their_own() {
+	assert decimal_type(.decimal32).kind == .decimal32
+	assert decimal_type(.decimal64).kind == .decimal64
+	assert decimal_type(.decimal128).kind == .decimal128
+	assert decimal_type(.decimal32).describe() == '_Decimal32'
+	assert decimal_type(.decimal64).describe() == '_Decimal64'
+	assert decimal_type(.decimal128).describe() == '_Decimal128'
+	for kind in [Kind.decimal32, .decimal64, .decimal128] {
+		assert kind.is_floating()
+		assert kind.is_decimal()
+		assert decimal_type(kind).is_complete()
+		assert decimal_type(kind).is_floating()
+	}
+	assert !Kind.double.is_decimal() && !Kind.float128.is_decimal()
+	// The three are one type each and not three spellings of one type.
+	assert !decimal_type(.decimal32).same(decimal_type(.decimal64))
+	assert !decimal_type(.decimal64).same(decimal_type(.decimal128))
+	assert !decimal_type(.decimal32).same(float_type())
+	assert decimal_digits(.decimal32) == 7
+	assert decimal_digits(.decimal64) == 16
+	assert decimal_digits(.decimal128) == 34
+	assert decimal_exponent_max(.decimal32) == 96
+	assert decimal_exponent_max(.decimal64) == 384
+	assert decimal_exponent_max(.decimal128) == 6144
+	assert decimal_bias(.decimal32) == 101
+	assert decimal_bias(.decimal64) == 398
+	assert decimal_bias(.decimal128) == 6176
 }
 
 fn test_a_pointer_says_what_it_points_at() {

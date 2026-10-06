@@ -6014,6 +6014,16 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 			e.append(e.target.move_immediate32(register, u32(expr.value))!)
 		}
 		ast.FloatLit {
+			if expr.typ.kind.is_decimal() {
+				// A decimal constant is a decimal coefficient and a power of
+				// ten, and no register holds that. This back end has no
+				// encoding for one yet, so the constant is refused by name
+				// with its location rather than materialized from `value`,
+				// which is zero for a decimal (ast.FloatLit) and would be a
+				// value nobody wrote.
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the decimal constant ${expr.text} is a ${expr.typ.describe()}, and this back end has no form for a decimal value yet')
+				return error('decimal constant')
+			}
 			if expr.typ.kind.is_extended() {
 				// A long double constant is materialized into a frame
 				// temporary. Its value is sixteen bytes and not a register
@@ -6369,6 +6379,16 @@ fn (mut e Emitter) emit_index(expr ast.Index, depth int) !void {
 // top-level object, whose storage is in the image and whose address is a
 // reference the layout fills in.
 fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, local bool, slot Slot) !void {
+	if expr.typ.kind.is_decimal() {
+		// An element of an array of a decimal type is a decimal value, and
+		// this back end has no form for one yet: reading the element's bytes
+		// as an integer of its width would answer with a number nobody wrote.
+		// The refusal is here because the named-array path reads every other
+		// element as an integer, where the general path refuses a type it has
+		// no width for.
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is a ${expr.typ.describe()}, and this back end has no form for a decimal value yet')
+		return error('decimal element')
+	}
 	if local {
 		e.emit_subscript_index(expr.index, depth + 1)!
 		base := e.slot_base_register(slot, expr.line, expr.col)!
@@ -12000,6 +12020,16 @@ fn (mut e Emitter) place_defined_objects() {
 		// not a function reached it, because the symbol table names them all.
 		if global.static_ {
 			e.program.internal[global.name] = true
+		}
+		if global.resolved.kind.is_decimal() {
+			// A top-level object of a decimal type is storage the image would
+			// have to hold four, eight or sixteen bytes of, and this back end
+			// has no encoding for a decimal value yet. It is refused by name
+			// with its location rather than dropped: the object is one the
+			// program can name, and an image without it would be a program
+			// whose linker failure or wrong answer says nothing about why.
+			e.diagnostics << problem(global.line, global.col, 'unsupported: ${global.name} is a top-level object of ${global.typ}, and this back end has no form for a decimal value yet')
+			continue
 		}
 		if _ := e.global_of(global.name) {
 		}

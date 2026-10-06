@@ -919,10 +919,20 @@ pub:
 	// those, and `value` is zero for it: the two are alternative representations
 	// of one constant at two widths, and a constant is one of them.
 	long_value ?types.LongDouble
-	text       string
-	typ        types.Type
-	line       int
-	col        int
+	// decimal_value is the value of a constant written with a decimal suffix,
+	// `df`, `dd` or `dl`, in the format its suffix chose. It is set only for one
+	// of those, and `value` is zero for it, the same way `long_value` is: the
+	// decimal formats hold a decimal coefficient and a power of ten, which no
+	// host number here holds. The kind field of the value is the kind its suffix
+	// named and `typ.kind` is the same kind, so a caller that has the literal's
+	// type and not its suffix can still tell what it is. It is zero for a
+	// constant that is not one of these, and a zero constant is a value the type
+	// tells apart: `typ.kind.is_decimal()` is the question.
+	decimal_value types.Decimal
+	text          string
+	typ           types.Type
+	line          int
+	col           int
 }
 
 // StrLit is one string literal. value is the bytes it names with the escapes

@@ -232,7 +232,15 @@ fn dump_leaf(expr ast.Expr, depth int, mut out []string) {
 		ast.FloatLit {
 			// The value is printed as a double rather than as the spelling it
 			// was written with, because what the emitter reads is the value.
-			out << '${indent}double ${expr.value} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			// A decimal constant is not a double and its double field is
+			// zero, so it prints the value it does hold, which is the digits
+			// and the power of ten, in the form the standard's conversion
+			// writes them.
+			if expr.typ.kind.is_decimal() {
+				out << '${indent}decimal ${expr.decimal_value.text()} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			} else {
+				out << '${indent}double ${expr.value} at ${expr.line}:${expr.col}${typed(expr.typ)}'
+			}
 		}
 		ast.ComplexLit {
 			// The imaginary constant's value is its imaginary part, and the

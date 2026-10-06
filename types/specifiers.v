@@ -151,6 +151,25 @@ pub fn from_specifiers(words []string) ?Kind {
 		}
 		return Kind.float128
 	}
+	if seen['_Decimal32'] || seen['_Decimal64'] || seen['_Decimal128'] {
+		// A decimal type is one word and takes no other: measured on gcc
+		// 16.2.1, `signed _Decimal32`, `unsigned _Decimal32`, `long
+		// _Decimal32` and `short _Decimal32` are each refused with `both
+		// 'signed' and '_Decimal32' in declaration specifiers`, and two of
+		// the three decimal words together with `two or more data types in
+		// declaration specifiers`. Only a qualifier may stand beside one,
+		// which the caller reads before these words arrive.
+		if longs != 0 || ints != 0 || seen.len != 1 {
+			return none
+		}
+		if seen['_Decimal32'] {
+			return Kind.decimal32
+		}
+		if seen['_Decimal64'] {
+			return Kind.decimal64
+		}
+		return Kind.decimal128
+	}
 	if seen.len > 0 {
 		for word, _ in seen {
 			if !word.starts_with('_BitInt(') {

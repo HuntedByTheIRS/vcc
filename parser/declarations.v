@@ -1915,6 +1915,21 @@ fn (mut p Parser) number_constant() ?NumberConstant {
 	}
 	t := p.next()
 	if is_floating_constant(t.text) {
+		if is_decimal_constant(t.text) {
+			// A decimal constant at file scope is a decimal coefficient and a
+			// power of ten, and this back end has no encoding for one yet, so
+			// there are no bytes to start the object with. The constant is read
+			// first, so that a suffix this compiler now knows is not reported as
+			// a character no floating constant holds, and then refused by name
+			// with its location. The emitter lane deletes this arm when it can
+			// write the encoding, and carries the value it reads here.
+			value := parse_decimal_literal(t.text) or {
+				p.error_at(t, err.msg())
+				return none
+			}
+			p.error_at(t, 'unsupported: the decimal constant ${t.text} is a ${types.decimal_type(value.kind).describe()}, and this back end has no form for a decimal value yet')
+			return none
+		}
 		if is_long_double_constant(t.text) {
 			value := parse_long_double_literal(t.text) or {
 				p.error_at(t, err.msg())
@@ -4455,6 +4470,13 @@ fn (p Parser) unsupported_type_word(spec DeclSpec, stars int) ?string {
 	if spec.clause.kind in [types.Kind.int128, .unsigned_int128] {
 		return none
 	}
+	// A decimal type is a type this reader resolved and a width the model has,
+	// four, eight or sixteen bytes, so a declaration of an object of one is a
+	// declaration. A value of one is the emitter's question and it refuses one
+	// by name, which is the same split the 128-bit integers above have.
+	if spec.clause.kind.is_decimal() {
+		return none
+	}
 	if spec.type_words.len == 0 {
 		return none
 	}
@@ -5814,6 +5836,13 @@ fn (p Parser) parameter_type_is_known(spec DeclSpec, stars int) bool {
 	// emitter's, and it answers them by name, which is the same split a
 	// declaration of an object of the type already has.
 	if spec.clause.kind in [types.Kind.int128, .unsigned_int128] {
+		return true
+	}
+	// A decimal type is a type the model knows the size of - four, eight or
+	// sixteen bytes - so a parameter declared with one is a parameter this
+	// reader can name. A value of one is the emitter's question, and it refuses
+	// one by name, which is the same split the 128-bit integers above have.
+	if spec.clause.kind.is_decimal() {
 		return true
 	}
 	// An alias that names an array is the same kind of question with the spelling

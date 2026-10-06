@@ -4,6 +4,7 @@ import math
 import math.big
 import strconv
 import types
+import decimal
 
 // Literal conversion. Both of these report instead of guessing: a constant that
 // does not fit, or a digit that is not valid for the base it was written in, is
@@ -110,6 +111,53 @@ fn is_float128_constant(text string) bool {
 	return text.len > 4 && (text.ends_with('f128') || text.ends_with('F128'))
 }
 
+// is_decimal_constant says whether a token is one of GNU C's decimal floating
+// constants, which is a floating constant whose suffix is `df`, `dd` or `dl` in
+// either case: the first names `_Decimal32`, the second `_Decimal64` and the third
+// `_Decimal128`. 6.4.4.2 makes the suffix the whole question of the constant's type.
+// A floating constant is one with a point or an exponent, so this asks
+// `is_floating_constant` itself rather than trusting its callers to have asked.
+//
+// Measured on gcc 16.2.1, which is what the two guards are for: `1df` and `5df` are
+// `invalid suffix 'df' on integer constant`, because they have neither a point nor
+// an exponent and are integer constants, and `0x1p3df` is `invalid suffix 'df' with
+// hexadecimal floating constant`, because a hexadecimal constant has no decimal
+// suffix either. `0.0df`, `.5df` and `1e6df` are decimal constants, and `1.5d` is
+// not one of these three: gcc reads the `d` alone as its own spelling of double.
+//
+// A caller must ask this before is_long_double_constant, because `dl` and `DL` end
+// in the letter `l`: that check would send `1.5dl` to the long double reader, which
+// takes one character off and refuses the `d` as a character no floating constant
+// holds.
+fn is_decimal_constant(text string) bool {
+	if !is_floating_constant(text) {
+		return false
+	}
+	if text.len > 1 && text[0] == `0` && (text[1] == `x` || text[1] == `X`) {
+		return false
+	}
+	if text.len < 3 {
+		return false
+	}
+	tail := text[text.len - 2..]
+	return tail == 'df' || tail == 'DF' || tail == 'dd' || tail == 'DD' || tail == 'dl'
+		|| tail == 'DL'
+}
+
+// decimal_kind_of is the kind the suffix of a decimal constant names. It is asked
+// only of a token is_decimal_constant accepted, so the last two characters are one
+// of the six spellings.
+fn decimal_kind_of(text string) types.Kind {
+	tail := text[text.len - 2..]
+	if tail == 'df' || tail == 'DF' {
+		return types.Kind.decimal32
+	}
+	if tail == 'dd' || tail == 'DD' {
+		return types.Kind.decimal64
+	}
+	return types.Kind.decimal128
+}
+
 // parse_float128_literal reads a `_Float128` constant into the value it names.
 // The digits are read by the same exact reader a long double constant uses, so
 // the value is rounded once to sixty-four bits of significand; see the comment
@@ -148,10 +196,22 @@ fn parse_long_double_literal(text string) !types.LongDouble {
 	return parse_decimal_long_double(text, body)
 }
 
-// parse_decimal_long_double reads the decimal form of a long double constant.
-// The digits are an integer D, the constant is D * 10^exp, and the value is
-// rounded to sixty-four bits of significand once.
-fn parse_decimal_long_double(text string, body string) !types.LongDouble {
+// DecimalParts is the digits and the power of ten the body of a decimal floating
+// constant names: the value is digits * 10^exp, where digits is every digit the
+// file wrote with the point taken out, leading zeros included.
+struct DecimalParts {
+	digits []u8
+	exp    int
+}
+
+// read_decimal_parts walks the body of a decimal floating constant, which is the
+// spelling with its suffix taken off: an integer part, a point and a fraction, and
+// an `e` exponent. The digits are one unsigned integer D with the point removed
+// and the exponent is the written one less the digits that followed the point, so
+// the value is D * 10^exp. Both the long double reader and the decimal reader take
+// their digits here rather than each walking the text again, so the two accept and
+// refuse the same spellings.
+fn read_decimal_parts(text string, body string) !DecimalParts {
 	mut int_digits := []u8{}
 	mut frac_digits := []u8{}
 	mut exp_sign := 1
@@ -210,19 +270,109 @@ fn parse_decimal_long_double(text string, body string) !types.LongDouble {
 	// D * 10^(written exponent - how many digits followed the point).
 	mut all := int_digits
 	all << frac_digits
-	exp := exp_sign * exp_value - frac_digits.len
+	return DecimalParts{
+		digits: all
+		exp:    exp_sign * exp_value - frac_digits.len
+	}
+}
+
+// parse_decimal_long_double reads the decimal form of a long double constant.
+// The digits are an integer D, the constant is D * 10^exp, and the value is
+// rounded to sixty-four bits of significand once.
+fn parse_decimal_long_double(text string, body string) !types.LongDouble {
+	parts := read_decimal_parts(text, body)!
 	mut start := 0
-	for start < all.len && all[start] == `0` {
+	for start < parts.digits.len && parts.digits[start] == `0` {
 		start++
 	}
-	if start == all.len {
+	if start == parts.digits.len {
 		return types.LongDouble{}
 	}
-	significant := all[start..].clone()
-	value := decimal_to_long_double(significant.bytestr(), exp) or {
+	significant := parts.digits[start..].clone()
+	value := decimal_to_long_double(significant.bytestr(), parts.exp) or {
 		return error('${text}: the constant is outside the range this reader converts')
 	}
 	return value
+}
+
+// decimal_range_warning is the warning gcc gives for a decimal constant the format
+// cannot hold, and an empty string when the constant fitted. Measured on gcc 16.2.1
+// on this machine, `double x = 1e400dd;` is `warning: floating constant exceeds range
+// of '_Decimal64' [-Woverflow]` and `double x = 1e-400dd;` is `warning: floating
+// constant truncated to zero [-Woverflow]`, and in neither case does gcc refuse the
+// program: it stores an infinity for the first and a zero for the second - measured
+// in `_Decimal32`, whose range ends at `1e96` and `1e-101`, `1e300df` is 0x78000000,
+// an infinity, and `1e-300df` is 0x00000000, a zero. This reader reads the same way
+// and puts the warning here, because a warning is not something a value can carry.
+//
+// Which of the two happened is read off the value and the source: a value past the
+// format comes back an infinity, and a value the format truncated to zero comes back
+// a zero from a source whose coefficient held a digit that is not zero. A source
+// that wrote a zero of its own is not warned about, which is why the digits the
+// warning looks at stop at the exponent - `0e5df` is a zero the file wrote.
+fn decimal_range_warning(text string, value types.Decimal) string {
+	if value.special == .infinity {
+		return "floating constant exceeds range of '${types.decimal_type(value.kind).describe()}'"
+	}
+	if value.is_zero() && decimal_written_nonzero(text) {
+		return 'floating constant truncated to zero'
+	}
+	return ''
+}
+
+// decimal_written_nonzero says whether the coefficient the source wrote held a digit
+// other than zero. The exponent is not part of the answer: `0e5df` is a zero the
+// file wrote, and only the digits in front of the `e` or `E` are the coefficient.
+fn decimal_written_nonzero(text string) bool {
+	for ch in text {
+		if ch == `e` || ch == `E` {
+			break
+		}
+		if ch >= `1` && ch <= `9` {
+			return true
+		}
+	}
+	return false
+}
+
+// parse_decimal_literal reads a decimal floating constant into the value it names,
+// in the format its suffix chose. The reading is the `decimal` module's `from_text`,
+// which takes the body, keeps the digits as written with the point removed and the
+// exponent adjusted for it, and rounds once to the precision the format keeps - 7
+// digits for `_Decimal32`, 16 for `_Decimal64`, 34 for `_Decimal128` - with ties to
+// even. That module is the compiler's only rounding: the reader does not round a
+// second time, because two roundings of one literal that disagree would be a bug with
+// no owner. The format's own `from_suffix` names it from the suffix, `decimal_digits`
+// answers the same precision out of the same module, and `clamp` is where the range
+// rule lives.
+//
+// A zero keeps no digits and the exponent the source wrote, because the encoding of
+// a zero carries its exponent: `0.0df` is the exponent -1, and gcc stores the field
+// 100 for it.
+//
+// A constant outside the format's range is read, not refused: gcc warns and stores a
+// value, so the module's `clamp` answers an infinity above the range and a zero below
+// it, and `decimal_range_warning` is what says which of the two the source asked for.
+// See it for the measurements.
+fn parse_decimal_literal(text string) !types.Decimal {
+	format := decimal.from_suffix(text) or {
+		return error('${text}: not a decimal floating constant')
+	}
+	body := decimal.from_text(text[..text.len - 2], format)
+	value := body.clamp(format)
+	// A value the format truncated to zero keeps the power of ten the source wrote,
+	// which is the same rule a zero the source wrote follows, and the encoding is
+	// what brings it to the field. Measured on gcc 16.2.1, `1e-300df` and `1e-400dd`
+	// are the bytes 00000000 and 0000000000000000 - the exponent field 0 - where
+	// `0e30df` is 41800000 and `0e400dd` is 5fe0000000000000, the written power and
+	// then the field's own largest.
+	return types.Decimal{
+		kind:     decimal_kind_of(text)
+		sign:     value.sign
+		digits:   value.digits
+		exponent: if value.is_zero() && !body.is_zero() { body.exponent } else { value.exponent }
+		special:  value.special
+	}
 }
 
 // parse_hex_long_double reads the hexadecimal form, `0x` significand `p`
