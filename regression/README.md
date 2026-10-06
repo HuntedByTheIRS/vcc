@@ -11,6 +11,24 @@ the commit that fixed it.
 The badge above counts the cases that currently fail. A green badge of 0 means
 every case in the directory compiles and runs.
 
+## One directory per standard
+
+A case's directory is the standard it is compiled under: the leaf name is the
+`-std=` spelling.
+
+    regression/iso/c99/     ISO C99, compiled -std=c99
+    regression/iso/c11/     empty until the first ISO C11 case lands
+    regression/iso/c17/     empty
+    regression/iso/c23/     empty
+    regression/iso/c29/     empty
+    regression/gnu/gnu99/   GNU C99, compiled -std=gnu99
+    regression/gnu/gnu11/   empty
+    regression/gnu/gnu17/   empty
+
+Every case in the corpus today compiles under strict ISO C99, so they all sit
+under `iso/c99`. A case this compiler accepts only in a GNU dialect belongs in
+`gnu/` beside its ISO sibling.
+
 ## Naming
 
     NNNN-group-individual.c
@@ -20,8 +38,8 @@ the tree the pinned behaviour belongs to and is one of `tokenize`, `preprocess`,
 `parser`, `types`, `optimizer`, `printer`, `codegen`, `backend`, `image`,
 `link`, `driver`, `cli`. `individual` names the behaviour in lowercase words
 joined by hyphens. The serial counts the corpus rather than the group, so
-`0005-parser-block-scope-extern.c` is the sixth case here whatever group it
-belongs to.
+`iso/c99/0005-parser-block-scope-extern.c` is the sixth case here whatever group
+it belongs to.
 
 ## What a case is
 
@@ -39,22 +57,22 @@ refusal and a silently wrong value are both failures here.
 
 ## How a case is compiled and run
 
-Every case compiles and runs correctly under the tree-built vcc with exactly
-these flags:
+Every case compiles and runs correctly under the tree-built vcc with exactly the
+flags its directory names:
 
     v -o /tmp/vcc-reg .
-    /tmp/vcc-reg -x c -std=gnu99 -w -lm regression/NNNN-group-individual.c -o /tmp/case
+    /tmp/vcc-reg -x c -std=c99 -w -lm regression/iso/c99/NNNN-group-individual.c -o /tmp/case
     /tmp/case ; echo $?
 
 and under gcc with the same flags:
 
-    gcc -x c -std=gnu99 -w -lm regression/NNNN-group-individual.c -o /tmp/case
+    gcc -x c -std=c99 -w -lm regression/iso/c99/NNNN-group-individual.c -o /tmp/case
     /tmp/case ; echo $?
 
-`-x c` reads the file as C whatever its extension. `-std=gnu99` is the dialect
-the pinned behaviour is measured in. `-w` because some cases are deliberately
-not warning-clean under one compiler. `-lm` for the complex and long double
-routines.
+`-x c` reads the file as C whatever its extension. `-std=c99` is the dialect the
+directory names, so a case under `gnu/gnu99/` is measured `-std=gnu99`. `-w`
+because some cases are deliberately not warning-clean under one compiler. `-lm`
+for the complex and long double routines.
 
 A non-zero exit from the run means the pinned behaviour is broken. A build
 failure is also a non-zero verdict, because the compiler refusing the construct

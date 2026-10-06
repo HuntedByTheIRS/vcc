@@ -5,9 +5,29 @@ program is compiled, run, and its output compared with the recorded file. A test
 that only checks the exit status cannot see the day the compiler starts printing
 7 where it used to print 9; a golden can.
 
+## One directory per standard
+
+A case's directory is the standard it is compiled under: the leaf name is the
+`-std=` spelling, so `goldens/iso/c99/` is compiled `-std=c99` and
+`goldens/gnu/gnu99/` `-std=gnu99`.
+
+    goldens/iso/c99/     ISO C99, compiled -std=c99
+    goldens/iso/c11/     empty until the first ISO C11 case lands
+    goldens/iso/c17/     empty
+    goldens/iso/c23/     empty
+    goldens/iso/c29/     empty
+    goldens/gnu/gnu99/   GNU C99, compiled -std=gnu99
+    goldens/gnu/gnu11/   empty
+    goldens/gnu/gnu17/   empty
+
+Every case in the corpus today compiles under strict ISO C99, so they all sit
+under `iso/c99`. A case this compiler accepts only in a GNU dialect belongs
+under `gnu/` beside its ISO sibling.
+
 ## Layout
 
-`NNNN-group-individual.c` pairs with `NNNN-group-individual.expected`.
+`NNNN-group-individual.c` pairs with `NNNN-group-individual.expected`, in the
+same dialect directory.
 
 - `NNNN` is a four-digit serial starting at `0000`, with no gaps.
 - `group` is one of the tree's own areas: `tokenize`, `preprocess`, `parser`,
@@ -15,8 +35,8 @@ that only checks the exit status cannot see the day the compiler starts printing
   `driver`, `cli`.
 - `individual` says what the case prints.
 
-So `0013-link-libc-calls.c` is compiled, run, and its stdout must equal
-`0013-link-libc-calls.expected`.
+So `iso/c99/0013-link-libc-calls.c` is compiled, run, and its stdout must equal
+`iso/c99/0013-link-libc-calls.expected`.
 
 ## What a case is
 
@@ -26,11 +46,11 @@ order, no uninitialised memory. Two runs of the same binary print the same bytes
 
 ## The comparison
 
-`tools/regress.vsh` compiles each case with `-x c -std=gnu99 -w -lm`, runs it,
-and compares its stdout with the `.expected` file byte for byte. The trailing
-newline is part of the file, so output that agrees line for line but stops before
-the last newline is still a failure. stdout and stderr go to separate files and
-only stdout is compared.
+`tools/regress.vsh` compiles each case with the standard of its directory plus
+`-w -lm -x c`, runs it, and compares its stdout with the `.expected` file byte
+for byte. The trailing newline is part of the file, so output that agrees line
+for line but stops before the last newline is still a failure. stdout and stderr
+go to separate files and only stdout is compared.
 
 ## A missing .expected
 
@@ -44,7 +64,7 @@ The `.expected` file is the answer the C standard requires, not a transcript of
 whatever vcc happened to print. Record it from a reference compile:
 
 ```sh
-gcc -x c -std=gnu99 -w -lm 0013-link-libc-calls.c
+gcc -x c -std=c99 -w -lm 0013-link-libc-calls.c
 ```
 
 then confirm the tree-built vcc prints the same bytes. A case where vcc disagrees

@@ -1,8 +1,23 @@
 #!/usr/bin/env -S v run
 
-// The regression corpus: one C program per bug this compiler has already put
-// right, compiled and run, so the fix cannot come undone. A case that stops
-// compiling or stops exiting zero names itself and the stage it stopped at.
+// Two corpora, one contract each, and both in the same shape: a directory per
+// standard whose leaf name is the -std= spelling.
+//
+//   regression/<standards>/<dialect>/NNNN-group-individual.c
+//     A program with `int main(void)`. It prints nothing and exits zero while
+//     the compiler behaves; non-zero, or a line of output, is the regression
+//     the file was added for.
+//
+//   goldens/<standards>/<dialect>/NNNN-group-individual.c
+//     A program that prints to stdout and exits zero. Its stdout has to equal
+//     NNNN-group-individual.expected byte for byte, because a golden is the
+//     exact bytes and not a shape that resembles them. The .expected sits
+//     beside its program in the same dialect directory.
+//
+// A case's directory is the standard it is compiled under, so `iso/c99/` is
+// compiled -std=c99 and `gnu/gnu99/` -std=gnu99, and a case this compiler
+// accepts only in a GNU dialect belongs in the `gnu/` tree beside its ISO
+// sibling. A new standard is a new directory and not a change here.
 //
 //   v run tools/regress.vsh                        # build the tree, then run every case
 //   v run tools/regress.vsh --compiler /tmp/vcc    # a compiler you already built
@@ -12,26 +27,13 @@
 //   v run tools/regress.vsh --count                # print how many cases there are
 //   v run tools/regress.vsh --root /tmp/tree       # read the corpora from another tree
 //
-// Two directories, one contract each:
+// Every case compiles with the standard of its directory, plus -w because a
+// case is not required to be warning-clean under this compiler, -lm for the
+// math a case may touch, and -x c so the compiler reads the file as C rather
+// than guessing from a name it did not write.
 //
-//   regression/NNNN-group-individual.c
-//     A program with `int main(void)`. It prints nothing and exits zero while
-//     the compiler behaves; non-zero, or a line of output, is the regression
-//     the file was added for.
-//
-//   goldens/NNNN-group-individual.c
-//     A program that prints to stdout and exits zero. Its stdout has to equal
-//     NNNN-group-individual.expected byte for byte, because a golden is the
-//     exact bytes and not a shape that resembles them.
-//
-// Both corpora compile with -std=gnu99 -w -lm -x c: gnu99 because a case may
-// reach a system header that refuses the c99 spelling, -w because a case is not
-// required to be warning-clean under this compiler, -lm for the math a case may
-// touch, and -x c so the compiler reads the file as C rather than guessing from
-// a name it did not write.
-//
-// The floors below are the number of cases that landed in each directory.
-// Losing one is a failure and adding one is not, so they are floors and not
+// The floors below are the number of cases that landed in each corpus. Losing
+// one is a failure and adding one is not, so they are floors and not
 // equalities. A --only run names its cases and makes no claim about the corpus,
 // so it is not held to them. --root exists so this runner can be exercised
 // against a corpus in a scratch tree, which is what a runner written before its
@@ -43,7 +45,8 @@ import time
 const regression_floor = 44
 const goldens_floor = 16
 
-const compile_flags = '-x c -std=gnu99 -w -lm'
+const compile_head = '-x c -std='
+const compile_tail = ' -w -lm'
 
 const regression_dir = 'regression'
 const goldens_dir = 'goldens'
@@ -59,11 +62,25 @@ mut:
 	count    bool
 }
 
-// Case is one file to compile and run, and the corpus it came from, which
-// decides the contract its run is held to.
+// Suite is one dialect directory of one corpus, with its own name as the -std=
+// spelling and the cases collected from it.
+struct Suite {
+	key   string
+	kind  string
+	rel   string
+	dir   string
+	mode  string
+	files []string
+}
+
+// Case is one file to compile and run, the corpus it came from, which decides
+// the contract its run is held to, and the standard of the directory it sits in.
 struct Case {
-	kind string
-	file string
+	kind  string
+	suite string
+	dir   string
+	mode  string
+	file  string
 }
 
 struct Outcome {
@@ -88,22 +105,23 @@ fn main() {
 			exit(1)
 		}
 	}
-	cases := collect_cases(root, opts)
 	if opts.count {
-		// the number of cases in both corpora, whatever --only would narrow it to.
-		// The regressions badge in README.md records it as the corpus size and
-		// counts failing cases separately, so this number and that count come
-		// from the same code that decides what a case is.
-		println(collect_cases(root, Options{}).len)
+		// the number of cases in both corpora, whatever --only would narrow it
+		// to. The regressions badge in README.md records it as the corpus size
+		// and counts failing cases separately, so this number and that count
+		// come from the same code that decides what a case is.
+		println(total_cases(root))
 		return
 	}
+	suites := collect_suites(root, opts)
+	cases := flatten(suites)
 	if cases.len == 0 {
 		eprintln('regress: no cases in ${root}')
 		exit(1)
 	}
 	if opts.list {
 		for one in cases {
-			println('${one.kind}/${one.file}')
+			println('${one.kind}/${one.suite}/${one.file}')
 		}
 		return
 	}
@@ -114,10 +132,12 @@ fn main() {
 		eprintln('regress: no scratch directory: ${err}')
 		exit(1)
 	}
-	// the parent is made once up front: several workers creating `run/` at the
-	// same time race inside mkdir_all, which reports File exists for a segment
-	// another worker made a moment ago
-	os.mkdir_all(os.join_path(scratch, 'run')) or {}
+	// the suite directories are made once up front: several workers creating
+	// `run/regression/iso-c99` at the same time race inside mkdir_all, which
+	// reports File exists for a segment another worker made a moment ago
+	for suite in suites {
+		os.mkdir_all(os.join_path(scratch, 'run', suite.kind, suite_slug(suite.rel))) or {}
+	}
 	mut cleanup := [scratch]
 	if built_here {
 		cleanup << compiler
@@ -131,14 +151,17 @@ fn main() {
 			goldens_cases++
 		}
 	}
-	println('regress:    ${regression_cases} regression, ${goldens_cases} golden cases')
+	for suite in suites {
+		println('regress:    ${suite.key}: ${suite.files.len} cases (-std=${suite.mode})')
+	}
+	println('cases:      ${regression_cases} regression, ${goldens_cases} golden')
 	println('compiler:   ${compiler}')
 
 	started := time.ticks()
 	shared work := Work{}
 	mut threads := []thread{}
 	for _ in 0 .. worker_count(opts) {
-		threads << spawn run_all(cases, root, compiler, scratch, opts.defines, shared work)
+		threads << spawn run_all(cases, compiler, scratch, opts.defines, shared work)
 	}
 	threads.wait()
 	elapsed := f64(time.ticks() - started) / 1000.0
@@ -194,10 +217,76 @@ fn worker_count(opts Options) int {
 	return 8
 }
 
+// collect_suites walks <corpus>/<standards>/<dialect>/ for both corpora and
+// collects the cases in each dialect directory. A .c directly under a corpus or
+// directly under a standards tree is not a case: the dialect directory is where
+// cases live.
+fn collect_suites(root string, opts Options) []Suite {
+	mut suites := []Suite{}
+	for corpus in [regression_dir, goldens_dir] {
+		corpus_path := os.join_path(root, corpus)
+		for standards in os.ls(corpus_path) or { []string{} } {
+			standards_dir := os.join_path(corpus_path, standards)
+			if !os.is_dir(standards_dir) {
+				continue
+			}
+			for dialect in os.ls(standards_dir) or { []string{} } {
+				dialect_dir := os.join_path(standards_dir, dialect)
+				if !os.is_dir(dialect_dir) {
+					continue
+				}
+				rel := os.join_path(standards, dialect)
+				suites << Suite{
+					key:   '${corpus}/${rel}'
+					kind:  corpus
+					rel:   rel
+					dir:   dialect_dir
+					mode:  dialect
+					files: collect_cases(dialect_dir, opts)
+				}
+			}
+		}
+	}
+	suites.sort(a.key < b.key)
+	return suites
+}
+
+// flatten is every collected case with the corpus and the dialect it belongs
+// to, which is the order the workers pull from.
+fn flatten(suites []Suite) []Case {
+	mut cases := []Case{}
+	for suite in suites {
+		for file in suite.files {
+			cases << Case{
+				kind:  suite.kind
+				suite: suite.rel
+				dir:   suite.dir
+				mode:  suite.mode
+				file:  file
+			}
+		}
+	}
+	return cases
+}
+
+// total_cases counts both corpora, for the badge.
+fn total_cases(root string) int {
+	mut count := 0
+	for suite in collect_suites(root, Options{}) {
+		count += suite.files.len
+	}
+	return count
+}
+
+// suite_slug names a suite's scratch directories: `iso/c99` becomes `iso-c99`.
+fn suite_slug(rel string) string {
+	return rel.replace('/', '-')
+}
+
 // run_all runs cases until the queue is empty. The queue is shared, so the
 // cursor moves under a lock and the thread count decides how many compilers run
 // at once.
-fn run_all(cases []Case, root string, compiler string, scratch string, defines []string, shared work Work) {
+fn run_all(cases []Case, compiler string, scratch string, defines []string, shared work Work) {
 	for {
 		mut index := -1
 		lock work {
@@ -209,39 +298,36 @@ fn run_all(cases []Case, root string, compiler string, scratch string, defines [
 		if index < 0 {
 			return
 		}
-		outcome := run_one(cases[index], root, compiler, scratch, defines)
+		outcome := run_one(cases[index], compiler, scratch, defines)
 		lock work {
 			work.outcomes << outcome
 		}
 	}
 }
 
-// run_one compiles a case and runs it under the contract its corpus gives it,
-// reporting the first thing that went wrong.
-fn run_one(one Case, root string, compiler string, scratch string, defines []string) Outcome {
-	location := os.join_path(root, one.kind)
-	path := os.join_path(location, one.file)
-	label := '${one.kind}/${one.file}'
+// run_one compiles a case under the standard of its directory and runs it under
+// the contract its corpus gives it, reporting the first thing that went wrong.
+fn run_one(one Case, compiler string, scratch string, defines []string) Outcome {
+	path := os.join_path(one.dir, one.file)
+	label := '${one.kind}/${one.suite}/${one.file}'
 	gate := required_define(path)
 	if needs_define(gate, defines) {
 		return Outcome{label, 'skip', 'needs -D${gate}'}
 	}
 	stem := one.file.all_before_last('.')
-	mut flags := compile_flags
-	for define in defines {
-		flags += ' -D${define}'
-	}
-	// the corpus name is part of the binary's name: a golden and a regression
-	// case may share a number and a stem
-	exe := os.join_path(scratch, '${one.kind}-${stem}')
-	build := os.execute('cd ${os.quoted_path(location)} && ${os.quoted_path(compiler)} ${flags} ${os.quoted_path(one.file)} -o ${os.quoted_path(exe)} 2>&1')
+	slug := suite_slug(one.suite)
+	flags := case_flags(one.mode, defines)
+	// the corpus and the dialect are part of the binary's name: a golden and a
+	// regression case may share a number and a stem
+	exe := os.join_path(scratch, '${one.kind}-${slug}-${stem}')
+	build := os.execute('cd ${os.quoted_path(one.dir)} && ${os.quoted_path(compiler)} ${flags} ${os.quoted_path(one.file)} -o ${os.quoted_path(exe)} 2>&1')
 	if build.exit_code != 0 {
 		return Outcome{label, 'build', first_lines(build.output, 3)}
 	}
-	rundir := os.join_path(scratch, 'run', one.kind, stem)
+	rundir := os.join_path(scratch, 'run', one.kind, slug, stem)
 	os.mkdir_all(rundir) or {}
 	if one.kind == goldens_dir {
-		return run_golden(label, location, exe, rundir)
+		return run_golden(label, one.file, one.dir, exe, rundir)
 	}
 	// a regression case passes by saying nothing: the compiler's own warnings
 	// are off with -w, so any line at all is something the case did not mean to
@@ -257,11 +343,23 @@ fn run_one(one Case, root string, compiler string, scratch string, defines []str
 	return Outcome{label, 'ok', ''}
 }
 
+// case_flags is the compile line for one dialect: the standard is the
+// directory's own name, and the defines are the ones --define named.
+fn case_flags(mode string, defines []string) string {
+	mut flags := '${compile_head}${mode}${compile_tail}'
+	for define in defines {
+		flags += ' -D${define}'
+	}
+	return flags
+}
+
 // run_golden holds a case to the bytes in its .expected file. stdout and stderr
 // go to files of their own, because the comparison is the program's stdout and
-// not whatever a shell or a runtime might add to the stream.
-fn run_golden(label string, location string, exe string, rundir string) Outcome {
-	stem := label.all_after('/').all_before_last('.')
+// not whatever a shell or a runtime might add to the stream. The file name is
+// asked for rather than read off the label, because the label carries the
+// dialect and `all_after('/')` would answer behind the first slash.
+fn run_golden(label string, file string, location string, exe string, rundir string) Outcome {
+	stem := file.all_before_last('.')
 	expected := os.join_path(location, '${stem}.expected')
 	if !os.exists(expected) {
 		return Outcome{label, 'golden', 'no ${stem}.expected beside it'}
@@ -321,29 +419,24 @@ fn describe_diff(want string, got string) string {
 	return shown.join(' / ')
 }
 
-// collect_cases is every numbered file in both corpora. `--only` narrows it to
-// the names given, which is how one case gets looked at without building the
-// whole corpus.
-fn collect_cases(root string, opts Options) []Case {
-	mut cases := []Case{}
-	for corpus in [regression_dir, goldens_dir] {
-		location := os.join_path(root, corpus)
-		mut entries := os.ls(location) or { []string{} }
-		entries.sort()
-		for entry in entries {
-			if entry.len < 5 || entry[0] < `0` || entry[0] > `9` {
-				continue
-			}
-			if !entry.ends_with('.c') {
-				continue
-			}
-			if opts.only.len > 0 && !matches_only(entry, opts.only) {
-				continue
-			}
-			cases << Case{corpus, entry}
+// collect_cases is every numbered .c in a dialect directory. `--only` narrows
+// it to the names given, which is how one case gets looked at without building
+// the whole corpus.
+fn collect_cases(dir string, opts Options) []string {
+	mut files := []string{}
+	for entry in os.ls(dir) or { []string{} } {
+		if entry.len < 5 || entry[0] < `0` || entry[0] > `9` {
+			continue
 		}
+		if !entry.ends_with('.c') {
+			continue
+		}
+		if opts.only.len > 0 && !matches_only(entry, opts.only) {
+			continue
+		}
+		files << entry
 	}
-	return cases
+	return files.sorted()
 }
 
 // needs_define is true when a case says it wants a define that was not given.
