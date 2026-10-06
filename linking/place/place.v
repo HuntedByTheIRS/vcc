@@ -29,6 +29,18 @@ pub mut:
 	tls_bases     []int
 	tls_len       int
 	tls_alignment int
+	// init_run_base and init_run_len are where the gathered `.init` fragments
+	// lie in the merged code and how long that run is, and init_run_bases is
+	// where each unit's own fragment landed inside it. The fini run has the same
+	// three, for `.fini`. Both runs come first in the merged code and the units'
+	// own text follows them, because the branch at the end of one fragment has to
+	// reach the beginning of the next.
+	init_run_base  int
+	init_run_len   int
+	init_run_bases []int
+	fini_run_base  int
+	fini_run_len   int
+	fini_run_bases []int
 	// init_bases and fini_bases are where each unit's two constructor tables
 	// land, and init_len and fini_len are how long the two places they land in
 	// are. The tables are placed together at the end of the writable data
@@ -43,27 +55,49 @@ pub mut:
 	constructor_base int
 }
 
-// lay places the units in the order they were given. Text and read-only data are
-// concatenated as they stand, because a reference to either is written as an
-// offset from the start of the unit's own blob and the base is the whole of what
-// changes. Writable data is placed the same way except that each unit starts at
-// the strictest alignment any unit asked for: an object's address is its offset
-// in the merged blob, so an object whose declaration asked for more than the
-// word size only lands at its alignment when the unit's storage begins there.
-pub fn lay(units []image.Program, globals_alignment int) Layout {
+// lay places the units in the order they were given. Text is concatenated as it
+// stands, because a reference to it is written as an offset from the start of
+// the unit's own blob and the base is the whole of what changes. Writable data
+// and read-only data are placed the same way except that each unit starts at the
+// strictest alignment any unit asked for: an object's address is its offset in
+// the merged blob, so an object whose declaration asked for more than the word
+// size only lands at its alignment when the unit's storage begins there. The
+// read-only data needs it for the same reason and not only for an object's
+// address: a compiler loads a sixteen-byte constant with one instruction that
+// faults on a misaligned place, and strings and constants share the section.
+pub fn lay(units []image.Program, globals_alignment int, read_only_alignment int) Layout {
 	mut layout := Layout{
-		text_bases:    []int{cap: units.len}
-		string_bases:  []int{cap: units.len}
-		globals_bases: []int{cap: units.len}
-		tls_bases:     []int{cap: units.len}
-		init_bases:    []int{cap: units.len}
-		fini_bases:    []int{cap: units.len}
-		tls_alignment: 1
+		text_bases:     []int{cap: units.len}
+		string_bases:   []int{cap: units.len}
+		globals_bases:  []int{cap: units.len}
+		tls_bases:      []int{cap: units.len}
+		init_bases:     []int{cap: units.len}
+		fini_bases:     []int{cap: units.len}
+		init_run_bases: []int{cap: units.len}
+		fini_run_bases: []int{cap: units.len}
+		tls_alignment:  1
 	}
+	// Each fragment lands at the end of its run so far, at the alignment it asks
+	// for, which is what puts the fragment that opens `.init` and the one that
+	// closes it next to each other when no other unit carries one.
+	for unit in units {
+		layout.init_run_len = align_up(layout.init_run_len, run_alignment(unit.init_run))
+		layout.init_run_bases << layout.init_run_len
+		layout.init_run_len += unit.init_run.len
+	}
+	layout.fini_run_base = layout.init_run_len
+	for unit in units {
+		layout.fini_run_len = align_up(layout.fini_run_len, run_alignment(unit.fini_run))
+		layout.fini_run_bases << layout.init_run_len + layout.fini_run_len
+		layout.fini_run_len += unit.fini_run.len
+	}
+	layout.text_len = layout.init_run_len + layout.fini_run_len
 	step := if globals_alignment > 0 { globals_alignment } else { 1 }
+	string_step := if read_only_alignment > 0 { read_only_alignment } else { 1 }
 	for unit in units {
 		layout.text_bases << layout.text_len
 		layout.text_len += unit.text.len
+		layout.string_len = align_up(layout.string_len, string_step)
 		layout.string_bases << layout.string_len
 		layout.string_len += unit.string_blob.len
 		for layout.globals_len % step != 0 {
@@ -111,6 +145,10 @@ pub fn lay(units []image.Program, globals_alignment int) Layout {
 // align_up rounds a length up to the next multiple of an alignment. A unit
 // whose thread-locals or tables ask for an alignment longer than one byte has
 // to start there, the same way a unit's writable data does.
+fn run_alignment(run image.CodeRun) int {
+	return if run.alignment > 1 { run.alignment } else { 1 }
+}
+
 fn align_up(length int, alignment int) int {
 	if alignment <= 1 {
 		return length

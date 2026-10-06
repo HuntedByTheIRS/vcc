@@ -58,7 +58,7 @@ pub fn link(units []image.Program, options Options) !image.Program {
 			return error('the entry ${options.entry} names an object and not a function')
 		}
 	}
-	layout := place.lay(units, names.globals_alignment)
+	layout := place.lay(units, names.globals_alignment, names.read_only_alignment)
 	read_only := merge_read_only(units, layout)
 	tls := merge_tls(units, layout)
 	ifuncs := merge_ifuncs(units)
@@ -127,6 +127,15 @@ pub fn link(units []image.Program, options Options) !image.Program {
 		if relocation.name in names.definitions && relocation.name !in ifuncs {
 			continue
 		}
+		// A name the link answers itself is not one a stub stands for either.
+		// The four constructor-table ends and the image's own bounds are places
+		// the linker knows and no unit defines, so a reference to one of them
+		// has to read the address the container writes rather than a stub whose
+		// slot nothing fills. An IFUNC is the exception it already was: it is a
+		// name whose definition is a resolver, so a call still needs the slot.
+		if relocation.name in bound && relocation.name !in ifuncs {
+			continue
+		}
 		// An IFUNC is defined by a unit of this link and still needs a stub: the
 		// name stands for the resolver rather than for the function, so a call
 		// to it has to reach the slot the resolver's answer is written into, and
@@ -156,42 +165,44 @@ pub fn link(units []image.Program, options Options) !image.Program {
 		}
 	}
 	mut merged := image.Program{
-		text:              merge_text(units, layout)
-		labels:            merge_labels(units, layout)
-		string_blob:       read_only.blob
-		strings:           read_only.strings
-		wide_strings:      read_only.wide_strings
-		doubles:           read_only.doubles
-		globals_blob:      merge_globals_blob(units, layout)
-		globals:           merge_globals(units, layout, names.definitions)
-		globals_alignment: names.globals_alignment
-		defined:           names.defined
-		weak:              names.weak
-		internal:          names.internal
-		imports:           names.imports
-		object_imports:    names.object_imports
-		weak_imports:      names.weak_imports
-		tls_slots:         names.tls_slots
-		libraries:         names.libraries
-		copy_objects:      copies
-		bound:             bound
-		fixups:            merge_fixups(units, layout)
-		data_fixups:       merge_data_fixups(units, layout, names.definitions)
-		relocations:       merged_relocations
-		plts:              plts
-		tls_blob:          tls.blob
-		tls_size:          tls.size
-		tls_alignment:     tls.alignment
-		tls_labels:        tls.labels
-		init_array:        image.ConstructorTable{
+		text:                merge_text(units, layout)
+		labels:              merge_labels(units, layout)
+		string_blob:         read_only.blob
+		strings:             read_only.strings
+		wide_strings:        read_only.wide_strings
+		doubles:             read_only.doubles
+		globals_blob:        merge_globals_blob(units, layout)
+		globals:             merge_globals(units, layout, names.definitions)
+		read_only_globals:   merge_read_only_globals(units, layout, names.definitions)
+		globals_alignment:   names.globals_alignment
+		read_only_alignment: names.read_only_alignment
+		defined:             names.defined
+		weak:                names.weak
+		internal:            names.internal
+		imports:             names.imports
+		object_imports:      names.object_imports
+		weak_imports:        names.weak_imports
+		tls_slots:           names.tls_slots
+		libraries:           names.libraries
+		copy_objects:        copies
+		bound:               bound
+		fixups:              merge_fixups(units, layout)
+		data_fixups:         merge_data_fixups(units, layout, names.definitions)
+		relocations:         merged_relocations
+		plts:                plts
+		tls_blob:            tls.blob
+		tls_size:            tls.size
+		tls_alignment:       tls.alignment
+		tls_labels:          tls.labels
+		init_array:          image.ConstructorTable{
 			offset: layout.constructor_base
 			count:  layout.init_len / 8
 		}
-		fini_array:        image.ConstructorTable{
+		fini_array:          image.ConstructorTable{
 			offset: layout.constructor_base + layout.init_len
 			count:  layout.fini_len / 8
 		}
-		ifuncs:            ifuncs
+		ifuncs:              ifuncs
 	}
 	// Every reference that is still external has to be answerable by a library
 	// the image names, or the program dies at load with nothing on the
@@ -230,7 +241,36 @@ fn merge_text(units []image.Program, layout place.Layout) []u8 {
 	for i, unit in units {
 		fill(mut text, layout.text_bases[i], unit.text)
 	}
+	// The gathered fragments are copied again where their runs hold them, which
+	// is where every reference into one of them was moved to. The copy the unit's
+	// own text still carries is unreachable and keeps the bytes it was read with,
+	// so the same input still writes the same image.
+	for i, unit in units {
+		if unit.init_run.len > 0 {
+			fill(mut text, layout.init_run_bases[i], unit.text[unit.init_run.base..unit
+				.init_run.base + unit.init_run.len])
+		}
+		if unit.fini_run.len > 0 {
+			fill(mut text, layout.fini_run_bases[i], unit.text[unit.fini_run.base..unit
+				.fini_run.base + unit.fini_run.len])
+		}
+	}
 	return text
+}
+
+// text_place is where a byte of a unit's code blob lands in the merged code: the
+// unit's own text, or the run the merge gathered that section into when the byte
+// is inside one of the two fragments it moves.
+fn text_place(unit image.Program, unit_index int, offset int, layout place.Layout) int {
+	if unit.init_run.len > 0 && offset >= unit.init_run.base
+		&& offset < unit.init_run.base + unit.init_run.len {
+		return layout.init_run_bases[unit_index] + (offset - unit.init_run.base)
+	}
+	if unit.fini_run.len > 0 && offset >= unit.fini_run.base
+		&& offset < unit.fini_run.base + unit.fini_run.len {
+		return layout.fini_run_bases[unit_index] + (offset - unit.fini_run.base)
+	}
+	return layout.text_bases[unit_index] + offset
 }
 
 // merge_labels unions the units' labels, each moved by its unit's text base, so
@@ -253,7 +293,7 @@ fn merge_labels(units []image.Program, layout place.Layout) map[string]int {
 				symbols.private_key(i, name)
 			}
 			if key !in labels {
-				labels[key] = offset + layout.text_bases[i]
+				labels[key] = text_place(unit, i, offset, layout)
 			}
 		}
 	}
@@ -405,6 +445,32 @@ fn merge_globals(units []image.Program, layout place.Layout, definitions map[str
 	return globals
 }
 
+// merge_read_only_globals rebases each object a unit defines in read-only data
+// into the merged read-only data. The offsets count from that blob's start, not
+// the writable data's, and the defining unit's slot is the one that binds: a
+// `const` object is the bytes one unit wrote, and a reference to it from another
+// unit has to land on them.
+fn merge_read_only_globals(units []image.Program, layout place.Layout, definitions map[string]symbols.Definition) map[string]image.GlobalSlot {
+	mut globals := map[string]image.GlobalSlot{}
+	for i, unit in units {
+		for name, slot in unit.read_only_globals {
+			key := if name in unit.internal { symbols.private_key(i, name) } else { name }
+			if definition := definitions[key] {
+				if !definition.read_only || definition.unit != i {
+					continue
+				}
+			} else if key in globals {
+				continue
+			}
+			globals[key] = image.GlobalSlot{
+				offset: slot.offset + layout.string_bases[i]
+				width:  slot.width
+			}
+		}
+	}
+	return globals
+}
+
 // merge_fixups sizes the merged reference list once and has each unit append its
 // rewritten references, so no per-unit array is built only to be copied again.
 fn merge_fixups(units []image.Program, layout place.Layout) []image.Fixup {
@@ -446,7 +512,8 @@ fn merge_relocations(units []image.Program, layout place.Layout) []image.Relocat
 	mut relocations := []image.Relocation{cap: count}
 	for i, unit in units {
 		reloc.relocations(unit, i, layout.text_bases[i], layout.string_bases[i],
-			layout.globals_bases[i], tables_of(unit, layout, i), mut relocations)
+			layout.globals_bases[i], layout.tls_bases[i], layout.init_run_bases[i],
+			layout.fini_run_bases[i], tables_of(unit, layout, i), mut relocations)
 	}
 	return relocations
 }
@@ -500,6 +567,14 @@ fn bind(units []image.Program, layout place.Layout, names symbols.Names) !map[st
 // A function's place is its label, which every unit records for the functions it
 // defines; an object's is its slot in the unit's writable data.
 fn definition_at(units []image.Program, layout place.Layout, definition symbols.Definition, name string) !image.Definition {
+	if definition.read_only {
+		slot := units[definition.unit].read_only_globals[name] or {
+			return error('the link binds ${name} to an object in read-only data unit ${definition.unit} defines and has no slot for')
+		}
+		return image.Definition{
+			offset: slot.offset + layout.string_bases[definition.unit]
+		}
+	}
 	if definition.tls {
 		offset := units[definition.unit].tls_labels[name] or {
 			return error('the link binds ${name} to a thread-local unit ${definition.unit} defines and has no offset for')

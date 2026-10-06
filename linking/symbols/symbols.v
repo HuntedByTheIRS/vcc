@@ -26,6 +26,11 @@ pub:
 	// image's thread-local block, which is where a local-exec reference to it
 	// measures from, and every thread gets its own copy of the storage.
 	tls bool
+	// read_only says the definition is an object in read-only data, which is
+	// what a `const` object at file scope is. Its offset counts from the start
+	// of the merged read-only data rather than from the writable data, so a
+	// reference to it lands on the bytes the definition wrote.
+	read_only bool
 }
 
 // Names is what the units define, need, and name, collected into one answer.
@@ -71,6 +76,10 @@ pub mut:
 	// globals_alignment is the strictest alignment any unit asked for, which is
 	// where the merged writable data has to start.
 	globals_alignment int
+	// read_only_alignment is the same for the read-only data, which is where the
+	// merged read-only data has to start for a section inside it to keep its own
+	// alignment.
+	read_only_alignment int
 }
 
 // private_key is the name a unit's own private definition is recorded under. A
@@ -107,7 +116,11 @@ pub fn collect(units []image.Program) !Names {
 			// satisfy another unit's import of the same name, which internal
 			// linkage does not do (6.2.2p2).
 			key := if name in unit.internal { private_key(i, name) } else { name }
-			record(mut names.definitions, key, i, true, unit.weak[name], false)!
+			record(mut names.definitions, key, Definition{
+				unit:     i
+				function: true
+				weak:     unit.weak[name]
+			})!
 		}
 		// A name in `globals` is a definition only when this unit holds its
 		// storage. A unit that merely names an `extern` object puts a slot in
@@ -130,14 +143,33 @@ pub fn collect(units []image.Program) !Names {
 			// the function above is: two units may each hold a `static` object
 			// of one name, and they are two objects with storage of their own.
 			key := if name in unit.internal { private_key(i, name) } else { name }
-			record(mut names.definitions, key, i, false, unit.weak[name], false)!
+			record(mut names.definitions, key, Definition{
+				unit: i
+				weak: unit.weak[name]
+			})!
+		}
+		// An object in read-only data is a definition too, and it is the one a
+		// `const` object at file scope makes: one unit writes the bytes, another
+		// names them, and the reference has to land on the merged read-only data
+		// rather than on the writable data a non-const object would live in.
+		for name, _ in unit.read_only_globals {
+			key := if name in unit.internal { private_key(i, name) } else { name }
+			record(mut names.definitions, key, Definition{
+				unit:      i
+				weak:      unit.weak[name]
+				read_only: true
+			})!
 		}
 		// A thread-local a unit defines is a definition like any other: the
 		// name binds to the unit that holds the storage, and the offset it
 		// answers with counts from the merged block rather than from a blob.
 		for name, _ in unit.tls_labels {
 			key := if name in unit.internal { private_key(i, name) } else { name }
-			record(mut names.definitions, key, i, false, unit.weak[name], true)!
+			record(mut names.definitions, key, Definition{
+				unit: i
+				weak: unit.weak[name]
+				tls:  true
+			})!
 		}
 		for name, _ in unit.internal {
 			names.internal[name] = true
@@ -171,6 +203,9 @@ pub fn collect(units []image.Program) !Names {
 		if unit.globals_alignment > names.globals_alignment {
 			names.globals_alignment = unit.globals_alignment
 		}
+		if unit.read_only_alignment > names.read_only_alignment {
+			names.read_only_alignment = unit.read_only_alignment
+		}
 	}
 	// The weak names are the ones the resolved definition carries, not the ones
 	// any unit wrote: a strong definition of a name another unit wrote weak is
@@ -186,19 +221,13 @@ pub fn collect(units []image.Program) !Names {
 // record settles one definition of one name. A strong definition replaces a weak
 // one, a weak definition leaves a strong one in place, two weak definitions keep
 // the first, and two strong definitions are what a link refuses by name.
-fn record(mut definitions map[string]Definition, name string, unit int, function bool, weak bool, tls bool) ! {
-	definition := Definition{
-		unit:     unit
-		function: function
-		weak:     weak
-		tls:      tls
-	}
+fn record(mut definitions map[string]Definition, name string, definition Definition) ! {
 	if existing := definitions[name] {
-		if existing.weak && !weak {
+		if existing.weak && !definition.weak {
 			definitions[name] = definition
 			return
 		}
-		if weak {
+		if definition.weak {
 			return
 		}
 		return error('multiple definition of `${name}`')

@@ -37,7 +37,7 @@ pub:
 // starts somewhere else; a section key keeps its spelling, since the container
 // reads it as a place in a merged blob rather than as a symbol. How wide the
 // field is comes across unchanged, because the container writes that many bytes.
-pub fn relocations(unit image.Program, unit_index int, text_base int, string_base int, globals_base int, tables Tables, mut out []image.Relocation) {
+pub fn relocations(unit image.Program, unit_index int, text_base int, string_base int, globals_base int, tls_base int, init_run_base int, fini_run_base int, tables Tables, mut out []image.Relocation) {
 	for relocation in unit.relocations {
 		mut addend := relocation.addend
 		mut name := relocation.name
@@ -45,8 +45,18 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 			.text { text_base }
 			.read_only { string_base }
 			.data { globals_base }
+			// A field in the thread-local image moves with the unit's own part
+			// of the merged thread-local block, which is a third place the
+			// merge lays out rather than one of the two data blobs.
+			.tls { tls_base }
 		}
 		mut field := relocation.offset + place_base
+		// A field inside one of the two gathered fragments moves with the
+		// fragment, which the merge placed with the other units' fragments rather
+		// than with its own unit's text.
+		if relocation.place == .text {
+			field = text_field(unit, relocation.offset, text_base, init_run_base, fini_run_base)
+		}
 		if relocation.place == .data {
 			if at := table_field(relocation.offset, tables) {
 				field = at
@@ -75,6 +85,22 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 			width:  relocation.width
 		}
 	}
+}
+
+// text_field is where a field at `offset` in the unit's code lands in the merged
+// code: inside the run the merge gathered the fragment into, when the offset is
+// within one of the two fragments it moves, and at the unit's own text base
+// otherwise.
+fn text_field(unit image.Program, offset int, text_base int, init_run_base int, fini_run_base int) int {
+	if unit.init_run.len > 0 && offset >= unit.init_run.base
+		&& offset < unit.init_run.base + unit.init_run.len {
+		return init_run_base + (offset - unit.init_run.base)
+	}
+	if unit.fini_run.len > 0 && offset >= unit.fini_run.base
+		&& offset < unit.fini_run.base + unit.fini_run.len {
+		return fini_run_base + (offset - unit.fini_run.base)
+	}
+	return text_base + offset
 }
 
 // table_field is where a field at `offset` in the unit's writable data lands when
@@ -178,21 +204,25 @@ fn reference_name(unit image.Program, unit_index int, kind image.FixupKind, name
 	}
 }
 
-// label_key is the key a label reference is written under, which has to be the
-// key the merged table holds its target under. A name this unit carries no label
-// for is not one of its own: the process stub's one code reference calls the
-// entry function, which another unit defines, and the merged table holds a name
-// with external linkage bare. A name this unit does label is its own, and it is
-// private unless it is a function of this unit with external linkage, which the
-// whole link names.
+// label_key is the key a reference is written under, which has to be the key the
+// merged tables hold its target under. A name the unit gives internal linkage is
+// private, and it is keyed by the unit whether it names code, an object in the
+// writable data, an object in the read-only data or a thread-local: two units
+// may each hold a `static` of one name, and those are two definitions with
+// storage of their own. A jump label the emitter made is private for the same
+// reason, because the emitter numbers its labels from zero in each unit and two
+// units hold a `.L0` naming a different place. A public definition keeps its
+// bare name, and so does a name this unit does not hold at all: the process
+// stub's one code reference calls the entry function, which another unit
+// defines.
 fn label_key(unit image.Program, unit_index int, name string) string {
-	if name !in unit.labels {
-		return name
+	if name in unit.internal {
+		return symbols.private_key(unit_index, name)
 	}
-	if name in unit.defined && name !in unit.internal {
-		return name
+	if name in unit.labels && name !in unit.defined {
+		return symbols.private_key(unit_index, name)
 	}
-	return symbols.private_key(unit_index, name)
+	return name
 }
 
 // object_key is the same for a reference to a top-level object: internal

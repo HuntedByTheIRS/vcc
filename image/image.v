@@ -207,6 +207,17 @@ pub:
 	unsigned bool
 }
 
+// CodeRun is one section of a unit's code blob that the merge gathers with the
+// same-named section of every other unit. Where it sits in the unit's blob, how
+// long it is, and the alignment it asks for are all the merge needs to place it
+// with the others.
+pub struct CodeRun {
+pub mut:
+	base      int
+	len       int
+	alignment int
+}
+
 // Program is what one translation unit became: machine code, the strings it
 // reads, and the references between them.
 pub struct Program {
@@ -271,12 +282,34 @@ pub mut:
 	// interned for the name it was defined with.
 	globals_blob []u8
 	globals      map[string]GlobalSlot
+	// read_only_globals is where an object a unit defines in read-only data
+	// lives, as an offset into the merged read-only data. It is a map of its
+	// own because the offset counts from that blob and not from the writable
+	// one: a `const` object at file scope is ordinary C, one unit defines it
+	// and another names it, and a reference to it has to land on the bytes the
+	// definition wrote rather than on bytes of the same name.
+	read_only_globals map[string]GlobalSlot
 	// globals_alignment is the strictest alignment any top-level object asked
 	// for with `__attribute__((aligned(N)))`, and zero when none did. The
 	// storage of the objects has to start at it for an object whose
 	// declaration asked for more than the word size to land at its alignment,
 	// because every object's offset is measured from the start of the blob.
 	globals_alignment int
+	// init_run and fini_run are the two sections of this unit's code blob that
+	// the merge gathers with the same-named section of every other unit: `.init`
+	// and `.fini`, which the start files are written around. The file that opens
+	// `.init` ends with a branch over a call, and the file that closes it begins
+	// with the instruction that branch is meant to reach, so the two fragments
+	// have to end up next to each other rather than where their units landed. A
+	// unit that carries neither has a run of length zero.
+	init_run CodeRun
+	fini_run CodeRun
+	// read_only_alignment is the strictest alignment any read-only section of
+	// this unit asked for. A unit read from an object carries the alignment its
+	// sections declared, and a sixteen-byte constant a compiler loads in one
+	// instruction only lands at its own alignment when the merged read-only data
+	// holds it there, so the merge has to know the number.
+	read_only_alignment int
 	// copy_objects is every name in `globals` that stands for an object another
 	// object defines: the storage is here, the definition is in a shared
 	// library, and the loader copies the library's object into this storage

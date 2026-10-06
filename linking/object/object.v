@@ -230,6 +230,14 @@ struct Layout {
 	// alignment is the strictest alignment any writable section asked for,
 	// floored at a word, which is where the merged writable data has to start.
 	alignment int
+	// read_only_alignment is the same for the read-only sections, which is
+	// where the merged read-only data has to start for a section's own alignment
+	// to hold inside it.
+	read_only_alignment int
+	// init_run and fini_run are the two code sections the merge gathers with the
+	// same-named section of every other unit.
+	init_run image.CodeRun
+	fini_run image.CodeRun
 	// tls_blob is the initialized image of the thread-local storage this unit
 	// defines, and tls_size is how much storage the block asks for in all,
 	// which is longer when a zero-filled `.tbss` follows the image. The base
@@ -277,38 +285,42 @@ pub fn read(bytes []u8, target backend.Target) !image.Program {
 	sections := parse_sections(bytes, header)!
 	layout := lay_out(bytes, sections)!
 	mut program := image.Program{
-		text:              layout.text
-		string_blob:       layout.read_only
-		globals_blob:      layout.writable
-		globals_alignment: layout.alignment
-		labels:            map[string]int{}
-		defined:           map[string]bool{}
-		globals:           map[string]image.GlobalSlot{}
-		internal:          map[string]bool{}
-		weak:              map[string]bool{}
-		weak_imports:      map[string]bool{}
-		tls_slots:         map[string]bool{}
-		strings:           map[string]int{}
-		wide_strings:      map[string]int{}
-		doubles:           map[string]int{}
-		imports:           []string{}
-		object_imports:    map[string]bool{}
-		copy_objects:      []string{}
-		libraries:         []string{}
-		bound:             map[string]image.Definition{}
-		tls_blob:          layout.tls_blob
-		tls_size:          layout.tls_size
-		tls_alignment:     layout.tls_alignment
-		tls_labels:        map[string]int{}
-		init_array:        image.ConstructorTable{
+		text:                layout.text
+		string_blob:         layout.read_only
+		globals_blob:        layout.writable
+		globals_alignment:   layout.alignment
+		read_only_alignment: layout.read_only_alignment
+		init_run:            layout.init_run
+		fini_run:            layout.fini_run
+		labels:              map[string]int{}
+		defined:             map[string]bool{}
+		globals:             map[string]image.GlobalSlot{}
+		internal:            map[string]bool{}
+		weak:                map[string]bool{}
+		weak_imports:        map[string]bool{}
+		tls_slots:           map[string]bool{}
+		read_only_globals:   map[string]GlobalSlot{}
+		strings:             map[string]int{}
+		wide_strings:        map[string]int{}
+		doubles:             map[string]int{}
+		imports:             []string{}
+		object_imports:      map[string]bool{}
+		copy_objects:        []string{}
+		libraries:           []string{}
+		bound:               map[string]image.Definition{}
+		tls_blob:            layout.tls_blob
+		tls_size:            layout.tls_size
+		tls_alignment:       layout.tls_alignment
+		tls_labels:          map[string]int{}
+		init_array:          image.ConstructorTable{
 			offset: layout.init_offset
 			count:  layout.init_count
 		}
-		fini_array:        image.ConstructorTable{
+		fini_array:          image.ConstructorTable{
 			offset: layout.fini_offset
 			count:  layout.fini_count
 		}
-		ifuncs:            map[string]bool{}
+		ifuncs:              map[string]bool{}
 	}
 	read_definitions(bytes, sections, layout, mut program)!
 	mut reader := Reader{
@@ -395,11 +407,31 @@ fn lay_out(bytes []u8, sections []Section) !Layout {
 	mut read_only := []u8{}
 	mut writable := []u8{}
 	mut alignment := 8
+	mut read_only_alignment := 0
+	mut init_run := image.CodeRun{}
+	mut fini_run := image.CodeRun{}
 	for i, s in sections {
 		if blob_of[i] != .code {
 			continue
 		}
 		pad(mut text, align_gap(s.addralign))
+		// The two sections the merge gathers rather than placing with their
+		// unit: where each one sits here is what the merge has to know to move
+		// it, and how long it is and what it asks for are what places it with
+		// the other units' fragments.
+		if s.name == '.init' {
+			init_run = image.CodeRun{
+				base:      text.len
+				len:       s.size
+				alignment: align_gap(s.addralign)
+			}
+		} else if s.name == '.fini' {
+			fini_run = image.CodeRun{
+				base:      text.len
+				len:       s.size
+				alignment: align_gap(s.addralign)
+			}
+		}
 		base_of[i] = text.len
 		copy_section(mut text, bytes, s)
 	}
@@ -407,7 +439,11 @@ fn lay_out(bytes []u8, sections []Section) !Layout {
 		if blob_of[i] != .read_only {
 			continue
 		}
-		pad(mut read_only, align_gap(s.addralign))
+		gap := align_gap(s.addralign)
+		pad(mut read_only, gap)
+		if gap > read_only_alignment {
+			read_only_alignment = gap
+		}
 		base_of[i] = read_only.len
 		copy_section(mut read_only, bytes, s)
 	}
@@ -501,20 +537,23 @@ fn lay_out(bytes []u8, sections []Section) !Layout {
 		tls_alignment = 8
 	}
 	return Layout{
-		blob_of:       blob_of
-		base_of:       base_of
-		text:          text
-		read_only:     read_only
-		writable:      writable
-		alignment:     alignment
-		tls_blob:      tls_blob
-		tls_size:      tls_size
-		tls_alignment: tls_alignment
-		init_offset:   init_offset
-		init_count:    init_count
-		fini_offset:   fini_offset
-		fini_count:    fini_count
-		symtab:        symtab
+		blob_of:             blob_of
+		base_of:             base_of
+		text:                text
+		read_only:           read_only
+		read_only_alignment: read_only_alignment
+		init_run:            init_run
+		fini_run:            fini_run
+		writable:            writable
+		alignment:           alignment
+		tls_blob:            tls_blob
+		tls_size:            tls_size
+		tls_alignment:       tls_alignment
+		init_offset:         init_offset
+		init_count:          init_count
+		fini_offset:         fini_offset
+		fini_count:          fini_count
+		symtab:              symtab
 	}
 }
 
@@ -636,6 +675,19 @@ fn read_definitions(bytes []u8, sections []Section, layout Layout, mut program i
 				}
 				record_linkage(mut program, name, bind)
 			}
+			.read_only {
+				// An object defined in read-only data: a `const` object at
+				// file scope, or a name the C library's own headers define.
+				// A reference to it names a place the merged read-only data
+				// has to hold, so where it lies in this unit's part of that
+				// blob is recorded the way a writable object's slot is.
+				width := if sym.size > 0 { int(sym.size) } else { 8 }
+				program.read_only_globals[name] = image.GlobalSlot{
+					offset: layout.base_of[int(sym.shndx)] + int(sym.value)
+					width:  width
+				}
+				record_linkage(mut program, name, bind)
+			}
 			.tls {
 				offset := layout.base_of[int(sym.shndx)] + int(sym.value)
 				program.tls_labels[name] = offset
@@ -649,7 +701,7 @@ fn read_definitions(bytes []u8, sections []Section, layout Layout, mut program i
 				}
 				record_linkage(mut program, name, bind)
 			}
-			.read_only, .none {}
+			.none {}
 		}
 		if kind == stt_gnu_ifunc {
 			program.ifuncs[name] = true

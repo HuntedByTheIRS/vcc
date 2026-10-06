@@ -317,10 +317,11 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	put(mut output, sections.tls, program.tls_blob)
 	emit_bound_slots(mut output, program, sections, base)
 	emit_extra_slots(mut output, program, sections, extra, base)!
-	emit_symbols(mut output, program, sections, symbol_names, indices, external, base, exports)
-	emit_hash(mut output, program, sections, external, exports.len)
+	emit_symbols(mut output, program, sections, symbol_names, indices, external, base, exports,
+		kind)
+	emit_hash(mut output, program, sections, external, exports.len, kind)
 	emit_relocations(mut output, program, sections, indices, external, base, loader_data,
-		extra, shared)!
+		extra, shared, kind)!
 	// A static program writes no table here, and no header points at one.
 	if has_dynamic {
 		emit_dynamic(mut output, sections, program, dynstr.len, needed, base, relocation_total)
@@ -349,9 +350,15 @@ fn check_kind(program image.Program, kind linux.LinkKind) ! {
 			// the kernel starts the program with no loader, and nothing would
 			// ever write that name's address.
 			for name in program.imports {
-				if name !in program.bound {
-					return error('${name} is not resolved into this static link: a static link resolves its libraries into the file, and this link left ${name} to a library')
+				// A weak import is not left to a library: an undefined weak
+				// symbol stands for zero, so there is nothing for a loader to
+				// write and nothing for this link to resolve. `__gmon_start__` is
+				// the one every static program has, because crti.o's `.init` reads
+				// it before it reads anything else.
+				if name in program.bound || name in program.weak_imports {
+					continue
 				}
+				return error('${name} is not resolved into this static link: a static link resolves its libraries into the file, and this link left ${name} to a library')
 			}
 		}
 		.shared {
@@ -572,6 +579,12 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 	offset = align(offset + program.plts.len * plt_stub_size, 8)
 	dynstr := offset
 	offset = align(offset + dynstr_len, 8)
+	// The read-only data starts at the strictest alignment any of its sections
+	// asked for. A compiler loads a sixteen-byte constant with one instruction
+	// that faults on a misaligned place, and the unit's own part of this data is
+	// placed at that alignment, so the whole of it has to begin there too.
+	string_align := if program.read_only_alignment > 1 { program.read_only_alignment } else { 8 }
+	offset = align(offset, string_align)
 	strings := offset
 	offset = align(offset + program.string_blob.len, 8)
 	// The storage of the top-level objects starts at the strictest alignment any
@@ -717,17 +730,25 @@ fn emit_extra_slots(mut output []u8, program image.Program, sections Sections, e
 // the one non-zero value this file uses, because a symbol with SHN_UNDEF is one
 // the loader skips when it is looking for a definition, and an export the loader
 // skips is an export in name only.
-fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbol_names map[string]int, indices []int, external int, base u64, exports []string) {
-	for i, name in program.imports {
-		if name in program.bound {
-			continue
-		}
-		at := sections.dynsym + indices[i] * elf_symbol_size
-		put_u32(mut output, at, u32(symbol_names[name]))
-		output[at + 4] = if name in program.weak_imports {
-			symbol_weak_function
-		} else {
-			symbol_global_function
+fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbol_names map[string]int, indices []int, external int, base u64, exports []string, kind linux.LinkKind) {
+	// A static program has no loader, so an entry in its dynamic symbol table
+	// answers nothing: every name the image needs is settled by the link, and an
+	// import still left over is one that stands for zero. The room the layout
+	// made says the same thing, because `external_imports` is zero for a static
+	// program, and a table that writes more entries than the room it was given
+	// runs off the end of the image.
+	if kind != .static_program {
+		for i, name in program.imports {
+			if name in program.bound {
+				continue
+			}
+			at := sections.dynsym + indices[i] * elf_symbol_size
+			put_u32(mut output, at, u32(symbol_names[name]))
+			output[at + 4] = if name in program.weak_imports {
+				symbol_weak_function
+			} else {
+				symbol_global_function
+			}
 		}
 	}
 	for i, name in program.copy_objects {
@@ -771,21 +792,26 @@ fn emit_symbols(mut output []u8, program image.Program, sections Sections, symbo
 // symbols are the external imports, the copies and the exports, in the order
 // their entries stand in the dynamic table, starting at one because the null
 // symbol is never in a chain. A bound name is in none of those sets.
-fn emit_hash(mut output []u8, program image.Program, sections Sections, external int, export_count int) {
+fn emit_hash(mut output []u8, program image.Program, sections Sections, external int, export_count int, kind linux.LinkKind) {
 	put_u32(mut output, sections.hash, 1) // one bucket
 	put_u32(mut output, sections.hash + 4, u32(external + program.copy_objects.len + export_count + 1))
 	mut head := u32(0)
 	mut index := 1
 	// A bound name has no entry in the dynamic table, so it is in no chain
 	// either; only the external imports are, and they number the chain the way
-	// they number the symbol table.
-	for name in program.imports {
-		if name in program.bound {
-			continue
+	// they number the symbol table. A static program has no loader, so it has no
+	// external import at all: the room the layout made is `external`, which is
+	// zero for one, and a chain that writes more entries than that runs past the
+	// end of the table and over whatever section follows it.
+	if kind != .static_program {
+		for name in program.imports {
+			if name in program.bound {
+				continue
+			}
+			put_u32(mut output, sections.hash + 8 + 4 * (1 + index), head)
+			head = u32(index)
+			index++
 		}
-		put_u32(mut output, sections.hash + 8 + 4 * (1 + index), head)
-		head = u32(index)
-		index++
 	}
 	for _ in program.copy_objects {
 		put_u32(mut output, sections.hash + 8 + 4 * (1 + index), head)
@@ -820,17 +846,24 @@ fn emit_hash(mut output []u8, program image.Program, sections Sections, external
 // loader to call the resolver and store what it answers. The entry names no
 // symbol, because the answer is not a name's address, and its addend is the
 // resolver's own address, which the loader calls.
-fn emit_relocations(mut output []u8, program image.Program, sections Sections, indices []int, external int, base u64, loader_data int, extra []string, shared bool) ! {
+fn emit_relocations(mut output []u8, program image.Program, sections Sections, indices []int, external int, base u64, loader_data int, extra []string, shared bool, kind linux.LinkKind) ! {
 	mut entry := 0
-	for i, name in program.imports {
-		if name in program.bound {
-			continue
+	// A static program writes no relocation for an import: there is no loader to
+	// read one, and every import still left over stands for zero rather than
+	// waiting for a slot to be filled. The room the layout made is
+	// `external_imports`' answer, which is zero for a static program, so this is
+	// also the loop that has to agree with it.
+	if kind != .static_program {
+		for i, name in program.imports {
+			if name in program.bound {
+				continue
+			}
+			at := sections.rela + entry * elf_relocation_size
+			put_u64(mut output, at, base + u64(sections.got + i * 8))
+			put_u64(mut output, at + 8, (u64(indices[i]) << 32) | relocation_glob_dat)
+			// The addend is zero, which says the address itself is the value.
+			entry++
 		}
-		at := sections.rela + entry * elf_relocation_size
-		put_u64(mut output, at, base + u64(sections.got + i * 8))
-		put_u64(mut output, at + 8, (u64(indices[i]) << 32) | relocation_glob_dat)
-		// The addend is zero, which says the address itself is the value.
-		entry++
 	}
 	// One copy relocation per object this image holds a copy of: the place is
 	// the storage in this image, and the symbol is the one the entry in the
@@ -1270,11 +1303,25 @@ fn relocation_referent_of(program image.Program, sections Sections, name string)
 			return 0
 		}
 	}
+	// An object a unit defines in read-only data: the merged read-only data is
+	// where its bytes are, and the offset a bound definition carries counts from
+	// its start.
+	if slot := program.read_only_globals[name] {
+		return sections.strings + slot.offset
+	}
 	if offset := program.labels[name] {
 		return sections.text + offset
 	}
 	if slot := program.globals[name] {
 		return sections.globals + slot.offset
+	}
+	// A name the link answers itself is in no unit's table: the constructor
+	// tables' four ends and the image's own bounds are places in the writable
+	// data, and the offset the link recorded for one counts from the start of
+	// that section. Everything a unit defines was found above, so a definition
+	// reaching this point is one of the link's own answers.
+	if definition := program.bound[name] {
+		return sections.globals + definition.offset
 	}
 	return error('${name} is named by a relocation and no unit of this link defines it and no stub stands for it')
 }
@@ -1309,6 +1356,14 @@ fn tls_memsz(program image.Program) int {
 // goes at the end of the rounded block and the offset has to agree with it.
 fn tpoff_of(program image.Program, name string, addend int) !i64 {
 	offset := program.tls_labels[name] or {
+		// An undefined weak symbol stands for zero (ELF), and the offset of a
+		// thread-local that lies at zero is the offset of the start of the
+		// block. The C library declares its own locale members weak so that a
+		// link which never pulls the data still finishes, and a reference to
+		// one is settled the same way: a zero offset rather than an error.
+		if name in program.weak_imports {
+			return i64(addend - tls_memsz(program))
+		}
 		return error('${name} is measured from the thread pointer and is not a thread-local of this image')
 	}
 	return i64(offset + addend - tls_memsz(program))
@@ -1394,6 +1449,20 @@ fn referent_of(program image.Program, sections Sections, kind image.FixupKind, n
 			}
 		}
 		.global_address {
+			// An object a unit defines in read-only data is not in `globals`,
+			// which is the storage this image holds in the writable section: its
+			// bytes are in the merged read-only data and a reference to it names
+			// that offset the same way. The definition is looked for before the
+			// slot, because a unit that only refers to the object puts a slot in
+			// `globals` for it too, and a slot is not where the bytes are.
+			if slot := program.read_only_globals[name] {
+				return sections.strings + slot.offset
+			}
+			if definition := program.bound[name] {
+				// A name the link answers itself, which is one of the bounds of
+				// the image or of a constructor table it placed.
+				return sections.globals + definition.offset
+			}
 			return sections.globals + (program.globals[name] or {
 				return error('no global ${name} in the image')
 			}).offset
