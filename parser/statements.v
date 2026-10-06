@@ -1530,7 +1530,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			// initializer's, and a declarator that builds another type from
 			// it has nowhere to put it. Measured on gcc 16.2.1, `auto *p = 0;`
 			// is `'auto' requires a plain identifier`.
-			p.error_at(d.name_at, 'unsupported: the C23 auto type specifier needs a plain identifier, and ${d.name} is written with a pointer or an array')
+			p.error_at(d.name_at, 'unsupported: ${deduced_specifier_name(spec.auto_spelling)} needs a plain identifier, and ${d.name} is written with a pointer or an array')
 			p.skip_declaration()
 			return stmts
 		}
@@ -1705,12 +1705,12 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				if initializer := init {
 					declared = auto_deduced_type(initializer)
 					if declared.kind == .unknown {
-						p.error_at(d.name_at, 'unsupported: auto takes the type of ${d.name} from its initializer, and this compiler did not resolve it')
+						p.error_at(d.name_at, 'unsupported: ${spec.auto_spelling} takes the type of ${d.name} from its initializer, and this compiler did not resolve it')
 					} else {
 						p.scopes.complete_type(d.name, declared)
 					}
 				} else {
-					p.error_at(d.name_at, 'unsupported: auto needs an initializer to take a type from, and ${d.name} has none')
+					p.error_at(d.name_at, 'unsupported: ${spec.auto_spelling} needs an initializer to take a type from, and ${d.name} has none')
 					p.skip_declaration()
 					return stmts
 				}
@@ -1731,7 +1731,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 			// C23 requires the initializer: there is nothing to take a type
 			// from, and the error names that rather than leaving the object
 			// with the word auto for a type.
-			p.error_at(d.name_at, 'unsupported: auto needs an initializer to take a type from, and ${d.name} has none')
+			p.error_at(d.name_at, 'unsupported: ${spec.auto_spelling} needs an initializer to take a type from, and ${d.name} has none')
 			p.skip_declaration()
 			return stmts
 		}
@@ -2099,7 +2099,7 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 				// its own initializer and its own type, which is not what the
 				// declaration says. Measured on gcc 16.2.1, `auto x = 1, y = 2;`
 				// is `'auto' may only be used with a single declarator`.
-				p.error_at(p.peek(), 'a constraint violation: auto may be used with only one declarator')
+				p.error_at(p.peek(), 'a constraint violation: ${spec.auto_spelling} may be used with only one declarator')
 				p.skip_declaration()
 				return stmts
 			}

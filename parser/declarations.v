@@ -61,6 +61,15 @@ const tag_keywords = ['struct', 'union', 'enum']
 // including c89 and draws no pedantic message from any of them.
 const typeof_words = ['typeof', '__typeof', '__typeof__']
 
+// auto_type_words are the spellings of the deduced type specifier, whose type
+// is taken from the initializer rather than written: GNU C's `__auto_type`,
+// which every GNU dialect and every strict one takes because the spelling is in
+// the namespace an implementation reserves for itself. C23's `auto` names the
+// same construct and is read through the same flag, but its spelling is also
+// the C89 storage class, so it is recognized by what follows it (see
+// auto_is_a_type_specifier) and not by this list.
+const auto_type_words = ['__auto_type']
+
 // typeof_unqual_words are the same specifier with the qualifiers taken off the
 // type it names, which is the one difference between the two: `typeof` keeps
 // them and `typeof_unqual` does not. C23 spells it `typeof_unqual`, and the
@@ -80,8 +89,8 @@ const keywords = ['_Atomic', '_BitInt', '_Bool', '_Complex', '_Imaginary', '_Thr
 	'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'typeof', 'typeof_unqual', 'union',
 	'unsigned', 'void', 'volatile', 'while', '__asm', '__asm__', '__attribute__', '__const', '__const__',
 	'__extension__', '__inline', '__inline__', '__int128', '__restrict', '__restrict__', '__signed',
-	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile',
-	'__volatile__']
+	'__signed__', '__thread', '__typeof', '__typeof__', '__typeof_unqual__', '__volatile__',
+	'__volatile__', '__auto_type']
 
 // is_keyword says whether a spelling is one of the reserved words. Nothing in the
 // language may use one as an identifier, so the question is asked by the declarator
@@ -168,7 +177,7 @@ fn (p Parser) starts_type_name(t tokenize.Token) bool {
 fn is_specifier_word(text string) bool {
 	return text in storage_classes || text in type_qualifiers || text in builtin_types
 		|| text in tag_keywords || text in typeof_words || text in typeof_unqual_words
-		|| text in bitint_words
+		|| text in bitint_words || text in auto_type_words
 }
 
 // storage_of is the storage class a word names. `inline` and `__extension__` say
@@ -230,6 +239,11 @@ mut:
 	// been read, and the reader that has the initializer is the one that fills
 	// the clause. It is false for the storage class of the same spelling.
 	auto_deduced bool
+	// auto_spelling is the word that opened a deduced specifier, `auto` or
+	// `__auto_type`, kept so that a diagnostic names the construct the source
+	// wrote and not the one spelling of it. It is empty when the declaration is
+	// not deduced.
+	auto_spelling string
 	// attributes is what any GNU `__attribute__` written among the specifiers
 	// said about the declaration. The two that change the object - a weak
 	// binding and a strict alignment - travel here to the reader that builds
@@ -842,7 +856,7 @@ fn (mut p Parser) parse_declaration() []ast.FnDecl {
 				// own initializer and its own type, which is not what the
 				// declaration says. Measured on gcc 16.2.1, `auto x = 1, y = 2;`
 				// is `'auto' may only be used with a single declarator`.
-				p.error_at(p.peek(), 'a constraint violation: auto may be used with only one declarator')
+				p.error_at(p.peek(), 'a constraint violation: ${spec.auto_spelling} may be used with only one declarator')
 				p.skip_declaration()
 				return decls
 			}
@@ -1032,17 +1046,17 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 		// storage the image lays out. The clause the specifiers left
 		// unresolved is filled here, once the type is a fact.
 		if d.pointer_count() > 0 || d.is_array() {
-			p.error_at(data_at, 'unsupported: the C23 auto type specifier needs a plain identifier, and ${data_name} is written with a pointer or an array')
+			p.error_at(data_at, 'unsupported: ${deduced_specifier_name(spec.auto_spelling)} needs a plain identifier, and ${data_name} is written with a pointer or an array')
 			return false
 		}
 		if !p.at_punct('=') {
-			p.error_at(data_at, 'unsupported: auto needs an initializer to take a type from, and ${data_name} has none')
+			p.error_at(data_at, 'unsupported: ${spec.auto_spelling} needs an initializer to take a type from, and ${data_name} has none')
 			return false
 		}
 		p.next()
 		data_defined = true
 		written := p.auto_file_initializer() or {
-			p.error_at(data_at, 'unsupported: auto takes the type of ${data_name} from its initializer, and this compiler read no type and no constant in it')
+			p.error_at(data_at, 'unsupported: ${spec.auto_spelling} takes the type of ${data_name} from its initializer, and this compiler read no type and no constant in it')
 			return false
 		}
 		spec.type_words = [written.typ.describe()]
@@ -4344,6 +4358,20 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 			spec.attributes = merge_attributes(spec.attributes, p.skip_gnu_postfix(opening)!)
 			continue
 		}
+		if t.text in auto_type_words {
+			// `__auto_type` is the GNU spelling of the deduced specifier and
+			// names the same construct C23's `auto` does: one declarator, a
+			// plain identifier, initialized, and the type taken from the
+			// initializer. Only the spelling is GNU, so it shares the flag
+			// with `auto` and the one reader fills the clause.
+			p.next()
+			spec.note(t)
+			spec.type_words << t.text
+			spec.auto_deduced = true
+			spec.auto_spelling = t.text
+			spec.has_type = true
+			continue
+		}
 		if t.text in storage_classes {
 			// `auto` is two constructs with one spelling: the C89 storage class
 			// and C23's type specifier for a type taken from the initializer.
@@ -4356,6 +4384,7 @@ fn (mut p Parser) parse_decl_specifiers(depth int) !DeclSpec {
 				spec.note(t)
 				spec.type_words << 'auto'
 				spec.auto_deduced = true
+				spec.auto_spelling = 'auto'
 				spec.has_type = true
 				continue
 			}
@@ -5315,6 +5344,17 @@ fn (p Parser) size_as_unsigned(expr ast.Expr, at tokenize.Token) ast.Expr {
 		line:     at.line
 		col:      at.col
 	})
+}
+
+// deduced_specifier_name names a deduced specifier for a diagnostic. `auto` is
+// described as C23's specifier because the word is also the C89 storage class
+// and naming it alone would not say which construct was meant; the GNU spelling
+// names itself, since there is only one thing `__auto_type` can be.
+fn deduced_specifier_name(spelling string) string {
+	if spelling == 'auto' {
+		return 'the C23 auto type specifier'
+	}
+	return spelling
 }
 
 // auto_deduced_type is the type C23's auto type specifier takes from its

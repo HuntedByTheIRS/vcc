@@ -5,8 +5,6 @@
  * declaration must declare only one variable, whose declarator must just be an
  * identifier, the declaration must be initialized, and the type of the variable
  * is determined by the initializer."
- *
- * unimplemented: __auto_type.
  */
 
 #include <stdio.h>
