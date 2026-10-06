@@ -89,6 +89,21 @@ pub const features = [
 		since:     .c23
 		pedantic:  'decimal floating-point'
 	}
+	// The `d` and `D` suffix on a floating constant, which names a double: a GNU
+	// extension in every mode rather than part of any standard. Measured on gcc
+	// 16.2.1 over `double a = 1.5d; double b = 1.5D;`: plain, exit 0 and empty
+	// stderr under c89 through c23 and gnu89 through gnu23; with -pedantic-errors,
+	// exit 1 and `suffix for double constant is a GCC extension` under every one
+	// of them, the GNU dialects included, which is the one place the table's
+	// GNU-extension shape does not hold and is why the row says so. This tree
+	// refuses the suffix by name and location today (`1.5d: d is not part of a
+	// floating constant`), so the row is unimplemented and read by nothing.
+	Feature{
+		since:    .none
+		gnu:      true
+		pedantic: 'a d suffix on a floating constant'
+		status:   .unimplemented
+	}
 	// An attribute can be written before the declaration
 	// (`__attribute__((unused)) int f(void);`), between the specifiers and the
 	// declarator, and after the declarator
@@ -441,6 +456,23 @@ pub const features = [
 		pedantic:  'the _Imaginary type'
 		status:    .unimplemented
 	},
+	// The _Alignof operator is C11's spelling of the alignment of a type, and it
+	// is a different row from `__alignof__`, the reserved spelling this tree
+	// reads. Measured on gcc 16.2.1 over `_Alignof(int) + _Alignof(double)`:
+	// plain, exit 0 and empty stderr under every mode tried, c89 included; with
+	// -pedantic-errors, `ISO C90 does not support '_Alignof'` under c89 and
+	// gnu89, `ISO C99 does not support '_Alignof'` under c99 and gnu99, and clean
+	// under c11, c17, c23 and gnu11. The GNU dialects exempt it in no mode, so
+	// the row carries no GNU exemption. This tree refuses the spelling in every
+	// mode with `a constraint violation: _Alignof is used here and nothing in
+	// this file declares it`, so the row is unimplemented and read by nothing.
+	Feature{
+		spellings: ['_Alignof']
+		since:     .c11
+		gnu:       false
+		pedantic:  'the _Alignof operator'
+		status:    .unimplemented
+	}
 	// sizeof is C89's operator and the tree reads it: `parser/parser.v` answers it
 	// where it is written, its operand is not evaluated, and `pipeline_test.v`
 	// asserts both (`sizeof(double) + sizeof(char)` is 9, and `sizeof(bump())`
