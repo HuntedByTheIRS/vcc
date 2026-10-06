@@ -409,30 +409,245 @@ fn test_an_object_of_its_own_names_reads_into_the_three_blobs() {
 	assert got.data_fixups[0].addend == 10
 }
 
-// A section that asks for thread-local storage is outside what this unit lays
-// out, and is refused by its flag rather than read as ordinary data.
-fn test_a_thread_local_section_is_refused() {
-	mut obj := build_object(sample_sections(), sample_symbols(), []BuildRelocation{})
-	off := section_header_offset(obj, '.myrw')
-	set_u64(mut obj, off + 8, field_u64(obj, off + 8) | 0x400)
-	read(obj, host()) or {
-		assert err.msg().contains('SHF_TLS')
-		return
+// A thread-local section is carried into the unit's own TLS block rather than
+// refused: the initialized bytes go into tls_blob, a zero-filled section adds to
+// tls_size, each thread-local symbol's offset inside the block is recorded in
+// tls_labels, and a `.tpoff` reference to the name is a thread pointer offset.
+fn test_a_thread_local_section_is_carried_into_the_tls_block() {
+	sections := [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 8, init: u8(0x90)} },
+		BuildSection{
+			name:  '.tdata'
+			kind:  1
+			flags: 0x403 // SHF_TLS | SHF_WRITE | SHF_ALLOC
+			align: 8
+			data:  [u8(0x01), u8(0x02), u8(0x03), u8(0x04), u8(0x05), u8(0x06), u8(0x07), u8(0x08)]
+		},
+		BuildSection{ name: '.tbss', kind: 8, flags: 0x403, align: 8, data: []u8{len: 16, init: u8(0)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'tls', info: 0x11, shndx: 2, value: 0, size: 8 },
+		BuildSymbol{ name: 'tlsb', info: 0x11, shndx: 3, value: 0, size: 16 },
+	]
+	relocations := [
+		BuildRelocation{ target: 1, offset: 0, symbol: 2, kind: 23, addend: 0 },
+	]
+	got := read(build_object(sections, symbols, relocations), host()) or {
+		panic('the reader refused a thread-local object: ${err.msg()}')
 	}
-	assert false, 'the reader accepted a thread-local section'
+	assert got.tls_blob == [u8(0x01), u8(0x02), u8(0x03), u8(0x04), u8(0x05), u8(0x06), u8(0x07),
+		u8(0x08)]
+	// Eight bytes of image and sixteen of zero-filled storage, at eight-byte
+	// alignment because the strictest member asked for it.
+	assert got.tls_size == 24
+	assert got.tls_alignment == 8
+	assert got.tls_labels['tls'] == 0
+	assert got.tls_labels['tlsb'] == 8
+	// The container reads the same number as a thread-local definition.
+	assert got.bound['tls'].tls
+	assert got.bound['tls'].offset == 0
+	assert !('tls' in got.labels)
+	assert got.relocations.len == 1
+	assert got.relocations[0].place == .text
+	assert got.relocations[0].kind == .tpoff
+	assert got.relocations[0].width == .narrow
+	assert got.relocations[0].name == 'tls'
+	assert got.relocations[0].offset == 0
+	assert got.relocations[0].addend == 0
 }
 
-// A constructor table is refused by name: running a constructor needs an
-// INIT_ARRAY tag this container does not write yet.
-fn test_a_constructor_table_is_refused() {
-	mut obj := build_object(sample_sections(), sample_symbols(), []BuildRelocation{})
-	off := section_header_offset(obj, '.myro')
-	set_u32(mut obj, off + 4, 14) // SHT_INIT_ARRAY
+// A constructor table is carried into the writable data: its sections are copied
+// there, the table records where and how many eight-byte entries it holds, and
+// each entry's own R_X86_64_64 becomes a wide absolute reference the link fills
+// in. A unit with an `.init_array` and an `.init_array.00000` for a priority gets
+// one table covering both.
+fn test_a_constructor_table_is_carried_into_the_writable_data() {
+	sections := [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 8, init: u8(0x90)} },
+		BuildSection{
+			name:  '.mydata'
+			kind:  1
+			flags: 0x3
+			align: 8
+			data:  [u8(0xaa), u8(0xbb), u8(0xcc), u8(0xdd), u8(0xee), u8(0xff), u8(0x11), u8(0x22)]
+		},
+		BuildSection{ name: '.init_array', kind: 14, flags: 0x3, align: 8, data: []u8{len: 16, init: u8(0)} },
+		BuildSection{ name: '.init_array.00000', kind: 14, flags: 0x3, align: 8, data: []u8{len: 8, init: u8(0)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'ctor1', info: 0x12, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'ctor2', info: 0x12, shndx: 1, value: 4, size: 0 },
+	]
+	relocations := [
+		BuildRelocation{ target: 3, offset: 0, symbol: 2, kind: 1, addend: 0 },
+		BuildRelocation{ target: 3, offset: 8, symbol: 3, kind: 1, addend: 0 },
+		BuildRelocation{ target: 4, offset: 0, symbol: 2, kind: 1, addend: 0 },
+	]
+	got := read(build_object(sections, symbols, relocations), host()) or {
+		panic('the reader refused a constructor object: ${err.msg()}')
+	}
+	// .mydata lands at 0, then the two array sections together at 8 and 24.
+	assert got.globals_blob.len == 32
+	assert got.globals_blob[0] == u8(0xaa)
+	assert got.init_array.offset == 8
+	assert got.init_array.count == 3
+	assert got.fini_array.count == 0
+	assert got.relocations.len == 3
+	assert got.relocations[0].place == .data
+	assert got.relocations[0].kind == .absolute
+	assert got.relocations[0].width == .wide
+	assert got.relocations[0].name == 'ctor1'
+	assert got.relocations[0].offset == 8
+	assert got.relocations[0].addend == 0
+	assert got.relocations[1].name == 'ctor2'
+	assert got.relocations[1].offset == 16
+	assert got.relocations[2].name == 'ctor1'
+	assert got.relocations[2].offset == 24
+}
+
+// A common symbol's storage is made in the writable data at the alignment its
+// value names, and the name is recorded the way a `.bss` definition is.
+fn test_a_common_symbol_gets_storage_in_the_writable_data() {
+	sections := [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 8, init: u8(0x90)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'shared', info: 0x11, shndx: 0xfff2, value: 16, size: 32 },
+	]
+	relocations := [
+		BuildRelocation{ target: 1, offset: 0, symbol: 2, kind: 1, addend: 0 },
+	]
+	got := read(build_object(sections, symbols, relocations), host()) or {
+		panic('the reader refused a common symbol: ${err.msg()}')
+	}
+	assert got.globals['shared'].offset == 0
+	assert got.globals['shared'].width == 32
+	assert got.globals_blob.len == 32
+	assert got.globals_alignment == 16
+	assert !got.defined['shared']
+	// The storage is recorded, so a reference to the name resolves to it.
+	assert got.relocations.len == 1
+	assert got.relocations[0].kind == .absolute
+	assert got.relocations[0].width == .wide
+	assert got.relocations[0].name == 'shared'
+	assert got.relocations[0].addend == 0
+}
+
+// A reference to an absolute symbol folds to the constant the symbol names, with
+// an empty name: the container is told the addend is the whole value.
+fn test_an_absolute_symbol_folds_to_a_constant() {
+	sections := [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 8, init: u8(0x90)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'CONST', info: 0x11, shndx: 0xfff1, value: 0x1000, size: 0 },
+	]
+	relocations := [
+		BuildRelocation{ target: 1, offset: 0, symbol: 2, kind: 1, addend: 4 },
+	]
+	got := read(build_object(sections, symbols, relocations), host()) or {
+		panic('the reader refused an absolute symbol: ${err.msg()}')
+	}
+	assert got.relocations.len == 1
+	assert got.relocations[0].kind == .absolute
+	assert got.relocations[0].width == .wide
+	assert got.relocations[0].name == ''
+	assert got.relocations[0].addend == 0x1004
+	assert got.imports.len == 0
+}
+
+// An eight-byte pc-relative field is carried as a wide direct reference, which is
+// what an unwind table's entries carry.
+fn test_a_pc64_field_is_a_wide_direct_reference() {
+	sections := [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 16, init: u8(0x90)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'f', info: 0x12, shndx: 1, value: 4, size: 4 },
+	]
+	relocations := [
+		BuildRelocation{ target: 1, offset: 0, symbol: 2, kind: 24, addend: -8 },
+	]
+	got := read(build_object(sections, symbols, relocations), host()) or {
+		panic('the reader refused a PC64 reference: ${err.msg()}')
+	}
+	assert got.relocations.len == 1
+	assert got.relocations[0].place == .text
+	assert got.relocations[0].kind == .direct
+	assert got.relocations[0].width == .wide
+	assert got.relocations[0].name == 'f'
+	assert got.relocations[0].offset == 0
+	assert got.relocations[0].addend == -8
+}
+
+// R_X86_64_64 in the read-only data is an eight-byte absolute field, which is
+// what a .sframe unwind table's entry holds.
+fn test_an_absolute_field_in_the_read_only_data_is_wide() {
+	sections := [
+		BuildSection{ name: '.myro', kind: 1, flags: 0x2, align: 8, data: []u8{len: 8, init: u8(0)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.myro', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'ext', info: 0x10, shndx: 0, value: 0, size: 0 },
+	]
+	relocations := [
+		BuildRelocation{ target: 1, offset: 0, symbol: 2, kind: 1, addend: -8 },
+	]
+	got := read(build_object(sections, symbols, relocations), host()) or {
+		panic('the reader refused a read-only absolute field: ${err.msg()}')
+	}
+	assert got.relocations.len == 1
+	assert got.relocations[0].place == .read_only
+	assert got.relocations[0].kind == .absolute
+	assert got.relocations[0].width == .wide
+	assert got.relocations[0].name == 'ext'
+	assert got.relocations[0].addend == -8
+}
+
+// An IFUNC symbol is a definition whose value is the resolver function's offset,
+// and its name is recorded so the container can ask the resolver for the address
+// to use.
+fn test_an_ifunc_symbol_is_recorded() {
+	sections := [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 16, init: u8(0x90)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'memcpy', info: 0x0a, shndx: 1, value: 4, size: 0 },
+	]
+	got := read(build_object(sections, symbols, []BuildRelocation{}), host()) or {
+		panic('the reader refused an IFUNC symbol: ${err.msg()}')
+	}
+	assert got.ifuncs['memcpy']
+	assert got.labels['memcpy'] == 4
+	assert got.defined['memcpy']
+}
+
+// A thread-local model this reader does not carry is refused by name rather than
+// treated as another kind.
+fn test_a_thread_local_model_this_reader_does_not_carry_is_refused() {
+	sections := [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 8, init: u8(0x90)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'ext', info: 0x10, shndx: 0, value: 0, size: 0 },
+	]
+	relocations := [
+		BuildRelocation{ target: 1, offset: 0, symbol: 2, kind: 19, addend: -4 },
+	]
+	obj := build_object(sections, symbols, relocations)
 	read(obj, host()) or {
-		assert err.msg().contains('SHT_INIT_ARRAY')
+		assert err.msg().contains('TLSGD')
+		assert err.msg().contains('unknown relocation type')
 		return
 	}
-	assert false, 'the reader accepted a constructor table'
+	assert false, 'the reader accepted a TLSGD relocation'
 }
 
 // A reference to a symbol defined in a section that is not part of the unit is
