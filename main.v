@@ -161,6 +161,15 @@ fn main() {
 		link_inputs(opts)
 		return
 	}
+	// A static program is linked rather than written from one unit, because the
+	// only static program that can reach a library is the one the library
+	// itself starts. Which of the two a static link needs is decided once its
+	// units are read, in the linker's path below, so every static link takes
+	// that path and one rule decides it.
+	if opts.links() && link_kind(opts) == .static_program {
+		link_inputs(opts)
+		return
+	}
 	mut phases := []cli.Phase{}
 	mut started := time.now()
 	// Lexing happens inside the preprocessor, which is the stage that knows
@@ -360,39 +369,95 @@ fn link_needs(units []unit.Program) map[string]bool {
 	return needed
 }
 
-// archive_members pulls the members of one archive that answer a name the link
-// still needs, and keeps pulling while a member it pulled asks for a name
-// another member provides. The names are walked in order rather than off the
-// map, so one archive and one set of needs always pull the same members in the
-// same order and the same link writes the same bytes. A member nothing refers
-// to stays out, which is what makes a library of many objects cost only the
-// parts the program asks for.
-fn archive_members(parts archive.Archive, target backend.Target, mut needed map[string]bool) ![]unit.Program {
-	mut pulled := map[int]bool{}
+// pull_archives pulls the members of every archive that answer a name the link
+// still needs, and sweeps the whole set again while a sweep pulled anything. A
+// static link resolves its libraries against each other rather than one after
+// the other: libgcc's unwinding reaches for the C library's threads and the C
+// library reaches for libgcc, so coming back to an archive already passed is
+// the only order that finishes. A member is read once, whichever sweep reached
+// it, and the names are walked in sorted order rather than off the map, so one
+// set of archives and one set of needs always pull the same members in the same
+// order and the same link writes the same bytes. A member nothing refers to
+// stays out, which is what makes a library of many objects cost only the parts
+// the program asks for.
+fn pull_archives(archives []archive.Archive, target backend.Target, mut needed map[string]bool) ![]unit.Program {
+	mut pulled := map[string]bool{}
 	mut out := []unit.Program{}
-	mut names := parts.index.keys()
-	names.sort()
 	mut again := true
 	for again {
 		again = false
-		for name in names {
-			index := parts.index[name]
-			if !needed[name] || index in pulled {
-				continue
+		for a, parts in archives {
+			mut names := parts.index.keys()
+			names.sort()
+			for name in names {
+				if !needed[name] {
+					continue
+				}
+				index := parts.index[name]
+				key := '${a}:${index}'
+				if key in pulled {
+					continue
+				}
+				pulled[key] = true
+				member := parts.members[index]
+				entry := object.read(member.bytes, target) or {
+					return error('${member.name}: ${err.msg()}')
+				}
+				for symbol in entry.imports {
+					needed[symbol] = true
+				}
+				out << entry
+				again = true
 			}
-			pulled[index] = true
-			member := parts.members[index]
-			entry := object.read(member.bytes, target) or {
-				return error('${member.name}: ${err.msg()}')
-			}
-			for symbol in entry.imports {
-				needed[symbol] = true
-			}
-			out << entry
-			again = true
 		}
 	}
 	return out
+}
+
+// read_unit reads one file as the relocatable object a link merges. The start
+// files of a link are objects of this compiler's own reading, so a link that
+// puts the C library's startup around its program reads them the way it reads
+// an object the command line named.
+fn read_unit(path string, target backend.Target) !unit.Program {
+	source := read_source(path)!
+	return object.read(source.bytes(), target)
+}
+
+// has_constructors says whether any unit of the link carries a constructor or
+// destructor table, which is what decides whether whoever starts the image has
+// to run anything before `main`.
+fn has_constructors(units []unit.Program) bool {
+	for unit in units {
+		if unit.init_array.count > 0 || unit.fini_array.count > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// needs_a_library says whether the units name a function or an object that none
+// of them defines, which is what makes a link reach outside itself. The names a
+// unit defines are collected first and the imports asked against them, because a
+// name one unit imports and another defines is the link's own business and not a
+// library's.
+fn needs_a_library(units []unit.Program) bool {
+	mut defined := map[string]bool{}
+	for unit in units {
+		for name, _ in unit.defined {
+			defined[name] = true
+		}
+		for name, _ in unit.globals {
+			defined[name] = true
+		}
+	}
+	for unit in units {
+		for name in unit.imports {
+			if name !in defined {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // link_inputs is the multi-input path. Every input is compiled as one unit of a
@@ -410,24 +475,13 @@ fn link_inputs(opts cli.Options) {
 		return
 	}
 	// A shared object has no process stub: nothing starts it and the image's
-	// entry point is zero. Every other kind of link starts at a stub, which is
-	// why text offset zero is the stub.
+	// entry point is zero. Every other kind of link starts at a stub this
+	// compiler writes, unless the units bring an entry point of their own,
+	// which is what the C library's start files do; that is decided below,
+	// once the units are read, because it is the units that say whether the
+	// link reaches a library.
 	output_kind := link_kind(opts)
 	mut units := []unit.Program{cap: opts.inputs.len + 1}
-	if output_kind != .shared {
-		stub := codegen.start_stub('main', codegen.Options{
-			target:    opts.target
-			link_kind: output_kind
-		})
-		// The stub is emitted from a constant entry name and the exit
-		// sequence, so it has nothing to report; a diagnostic here is this
-		// compiler failing rather than an input. It goes through the one place
-		// a diagnostic becomes text, with no file to name because it has none.
-		if report('', stub.diagnostics, opts.warnings) > 0 {
-			exit(1)
-		}
-		units << stub.program
-	}
 	mut reading := i64(0)
 	mut parsing := i64(0)
 	mut optimizing := i64(0)
@@ -519,6 +573,66 @@ fn link_inputs(opts cli.Options) {
 			}
 		}
 	}
+	// A static link that reaches a library is started by the C library's own
+	// entry point instead of by a stub this compiler writes: the library's
+	// startup is what sets the thread pointer up, runs the constructors and
+	// reaches `main`, and a program that calls printf without any of that dies
+	// before it prints. Whether this link is one of those is whether its units
+	// name a function or an object none of them defines.
+	//
+	// The start files come from the system's own description, resolved in the
+	// directories a link searches, and they go around the units in the order a
+	// link puts them: crt1.o holds the entry point, so it is what the merged
+	// text begins with and what the image's entry point is.
+	reach := output_kind == .static_program && needs_a_library(units)
+	mut entry := if output_kind == .shared { '' } else { 'main' }
+	if reach {
+		before, after := target.start_file_paths(.static_program, opts.library_dirs) or {
+			abort(err.msg())
+			return
+		}
+		// The start files go in front of the units, in the order a link places
+		// them, so the last one is prepended first and crt1.o ends up at text
+		// offset zero, where the container reads the entry point from.
+		mut i := before.len
+		for i > 0 {
+			i--
+			units.prepend(read_unit(before[i], target) or {
+				abort('${before[i]}: ${err.msg()}')
+				return
+			})
+		}
+		for path in after {
+			units << read_unit(path, target) or {
+				abort('${path}: ${err.msg()}')
+				return
+			}
+		}
+		for path in target.static_support_libraries(opts.library_dirs) {
+			source := read_source(path) or {
+				abort('cannot read ${path}: ${err.msg()}')
+				return
+			}
+			archives << archive.read(source.bytes()) or {
+				abort('${path}: ${err.msg()}')
+				return
+			}
+		}
+		entry = '_start'
+	} else if output_kind != .shared {
+		stub := codegen.start_stub(entry, codegen.Options{
+			target:    opts.target
+			link_kind: output_kind
+		})
+		// The stub is emitted from a constant entry name and the exit
+		// sequence, so it has nothing to report; a diagnostic here is this
+		// compiler failing rather than an input. It goes through the one place
+		// a diagnostic becomes text, with no file to name because it has none.
+		if report('', stub.diagnostics, opts.warnings) > 0 {
+			exit(1)
+		}
+		units.prepend(stub.program)
+	}
 	// An archive is pulled apart only for the names the link still needs. A
 	// member whose symbols nothing refers to stays where it is, the way a linker
 	// leaves it, so a library of many objects adds the ones the program asks
@@ -527,17 +641,24 @@ fn link_inputs(opts cli.Options) {
 	// wanted from the start.
 	if archives.len > 0 {
 		mut needed := link_needs(units)
-		for parts in archives {
-			pulled := archive_members(parts, target, mut needed) or {
-				abort(err.msg())
-				return
-			}
-			units << pulled
+		units << pull_archives(archives, target, mut needed) or {
+			abort(err.msg())
+			return
 		}
+	}
+	// A constructor table is run by whoever starts the program: the loader for a
+	// dynamic one, the C library's own startup for a static one, which walks the
+	// table by its two end names. A static program with neither has nothing to
+	// walk it and the stub this compiler writes calls `main` and leaves, so the
+	// constructor would be silently skipped. A wrong answer that is quiet is the
+	// worst outcome available, so such a link stops here and names the pair.
+	if output_kind == .static_program && !reach && has_constructors(units) {
+		abort("a static program with a constructor needs the C library's startup to run it, and this link reaches no library: the constructor would never run")
+		return
 	}
 	mut started := time.now()
 	merged := linking.link(units, linking.Options{
-		entry:        if output_kind == .shared { '' } else { 'main' }
+		entry:        entry
 		target:       target
 		libraries:    opts.libraries
 		library_dirs: opts.library_dirs

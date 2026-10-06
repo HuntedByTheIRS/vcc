@@ -1470,6 +1470,47 @@ pub fn (t &Target) link_dirs(given []string) []string {
 	return dirs
 }
 
+// start_file_paths is the two runs of start file a kind of link is made of, the
+// ones that go before its own objects and the ones that go after, each resolved
+// in the directories a link searches. A name this system does not have is an
+// error rather than a link made without it: a static program started without
+// crt1.o has no entry point at all, and crti.o/crtn.o are what open and close
+// the initialisation and finalisation sections the C library's startup reads.
+pub fn (t &Target) start_file_paths(kind linux.LinkKind, given []string) !([]string, []string) {
+	files := linux.start_files(kind)
+	dirs := t.link_dirs(given)
+	mut before := []string{cap: files.before.len}
+	for name in files.before {
+		before << linux.find_file(name, dirs) or {
+			return error('the start file ${name} is not in any directory this system searches')
+		}
+	}
+	mut after := []string{cap: files.after.len}
+	for name in files.after {
+		after << linux.find_file(name, dirs) or {
+			return error('the start file ${name} is not in any directory this system searches')
+		}
+	}
+	return before, after
+}
+
+// static_support_libraries are the archives a static link resolves against: the
+// C library, the part of it that lives in an archive of its own, and the
+// toolchain's two unwinding archives. They are files rather than -l names
+// because libc_nonshared.a is a file no -l name reaches, and because a static
+// link wants the archive even where a shared library of the same name is
+// installed beside it. A name this system does not have is left out; the link
+// reports the symbol that needed it.
+pub fn (t &Target) static_support_libraries(given []string) []string {
+	mut out := []string{}
+	for name in ['libc.a', 'libc_nonshared.a', 'libgcc.a', 'libgcc_eh.a'] {
+		if path := linux.find_file(name, t.link_dirs(given)) {
+			out << path
+		}
+	}
+	return out
+}
+
 // external_link_arguments is the command line a linker named with
 // -external-linker is given. The loader, the start files and the library
 // directories all come from the system's description through linux, so the
