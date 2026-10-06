@@ -9344,6 +9344,33 @@ fn (mut e Emitter) emit_overflow(call ast.Call, depth int) !void {
 	e.append(e.target.move_register32(accumulator, scratch)!)
 }
 
+// emit_alloc answers `__builtin_alloca(size)`: it claims `size` bytes on the
+// calling function's stack and leaves their address in the accumulator. The size is
+// rounded up to the boundary a call needs and subtracted from the stack pointer, the
+// same two steps a variable-length array's declaration makes, so the storage sits
+// below the frame and every access through the frame pointer is untouched; the value
+// the stack pointer became is the address the call is worth.
+//
+// The lifetime is what separates this from a variable-length array: the standard
+// says an alloca'd object lives until the function returns, so no block saves and
+// restores the stack pointer around this call, and the frame's own epilogue, which
+// puts the stack pointer back to the frame pointer, is what gives the storage back
+// at the end. The size is widened to a word first, so an int argument arrives at the
+// subtraction as the value it is and not with whatever the register held above it.
+fn (mut e Emitter) emit_alloc(call ast.Call, depth int) !void {
+	e.emit_expr_at(call.args[0], depth + 1)!
+	e.extend_operand_to_word(call.args[0], call.line, call.col)!
+	register := e.accumulator(call.line, call.col)!
+	e.append(e.target.add_immediate(register, frame_alignment - 1))
+	e.append(e.target.and_immediate(register, -frame_alignment)!)
+	e.append(e.target.sub_rsp_register(register)!)
+	stack := e.target.stack_pointer() or {
+		e.diagnostics << problem(call.line, call.col, '${e.target.name}: the machine has no stack pointer to claim __builtin_alloca storage against')
+		return error('no stack pointer')
+	}
+	e.append(e.target.move_register64(register, stack)!)
+}
+
 // emit_call writes one call: every argument is evaluated first, each one into a
 // slot of its own in the frame, and only then are the machine's argument
 // registers loaded with them. An argument can be an expression that calls
@@ -9427,6 +9454,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		}
 		'__builtin_add_overflow', '__builtin_mul_overflow' {
 			return e.emit_overflow(call, depth)
+		}
+		'__builtin_alloca' {
+			return e.emit_alloc(call, depth)
 		}
 		'atexit' {
 			// glibc defines atexit in libc_nonshared.a, the static half of

@@ -5,8 +5,6 @@
  * block scope. The function allocates an object size bytes large on the stack of
  * the calling function. ... The lifetime of the allocated object ends just
  * before the calling function returns to its caller."
- *
- * unimplemented: __builtin_alloca.
  */
 
 #include <stdio.h>

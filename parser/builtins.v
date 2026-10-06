@@ -37,7 +37,7 @@ const builtin_expression_names = ['__builtin_types_compatible_p', '__builtin_cho
 	'__builtin_ctzll', '__builtin_clz', '__builtin_clzll', '__builtin_constant_p',
 	'__builtin_object_size', '__builtin_return_address', '__builtin_unreachable', '__builtin_trap',
 	'__builtin_bswap16', '__builtin_bswap32', '__builtin_popcount', '__builtin_parity',
-	'__builtin_add_overflow', '__builtin_mul_overflow']
+	'__builtin_add_overflow', '__builtin_mul_overflow', '__builtin_alloca']
 
 // parse_builtin_expression reads one of them. The name has been read and the
 // cursor is at its opening parenthesis.
@@ -125,6 +125,9 @@ fn (mut p Parser) read_builtin_expression(at tokenize.Token) !ast.Expr {
 		}
 		'__builtin_add_overflow', '__builtin_mul_overflow' {
 			return p.parse_overflow(at)
+		}
+		'__builtin_alloca' {
+			return p.parse_alloc(at)
 		}
 		else {
 			return error('not a builtin this reader knows')
@@ -850,6 +853,34 @@ fn (mut p Parser) parse_overflow(at tokenize.Token) !ast.Expr {
 		name: at.text
 		args: args
 		typ:  types.int_type()
+		line: at.line
+		col:  at.col
+	})
+}
+
+// parse_alloc reads `__builtin_alloca(size)`, which claims `size` bytes on the
+// calling function's stack and answers the address they begin at. The answer is a
+// void *, which is the address the back end leaves in the accumulator after it
+// lowers the stack pointer. The size is a value of size_t's kind: gcc's builtin
+// takes size_t, and an operand that is not an integer has no byte count to read,
+// so it is refused by name.
+fn (mut p Parser) parse_alloc(at tokenize.Token) !ast.Expr {
+	args := p.parse_arguments()!
+	if args.len != 1 {
+		p.error_at(at, 'unsupported: ${at.text} takes the number of bytes to claim')
+		return error('the size of ${at.text}')
+	}
+	if !p.is_unresolved(args[0]) {
+		size := p.value_type(args[0])
+		if size.kind != .unknown && !size.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} takes a size in bytes, and ${describe_operand(args[0])} is ${size.describe()}')
+			return error('the size of ${at.text}')
+		}
+	}
+	return ast.Expr(ast.Call{
+		name: '__builtin_alloca'
+		args: args
+		typ:  types.pointer_to(types.void_type())
 		line: at.line
 		col:  at.col
 	})
