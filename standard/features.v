@@ -76,6 +76,19 @@ pub:
 // yet are read by nothing; the day one lands, its row changes status, gains its
 // spellings and starts being checked.
 pub const features = [
+	// The decimal floating types `_Decimal32`, `_Decimal64` and `_Decimal128`.
+	// Measured on gcc 16.2.1 over a file that declares one of each and converts
+	// them to double: `-std=c23` takes it with empty stderr and exit 0, and
+	// every mode before C23 is silent without -pedantic and says `ISO C does not
+	// support decimal floating-point before C23` with it — under the GNU
+	// dialects as much as the strict ones, gnu99 included, which is why this row
+	// carries no GNU exemption and no extension name. It is also the one
+	// construct in this table whose standard is C23 rather than C99.
+	Feature{
+		spellings: ['_Decimal32', '_Decimal64', '_Decimal128']
+		since:     .c23
+		pedantic:  'decimal floating-point'
+	}
 	// An attribute can be written before the declaration
 	// (`__attribute__((unused)) int f(void);`), between the specifiers and the
 	// declarator, and after the declarator
