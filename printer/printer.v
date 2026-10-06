@@ -136,6 +136,10 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 			.asm_stmt {
 				out << '${indent}asm statement ${stmt.asm_spelling()} at ${stmt.line}:${stmt.col}'
 			}
+			.nested_function {
+				fn_decl := stmt.nested_fn() or { ast.FnDecl{} }
+				out << '${indent}nested function ${fn_decl.name} of ${fn_decl.owner} at ${stmt.line}:${stmt.col}'
+			}
 		}
 		if expr := stmt.expr {
 			dump_expression(expr, depth + 1, mut out)

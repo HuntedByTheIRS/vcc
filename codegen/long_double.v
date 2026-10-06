@@ -219,7 +219,7 @@ fn put_extended_value(mut blob []u8, at int, value types.LongDouble) {
 // what a value of the extended type is worth.
 fn (mut e Emitter) leave_address(slot Slot, line int, col int) !void {
 	register := e.accumulator(line, col)!
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	e.append(e.target.address_of_slot(base, slot.offset, register))
 }
 
@@ -227,7 +227,7 @@ fn (mut e Emitter) leave_address(slot Slot, line int, col int) !void {
 // of the frame. The machine has no form of a move that takes a floating value in
 // the instruction, so the two words go in as immediates.
 fn (mut e Emitter) put_extended_bytes(slot Slot, bytes [16]u8, line int, col int) !void {
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	register := e.accumulator(line, col)!
 	e.append(e.target.move_immediate64(register, word_from_bytes(bytes, 0))!)
 	e.append(e.target.store_slot(base, i32(slot.offset), register, 8)!)
@@ -261,7 +261,7 @@ fn (mut e Emitter) emit_extended_literal(expr ast.FloatLit, line int, col int) !
 // wherever a long double value's address is, or a double, float or integer
 // converted by the machine's x87 moves.
 fn (mut e Emitter) store_long_double(slot Slot, expr ast.Expr, line int, col int, depth int) !void {
-	base := e.frame_pointer(line, col)!
+	base := e.slot_base_register(slot, line, col)!
 	register := e.accumulator(line, col)!
 	e.append(e.target.address_of_slot(base, slot.offset, register))
 	address := e.value_slot(depth)
