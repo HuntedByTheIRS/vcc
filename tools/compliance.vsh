@@ -1,11 +1,22 @@
 #!/usr/bin/env -S v run
 
 // The compliance corpus used to be one translation unit carrying nine hundred
-// assertions. It is a directory now. `compliance/monolithic.c` is that unit, and
-// each `NNN-*.c` beside it holds one of its checks together with the
-// declarations and the statements that check needs. Every tiny file is a
-// program: it compiles on its own, runs on its own, and exits non-zero when its
-// check fails, so a failure names a file and a line in that file.
+// assertions. It is a tree now. `compliance/monolithic.c` is that unit, kept
+// whole at the root, and the checks live in a directory per dialect:
+//
+//   compliance/iso/c99/    one test per ISO C99 answer, compiled -std=c99
+//   compliance/gnu/gnu99/  the tests this compiler takes only in a GNU dialect,
+//                          compiled -std=gnu99
+//
+// A test's directory is the standard it is compiled under: the leaf name is the
+// `-std=` spelling, so a new standard is a new directory and not a change here.
+// A test this compiler accepts only under a GNU dialect belongs in the `gnu/`
+// tree beside its ISO sibling; the measurement that decides it is the one in
+// compliance/README.md.
+//
+// Every tiny file is a program: it compiles on its own, runs on its own, and
+// exits non-zero when its check fails, so a failure names a file and a line in
+// that file.
 //
 //   v run tools/compliance.vsh                        # build the tree, then run every test
 //   v run tools/compliance.vsh --compiler /tmp/vcc    # a compiler you already built
@@ -28,18 +39,24 @@ import time
 const tests_floor = 999
 const checks_floor = 906
 
-// gnu99 rather than the c99 the corpus documents for gcc, because several tests
-// include <tgmath.h> and the system header refuses a compiler it does not
-// recognise: measured, -std=c99 stops at /usr/include/tgmath.h:802 with
-// `#error "Unsupported compiler; you cannot use <tgmath.h>"`. -w because some
-// tests are deliberately not warning-clean under this compiler, and -lm for the
-// long double complex functions.
+// Every suite compiles with the same head and tail, and the standard between
+// them is the directory's own name, so the two cannot drift apart. -w because
+// some tests are deliberately not warning-clean under this compiler, and -lm
+// for the long double complex functions.
 //
 // -x c is for the tests that keep their check in a .h file because what they
 // test is what a header declares. The compiler has to read those as C; handed
 // `foo.h` alone, both this compiler and gcc treat it as a header, and gcc then
 // says `linker input file unused because linking not done`.
-const compile_flags = '-x c -std=gnu99 -w -lm'
+const compile_head = '-x c -std='
+const compile_tail = ' -w -lm'
+
+// The whole corpus in one translation unit keeps the mode it was written
+// against. It includes <tgmath.h>, and this compiler claims __GNUC__ only in a
+// GNU dialect, so the strict c99 spelling stops at /usr/include/tgmath.h:802
+// with `#error "Unsupported compiler; you cannot use <tgmath.h>"`. Measured;
+// compliance/README.md says why it stays at the root.
+const monolithic_mode = 'gnu99'
 
 const corpus_dir = 'compliance'
 const monolithic = 'monolithic.c'
@@ -52,6 +69,24 @@ mut:
 	jobs     int
 	list     bool
 	count    bool
+}
+
+// Suite is one dialect directory: the standards tree it sits in, its own name as
+// the -std= spelling, and the tests collected from it.
+struct Suite {
+	rel   string
+	dir   string
+	mode  string
+	tests []string
+}
+
+// Test is one file to compile and run, with the suite it came from so the worker
+// knows which standard to hand the compiler.
+struct Test {
+	suite string
+	dir   string
+	mode  string
+	name  string
 }
 
 struct Outcome {
@@ -70,26 +105,27 @@ mut:
 fn main() {
 	opts := parse_options(os.args[1..])
 	root := os.dir(os.dir(@FILE))
-	tests_dir := os.join_path(root, corpus_dir)
-	if !os.exists(tests_dir) {
+	corpus_path := os.join_path(root, corpus_dir)
+	if !os.exists(corpus_path) {
 		eprintln('compliance: ${corpus_dir} is missing from ${root}')
 		exit(1)
 	}
-	tests := collect_tests(tests_dir, opts)
 	if opts.count {
-		// the number of tests in the corpus, whatever --only would narrow it to.
+		// the number of tests in the tree, whatever --only would narrow it to.
 		// The badge in README.md reads this number, so it is counted by the same
 		// code that decides what a test file is.
-		println(collect_tests(tests_dir, Options{}).len)
+		println(total_tests(root))
 		return
 	}
+	suites := collect_suites(root, opts)
+	tests := flatten(suites)
 	if tests.len == 0 {
-		eprintln('compliance: no test files in ${tests_dir}')
+		eprintln('compliance: no test files under ${corpus_path}')
 		exit(1)
 	}
 	if opts.list {
 		for test in tests {
-			println(test)
+			println('${test.suite}/${test.name}')
 		}
 		return
 	}
@@ -100,19 +136,27 @@ fn main() {
 		eprintln('compliance: no scratch directory: ${err}')
 		exit(1)
 	}
-	os.mkdir_all(os.join_path(scratch, 'run')) or {}
+	// the suite directories are made once up front: eight workers creating
+	// `run/iso-c99` at the same time race inside mkdir_all, which reports File
+	// exists for a segment another worker made a moment ago
+	for suite in suites {
+		os.mkdir_all(os.join_path(scratch, 'bin', suite_slug(suite.rel))) or {}
+		os.mkdir_all(os.join_path(scratch, 'run', suite_slug(suite.rel))) or {}
+	}
 	mut cleanup := [scratch]
 	if built_here {
 		cleanup << compiler
 	}
-	println('compliance: ${tests.len} tests in ${corpus_dir}')
+	for suite in suites {
+		println('compliance: ${suite.rel}: ${suite.tests.len} tests (-std=${suite.mode})')
+	}
 	println('compiler:   ${compiler}')
 
 	started := time.ticks()
 	shared work := Work{}
 	mut threads := []thread{}
 	for _ in 0 .. worker_count(opts) {
-		threads << spawn test_all(tests, tests_dir, compiler, scratch, opts.defines, shared work)
+		threads << spawn test_all(tests, compiler, scratch, opts.defines, shared work)
 	}
 	threads.wait()
 	elapsed := f64(time.ticks() - started) / 1000.0
@@ -134,7 +178,7 @@ fn main() {
 
 	// the whole corpus in one translation unit, which is what step 3 of the
 	// bootstrap chain compiles and what the check count floor is about
-	whole := run_monolithic(tests_dir, compiler, scratch)
+	whole := run_monolithic(corpus_path, compiler, scratch)
 	if whole.stage != 'ok' {
 		problems << 'monolithic.c: ${whole.stage}: ${whole.detail}'
 	} else {
@@ -170,10 +214,70 @@ fn worker_count(opts Options) int {
 	return 8
 }
 
+// collect_suites walks compliance/<standards>/<dialect>/ and collects the tests
+// in each dialect directory. A .c or .h directly under compliance/ or directly
+// under a standards tree is not a test: the dialect directory is where tests
+// live.
+fn collect_suites(root string, opts Options) []Suite {
+	mut suites := []Suite{}
+	corpus_path := os.join_path(root, corpus_dir)
+	for standards in os.ls(corpus_path) or { []string{} } {
+		standards_dir := os.join_path(corpus_path, standards)
+		if !os.is_dir(standards_dir) {
+			continue
+		}
+		for dialect in os.ls(standards_dir) or { []string{} } {
+			dialect_dir := os.join_path(standards_dir, dialect)
+			if !os.is_dir(dialect_dir) {
+				continue
+			}
+			suites << Suite{
+				rel:   os.join_path(standards, dialect)
+				dir:   dialect_dir
+				mode:  dialect
+				tests: collect_tests(dialect_dir, opts)
+			}
+		}
+	}
+	suites.sort(a.rel < b.rel)
+	return suites
+}
+
+// flatten is every collected test with the suite it belongs to, which is the
+// order the workers pull from.
+fn flatten(suites []Suite) []Test {
+	mut tests := []Test{}
+	for suite in suites {
+		for name in suite.tests {
+			tests << Test{
+				suite: suite.rel
+				dir:   suite.dir
+				mode:  suite.mode
+				name:  name
+			}
+		}
+	}
+	return tests
+}
+
+// total_tests counts the whole tree, for the badge.
+fn total_tests(root string) int {
+	mut count := 0
+	for suite in collect_suites(root, Options{}) {
+		count += suite.tests.len
+	}
+	return count
+}
+
+// suite_slug names a suite's scratch directories: `iso/c99` becomes `iso-c99`.
+fn suite_slug(rel string) string {
+	return rel.replace('/', '-')
+}
+
 // test_all runs tests until the queue is empty. The queue is shared, so the
 // cursor moves under a lock and the thread count decides how many compilers run
 // at once.
-fn test_all(tests []string, dir string, compiler string, scratch string, defines []string, shared work Work) {
+fn test_all(tests []Test, compiler string, scratch string, defines []string, shared work Work) {
 	for {
 		mut index := -1
 		lock work {
@@ -185,49 +289,56 @@ fn test_all(tests []string, dir string, compiler string, scratch string, defines
 		if index < 0 {
 			return
 		}
-		outcome := run_one(tests[index], dir, compiler, scratch, defines)
+		outcome := run_one(tests[index], compiler, scratch, defines)
 		lock work {
 			work.outcomes << outcome
 		}
 	}
 }
 
-// run_one compiles a test, runs it, and reports the first thing that went
-// wrong. A test that passes prints nothing and exits zero, so any output at all
-// is a finding rather than noise to filter.
-fn run_one(file string, dir string, compiler string, scratch string, defines []string) Outcome {
-	path := os.join_path(dir, file)
+// run_one compiles a test under the standard of the directory it sits in, runs
+// it, and reports the first thing that went wrong. A test that passes prints
+// nothing and exits zero, so any output at all is a finding rather than noise
+// to filter.
+fn run_one(test Test, compiler string, scratch string, defines []string) Outcome {
+	path := os.join_path(test.dir, test.name)
+	label := '${test.suite}/${test.name}'
 	if needs_define(required_define(path), defines) {
-		return Outcome{file, 'skip', 'needs -D${required_define(path)}'}
+		return Outcome{label, 'skip', 'needs -D${required_define(path)}'}
 	}
-	stem := file.all_before_last('.')
-	mut flags := compile_flags
-	for define in defines {
-		flags += ' -D${define}'
-	}
-	exe := os.join_path(scratch, stem)
-	build := os.execute('cd ${os.quoted_path(dir)} && ${os.quoted_path(compiler)} ${flags} ${os.quoted_path(file)} -o ${os.quoted_path(exe)} 2>&1')
+	stem := test.name.all_before_last('.')
+	slug := suite_slug(test.suite)
+	flags := suite_flags(test.mode, defines)
+	exe := os.join_path(scratch, 'bin', slug, stem)
+	build := os.execute('cd ${os.quoted_path(test.dir)} && ${os.quoted_path(compiler)} ${flags} ${os.quoted_path(test.name)} -o ${os.quoted_path(exe)} 2>&1')
 	if build.exit_code != 0 {
-		return Outcome{file, 'build', first_lines(build.output, 3)}
+		return Outcome{label, 'build', first_lines(build.output, 3)}
 	}
 	// each test gets its own directory: several write c99_stdio_*.txt, and one
 	// directory for the whole run lets them read each other's leavings
-	rundir := os.join_path(scratch, 'run', stem)
-	// the parent is made once up front: eight workers creating `run/` at the same
-	// time race inside mkdir_all, which reports File exists for a segment another
-	// worker made a moment ago
+	rundir := os.join_path(scratch, 'run', slug, stem)
 	os.mkdir_all(rundir) or {}
 	run := os.execute('cd ${os.quoted_path(rundir)} && ${os.quoted_path(exe)} 2>&1')
 	if run.exit_code != 0 {
-		return Outcome{file, 'run', first_lines(run.output, 3)}
+		return Outcome{label, 'run', first_lines(run.output, 3)}
 	}
 	// no `if finding := f(x); finding != '' {` here: V 0.5.2 ends the file with
 	// `unexpected eof, expecting }` on that form, measured
 	finding := finding_output(run.output)
 	if finding != '' {
-		return Outcome{file, 'output', first_lines(finding, 3)}
+		return Outcome{label, 'output', first_lines(finding, 3)}
 	}
-	return Outcome{file, 'ok', ''}
+	return Outcome{label, 'ok', ''}
+}
+
+// suite_flags is the compile line for one dialect: the standard is the
+// directory's own name, and the defines are the ones --define named.
+fn suite_flags(mode string, defines []string) string {
+	mut flags := '${compile_head}${mode}${compile_tail}'
+	for define in defines {
+		flags += ' -D${define}'
+	}
+	return flags
 }
 
 // run_monolithic runs the corpus as one translation unit and reads its own
@@ -235,7 +346,8 @@ fn run_one(file string, dir string, compiler string, scratch string, defines []s
 // silence.
 fn run_monolithic(dir string, compiler string, scratch string) Outcome {
 	exe := os.join_path(scratch, 'monolithic')
-	build := os.execute('cd ${os.quoted_path(dir)} && ${os.quoted_path(compiler)} ${compile_flags} ${monolithic} -o ${os.quoted_path(exe)} 2>&1')
+	flags := '${compile_head}${monolithic_mode}${compile_tail}'
+	build := os.execute('cd ${os.quoted_path(dir)} && ${os.quoted_path(compiler)} ${flags} ${monolithic} -o ${os.quoted_path(exe)} 2>&1')
 	if build.exit_code != 0 {
 		return Outcome{monolithic, 'build', first_lines(build.output, 3)}
 	}
@@ -255,9 +367,9 @@ fn run_monolithic(dir string, compiler string, scratch string) Outcome {
 	return Outcome{monolithic, 'ok', summary}
 }
 
-// collect_tests is every numbered file in the corpus. `--only` narrows it to the
-// names given, which is how one test gets looked at without waiting for nine
-// hundred builds.
+// collect_tests is every numbered file in a dialect directory. `--only` narrows
+// it to the names given, which is how one test gets looked at without waiting
+// for nine hundred builds.
 fn collect_tests(dir string, opts Options) []string {
 	mut tests := []string{}
 	for entry in os.ls(dir) or { []string{} } {
