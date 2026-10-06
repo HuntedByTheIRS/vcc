@@ -60,10 +60,30 @@ pub fn link(units []image.Program, options Options) !image.Program {
 	}
 	layout := place.lay(units, names.globals_alignment)
 	read_only := merge_read_only(units, layout)
+	tls := merge_tls(units, layout)
+	ifuncs := merge_ifuncs(units)
 	// bound is the truth a reference is answered from: the names whose definition
 	// is inside this image. It is built before the copy list is filtered, because
 	// a name both lists carry is one the filtering has to drop from the copies.
-	bound := bind(units, layout, names)!
+	mut bound := bind(units, layout, names)!
+	// Each constructor table has two ends the C library's own startup reaches
+	// for by name rather than by being told where the table is: `__libc_csu_init`
+	// walks `__init_array_start` to `__init_array_end` and the same for the
+	// fini table. The linker is what knows where the tables landed, so it is
+	// what answers for the four names, and only for the ones something in the
+	// link actually named.
+	mut arrays := map[string]int{}
+	arrays['__init_array_start'] = layout.constructor_base
+	arrays['__init_array_end'] = layout.constructor_base + layout.init_len
+	arrays['__fini_array_start'] = layout.constructor_base + layout.init_len
+	arrays['__fini_array_end'] = layout.constructor_base + layout.init_len + layout.fini_len
+	for name, offset in arrays {
+		if name in names.imports {
+			bound[name] = image.Definition{
+				offset: offset
+			}
+		}
+	}
 	// The references a unit carried as relocations are merged like its fixups,
 	// and the imported functions among them need a stub: a unit read back from
 	// a relocatable object reaches a library function with a direct branch, and
@@ -81,7 +101,16 @@ pub fn link(units []image.Program, options Options) !image.Program {
 		if is_section_key(relocation.name) {
 			continue
 		}
-		if relocation.name in names.definitions {
+		if relocation.name in names.definitions && relocation.name !in ifuncs {
+			continue
+		}
+		// An IFUNC is defined by a unit of this link and still needs a stub: the
+		// name stands for the resolver rather than for the function, so a call
+		// to it has to reach the slot the resolver's answer is written into, and
+		// that is what a stub is. A reference that already goes through the
+		// table is skipped above.
+		if relocation.name in ifuncs && relocation.name !in plts {
+			plts << relocation.name
 			continue
 		}
 		if relocation.name in names.object_imports {
@@ -125,6 +154,19 @@ pub fn link(units []image.Program, options Options) !image.Program {
 		data_fixups:       merge_data_fixups(units, layout, names.definitions)
 		relocations:       merged_relocations
 		plts:              plts
+		tls_blob:          tls.blob
+		tls_size:          tls.size
+		tls_alignment:     tls.alignment
+		tls_labels:        tls.labels
+		init_array:        image.ConstructorTable{
+			offset: layout.constructor_base
+			count:  layout.init_len / 8
+		}
+		fini_array:        image.ConstructorTable{
+			offset: layout.constructor_base + layout.init_len
+			count:  layout.fini_len / 8
+		}
+		ifuncs:            ifuncs
 	}
 	// Every reference that is still external has to be answerable by a library
 	// the image names, or the program dies at load with nothing on the
@@ -199,6 +241,57 @@ struct ReadOnly {
 	strings      map[string]int
 	wide_strings map[string]int
 	doubles      map[string]int
+}
+
+// Tls is the merged thread-local block and where each name lies in it. The block
+// is the image's whole thread-local storage, which is what a `tpoff` reference
+// measures from its end: the storage sits below the thread pointer, so a
+// thread-local's distance from it is its offset in the block minus the block's
+// length.
+struct Tls {
+	blob      []u8
+	size      int
+	alignment int
+	labels    map[string]int
+}
+
+// merge_tls concatenates the units' thread-local storage at its final length and
+// rebases each name into it. A unit is placed at the alignment its members asked
+// for, so the gaps between units stay zero, which is what a thread-local part the
+// unit did not initialize is.
+fn merge_tls(units []image.Program, layout place.Layout) Tls {
+	mut blob := []u8{len: layout.tls_len}
+	mut labels := map[string]int{}
+	for i, unit in units {
+		base := layout.tls_bases[i]
+		fill(mut blob, base, unit.tls_blob)
+		for name, offset in unit.tls_labels {
+			key := if name in unit.internal { symbols.private_key(i, name) } else { name }
+			if key !in labels {
+				labels[key] = offset + base
+			}
+		}
+	}
+	return Tls{
+		blob:      blob
+		size:      layout.tls_len
+		alignment: layout.tls_alignment
+		labels:    labels
+	}
+}
+
+// merge_ifuncs is the union of the units' IFUNC names. The container needs the
+// set so that each one's slot is filled by asking its resolver when the image
+// starts rather than by copying an address, and so that a call to one goes
+// through a stub.
+fn merge_ifuncs(units []image.Program) map[string]bool {
+	mut ifuncs := map[string]bool{}
+	for unit in units {
+		for name, _ in unit.ifuncs {
+			ifuncs[name] = true
+		}
+	}
+	return ifuncs
 }
 
 // merge_read_only concatenates the units' read-only data at its final length and
@@ -325,9 +418,24 @@ fn merge_relocations(units []image.Program, layout place.Layout) []image.Relocat
 	mut relocations := []image.Relocation{cap: count}
 	for i, unit in units {
 		reloc.relocations(unit, i, layout.text_bases[i], layout.string_bases[i],
-			layout.globals_bases[i], mut relocations)
+			layout.globals_bases[i], tables_of(unit, layout, i), mut relocations)
 	}
 	return relocations
+}
+
+// tables_of is where one unit's two constructor tables land in the merged
+// writable data, read from the layout the merge places the unit by. A unit with
+// no table of a kind answers with the zero value, which the rewriter reads as
+// "this field moves with the unit's own data".
+fn tables_of(unit image.Program, layout place.Layout, i int) reloc.Tables {
+	return reloc.Tables{
+		init_base:   layout.init_bases[i]
+		init_offset: unit.init_array.offset
+		init_count:  unit.init_array.count
+		fini_base:   layout.fini_bases[i]
+		fini_offset: unit.fini_array.offset
+		fini_count:  unit.fini_array.count
+	}
 }
 
 // is_section_key says whether a relocation's name is one of a unit's own section
@@ -364,6 +472,15 @@ fn bind(units []image.Program, layout place.Layout, names symbols.Names) !map[st
 // A function's place is its label, which every unit records for the functions it
 // defines; an object's is its slot in the unit's writable data.
 fn definition_at(units []image.Program, layout place.Layout, definition symbols.Definition, name string) !image.Definition {
+	if definition.tls {
+		offset := units[definition.unit].tls_labels[name] or {
+			return error('the link binds ${name} to a thread-local unit ${definition.unit} defines and has no offset for')
+		}
+		return image.Definition{
+			offset: offset + layout.tls_bases[definition.unit]
+			tls:    true
+		}
+	}
 	if definition.function {
 		offset := units[definition.unit].labels[name] or {
 			return error('the link binds ${name} to a function unit ${definition.unit} defines and has no label for')

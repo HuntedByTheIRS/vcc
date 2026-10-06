@@ -12,15 +12,32 @@ import linking.symbols
 // because the merged tables are keyed by name; only a kind changes, and only
 // where a link turns a reference into one the container writes itself.
 
+// Tables is where one unit's two constructor tables land in the merged writable
+// data, and where they began in the unit. A table's entries do not move with the
+// unit's writable data: the tables of every unit are placed together at the end
+// of the blob, so a field inside one moves to the table's new place instead. The
+// zero value says the unit has no table of that kind.
+pub struct Tables {
+pub:
+	init_base   int
+	init_offset int
+	init_count  int
+	fini_base   int
+	fini_offset int
+	fini_count  int
+}
+
 // relocations appends one unit's rewritten relocations to the merged list. A
 // field moves with the blob it lies in, so its offset gains that blob's base,
-// which is what the place it carries names. Its name is keyed the way the merged
-// tables key it. A reference into one of the unit's own sections gains that
-// section's base in the addend, because the object measured the byte from the
-// start of its own copy of the section and the merged copy starts somewhere
-// else; a section key keeps its spelling, since the container reads it as a
-// place in a merged blob rather than as a symbol.
-pub fn relocations(unit image.Program, unit_index int, text_base int, string_base int, globals_base int, mut out []image.Relocation) {
+// which is what the place it carries names, except for a field inside one of the
+// unit's constructor tables, which moves to the merged table. Its name is keyed
+// the way the merged tables key it. A reference into one of the unit's own
+// sections gains that section's base in the addend, because the object measured
+// the byte from the start of its own copy of the section and the merged copy
+// starts somewhere else; a section key keeps its spelling, since the container
+// reads it as a place in a merged blob rather than as a symbol. How wide the
+// field is comes across unchanged, because the container writes that many bytes.
+pub fn relocations(unit image.Program, unit_index int, text_base int, string_base int, globals_base int, tables Tables, mut out []image.Relocation) {
 	for relocation in unit.relocations {
 		mut addend := relocation.addend
 		mut name := relocation.name
@@ -28,6 +45,12 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 			.text { text_base }
 			.read_only { string_base }
 			.data { globals_base }
+		}
+		mut field := relocation.offset + place_base
+		if relocation.place == .data {
+			if at := table_field(relocation.offset, tables) {
+				field = at
+			}
 		}
 		match relocation.name {
 			image.section_key_text {
@@ -44,13 +67,30 @@ pub fn relocations(unit image.Program, unit_index int, text_base int, string_bas
 			}
 		}
 		out << image.Relocation{
-			offset: relocation.offset + place_base
+			offset: field
 			place:  relocation.place
 			kind:   relocation.kind
 			name:   name
 			addend: addend
+			width:  relocation.width
 		}
 	}
+}
+
+// table_field is where a field at `offset` in the unit's writable data lands when
+// it is one of a constructor table's entries: the merged table is somewhere else
+// in the blob, and the entry keeps its place within its own table. None means the
+// field is not in a table and moves with the unit's data.
+fn table_field(offset int, tables Tables) ?int {
+	if tables.init_count > 0 && offset >= tables.init_offset
+		&& offset < tables.init_offset + tables.init_count * 8 {
+		return tables.init_base + (offset - tables.init_offset)
+	}
+	if tables.fini_count > 0 && offset >= tables.fini_offset
+		&& offset < tables.fini_offset + tables.fini_count * 8 {
+		return tables.fini_base + (offset - tables.fini_offset)
+	}
+	return none
 }
 
 // fixups appends one unit's rewritten code references to the merged list. The

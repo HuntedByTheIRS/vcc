@@ -21,6 +21,11 @@ pub:
 	unit     int
 	function bool
 	weak     bool
+	// tls says the definition is a thread-local rather than a function or an
+	// object in the writable data: its offset counts from the start of the
+	// image's thread-local block, which is where a local-exec reference to it
+	// measures from, and every thread gets its own copy of the storage.
+	tls bool
 }
 
 // Names is what the units define, need, and name, collected into one answer.
@@ -89,7 +94,7 @@ pub fn collect(units []image.Program) !Names {
 			// satisfy another unit's import of the same name, which internal
 			// linkage does not do (6.2.2p2).
 			key := if name in unit.internal { private_key(i, name) } else { name }
-			record(mut names.definitions, key, i, true, unit.weak[name])!
+			record(mut names.definitions, key, i, true, unit.weak[name], false)!
 		}
 		// A name in `globals` is a definition only when this unit holds its
 		// storage. A unit that merely names an `extern` object puts a slot in
@@ -101,11 +106,25 @@ pub fn collect(units []image.Program) !Names {
 			if name in unit.copy_objects {
 				continue
 			}
+			// A thread-local is not storage in the writable data, and a unit
+			// that carries one records it in `tls_labels` instead, which the
+			// loop below reads. It is skipped here so one name is not two
+			// definitions of one unit.
+			if name in unit.tls_labels {
+				continue
+			}
 			// An object with internal linkage is private for the same reason
 			// the function above is: two units may each hold a `static` object
 			// of one name, and they are two objects with storage of their own.
 			key := if name in unit.internal { private_key(i, name) } else { name }
-			record(mut names.definitions, key, i, false, unit.weak[name])!
+			record(mut names.definitions, key, i, false, unit.weak[name], false)!
+		}
+		// A thread-local a unit defines is a definition like any other: the
+		// name binds to the unit that holds the storage, and the offset it
+		// answers with counts from the merged block rather than from a blob.
+		for name, _ in unit.tls_labels {
+			key := if name in unit.internal { private_key(i, name) } else { name }
+			record(mut names.definitions, key, i, false, unit.weak[name], true)!
 		}
 		for name, _ in unit.internal {
 			names.internal[name] = true
@@ -148,11 +167,12 @@ pub fn collect(units []image.Program) !Names {
 // record settles one definition of one name. A strong definition replaces a weak
 // one, a weak definition leaves a strong one in place, two weak definitions keep
 // the first, and two strong definitions are what a link refuses by name.
-fn record(mut definitions map[string]Definition, name string, unit int, function bool, weak bool) ! {
+fn record(mut definitions map[string]Definition, name string, unit int, function bool, weak bool, tls bool) ! {
 	definition := Definition{
 		unit:     unit
 		function: function
 		weak:     weak
+		tls:      tls
 	}
 	if existing := definitions[name] {
 		if existing.weak && !weak {
