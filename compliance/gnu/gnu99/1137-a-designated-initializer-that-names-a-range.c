@@ -3,10 +3,8 @@
  * GCC 6.2.11 Designated Initializers: "To initialize a range of elements to the
  * same value, write '[ first ... last ] = value'. This is a GNU extension. For
  * example, int widths[] = { [0 ... 9] = 1, [10 ... 99] = 2, [100] = 3 };"
- *
- * unimplemented: a designated initializer that names a range, [first ... last].
  */
-
+ 
 #include <stdio.h>
 
 #define CHECK(...)                                                            \

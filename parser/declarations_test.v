@@ -593,6 +593,37 @@ fn test_a_file_scope_nested_or_designated_list_writes_the_subobject_it_names() {
 	assert (entries[1].init or { -1 }) == 1
 }
 
+// A GNU range designator `[first ... last] = value` writes the one value into
+// every element of the range, and an array with empty brackets takes its size
+// from the last element the range names. Measured on gcc 16.2.1,
+// `{ [0 ... 1] = 5, [3 ... 3] = 9 }` on an int[4] is {5, 5, 0, 9}, and an unsized
+// `{ [0 ... 9] = 1, [10] = 2 }` is eleven elements. A range that ends before it
+// begins and one that reaches past the array are refused by name at the
+// designator rather than read as a shorter list.
+fn test_a_range_designator_fills_every_element_it_names() {
+	filled := declarations_of('static int a[4] = {[0 ... 1] = 5, [3 ... 3] = 9};')
+	assert filled.diagnostics.len == 0
+	entries := filled.unit.globals[0].member_inits
+	assert entries.len == 3
+	mut offsets := []int{}
+	mut values := []i64{}
+	for entry in entries {
+		offsets << entry.offset
+		values << (entry.init or { -1 })
+	}
+	assert offsets == [0, 4, 12]
+	assert values == [5, 5, 9]
+	sized := declarations_of('static int b[] = {[0 ... 9] = 1, [10] = 2};')
+	assert sized.diagnostics.len == 0
+	assert sized.unit.globals[0].count == 11
+	empty := declarations_of('static int c[4] = {[3 ... 1] = 1};')
+	assert empty.diagnostics.len == 1
+	assert empty.diagnostics[0].msg.contains('names no element')
+	beyond := declarations_of('static int d[4] = {[0 ... 9] = 1};')
+	assert beyond.diagnostics.len == 1
+	assert beyond.diagnostics[0].msg.contains('is outside')
+}
+
 // 6.7.8p1 makes each element of an aggregate initializer an
 // assignment-expression and 6.6p4 lets a file-scope one be a constant
 // expression, so an element may be arithmetic over constants rather than a

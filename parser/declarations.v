@@ -2389,10 +2389,14 @@ fn (p Parser) is_parenthesized_constant() bool {
 // initializer: `.name` picks a member of a struct, `[n]` an element of an array,
 // and a run of them descends through subobjects, `.chain[1]` picking member
 // `chain` and then element 1 of it. Exactly one of `member` and `index` is set.
+// A GNU range designator `[first ... last]` is an index designator whose
+// `range_end` is the last element it names: `index` is then the first, and the
+// two are equal only when the range covers one element.
 struct BraceDesignator {
-	member ?string
-	index  ?int
-	at     tokenize.Token
+	member    ?string
+	index     ?int
+	range_end ?int
+	at        tokenize.Token
 }
 
 // BraceElement is one element of a brace initializer. At most one of number,
@@ -3026,12 +3030,22 @@ fn (mut p Parser) brace_designators() ?[]BraceDesignator {
 			continue
 		}
 		index := p.brace_designator_index() or { return none }
+		// A GNU range designator names a run of elements, `[first ... last]`,
+		// and the value after it initializes every one of them. The last is
+		// read the same way the first is, which is what lets both be integer
+		// constant expressions; the closing bracket then ends the designator.
+		mut range_end := ?int(none)
+		if p.at_punct('...') {
+			p.next()
+			range_end = p.brace_designator_index() or { return none }
+		}
 		if !p.expect_punct(']') {
 			return none
 		}
 		designators << BraceDesignator{
-			index: index
-			at:    at
+			index:     index
+			range_end: range_end
+			at:        at
 		}
 	}
 	return designators
@@ -3192,7 +3206,9 @@ fn (list BraceList) is_a_flat_number_list() bool {
 
 // brace_array_count is how many elements a list gives an array declared with
 // empty brackets: the highest subobject it reaches, one past the last index a
-// designator names and one past each element written by position.
+// designator names and one past each element written by position. A range
+// designator names its last element, `[0 ... 9]` reaching element 9, so the
+// count one past it is the element after the whole range.
 fn brace_array_count(items []BraceElement) int {
 	mut index := 0
 	mut count := 0
@@ -3200,6 +3216,11 @@ fn brace_array_count(items []BraceElement) int {
 		if item.designators.len > 0 {
 			if named := item.designators[0].index {
 				index = named
+			}
+			// A range reaches its last element, not its first, so the size
+			// an unsized array takes from the list is counted from there.
+			if end := item.designators[0].range_end {
+				index = end
 			}
 		}
 		if index + 1 > count {
@@ -3219,6 +3240,48 @@ fn member_index(typ types.Type, name string) ?int {
 		}
 	}
 	return none
+}
+
+// check_array_designator answers whether an array designator names elements the
+// array holds and reports the one that does not. A single index and a range are
+// one question asked of two numbers: the first element named has to be in the
+// array, a range may not be empty, and its last element has to be in the array.
+// Measured on gcc 16.2.1, which refuses `int a[5] = {[0 ... 9] = 1}` as `array
+// index range in initializer exceeds array bounds` and `[3 ... 1]` as `empty
+// index range in initializer`. `count` is zero for an array whose size the list
+// itself gives, where no element is out of bounds.
+fn (mut p Parser) check_array_designator(designator BraceDesignator, first int, last int, count int, typ types.Type) bool {
+	if designator.range_end == none {
+		if first < 0 || (count > 0 && first >= count) {
+			p.error_at(designator.at, 'a constraint violation: the designator [${first}] is outside ${typ.describe()}')
+			return false
+		}
+		return true
+	}
+	if last < first {
+		p.error_at(designator.at, 'a constraint violation: the designator [${first} ... ${last}] names no element, because ${last} is before ${first}')
+		return false
+	}
+	if first < 0 || (count > 0 && last >= count) {
+		p.error_at(designator.at, 'a constraint violation: the designator [${first} ... ${last}] is outside ${typ.describe()}')
+		return false
+	}
+	return true
+}
+
+// fill_index_range initializes every element a GNU range designator names,
+// `[first ... last]`, from the one element at `start`: 6.7.8 as gcc extends it
+// writes the single value after the designator into each element of the range,
+// so `{ [0 ... 9] = 1 }` is ten elements of one. `rest` is the designators after
+// the range, empty for the shape the corpus writes, and the answer is the first
+// element left, which is the one after the single value the range wrote.
+fn (mut p Parser) fill_index_range(element types.Type, designator BraceDesignator, rest []BraceDesignator, items []BraceElement, start int, base int, stride int, mut writes []BraceWrite) int {
+	first := designator.index or { return start }
+	last := designator.range_end or { first }
+	for index := first; index <= last; index++ {
+		_ = p.fill_designated(element, rest, items, start, base + index * stride, mut writes)
+	}
+	return start + 1
 }
 
 // fill_brace walks a brace list against the type it initializes and appends the
@@ -3255,14 +3318,23 @@ fn (mut p Parser) fill_brace(typ types.Type, items []BraceElement, start int, ba
 			for i < items.len {
 				item := items[i]
 				if item.designators.len > 0 {
-					named := item.designators[0].index or {
-						p.error_at(item.designators[0].at, 'unsupported: an array is initialized by position or by an index, and a member designator names no element')
+					designator := item.designators[0]
+					named := designator.index or {
+						p.error_at(designator.at, 'unsupported: an array is initialized by position or by an index, and a member designator names no element')
+						return items.len
+					}
+					last := designator.range_end or { named }
+					if !p.check_array_designator(designator, named, last, count, typ) {
 						return items.len
 					}
 					index = named
-					if index < 0 || (count > 0 && index >= count) {
-						p.error_at(item.designators[0].at, 'a constraint violation: the designator [${index}] is outside ${typ.describe()}')
-						return items.len
+					if designator.range_end != none {
+						// `[first ... last] = value` writes the one value into
+						// every element of the range, and the walk resumes at
+						// the element after them.
+						i = p.fill_index_range(element, designator, item.designators[1..], items, i, base, stride, mut writes)
+						index = last + 1
+						continue
 					}
 					i = p.fill_designated(element, item.designators[1..], items, i, base + index * stride, mut writes)
 					index++
@@ -3402,9 +3474,12 @@ fn (mut p Parser) fill_designated(typ types.Type, designators []BraceDesignator,
 				p.error_at(designator.at, 'unsupported: an array is initialized by position or by an index, and a member designator names no element')
 				return items.len
 			}
-			if index < 0 || (typ.count > 0 && index >= typ.count) {
-				p.error_at(designator.at, 'a constraint violation: the designator [${index}] is outside ${typ.describe()}')
+			last := designator.range_end or { index }
+			if !p.check_array_designator(designator, index, last, typ.count, typ) {
 				return items.len
+			}
+			if designator.range_end != none {
+				return p.fill_index_range(element, designator, rest, items, start, base, stride, mut writes)
 			}
 			return p.fill_designated(element, rest, items, start, base + index * stride, mut writes)
 		}
