@@ -1354,10 +1354,16 @@ pub fn halt() []u8 {
 // Three registers have a job beyond being general storage: the frame pointer is
 // where a local is found, the scratch register holds the right-hand value of an
 // operation while the left-hand one waits in the result register, and the
-// register above the result register is what a division leaves over.
+// register above the result register is what a division leaves over. A fourth
+// carries the static chain: a nested function is handed the frame pointer of the
+// function it is written in, and this is the register the convention leaves for
+// it, so the callers that set up a nested call and the callee that reads its
+// enclosing frame agree without naming a general register either side might be
+// using for something else.
 pub const frame_pointer = 'rbp'
 pub const scratch_reg = 'ecx'
 pub const remainder_reg = 'edx'
+pub const static_chain_reg = 'r10'
 
 // load_slot and store_slot move a value between a register and the frame. The
 // displacement is written in the wide form always: the frame is still growing
