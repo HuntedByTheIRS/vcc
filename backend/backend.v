@@ -384,6 +384,13 @@ pub fn (t &Target) call_register(reg Register) ![]u8 {
 	return t.encoders.call_register(t.describe(reg))
 }
 
+// jump_register jumps to the address a register holds: the indirect form a
+// computed goto takes. It carries no reference, because the address is in the
+// register rather than at a place in the image.
+pub fn (t &Target) jump_register(reg Register) ![]u8 {
+	return t.encoders.jump_register(t.describe(reg))
+}
+
 // call_relocation is the number an object file gives a call, for a reference the
 // linker still has to fill in: a call to a symbol this object does not define,
 // or one it leaves to the linker to route.

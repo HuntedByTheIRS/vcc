@@ -276,7 +276,37 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 					call:   false
 				}
 			}
-			.global_address, .function_address, .import_address {
+			.function_address {
+				// A label the emitter made is a place in this unit's own
+				// .text, which the link moves as a unit, so the distance from
+				// the field to it is settled here, the same way a jump inside
+				// .text is. A function name is a symbol another unit may also
+				// name, so its address is left as a relocation against it.
+				if fixup.name !in symbol_index {
+					if where := program.labels[fixup.name] {
+						register := target.reg(fixup.register) or {
+							return error('no register named ${fixup.register} to compute an address into')
+						}
+						disp := i32(where - (instruction + fixup.length))
+						replacement := target.address_of(register, disp)
+						if replacement.len != fixup.length {
+							return error('the address of ${fixup.name} was ${fixup.length} bytes and became ${replacement.len}')
+						}
+						put(mut text, instruction, replacement)
+						continue
+					}
+				}
+				symbol := symbol_index[fixup.name] or {
+					return error('${fixup.name} is addressed but this object defines no such name')
+				}
+				relocations << ObjectRelocation{
+					offset: field
+					symbol: symbol
+					addend: -4
+					call:   false
+				}
+			}
+			.global_address, .import_address {
 				symbol := symbol_index[fixup.name] or {
 					return error('${fixup.name} is addressed but this object defines no such name')
 				}

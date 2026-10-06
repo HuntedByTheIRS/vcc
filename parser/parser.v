@@ -136,6 +136,12 @@ mut:
 	// states; a switch's own set is pushed and popped around its body, so the
 	// cases of a nested switch do not collide with the ones outside it.
 	case_values []map[i64]bool
+	// case_ranges holds the case labels written as a range, one list per switch
+	// being read, innermost last, beside the single values in case_values. A
+	// range keeps only its two ends, so `case 0 ... 4000000000:` is one entry
+	// and not the four billion values it names, and a new label is checked
+	// against every range for overlap rather than the range being expanded.
+	case_ranges [][]CaseRange
 	// case_defaults says, one entry per switch being read, whether a default
 	// label has been read in it: a second default in one switch is refused.
 	case_defaults []bool
@@ -518,6 +524,11 @@ fn (mut p Parser) check_undeclared_statements(stmts []ast.Stmt, mut reported map
 		if cond := stmt.cond {
 			p.check_undeclared_expression(cond, mut reported)
 		}
+		// A computed goto's operand is an expression, so the names it carries
+		// are uses like any other: `goto *table[i];` names table and i.
+		if target := stmt.goto_expr() {
+			p.check_undeclared_expression(target, mut reported)
+		}
 		p.check_undeclared_statements(stmt.body, mut reported)
 		p.check_undeclared_statements(stmt.then_body, mut reported)
 		p.check_undeclared_statements(stmt.else_body, mut reported)
@@ -573,6 +584,12 @@ fn (mut p Parser) check_undeclared_expression(expr ast.Expr, mut reported map[st
 			}
 		}
 		ast.Unary {
+			if expr.op == '&&' {
+				// The operand of `&&` is a label name and not an object: the
+				// emitted jump resolves it against the function's labels, so
+				// there is no declaration for the walk to want.
+				return
+			}
 			p.check_undeclared_expression(expr.expr, mut reported)
 		}
 		ast.Cast {
@@ -1521,6 +1538,14 @@ fn (p Parser) unresolved_name(expr ast.Expr) ?ast.Ident {
 			return expr
 		}
 		ast.Unary {
+			if expr.op == '&&' {
+				// The operand of `&&` is a label name and not an object: it is
+				// resolved against the function's labels where the jump is
+				// emitted, so it is no more undeclared than the name a `goto`
+				// writes. Walking into it would report a label as a missing
+				// declaration.
+				return none
+			}
 			return p.unresolved_name(expr.expr)
 		}
 		ast.Cast {
@@ -1639,6 +1664,32 @@ fn (mut p Parser) parse_unary() !ast.Expr {
 		p.next()
 		operand := p.parse_prefix_operand(t)!
 		return p.inc_dec(t, operand, false)
+	}
+	// `&&name` is the address of the label `name`, which is how glibc builds a
+	// jump table and how `goto *p` finds an arm. The two characters are the
+	// whole operator and what follows is a label name rather than an
+	// expression, so it is read here and not as the address of an address. The
+	// value is a `void *`, which is the type gcc gives it, and where the
+	// address is filled in is the emitter's work.
+	if t.kind == .punct && t.text == '&&' {
+		p.next()
+		name := p.peek()
+		if name.kind != .identifier {
+			p.error_at(name, 'unsupported: expected a label name after &&, found ${describe(name)}')
+			return error('no label name')
+		}
+		p.next()
+		return ast.Expr(ast.Unary{
+			op:   '&&'
+			expr: ast.Expr(ast.Ident{
+				name: name.text
+				line: name.line
+				col:  name.col
+			})
+			typ:  types.pointer_to(types.void_type())
+			line: t.line
+			col:  t.col
+		})
 	}
 	// `&` and `*` are here with the other prefix operators: the address of a
 	// value and the value at an address both bind as tightly as they do -

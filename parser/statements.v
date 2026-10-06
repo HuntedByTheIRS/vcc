@@ -66,8 +66,11 @@ fn (mut p Parser) parse_statement_inner() ![]ast.Stmt {
 		}]
 	}
 	if t.kind == .identifier {
-		if t.text == '__asm__' || t.text == '__asm' {
+		if t.text == '__asm__' || t.text == '__asm' || p.asm_is_a_statement() {
 			return p.parse_asm_statement()
+		}
+		if t.text == '__label__' {
+			return p.parse_local_label_declaration()
 		}
 		if t.text == 'return' {
 			return p.parse_return_statement()
@@ -168,13 +171,26 @@ fn (mut p Parser) parse_simple_statement() []ast.Stmt {
 // consumed without being kept, because a statement this reader may refuse is
 // not a place to resolve names for.
 fn (mut p Parser) parse_asm_statement() []ast.Stmt {
-	start := p.next() // __asm__ or __asm
-	// The qualifier says the statement may not be deleted when its outputs are
-	// unused. It changes nothing this reader does, and it is read so that the
-	// parenthesis after it is where the reader looks for it.
-	if p.peek().kind == .identifier
-		&& (p.peek().text == 'volatile' || p.peek().text == '__volatile__') {
-		p.next()
+	start := p.next() // __asm__ or __asm or asm
+	// The qualifiers say what the statement is: `volatile` that it may not be
+	// deleted when its outputs are unused, `goto` that its fifth list names the
+	// C labels its template may jump to, and `inline` that it should be inlined.
+	// They change nothing this reader does to the template, and they are read so
+	// that the parenthesis after them is where the reader looks for it. gcc
+	// accepts them in any order, which is why this is a loop and not one test.
+	mut is_goto := false
+	for p.peek().kind == .identifier {
+		word := p.peek().text
+		if word == 'goto' {
+			is_goto = true
+			p.next()
+			continue
+		}
+		if word == 'volatile' || word == '__volatile__' || word == 'inline' {
+			p.next()
+			continue
+		}
+		break
 	}
 	if !p.at_punct('(') {
 		p.error_at(p.peek(), 'unsupported: expected ( after ${start.text}, found ${describe(p.peek())}')
@@ -205,6 +221,7 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 	mut outputs := 0
 	mut inputs := 0
 	mut clobbers := []string{}
+	mut goto_labels := []string{}
 	if p.at_punct(':') {
 		p.next()
 		outputs = p.parse_asm_operands() or {
@@ -223,8 +240,23 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 					p.skip_statement()
 					return []ast.Stmt{}
 				}
+				if p.at_punct(':') {
+					p.next()
+					goto_labels = p.parse_asm_goto_labels() or {
+						p.skip_statement()
+						return []ast.Stmt{}
+					}
+				}
 			}
 		}
+	}
+	// A label list without the keyword is a shape gcc refuses, because the
+	// list has no meaning to a plain asm: it is read here so the refusal names
+	// the missing word rather than the `)` the reader would otherwise want.
+	if goto_labels.len > 0 && !is_goto {
+		p.error_at(start, 'unsupported: an asm statement that names labels must be written asm goto')
+		p.skip_statement()
+		return []ast.Stmt{}
 	}
 	if !p.expect_punct(')') {
 		p.skip_statement()
@@ -237,15 +269,75 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 	return [ast.Stmt{
 		kind:  .asm_stmt
 		extra: &ast.StmtExtra{
-			asm_text:     text
-			asm_spelling: spelling
-			asm_outputs:  outputs
-			asm_inputs:   inputs
-			asm_clobbers: clobbers
+			asm_text:        text
+			asm_spelling:    spelling
+			asm_outputs:     outputs
+			asm_inputs:      inputs
+			asm_clobbers:    clobbers
+			asm_is_goto:     is_goto
+			asm_goto_labels: goto_labels
 		}
 		line:  start.line
 		col:   start.col
 	}]
+}
+
+// parse_asm_goto_labels reads the fifth list of an asm goto, the C labels its
+// template may jump to, and answers with them as the file wrote them. The
+// cursor is just past the `:` that opens the list, and the list ends at the `)`
+// that closes the statement, which the caller reports. Each entry is a label
+// name: a label lives in a namespace of its own, so the name is read without
+// being looked up among the objects in scope, and a keyword is refused because
+// a keyword cannot be a name.
+fn (mut p Parser) parse_asm_goto_labels() ![]string {
+	mut labels := []string{}
+	for {
+		if p.at_punct(')') {
+			return labels
+		}
+		name := p.peek()
+		if name.kind != .identifier {
+			p.error_at(name, 'unsupported: expected a label name in an asm goto label list, found ${describe(name)}')
+			return error('asm goto label')
+		}
+		if is_keyword(name.text) {
+			p.error_at(name, 'unsupported: ${name.text} is a keyword in an asm goto label list and cannot name a label')
+			return error('asm goto label')
+		}
+		p.next()
+		labels << name.text
+		if p.at_punct(',') {
+			p.next()
+			continue
+		}
+		if p.at_punct(')') {
+			return labels
+		}
+		p.error_at(p.peek(), 'unsupported: expected , or ) in an asm goto label list, found ${describe(p.peek())}')
+		return error('asm goto label list')
+	}
+}
+
+// asm_is_a_statement says whether an `asm` at the cursor opens a statement and
+// is not naming an object. The plain spelling is a keyword only in a GNU
+// dialect, and in strict ISO C it is an ordinary identifier, so the word opens
+// an asm statement only where what follows can only be one: the parenthesis of
+// the template, or one of the qualifier words that come before it. A name
+// followed by anything else - `asm = 1;`, `asm [2];` - is left to the
+// expression reader, which is what reads it where asm is not reserved.
+fn (p Parser) asm_is_a_statement() bool {
+	if p.peek().kind != .identifier || p.peek().text != 'asm' {
+		return false
+	}
+	after := p.peek_at(1)
+	if after.kind == .punct {
+		return after.text == '('
+	}
+	if after.kind == .identifier {
+		return after.text == 'goto' || after.text == 'volatile' || after.text == '__volatile__'
+			|| after.text == 'inline'
+	}
+	return false
 }
 
 // parse_asm_operands reads one of the comma-separated operand lists of an asm
@@ -305,7 +397,10 @@ fn (mut p Parser) parse_asm_operands() !int {
 fn (mut p Parser) parse_asm_clobbers() ![]string {
 	mut clobbers := []string{}
 	for {
-		if p.at_punct(')') {
+		// A clobber list may be empty, and the `:` that opens the GotoLabels
+		// list is what ends it: `:::: label` is an empty clobber list followed
+		// by the fifth list, so the `:` closes this one the way `)` does.
+		if p.at_punct(')') || p.at_punct(':') {
 			return clobbers
 		}
 		if p.peek().kind != .string {
@@ -1067,6 +1162,42 @@ fn (mut p Parser) parse_loop_jump(t tokenize.Token) []ast.Stmt {
 	}]
 }
 
+// parse_local_label_declaration reads `__label__ name [, name]* ;`, which
+// declares the names as labels local to the block the declaration sits in. This
+// tree's labels are already names for a place inside one function, which is the
+// namespace the declaration asks for, so the names are read and checked and
+// nothing is declared here: what the declaration adds is a scope restriction
+// gcc enforces and this reader does not, and a goto or a taken address that
+// names one of the names is read by the label machinery that already exists. A
+// declared label the function never writes is accepted, which is what gcc does
+// with `__label__ x;` and no other mention of x.
+fn (mut p Parser) parse_local_label_declaration() ![]ast.Stmt {
+	start := p.next() // __label__
+	for {
+		name := p.peek()
+		if name.kind != .identifier {
+			p.error_at(name, 'unsupported: expected a label name after ${start.text}, found ${describe(name)}')
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		if is_keyword(name.text) {
+			p.error_at(name, 'unsupported: ${name.text} is a keyword and cannot name a label')
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		p.next() // the label name
+		if !p.at_punct(',') {
+			break
+		}
+		p.next() // ,
+	}
+	if !p.expect_punct(';') {
+		p.skip_statement()
+		return []ast.Stmt{}
+	}
+	return []ast.Stmt{}
+}
+
 // parse_label_statement reads `name: stmt`. The label is a place in the
 // function and not an object, so nothing is declared here and the name is
 // looked up nowhere: a label is a name for the position of the statement that
@@ -1106,6 +1237,31 @@ fn (mut p Parser) statement_under_label() ![]ast.Stmt {
 // the jump is emitted.
 fn (mut p Parser) parse_goto_statement() ![]ast.Stmt {
 	t := p.next() // goto
+	// `goto *expr;` is a computed goto: the operand is an address and control
+	// goes there, so no label name is involved. The expression is read where it
+	// stands, and a `goto *` with nothing after the star is refused by the
+	// expression reader, which names the token it found. What the address names
+	// is not a question this reader asks: measured on gcc 16.2.1, `goto *p` for
+	// any scalar expression is accepted and the address is the program's.
+	if p.at_punct('*') {
+		p.next() // *
+		expr := p.parse_expression() or {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		if !p.expect_punct(';') {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+		return [ast.Stmt{
+			kind:  .goto_stmt
+			extra: &ast.StmtExtra{
+				goto_expr: expr
+			}
+			line:  t.line
+			col:   t.col
+		}]
+	}
 	if p.peek().kind != .identifier {
 		p.error_at(p.peek(), 'unsupported: expected a label name after goto, found ${describe(p.peek())}')
 		p.skip_statement()
@@ -1159,9 +1315,11 @@ fn (mut p Parser) parse_switch_statement() ![]ast.Stmt {
 	}
 	p.check_switch_operand(cond, t)
 	p.case_values << map[i64]bool{}
+	p.case_ranges << []CaseRange{}
 	p.case_defaults << false
 	body := p.parse_control_body()!
 	p.case_values.pop()
+	p.case_ranges.pop()
 	p.case_defaults.pop()
 	return [ast.Stmt{
 		kind: .switch_stmt
@@ -1188,10 +1346,27 @@ fn (mut p Parser) check_switch_operand(expr ast.Expr, at tokenize.Token) {
 	}
 }
 
-// parse_case_label reads `case constant: stmt`. The value is converted to the
-// type of the controlling expression where the label is placed, so what is kept
-// here is the constant as written; what this reader refuses is a value it cannot
-// reduce to one, which is a constant expression that is not a written constant.
+// CaseRange is the run of values one case label names: the two ends of
+// `case low ... high:`, the GNU spelling. The values between the ends are not
+// written down, so a range over a 64-bit type stays two numbers rather than the
+// whole run, which is what lets a range be tested without the compiler carrying
+// every value in it.
+struct CaseRange {
+	low  i64
+	high i64
+}
+
+// parse_case_label reads `case constant: stmt`, or the GNU range spelling
+// `case low ... high: stmt`. The value is converted to the type of the
+// controlling expression where the label is placed, so what is kept here is the
+// constant as written; what this reader refuses is a value it cannot reduce to
+// one, which is a constant expression that is not a written constant.
+//
+// A range is one label for every value from low to high, so it takes the same
+// duplicate check a single value does: it is refused where it overlaps a label
+// already written. The run is checked as its two ends and not by walking the
+// values, because the number of values in `case 0 ... 4000000000:` is not a
+// number a reader may expand.
 //
 // The label is worth a statement of its own rather than a field on the statement
 // after it: a run of labels over one statement, `case 0: case 1: x += 1;`, is a
@@ -1208,6 +1383,19 @@ fn (mut p Parser) parse_case_label() ![]ast.Stmt {
 		p.skip_statement()
 		return []ast.Stmt{}
 	}
+	// A `...` after the first constant opens a range. The second constant is
+	// read the way the first is and held until the colon is past, so that a
+	// value that does not reduce is refused at the same place either way.
+	mut range_end := ?ast.Expr(none)
+	mut is_range := false
+	if p.at_punct('...') {
+		p.next() // ...
+		is_range = true
+		range_end = p.parse_expression() or {
+			p.skip_statement()
+			return []ast.Stmt{}
+		}
+	}
 	if !p.expect_punct(':') {
 		p.skip_statement()
 		return []ast.Stmt{}
@@ -1219,21 +1407,72 @@ fn (mut p Parser) parse_case_label() ![]ast.Stmt {
 		p.error_at(t, 'unsupported: this case value is not one this reader reduces to an integer constant, and only a written integer constant or one of those negated is read')
 		return p.statement_under_label()
 	}
-	if p.case_values[p.case_values.len - 1][value] {
-		p.error_at(t, 'duplicate case value ${value} in one switch')
-		return p.statement_under_label()
+	mut high := value
+	if is_range {
+		end := range_end or { return p.statement_under_label() }
+		high = p.case_constant(end) or {
+			p.error_at(t, 'unsupported: this case value is not one this reader reduces to an integer constant, and only a written integer constant or one of those negated is read')
+			return p.statement_under_label()
+		}
 	}
-	p.case_values[p.case_values.len - 1][value] = true
+	// An empty range, `case 5 ... 3:`, names no value: gcc warns and matches
+	// nothing, and it is left out of the duplicate check because it can collide
+	// with no label. It is still emitted, and the two comparisons it becomes
+	// jump nowhere.
+	if value <= high {
+		if p.case_duplicate(value, high) {
+			p.error_at(t, 'duplicate case value ${value} in one switch')
+			return p.statement_under_label()
+		}
+		top := p.case_values.len - 1
+		if value == high {
+			p.case_values[top][value] = true
+		} else {
+			p.case_ranges[top] << CaseRange{
+				low:  value
+				high: high
+			}
+		}
+	}
 	mut out := [ast.Stmt{
 		kind:  .case_stmt
 		extra: &ast.StmtExtra{
-			case_value: value
+			case_value:      value
+			case_value_high: high
+			case_is_range:   is_range
 		}
 		line:  t.line
 		col:   t.col
 	}]
 	out << p.statement_under_label()!
 	return out
+}
+
+// case_duplicate says whether a case label naming low through high collides
+// with one already written in the switch being read. A single value is looked up
+// in the set in constant time, which is the shape most switches write. A range
+// is checked against that set and against the ranges already read, so the work
+// is in the number of labels the switch has written and never in the number of
+// values a range names.
+fn (p Parser) case_duplicate(low i64, high i64) bool {
+	top := p.case_values.len - 1
+	if low == high {
+		if p.case_values[top][low] {
+			return true
+		}
+	} else {
+		for value, _ in p.case_values[top] {
+			if value >= low && value <= high {
+				return true
+			}
+		}
+	}
+	for entry in p.case_ranges[top] {
+		if low <= entry.high && entry.low <= high {
+			return true
+		}
+	}
+	return false
 }
 
 // parse_default_label reads `default: stmt`. Which of the labels is the default

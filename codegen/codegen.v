@@ -183,9 +183,13 @@ struct LoopLabels {
 // constant it matches, the machine label its statement is placed at, and
 // whether it is the default one. A switch's dispatch compares the controlling
 // expression against every non-default value and jumps to the matching label;
-// the default is where it goes when none matches.
+// the default is where it goes when none matches. When the label wrote a range,
+// `case low ... high:`, value is the low end, high the high one, and is_range
+// says the dispatch tests a run rather than one value.
 struct CaseTarget {
 	value      i64
+	high       i64
+	is_range   bool
 	label      string
 	is_default bool
 }
@@ -1550,10 +1554,80 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 // skips a `static` definition nothing in the file names before its body is
 // read, and a statement in one of those is never seen at all.
 fn (mut e Emitter) emit_asm(stmt ast.Stmt) !void {
+	if stmt.asm_is_goto() || stmt.asm_goto_labels().len > 0 {
+		return e.emit_asm_goto(stmt)
+	}
 	if stmt.asm_text().len > 0 || stmt.asm_outputs() > 0 || stmt.asm_inputs() > 0 {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm statement ${stmt.asm_spelling()} is not emitted by this compiler')
 		return error('asm statement')
 	}
+}
+
+// emit_asm_goto emits the one shape an asm goto can take here: a template of
+// the form `jmp %lN`, an unconditional jump to the Nth label of the statement's
+// GotoLabels list, counting from zero. That is the shape glibc's helpers use to
+// reach a label, and it is the whole of what a template can mean in this back
+// end: this compiler writes machine code directly and has no assembler to run a
+// general template through, so any other template is refused by name, with its
+// text and its location, rather than guessed at. A template naming a label the
+// list does not hold is refused the same way, and a list with no labels is
+// refused because there is then no label for a template to name.
+fn (mut e Emitter) emit_asm_goto(stmt ast.Stmt) !void {
+	labels := stmt.asm_goto_labels()
+	if stmt.asm_outputs() > 0 || stmt.asm_inputs() > 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm goto ${stmt.asm_spelling()} has operands, and only a template that jumps to a named label is emitted here')
+		return error('asm goto with operands')
+	}
+	if labels.len == 0 {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm goto ${stmt.asm_spelling()} names no label for its template to jump to')
+		return error('asm goto without a label')
+	}
+	index := jump_label_index(stmt.asm_text()) or {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm goto template ${stmt.asm_spelling()} is not an unconditional jump to a label, and only `jmp %lN` jumping to a named label is emitted here')
+		return error('asm goto template')
+	}
+	if index >= labels.len {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm goto template ${stmt.asm_spelling()} names label ${index}, and its list holds ${labels.len}')
+		return error('asm goto label')
+	}
+	name := labels[index]
+	if !(name in e.goto_used) {
+		e.goto_used[name] = LabelUse{
+			line: stmt.line
+			col:  stmt.col
+		}
+	}
+	e.jump(e.named_label(name))!
+}
+
+// jump_label_index is the label number a `jmp %lN` template names, counting from
+// zero, and none for every other template. This is the one shape the asm goto
+// path emits: an unconditional jump to one of the statement's own labels, with
+// `%l0` the first. Space around the words is allowed, which is what a template
+// written as "jmp %l0\n" leaves; the `%l` and the number are kept together,
+// because that is one operator and gcc reads it that way too.
+fn jump_label_index(text string) ?int {
+	s := text.trim_space()
+	if !s.starts_with('jmp') {
+		return none
+	}
+	rest := s[3..].trim_space()
+	if !rest.starts_with('%l') {
+		return none
+	}
+	digits := rest[2..]
+	if digits.len == 0 {
+		return none
+	}
+	mut value := 0
+	for i in 0 .. digits.len {
+		c := digits[i]
+		if c < 0x30 || c > 0x39 {
+			return none
+		}
+		value = value * 10 + int(c - 0x30)
+	}
+	return value
 }
 
 // emit_return writes the value into the register a function's results arrive in
@@ -3529,8 +3603,8 @@ fn (mut e Emitter) emit_jump_out(stmt ast.Stmt, is_break bool) !void {
 // case value is converted to the operand's type the same way C converts it.
 //
 // The comparison chain is a loop and not a recursion, and it is one comparison
-// per case: the corpus writes a switch with 1023 labels and a few thousand is
-// the size a switch is allowed to reach.
+// per case, two for a range: the corpus writes a switch with 1023 labels and a
+// few thousand is the size a switch is allowed to reach.
 fn (mut e Emitter) emit_switch(stmt ast.Stmt) !void {
 	cond := stmt.cond or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a switch without a controlling expression')
@@ -3555,6 +3629,39 @@ fn (mut e Emitter) emit_switch(stmt ast.Stmt) !void {
 	other := e.scratch(stmt.line, stmt.col)!
 	for target in cases {
 		if target.is_default {
+			continue
+		}
+		if target.is_range {
+			// A range is `low <= v <= high`, which is two comparisons rather
+			// than one per value: `case 'A' ... 'Z':` is two, and a run over a
+			// 64-bit type is still two where expanding the run would be
+			// millions. A value below the run or above it skips this label and
+			// the dispatch goes on to the next case. The operand is reloaded
+			// for the second comparison because the first leaves its answer in
+			// the accumulator, which is where a comparison writes its result.
+			skip := e.label()
+			low := case_constant_in(target.value, width, unsigned)
+			high := case_constant_in(target.high, width, unsigned)
+			e.load_accumulator(operand, stmt.line, stmt.col)!
+			e.append(e.target.move_immediate64(other, u64(low))!)
+			if unsigned {
+				e.append(e.target.compare_word_unsigned('<', accumulator, other)!)
+			} else {
+				e.append(e.target.compare_word('<', accumulator, other)!)
+			}
+			e.emit_test(cond, stmt.line, stmt.col)!
+			e.branch(.branch_nonzero, skip, stmt.line, stmt.col)!
+			e.load_accumulator(operand, stmt.line, stmt.col)!
+			e.append(e.target.move_immediate64(other, u64(high))!)
+			if unsigned {
+				e.append(e.target.compare_word_unsigned('>', accumulator, other)!)
+			} else {
+				e.append(e.target.compare_word('>', accumulator, other)!)
+			}
+			e.emit_test(cond, stmt.line, stmt.col)!
+			e.branch(.branch_nonzero, skip, stmt.line, stmt.col)!
+			e.jump(target.label)!
+			e.place(skip)
 			continue
 		}
 		e.load_accumulator(operand, stmt.line, stmt.col)!
@@ -3647,8 +3754,10 @@ fn (mut e Emitter) collect_cases(body []ast.Stmt, mut cases []CaseTarget) {
 		match stmt.kind {
 			.case_stmt {
 				cases << CaseTarget{
-					value: stmt.case_value()
-					label: e.label()
+					value:    stmt.case_value()
+					high:     stmt.case_value_high()
+					is_range: stmt.case_is_range()
+					label:    e.label()
 				}
 			}
 			.default_stmt {
@@ -3735,6 +3844,20 @@ fn (mut e Emitter) emit_case_label(stmt ast.Stmt, is_default bool) !void {
 // written before the place it lands on. What is not settled until then is
 // whether a label of that name is written at all.
 fn (mut e Emitter) emit_goto(stmt ast.Stmt) !void {
+	if target := stmt.goto_expr() {
+		// A computed goto jumps to the address the expression is worth, so the
+		// value is evaluated and the machine jumps to the register holding it.
+		// The named-label machinery is not involved: the program wrote an
+		// address and not a name, and whether that address names a label of
+		// this function is not a question the compiler asks, which is what gcc
+		// does with `goto *p` as well. No variable-length array's stack is
+		// given back, because there is no label name to say which scope the
+		// target is in; gcc leaves that to the program too.
+		e.emit_expr(target)!
+		register := e.accumulator(stmt.line, stmt.col)!
+		e.append(e.target.jump_register(register)!)
+		return
+	}
 	label := stmt.label()
 	if !(label in e.goto_used) {
 		e.goto_used[label] = LabelUse{
@@ -6200,6 +6323,12 @@ fn describe_target(expr ast.Expr) string {
 }
 
 fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
+	if unary.op == '&&' {
+		// The address of a label, `&&name`. The operand is a label name and
+		// not a value to read, so it is not evaluated here: what is written is
+		// the address of the place the label names.
+		return e.emit_label_address(unary)
+	}
 	if unary.op == '&' {
 		// Taking an address is not a computation on a value: the operand is not
 		// read at all, and what is taken is where it lives. The depth travels
@@ -8857,7 +8986,10 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 			}
 		}
 		ast.Unary {
-			if expr.op == '!' {
+			if expr.op == '&&' {
+				// The address of a label is a `void *`, so the machine's word.
+				e.target.word_size
+			} else if expr.op == '!' {
 				4
 			} else if expr.op == '&' {
 				// The address of a value is a pointer, whatever the width of the
@@ -9106,6 +9238,29 @@ fn (mut e Emitter) emit_function_address(name string, line int, col int) !void {
 	} else {
 		e.reference(e.target.load_slot_value(register, 0), .import_address, name, e.target.name_of(register))
 	}
+}
+
+// emit_label_address leaves the address of a label in the accumulator, which is
+// the value of `&&name`. The label is a place in the function being emitted, so
+// its address is a reference the layout fills in, the same reference a function
+// designator's address is and through the same kind: the layout resolves a
+// label name against the function's own label table. Writing the name is a use
+// of the label, so a name no label statement writes is reported once the whole
+// function has been emitted, exactly as a goto to one is.
+fn (mut e Emitter) emit_label_address(unary ast.Unary) !void {
+	if unary.expr !is ast.Ident {
+		e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of a label is taken with && and what follows must be a label name')
+		return error('no label name')
+	}
+	name := unary.expr.name
+	if !(name in e.goto_used) {
+		e.goto_used[name] = LabelUse{
+			line: unary.line
+			col:  unary.col
+		}
+	}
+	register := e.accumulator(unary.line, unary.col)!
+	e.reference(e.target.address_of(register, 0), .function_address, e.named_label(name), e.target.name_of(register))
 }
 
 // is_function_name says whether a name is a function this unit names, whether it

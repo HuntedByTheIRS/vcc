@@ -122,7 +122,11 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 				out << '${indent}switch at ${stmt.line}:${stmt.col}'
 			}
 			.case_stmt {
-				out << '${indent}case ${stmt.case_value()} at ${stmt.line}:${stmt.col}'
+				if stmt.case_is_range() {
+					out << '${indent}case ${stmt.case_value()} ... ${stmt.case_value_high()} at ${stmt.line}:${stmt.col}'
+				} else {
+					out << '${indent}case ${stmt.case_value()} at ${stmt.line}:${stmt.col}'
+				}
 			}
 			.default_stmt {
 				out << '${indent}default at ${stmt.line}:${stmt.col}'
@@ -131,10 +135,22 @@ fn dump_statements(body []ast.Stmt, depth int, mut out []string) {
 				out << '${indent}label ${stmt.label()} at ${stmt.line}:${stmt.col}'
 			}
 			.goto_stmt {
-				out << '${indent}goto ${stmt.label()} at ${stmt.line}:${stmt.col}'
+				if target := stmt.goto_expr() {
+					out << '${indent}computed goto at ${stmt.line}:${stmt.col}'
+					dump_expression(target, depth + 1, mut out)
+				} else {
+					out << '${indent}goto ${stmt.label()} at ${stmt.line}:${stmt.col}'
+				}
 			}
 			.asm_stmt {
 				out << '${indent}asm statement ${stmt.asm_spelling()} at ${stmt.line}:${stmt.col}'
+				// An asm goto carries the labels its template may jump to,
+				// which name places in this function the way a goto's target
+				// does, so the printer names them beside the template.
+				labels := stmt.asm_goto_labels()
+				if stmt.asm_is_goto() || labels.len > 0 {
+					out << '${indent}jumping to ${labels.join(', ')}'
+				}
 			}
 		}
 		if expr := stmt.expr {

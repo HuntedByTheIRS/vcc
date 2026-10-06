@@ -4,8 +4,6 @@
  * a single case label, like this: case low ... high : This has the same effect
  * as the proper number of individual case labels, one for each integer value
  * from low to high, inclusive."
- *
- * unimplemented: a case label holding a range of values.
  */
 
 #include <stdio.h>

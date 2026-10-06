@@ -1320,6 +1320,26 @@ pub fn call_register(reg Register) ![]u8 {
 	return out
 }
 
+// jump_register jumps to the address a register holds, which is the form a
+// computed goto takes: `goto *p` is the value of p and the machine goes there.
+// It is the call form above with the group's reg field set to 4 rather than 2,
+// so the same note applies: no memory is read, there is no displacement, and a
+// register whose low three bits are 4 or 5 cannot be named without a SIB byte
+// or a displacement, which this form writes neither of.
+pub fn jump_register(reg Register) ![]u8 {
+	low := reg.code & 0x07
+	if low == 4 || low == 5 {
+		return error('${name}: a jump through ${reg.name} cannot be named without a SIB byte or a displacement, and this form writes neither')
+	}
+	mut out := []u8{cap: 3}
+	if reg.code >= 8 {
+		out << u8(0x41) // REX.B: the r/m field names a wider register
+	}
+	out << u8(0xff)
+	out << u8(0xe0 | low) // mod 11, reg field 4: jmp r/m64
+	return out
+}
+
 // lea_rip computes the address of something at a displacement from the
 // instruction and writes it into the register. The register is named by its
 // 32-bit spelling because that is how the table lists it; the instruction writes
@@ -2785,6 +2805,7 @@ pub:
 	int_to_double                   fn (Register, Register) ![]u8           = unsafe { nil }
 	int_to_float                    fn (Register, Register) ![]u8           = unsafe { nil }
 	jump_nonzero_rel32              fn (i32) []u8                           = unsafe { nil }
+	jump_register                   fn (Register) ![]u8                     = unsafe { nil }
 	jump_rel32                      fn (i32) []u8                           = unsafe { nil }
 	jump_zero_rel32                 fn (i32) []u8                           = unsafe { nil }
 	lea_rip                         fn (Register, i32) []u8                 = unsafe { nil }
@@ -2936,6 +2957,7 @@ pub fn encoders() Encoders {
 		int_to_double:                   &int_to_double
 		int_to_float:                    &int_to_float
 		jump_nonzero_rel32:              &jump_nonzero_rel32
+		jump_register:                   &jump_register
 		jump_rel32:                      &jump_rel32
 		jump_zero_rel32:                 &jump_zero_rel32
 		lea_rip:                         &lea_rip

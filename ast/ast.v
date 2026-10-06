@@ -403,13 +403,25 @@ pub:
 	subscript ?Expr
 	// case_value is the integer constant a case label names, as written. C
 	// converts it to the type of the controlling expression, and that
-	// conversion is made where the label is placed.
+	// conversion is made where the label is placed. When the label wrote a
+	// range, `case low ... high:`, this is the low end and case_value_high is
+	// the high one.
 	case_value i64
+	// case_value_high is the last value a case range names, and case_is_range
+	// says whether the label wrote a range at all. A label that named one value
+	// has the two ends equal and case_is_range false, which is a run of one.
+	case_value_high i64
+	case_is_range   bool
 	// label is the name a goto jumps to and the name a label statement
 	// declares. Labels are a namespace of their own: a label named `x` and an
 	// object named `x` in the same function are two different names, and only
 	// the label one is a place to jump to.
 	label string
+	// goto_expr is the operand of a computed goto, `goto *expr;`, and none for
+	// the ordinary `goto name;` form, whose target is in label. A computed
+	// goto jumps to the address the expression is worth, so no label name is
+	// involved and label is empty for it.
+	goto_expr ?Expr
 	// asm_text is the instruction text of a statement-level GNU asm, with the
 	// escapes of its adjacent string literals resolved and the literals joined.
 	// It is empty both for the barrier and for a statement whose only string
@@ -430,6 +442,14 @@ pub:
 	// later pass may not keep across the statement, which is the whole of what
 	// an accepted barrier tells the optimizer.
 	asm_clobbers []string
+	// asm_is_goto says the statement was written `asm goto`, whose fifth list
+	// names the C labels the template may jump to, and asm_goto_labels is that
+	// list, each a label name as the file wrote it. A `%lN` in the template
+	// refers to the Nth of them, counting from zero. This is the shape glibc
+	// uses to reach a label from inside an instruction, which an ordinary goto
+	// cannot do because it is not an instruction.
+	asm_is_goto     bool
+	asm_goto_labels []string
 	// cleanup is the name of the function a declaration asked for with
 	// `__attribute__((cleanup(name)))`, which runs on the object when the
 	// block it was declared in ends. It is empty for a declaration that asked
@@ -501,11 +521,35 @@ pub fn (stmt Stmt) case_value() i64 {
 }
 
 @[inline]
+pub fn (stmt Stmt) case_value_high() i64 {
+	if extra := stmt.extra {
+		return extra.case_value_high
+	}
+	return 0
+}
+
+@[inline]
+pub fn (stmt Stmt) case_is_range() bool {
+	if extra := stmt.extra {
+		return extra.case_is_range
+	}
+	return false
+}
+
+@[inline]
 pub fn (stmt Stmt) label() string {
 	if extra := stmt.extra {
 		return extra.label
 	}
 	return ''
+}
+
+@[inline]
+pub fn (stmt Stmt) goto_expr() ?Expr {
+	if extra := stmt.extra {
+		return extra.goto_expr
+	}
+	return none
 }
 
 @[inline]
@@ -557,6 +601,22 @@ pub fn (stmt Stmt) cleanup() string {
 		return extra.cleanup
 	}
 	return ''
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_is_goto() bool {
+	if extra := stmt.extra {
+		return extra.asm_is_goto
+	}
+	return false
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_goto_labels() []string {
+	if extra := stmt.extra {
+		return extra.asm_goto_labels
+	}
+	return []
 }
 
 // Expr is one of the expression shapes the stub understands. A call is parsed
