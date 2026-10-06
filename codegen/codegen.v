@@ -9861,23 +9861,40 @@ fn (mut e Emitter) emit_bit_operation(call ast.Call, depth int) !void {
 
 // emit_overflow answers `__builtin_add_overflow` and `__builtin_mul_overflow`: the
 // two operands are added or multiplied and the result the operation wraps to is
-// stored through the third argument, while the answer is the machine's signed
-// overflow flag. The operands are evaluated into slots first, because an operand can
-// be an expression that calls a function and the registers have to be free for it;
-// then they are loaded into the accumulator and the scratch register, and the add or
-// imul raises the overflow flag on the pair. The flag is read at once, before
-// anything that could overwrite it, and the wrapped result in the accumulator and
-// that flag are what the call leaves: the result is stored through the pointer and
-// the flag is widened into the accumulator for the value the expression is worth.
-// All three are int - the reader refuses another type - so the width is one word's
-// low four bytes at every step.
+// stored through the third argument, while the answer is whether it overflowed.
+// The operands are evaluated into slots first, because an operand can be an
+// expression that calls a function and the registers have to be free for it, and
+// each is widened to a word as it is stored, so the operation reads the values
+// they are and not whatever sat above a narrower one.
+//
+// The width the operation runs in is the result type's, and that is what makes the
+// flag the answer: a four-byte add's overflow flag is the overflow of the int the
+// result is, and a word add's is the overflow of the 64-bit integer the result is.
+// The reader has refused an operand whose value the result type cannot hold, so the
+// width the operation runs in changes no operand's value.
+//
+// A signed result reads the machine's signed overflow flag. An unsigned one cannot
+// use that flag: the carry out of an add is what says an unsigned sum left the
+// result, and for a multiply the bytes of the product above the result's are, which
+// a signed multiply's flag does not state. Both are read here, so an unsigned
+// result and a signed one are the same operation with a different question asked of
+// it.
 fn (mut e Emitter) emit_overflow(call ast.Call, depth int) !void {
-	overflow := call.name == '__builtin_mul_overflow'
+	multiply := call.name == '__builtin_mul_overflow'
+	result := call.args[2].typ.pointee() or {
+		e.diagnostics << problem(call.line, call.col, '${e.target.name}: ${call.name} stores its result through a pointer, and this one names no object')
+		return error('no result type')
+	}
+	wide := e.eight_byte_integer(result)
+	unsigned := result.is_unsigned_type()
+	store_width := if wide { 8 } else { 4 }
 	a_slot := e.reserve(e.target.word_size)
 	e.emit_expr_at(call.args[0], depth + 1)!
+	e.extend_operand_to_word(call.args[0], call.line, call.col)!
 	e.store_accumulator(a_slot, call.line, call.col)!
 	b_slot := e.reserve(e.target.word_size)
 	e.emit_expr_at(call.args[1], depth + 2)!
+	e.extend_operand_to_word(call.args[1], call.line, call.col)!
 	e.store_accumulator(b_slot, call.line, call.col)!
 	pointer_slot := e.reserve(e.target.word_size)
 	e.emit_expr_at(call.args[2], depth + 3)!
@@ -9888,19 +9905,46 @@ fn (mut e Emitter) emit_overflow(call ast.Call, depth int) !void {
 	pointer := e.remainder(call.line, call.col)!
 	e.load_accumulator(a_slot, call.line, call.col)!
 	e.append(e.target.load_slot(base, i32(b_slot.offset), scratch, e.target.word_size)!)
-	if overflow {
-		e.append(e.target.multiply(accumulator, scratch)!)
+	if multiply {
+		if unsigned {
+			if wide {
+				// `mul` leaves the product's bytes above the result in the register
+				// above, which is where a product too large for the result sits.
+				e.append(e.target.multiply_pair(scratch)!)
+				e.append(e.target.test_word(pointer)!)
+			} else {
+				// A four-byte result takes operands of at most four bytes, so the
+				// word product is the whole product and its bytes above the fourth
+				// are what says it did not fit.
+				e.append(e.target.multiply_word(accumulator, scratch)!)
+				e.append(e.target.move_register64(pointer, accumulator)!)
+				e.append(e.target.shift_right_word(pointer, 32)!)
+				e.append(e.target.test_word(pointer)!)
+			}
+			e.append(e.target.set_condition(backend.Condition.not_equal, scratch)!)
+		} else {
+			if wide {
+				e.append(e.target.multiply_word(accumulator, scratch)!)
+			} else {
+				e.append(e.target.multiply(accumulator, scratch)!)
+			}
+			e.append(e.target.set_condition(backend.Condition.overflow, scratch)!)
+		}
 	} else {
-		e.append(e.target.add(accumulator, scratch)!)
+		if wide {
+			e.append(e.target.add_reg64(accumulator, scratch))
+		} else {
+			e.append(e.target.add(accumulator, scratch)!)
+		}
+		// The carry is the unsigned sum leaving the result, and it is the flag the
+		// signed add leaves as its unsigned half.
+		condition := if unsigned { backend.Condition.below } else { backend.Condition.overflow }
+		e.append(e.target.set_condition(condition, scratch)!)
 	}
-	// The flags the operation left are the answer. They are read into the scratch
-	// register now: the widen, the loads below and the store all leave the flags
-	// alone, but reading them here is what the machine's one-shot flag register asks.
-	e.append(e.target.set_condition(backend.Condition.overflow, scratch)!)
 	e.append(e.target.widen_byte(scratch)!)
 	// The result the operation wrapped to, through the pointer the third argument was.
 	e.append(e.target.load_slot(base, i32(pointer_slot.offset), pointer, e.target.word_size)!)
-	e.append(e.target.store_indirect(pointer, accumulator, 4)!)
+	e.append(e.target.store_indirect(pointer, accumulator, store_width)!)
 	// And the answer itself: the overflow flag, which the widen has already made 0 or 1.
 	e.append(e.target.move_register32(accumulator, scratch)!)
 }

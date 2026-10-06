@@ -815,12 +815,16 @@ fn (mut p Parser) parse_bit_operation(at tokenize.Token) !ast.Expr {
 
 // parse_overflow reads `__builtin_add_overflow` and `__builtin_mul_overflow`, which
 // add or multiply two values, store the result the operation wraps to through the
-// third argument, and answer nonzero when it overflowed. The three are ints here:
-// the answer is an int, and both operands and the object the third argument points
-// at have to be int, because the overflow the back end reads is the signed one the
-// machine's add and imul raise, and a wider, narrower or unsigned operand would be
-// checked by a different flag. An operand of another type is refused by name rather
-// than computed with a check that does not fit it.
+// third argument, and answer nonzero when it overflowed. The answer is an int, and
+// the operands and the object the third argument points at are integers.
+//
+// The arithmetic runs in the result type's width and the machine's flag for that
+// width is the answer, which is the result type's own question only when the result
+// type can hold both operands: an operand wider than the result, or one the same
+// width as the result and of the other signedness, names a sum the result type's
+// flag is not about. Such an operand is refused by name. The result type is one of
+// the two widths this back end's arithmetic has, four bytes and eight, and a
+// narrower result type is refused by name for the same reason.
 fn (mut p Parser) parse_overflow(at tokenize.Token) !ast.Expr {
 	args := p.parse_arguments()!
 	if args.len != 3 {
@@ -833,20 +837,47 @@ fn (mut p Parser) parse_overflow(at tokenize.Token) !ast.Expr {
 			continue
 		}
 		operand := p.value_type(args[i])
-		if operand.kind != .unknown && operand.kind != .int_ {
-			p.error_at(at, 'unsupported: ${at.text} checks an int ${name}, and it is ${operand.describe()}')
+		if operand.kind != .unknown && !operand.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} checks an integer ${name}, and it is ${operand.describe()}')
 			return error('the operand of ${at.text}')
 		}
 	}
+	mut result := types.Type{}
 	if !p.is_unresolved(args[2]) {
 		pointer := p.value_type(args[2])
 		pointee := pointer.pointee() or {
 			p.error_at(at, 'unsupported: ${at.text} stores its result through the third argument, and ${describe_operand(args[2])} is ${pointer.describe()}')
 			return error('the result pointer of ${at.text}')
 		}
-		if pointee.kind != .int_ {
-			p.error_at(at, 'unsupported: ${at.text} stores an int result, and ${describe_operand(args[2])} points at ${pointee.describe()}')
+		if !pointee.kind.is_integer() {
+			p.error_at(at, 'unsupported: ${at.text} stores an integer result, and ${describe_operand(args[2])} points at ${pointee.describe()}')
 			return error('the result pointer of ${at.text}')
+		}
+		result = pointee
+	}
+	if result.kind != .unknown {
+		size := p.representation.size_of(result) or { 0 }
+		if size != 4 && size != 8 {
+			p.error_at(at, 'unsupported: ${at.text} checks a ${result.describe()} result, and the arithmetic this compiler emits is four bytes or eight')
+			return error('the result type of ${at.text}')
+		}
+		for i, name in names {
+			if p.is_unresolved(args[i]) {
+				continue
+			}
+			operand := p.value_type(args[i])
+			if operand.kind == .unknown {
+				continue
+			}
+			operand_size := p.representation.size_of(operand) or { size }
+			if operand_size > size {
+				p.error_at(at, 'unsupported: ${at.text} checks a ${operand.describe()} ${name} against a ${result.describe()} result, and an operand wider than the result would be a different sum')
+				return error('the operand of ${at.text}')
+			}
+			if operand_size == size && operand.is_unsigned_type() != result.is_unsigned_type() {
+				p.error_at(at, 'unsupported: ${at.text} checks a ${operand.describe()} ${name} against a ${result.describe()} result, and a ${operand.describe()} value is not one every ${result.describe()} holds')
+				return error('the operand of ${at.text}')
+			}
 		}
 	}
 	return ast.Expr(ast.Call{
