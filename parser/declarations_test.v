@@ -2352,26 +2352,58 @@ fn test_a_file_scope_auto_without_an_initializer_is_refused_by_name() {
 	assert result.diagnostics[0].msg.contains('auto needs an initializer')
 }
 
-// The decimal floating types are types the language has and this compiler does
-// not write. Each is refused by name where the declaration asks for it, rather
-// than left to be read as a name the file never declared: a program that writes
-// one is a program about that construct, and the diagnostic has to say so. The
-// words are reserved here for the same reason, so one of them cannot quietly
-// become an object's name either.
-fn test_a_decimal_floating_type_is_refused_by_name_at_its_declaration() {
-	result := declarations_of('_Decimal32 a = 1;\n_Decimal64 b = 2;\n_Decimal128 c = 3;\n')
-	assert result.diagnostics.len == 3
-	assert result.diagnostics[0].msg.contains('unsupported type _Decimal32')
-	assert result.diagnostics[0].line == 1
-	assert result.diagnostics[1].msg.contains('unsupported type _Decimal64')
-	assert result.diagnostics[2].msg.contains('unsupported type _Decimal128')
+// The decimal floating types are types this reader resolves: each of the three
+// words is a complete type with a size and an alignment, so a declaration of one
+// is read and a `sizeof` of one is an integer constant expression the folder
+// answers with 4, 8 or 16. Measured on gcc 16.2.1 on this target,
+// `sizeof(_Decimal32)` is 4, `sizeof(_Decimal64)` is 8 and `sizeof(_Decimal128)`
+// is 16, and a program that returns any of them exits with that number.
+//
+// This used to be the other way round: each word was refused by name where a
+// declaration asked for it, and the same test asked for that refusal. The type
+// exists now, so what is left to refuse is a decimal word beside another
+// specifier word.
+fn test_a_decimal_floating_type_is_a_complete_type() {
+	sizes := {
+		'sizeof(_Decimal32)':  4
+		'sizeof(_Decimal64)':  8
+		'sizeof(_Decimal128)': 16
+	}
+	for question, expected in sizes {
+		result := declarations_of('int g = ${question};')
+		assert result.diagnostics.len == 0
+		assert result.unit.globals.len == 1
+		value := result.unit.globals[0].init or {
+			assert false
+			return
+		}
+		assert value == expected
+	}
+	// A decimal word is not an object's name either: `int _Decimal32 = 1;` writes
+	// two type words in one declaration list, and a list that resolves to no type
+	// is refused rather than named as an object.
+	named := declarations_of('int _Decimal32 = 1;')
+	assert named.diagnostics.len > 0
+	assert named.diagnostics[0].line == 1
 }
 
-// A decimal type resolves to no size, so a `sizeof` of one is refused by name
-// too, which is the other half of the same construct: the test that measures the
-// three types asks for it there as well.
-fn test_a_sizeof_of_a_decimal_floating_type_is_refused_by_name() {
-	result := declarations_of('int f(void) {\n	int n = sizeof(_Decimal32);\n	return n;\n}\n')
-	assert result.diagnostics.len > 0
-	assert result.diagnostics.any(it.msg.contains('_Decimal32'))
+// A decimal type is one word and takes no other: measured on gcc 16.2.1,
+// `signed _Decimal32`, `unsigned _Decimal32`, `long _Decimal32` and
+// `short _Decimal32` are each refused with `both 'signed' and '_Decimal32' in
+// declaration specifiers`, and two of the three decimal words together with
+// `two or more data types in declaration specifiers`. A qualifier may stand
+// beside one, which the reader takes before these words arrive.
+fn test_a_decimal_type_word_takes_no_other_declaration_specifier() {
+	for source in ['signed _Decimal32 x;', 'unsigned _Decimal64 x;', 'long _Decimal128 x;',
+		'short _Decimal32 x;', '_Decimal32 _Decimal64 x;'] {
+		result := declarations_of(source)
+		assert result.diagnostics.len > 0
+		assert result.diagnostics[0].line == 1
+	}
+	// A qualifier is not another type word, so `const _Decimal32` and
+	// `volatile _Decimal64` are read: measured, gcc accepts both.
+	qualified := declarations_of('void f(const _Decimal32 x, volatile _Decimal64 y);')
+	assert qualified.diagnostics.len == 0
+	pointed := declarations_of('_Decimal32 *p;')
+	assert pointed.diagnostics.len == 0
 }

@@ -2719,6 +2719,32 @@ fn (mut p Parser) parse_primary() !ast.Expr {
 			})
 		}
 		if is_floating_constant(t.text) {
+			// The decimal suffix is asked about first: `dl` and `DL` end in the
+			// letter `l`, so the long double check below would take `1.5dl` for
+			// its own and refuse the `d`. See is_decimal_constant.
+			if is_decimal_constant(t.text) {
+				value := parse_decimal_literal(t.text) or {
+					p.error_at(t, err.msg())
+					return error('bad decimal literal')
+				}
+				// A constant the format cannot hold is a warning and not a refusal:
+				// gcc reports it, stores what it can and compiles the program, and
+				// so does this reader, which is why the value comes back an
+				// infinity or a zero. See decimal_range_warning for the
+				// measurements and for which of the two this is.
+				range_warning := decimal_range_warning(t.text, value)
+				if range_warning != '' {
+					p.report_at(t.line, t.col, if t.file != '' { t.file } else { p.file },
+						range_warning, true, .cpp)
+				}
+				return ast.Expr(ast.FloatLit{
+					decimal_value: value
+					text:          t.text
+					typ:           types.decimal_type(value.kind)
+					line:          t.line
+					col:           t.col
+				})
+			}
 			if is_long_double_constant(t.text) {
 				value := parse_long_double_literal(t.text) or {
 					p.error_at(t, err.msg())
@@ -3101,6 +3127,9 @@ fn (mut p Parser) floating_type(at tokenize.Token, value f64) types.Type {
 		// the constant is better than emitting a NaN where a number was.
 		p.error_at(at, '${at.text}: the constant is out of range for a double')
 		return types.Type{}
+	}
+	if is_decimal_constant(at.text) {
+		return types.decimal_type(decimal_kind_of(at.text))
 	}
 	if is_long_double_constant(at.text) && is_floating_constant(at.text) {
 		return types.long_double_type()
@@ -3495,6 +3524,14 @@ fn (p Parser) floating_constant_value(expr ast.Expr) ?f64 {
 			// of the extended type instead, which is where its bytes come from.
 			return none
 		}
+		if expr.decimal_value.kind.is_decimal() {
+			// A decimal constant keeps its value in the decimal field and
+			// its double field is zero (ast.FloatLit), so folding one here
+			// would answer 0.0 for every spelling. This folder produces a
+			// double and has no decimal form, so it answers none and the
+			// constant is refused by name where the value is needed.
+			return none
+		}
 		return expr.value
 	}
 	if expr is ast.Unary {
@@ -3627,6 +3664,13 @@ fn apply_constant_step(op string, left i64, right i64) ?i64 {
 // a floating constant anywhere else still has no value this folder will use.
 fn floating_operand(expr ast.Expr) ?f64 {
 	if expr is ast.FloatLit {
+		if expr.decimal_value.kind.is_decimal() {
+			// A decimal constant's double field is zero, so folding one here
+			// would answer 0.0 for `(int) 1.5df`. A decimal value is not a
+			// double this folder holds, so it answers none and the cast is
+			// left to the back end.
+			return none
+		}
 		return expr.value
 	}
 	if expr is ast.Unary {
