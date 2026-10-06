@@ -4,8 +4,6 @@
  * another function. ... The nested function can access all the variables of the
  * containing function that are visible at the point of its definition. This is
  * called lexical scoping."
- *
- * unimplemented: a function defined inside another function.
  */
 
 #include <stdio.h>
