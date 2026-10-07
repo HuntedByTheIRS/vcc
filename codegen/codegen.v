@@ -576,6 +576,11 @@ mut:
 	// format it used here and only those are written; a unit with no decimal
 	// value carries none of them.
 	decimal_used map[string]bool
+	// decimal_convert_used names the conversions beyond the one to double that a
+	// unit called for: a decimal to an integer, and the pairs codegen/decimal_convert.v
+	// writes. The same rule applies, and the names are the routine labels so a
+	// call site and the emitter agree on one name.
+	decimal_convert_used map[string]bool
 }
 
 // A frame is a multiple of sixteen so that every call made from the body starts
@@ -814,6 +819,7 @@ fn (mut e Emitter) build() ![]u8 {
 		return []u8{}
 	}
 	e.decimal_used = map[string]bool{}
+	e.decimal_convert_used = map[string]bool{}
 	// The libraries the image will name are settled before a byte is written.
 	// A -l name with no file behind it is an error a link makes, and the
 	// alternative is worse than an error: a program that compiles and then
@@ -1036,6 +1042,9 @@ fn (mut e Emitter) build() ![]u8 {
 	// conversion carries none of them, which is why they are emitted from here
 	// rather than made part of every image.
 	e.emit_decimal_routines()!
+	// The conversions beyond the one to double are written the same way, after the
+	// functions and only for the pairs a call site named.
+	e.emit_decimal_convert_routines()!
 	// The routines a run-time decimal addition, subtraction or negation runs are
 	// written the same way, and only for the formats and operators a call site
 	// named.
@@ -6958,6 +6967,14 @@ fn describe_target(expr ast.Expr) string {
 }
 
 fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
+	if unary.op == '!' && unary.expr.typ.kind.is_decimal() && e.names_an_object(unary.expr) {
+		// Whether a decimal object is zero is answered where the object lies,
+		// and the answer is an int; the operand's value is never read into a
+		// register. An operand that is not an object - a constant - is left to
+		// the comparison against zero below, which writes the constant into a
+		// slot of its own.
+		return e.emit_decimal_is_zero_test(unary, depth)
+	}
 	if unary.op == '&&' {
 		// The address of a label, `&&name`. The operand is a label name and
 		// not a value to read, so it is not evaluated here: what is written is
@@ -7583,16 +7600,26 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		return e.emit_expr_at(cast.expr, depth + 1)
 	}
 	if e.decimal_of(cast.expr) {
-		// A decimal value converts to a double and to nothing else here: the
-		// routine reads the object where it lives, and there is no value of the
-		// format this back end holds to convert from. The conversion is written
-		// whether or not the value is a constant, because a decimal object's
-		// value is the bytes it holds and not a number the reader folded.
-		if target.kind == .double {
-			return e.emit_decimal_to_double(cast.expr, cast.line, cast.col, depth)
+		// The conversion of a decimal to another type is the step decimal_step
+		// answers .value for: the routine reads the object where it lives and
+		// leaves the result in the accumulator, or in rax for an integer. The
+		// conversion is written whether or not the value is a constant, because
+		// a decimal object's value is the bytes it holds and not a number the
+		// reader folded. A step the registry leaves uncovered, and a conversion
+		// whose result is a decimal object, are refused by name here.
+		match e.decimal_step(cast) {
+			.value {
+				return e.emit_decimal_conversion(cast, target, depth)
+			}
+			.uncovered {
+				e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes')
+				return error('decimal conversion')
+			}
+			.object {
+				e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is wanted as a value here, and this back end writes the conversion into an object')
+				return error('decimal conversion value')
+			}
 		}
-		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and only a conversion to double is implemented')
-		return error('decimal conversion')
 	}
 	if target.kind.is_extended() {
 		// A conversion to the extended type: a source of the same type is the

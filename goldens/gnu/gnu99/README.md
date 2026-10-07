@@ -7,4 +7,6 @@ its middle operand left out, the function-name strings, `__auto_type`, a range
 designator, case ranges, a label's address and a computed goto, the bit,
 byte-swap, overflow, object-size, constant-fold and stack-allocation builtins, a
 cast to a union type, a structure with no members, `_Float128`, a vector type,
-and a variadic macro that names its variable arguments.
+a variadic macro that names its variable arguments, and the decimal conversions:
+a decimal to an integer, to a float and to a double, an integer to a decimal, and
+a decimal of one width into another.
