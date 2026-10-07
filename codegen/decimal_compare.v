@@ -540,41 +540,45 @@ fn (e Emitter) decimal_compare_order(mut r DecimalRoutine, format decimal.Format
 	r.branch(.not_equal, 'less')
 	r.jump('greater')
 	r.place('both_finite')
-	// Two zeros compare equal however they are written, which is what makes a
-	// computed zero with any exponent equal a written one.
+	// A zero is equal to another zero however either is written, so that is asked
+	// first: a zero with a power of ten, or with a sign, has other bytes than the
+	// plain one and is still the same value.
 	r.load_local(a_lo, g.rax)!
 	r.load_local(a_hi, g.rcx)!
 	r.op(r.t.or_word(g.rax, g.rcx)!)
 	r.op(r.t.test_word(g.rax)!)
-	r.branch(.equal, 'a_zero')
+	r.branch(.not_equal, 'a_nonzero')
+	// The left is zero. If the right is too the two are equal; otherwise the zero
+	// is greater than a negative right and less than a positive one, which is the
+	// right operand's sign and not the zero's own.
 	r.load_local(b_lo, g.rax)!
 	r.load_local(b_hi, g.rcx)!
 	r.op(r.t.or_word(g.rax, g.rcx)!)
 	r.op(r.t.test_word(g.rax)!)
-	r.branch(.equal, 'b_zero')
+	r.branch(.equal, 'equal')
+	r.load_local(b_sign, g.rax)!
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.not_equal, 'greater')
+	r.jump('less')
+	r.place('a_nonzero')
+	// The right is zero and the left is not, so the left is greater than zero when
+	// it is positive and less than zero when it is negative.
+	r.load_local(b_lo, g.rax)!
+	r.load_local(b_hi, g.rcx)!
+	r.op(r.t.or_word(g.rax, g.rcx)!)
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.not_equal, 'both_nonzero')
+	r.load_local(a_sign, g.rax)!
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.not_equal, 'less')
+	r.jump('greater')
+	r.place('both_nonzero')
 	// Neither is zero, so a sign that differs decides.
 	r.load_local(a_sign, g.rax)!
 	r.load_local(b_sign, g.rcx)!
 	r.op(r.t.subtract_word(g.rax, g.rcx)!)
 	r.branch(.equal, 'same_sign')
 	r.load_local(a_sign, g.rax)!
-	r.op(r.t.test_word(g.rax)!)
-	r.branch(.not_equal, 'less')
-	r.jump('greater')
-	r.place('a_zero')
-	// The left is zero; if the right is too the two are equal whatever sign or
-	// exponent either zero was written with.
-	r.load_local(b_lo, g.rax)!
-	r.load_local(b_hi, g.rcx)!
-	r.op(r.t.or_word(g.rax, g.rcx)!)
-	r.op(r.t.test_word(g.rax)!)
-	r.branch(.equal, 'equal')
-	r.load_local(a_sign, g.rax)!
-	r.op(r.t.test_word(g.rax)!)
-	r.branch(.not_equal, 'greater')
-	r.jump('less')
-	r.place('b_zero')
-	r.load_local(b_sign, g.rax)!
 	r.op(r.t.test_word(g.rax)!)
 	r.branch(.not_equal, 'less')
 	r.jump('greater')
