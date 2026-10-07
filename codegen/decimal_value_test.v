@@ -113,3 +113,27 @@ fn test_a_decimal_and_a_non_decimal_do_not_mix_silently() {
 	found := emitted.diagnostics.any(it.msg.contains('unsupported'))
 	assert found, 'the refusal is not named: ${emitted.diagnostics[0].msg}'
 }
+
+// A decimal is refused by name wherever nothing of one is handled. Arithmetic,
+// a comparison, a truth test and an implicit conversion to a double all compute
+// with the value, and the bytes in the floating accumulator are not a number to
+// compute with: answering with them would be a wrong number nobody could see,
+// so each is refused where it is written. The sign change is not one of these,
+// because negating a decimal is flipping one bit and that bit is written.
+const decimal_value_unhandled_bodies = [
+	'_Decimal64 a = 1.5dd, b = 2.5dd; _Decimal64 c = a + b;',
+	'_Decimal64 a = 1.5dd, b = 2.5dd; _Decimal64 c = a * b;',
+	'_Decimal64 a = 1.5dd, b = 2.5dd; int c = a == b;',
+	'_Decimal64 a = 1.5dd; if (a) { return 1; }',
+	'_Decimal64 a = 1.5dd; double x = a;',
+	'_Decimal64 a = 1.5dd; _Decimal64 b = !a;',
+]
+
+fn test_a_decimal_is_refused_where_no_value_of_one_is_handled() {
+	for body in decimal_value_unhandled_bodies {
+		source := 'int main(void) {\n	${body}\n	return 0;\n}'
+		emitted := emit(decimal_value_unit(source), Options{})
+		assert emitted.diagnostics.len > 0, 'the program was accepted: ${body}'
+		assert emitted.diagnostics.any(it.msg.contains('unsupported')), 'the refusal is not named: ${body}: ${emitted.diagnostics[0].msg}'
+	}
+}

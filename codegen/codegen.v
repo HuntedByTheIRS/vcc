@@ -5274,6 +5274,13 @@ fn (mut e Emitter) branch(kind image.FixupKind, name string, line int, col int) 
 // cleared by exclusive-or with itself rather than read from memory, so this costs
 // no constant.
 fn (mut e Emitter) emit_test(value ast.Expr, line int, col int) !void {
+	if value.typ.kind.is_decimal() {
+		// A truth value for a decimal is its comparison with zero, and this
+		// back end writes no comparison for one, so testing the bytes that
+		// happen to be in the accumulator would be an answer nobody asked for.
+		e.diagnostics << problem(line, col, 'unsupported: a ${value.typ.describe()} is tested as a condition, and this back end has no truth value for a decimal yet')
+		return error('decimal condition')
+	}
 	if e.long_double_of(value) {
 		// The truth value of a long double is its comparison with zero, which
 		// the x87 stack makes in the long-double file; the value's address is
@@ -5763,6 +5770,15 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 // into a slot that holds one, an argument a parameter is one for, and the value a
 // function returning a double returns.
 fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
+	if e.decimal_of(expr) {
+		// A decimal becomes a double through the routine that reads the object
+		// where it lives, which is the path a cast that asks for the
+		// conversion takes. An implicit conversion has no place to park the
+		// object's address here, and computing with the bytes of the value
+		// instead would be a number nobody wrote, so it is refused by name.
+		e.diagnostics << problem(line, col, 'unsupported: a ${expr.typ.describe()} is converted to a double here without a cast, and this back end makes that conversion only where a cast asks for it')
+		return error('decimal to double')
+	}
 	if e.long_double_of(expr) {
 		// The value is in memory at the address the expression left in the
 		// accumulator, and the machine converts it on its x87 stack.
@@ -5865,6 +5881,14 @@ fn (mut e Emitter) convert_to_single(expr ast.Expr, line int, col int) !void {
 // one and 2^63 for an eight-byte one, while a signed destination has no such
 // values and its conversion is the one the machine has.
 fn (mut e Emitter) convert_to_int(expr ast.Expr, unsigned_target bool, target_width int, line int, col int) !void {
+	if expr.typ.kind.is_decimal() {
+		// Only a conversion to a double reads a decimal object where it lives,
+		// and there is no value of the format this back end holds to convert
+		// from, so a decimal that would become an integer is refused by name
+		// rather than stored with the bits of the floating accumulator.
+		e.diagnostics << problem(line, col, 'unsupported: a ${expr.typ.describe()} is converted to an integer here, and this back end has no conversion from a decimal except to a double')
+		return error('decimal to int')
+	}
 	if e.long_double_of(expr) {
 		// The destination truncates toward zero and the machine's instruction
 		// rounds to nearest even, so the two answers differ for a fractional
@@ -6961,6 +6985,36 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// A 128-bit operand is a pair rather than a value in the accumulator, so
 		// the operators it has a meaning for are computed on the pair.
 		return e.emit_wide_unary(unary, depth)
+	}
+	if unary.expr.typ.kind.is_decimal() {
+		// The operators a decimal has here are the sign change and the unary
+		// plus. Negating a decimal is flipping its sign bit, which is the top
+		// bit of the value at its own width: one bit in the floating
+		// accumulator for the two narrow formats and one bit in the high half
+		// of the pair for _Decimal128, which is the same bit a negated double
+		// and a negated float flip. The logical not and the complement ask
+		// questions this back end does not answer for a decimal, because both
+		// need its value compared and no comparison is written.
+		if unary.op != '+' && unary.op != '-' {
+			e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes a ${unary.expr.typ.describe()} operand, and this back end has no such operation for a decimal')
+			return error('decimal unary operand')
+		}
+		e.emit_expr_at(unary.expr, depth + 1)!
+		if unary.op == '-' {
+			register := e.scratch(unary.line, unary.col)!
+			match decimal_width_of(unary.expr.typ) {
+				4 {
+					e.append(e.target.negate_single(e.float_accumulator(unary.line, unary.col)!, register)!)
+				}
+				8 {
+					e.append(e.target.negate_double(e.float_accumulator(unary.line, unary.col)!, register)!)
+				}
+				else {
+					e.append(e.target.negate_double(e.float_scratch(unary.line, unary.col)!, register)!)
+				}
+			}
+		}
+		return
 	}
 	floating := e.floating_of(unary.expr)
 	single := e.single_of(unary.expr)
@@ -8755,6 +8809,14 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		// answer rather than computing one lane or a wrong width.
 		e.diagnostics << problem(binary.line, binary.col, 'unsupported: the vector value ${binary.typ.describe()} is used where this back end does not compute it, and a vector is implemented only as the initialized object of a declaration')
 		return error('vector value')
+	}
+	if binary.left.typ.kind.is_decimal() || binary.right.typ.kind.is_decimal() {
+		// No operator this back end writes computes on a decimal, and the
+		// bytes in the floating accumulator are not a number to compute with:
+		// comparing or adding them as an integer would be a wrong answer
+		// nobody could see, so the step is refused where it is written.
+		e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} has a decimal operand, and this back end has no arithmetic or comparison for a decimal')
+		return error('decimal operand')
 	}
 	// A step with a complex operand is a comparison: the arithmetic is written by
 	// the complex paths into an object, and a step that reaches here is one whose
