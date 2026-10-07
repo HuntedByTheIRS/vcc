@@ -132,6 +132,23 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 			}
 		}
 	}
+	// The integer conversions this unit named, which reach the same rounding and
+	// encoding routines as a width conversion to the same destination.
+	mut int_size := []int{}
+	mut int_unsigned := []bool{}
+	mut int_dst := []int{}
+	for size in [1, 2, 4, 8] {
+		for unsigned_kind in [false, true] {
+			for j, dst in formats {
+				if decimal_from_integer_name(size, unsigned_kind, dst) in e.decimal_convert_used {
+					int_size << size
+					int_unsigned << unsigned_kind
+					int_dst << j
+					width_format[j] = true
+				}
+			}
+		}
+	}
 	// Which formats a decode is read for: its own conversions, and the width
 	// conversions that start at it.
 	mut any_decode := []bool{}
@@ -145,7 +162,7 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 			}
 		}
 	}
-	mut any := any_fix || any_float
+	mut any := any_fix || any_float || int_size.len > 0
 	for wants in width_format {
 		if wants {
 			any = true
@@ -192,6 +209,9 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 	for k, _ in pair_src {
 		e.emit_decimal_pair(mut r, formats[pair_src[k]], formats[pair_dst[k]])!
 	}
+	for k, _ in int_size {
+		e.emit_decimal_from_integer_routine(mut r, int_size[k], int_unsigned[k], formats[int_dst[k]])!
+	}
 	base := e.program.text.len
 	bytes := r.resolved()
 	e.program.text << bytes
@@ -222,6 +242,14 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 			label := decimal_pair_name(format, dst)
 			if label in r.labels {
 				e.program.labels[label] = base + r.labels[label]
+			}
+		}
+		for size in [1, 2, 4, 8] {
+			for unsigned_kind in [false, true] {
+				label := decimal_from_integer_name(size, unsigned_kind, format)
+				if label in r.labels {
+					e.program.labels[label] = base + r.labels[label]
+				}
 			}
 		}
 	}

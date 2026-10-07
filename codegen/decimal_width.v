@@ -14,6 +14,7 @@ module codegen
 // it to an infinity.
 import ast
 import decimal
+import types
 
 // DecimalTarget gathers one format's constants so a routine that rounds or
 // encodes for it reads them in one place.
@@ -523,14 +524,21 @@ fn (mut e Emitter) emit_decimal_copy(slot Slot, expr ast.Expr, line int, col int
 }
 
 // store_decimal_value writes a decimal into an object from a value that is not a
-// constant: a value of another width converted into this one, written where the
-// object is, or another object of the same type copied into it. It answers
-// whether it wrote, and a value it does not know is left for the caller to refuse
-// by name rather than written as something else.
+// constant: a value of another width converted into this one, an integer
+// converted into it, or another object of the same type copied into it. It
+// answers whether it wrote, and a value it does not know is left for the caller
+// to refuse by name rather than written as something else.
 fn (mut e Emitter) store_decimal_value(slot Slot, expr ast.Expr, line int, col int) !bool {
 	if expr is ast.Cast {
-		if expr.typ.kind.is_decimal() && expr.expr.typ.kind.is_decimal() {
+		if !expr.typ.kind.is_decimal() {
+			return false
+		}
+		if expr.expr.typ.kind.is_decimal() {
 			e.emit_decimal_to_decimal(slot, expr, 0)!
+			return true
+		}
+		if _ := decimal_integer_bytes(expr.expr.typ.kind) {
+			e.emit_decimal_from_integer(slot, expr, 0)!
 			return true
 		}
 		return false
@@ -540,4 +548,112 @@ fn (mut e Emitter) store_decimal_value(slot Slot, expr ast.Expr, line int, col i
 		return true
 	}
 	return false
+}
+
+// decimal_integer_bytes is how many bytes an integer type occupies, or none for
+// a kind that is not an integer this back end converts. The 128-bit integers are
+// left out: their value does not fit the coefficient field of any decimal format
+// and the conversion is not one this back end makes.
+fn decimal_integer_bytes(kind types.Kind) ?int {
+	return match kind {
+		.char_, .signed_char, .unsigned_char { 1 }
+		.short, .unsigned_short { 2 }
+		.int_, .unsigned_int { 4 }
+		.long, .unsigned_long, .long_long, .unsigned_long_long { 8 }
+		else { none }
+	}
+}
+
+fn decimal_from_integer_name(size int, unsigned bool, dst decimal.Format) string {
+	mark := if unsigned { 'u' } else { 's' }
+	return 'vcc_decimal_from_${mark}${size}_to_${dst.bytes()}'
+}
+
+// emit_decimal_from_integer writes a conversion from an integer to a decimal
+// width: the source's address is left in rax, the object the value is going into
+// is addressed into rdi, and the routine reads the integer where it lives. The
+// integer is exact, so the conversion is the integer's digits rounded to the
+// destination's precision and range, which is the same rounding a width
+// conversion uses.
+fn (mut e Emitter) emit_decimal_from_integer(slot Slot, expr ast.Cast, depth int) !void {
+	g := decimal_registers(e.target) or {
+		e.diagnostics << problem(expr.line, expr.col, 'internal: the target has no register a decimal conversion needs')
+		return error('decimal registers')
+	}
+	size := decimal_integer_bytes(expr.expr.typ.kind) or {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.expr.typ.describe()} is converted to ${expr.typ.describe()}, and only a 32- or 64-bit integer is')
+		return error('decimal integer')
+	}
+	e.emit_address(ast.Unary{
+		op:   '&'
+		expr: expr.expr
+		typ:  expr.expr.typ
+		line: expr.line
+		col:  expr.col
+	}, depth + 1)!
+	e.append(e.target.move_register64(g.rsi, e.accumulator(expr.line, expr.col)!)!)
+	e.leave_address(slot, expr.line, expr.col)!
+	e.append(e.target.move_register64(g.rdi, e.accumulator(expr.line, expr.col)!)!)
+	e.append(e.target.move_register64(g.rax, g.rsi)!)
+	name := decimal_from_integer_name(size, expr.expr.typ.kind.is_unsigned(), expr.typ.kind.decimal_format())
+	e.decimal_convert_used[name] = true
+	e.reference(e.target.call_near(0), .call_local, name, '')
+}
+
+// emit_decimal_from_integer_routine writes one integer width's routine: it reads
+// the integer where it lives, takes its magnitude's digits, and rounds them into
+// the destination format. The sign is the integer's, and an integer too large for
+// the format saturates to an infinity.
+fn (e Emitter) emit_decimal_from_integer_routine(mut r DecimalRoutine, size int, unsigned_kind bool, dst decimal.Format) !void {
+	g := r.reg
+	name := decimal_from_integer_name(size, unsigned_kind, dst)
+	target := decimal_target(dst)
+	r.place(name)
+	r.op(r.t.push_register(g.rbx))
+	r.op(r.t.move_register64(g.rsi, g.rax)!)
+	match size {
+		1 {
+			if unsigned_kind {
+				r.op(r.t.load_indirect_unsigned(g.rsi, g.rax, 1)!)
+			} else {
+				r.op(r.t.load_indirect(g.rsi, g.rax, 1)!)
+			}
+		}
+		2 {
+			if unsigned_kind {
+				r.op(r.t.load_indirect_unsigned(g.rsi, g.rax, 2)!)
+			} else {
+				r.op(r.t.load_indirect(g.rsi, g.rax, 2)!)
+			}
+		}
+		4 {
+			r.op(r.t.load_indirect(g.rsi, g.rax, 4)!)
+			if !unsigned_kind {
+				r.op(r.t.sign_extend_word(g.rax, g.rax)!)
+			}
+		}
+		else {
+			r.op(r.t.load_indirect(g.rsi, g.rax, 8)!)
+		}
+	}
+	r.op(r.t.xor_word(g.rcx, g.rcx)!)
+	r.op(r.t.xor_word(g.r8, g.r8)!)
+	if !unsigned_kind {
+		r.op(r.t.test_word(g.rax)!)
+		r.branch(.greater_or_equal, '${name}_positive')
+		r.op(r.t.move_immediate64(g.r8, 1)!)
+		r.op(r.t.negate_word(g.rax)!)
+		r.place('${name}_positive')
+	}
+	r.op(r.t.xor_word(g.rdx, g.rdx)!)
+	r.call(decimal_quantize_name(dst))
+	r.op(r.t.test_word(g.r9)!)
+	r.branch(.not_equal, '${name}_infinity')
+	r.call(decimal_encode_name(dst))
+	r.jump('${name}_done')
+	r.place('${name}_infinity')
+	e.decimal_write_special(mut r, target, false)!
+	r.place('${name}_done')
+	r.op(r.t.pop_register(g.rbx))
+	r.op(r.t.ret())
 }
