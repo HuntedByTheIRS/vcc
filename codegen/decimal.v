@@ -765,10 +765,14 @@ enum DecimalStep {
 // orders the two objects and leaves its order code in the accumulator, which the
 // call site turns into one of the six operators. A comparison whose operands are
 // not both decimals is not a step this back end has, and is left uncovered so it
-// stays refused. A lane that adds a routine adds its step to this one function
-// and its emitter beside the others, so the step is reached instead of meeting a
-// refusal written for a tree with no routine at all: the multiply and divide lane
-// will answer .object here.
+// stays refused. A cast is the conversion the conversion lane's routines write:
+// a cast to an integer or a float yields a value and answers .value, and a cast
+// that stores into a decimal object answers .object, because there the routine
+// writes the object. A conversion to or from a type this back end does not
+// convert is left uncovered and stays refused. A lane that adds a routine adds
+// its step to this one function and its emitter beside the others, so the step
+// is reached instead of meeting a refusal written for a tree with no routine at
+// all: the multiply and divide lane will answer .object here.
 fn (e Emitter) decimal_step(expr ast.Expr) DecimalStep {
 	match expr {
 		ast.Binary {
@@ -786,6 +790,32 @@ fn (e Emitter) decimal_step(expr ast.Expr) DecimalStep {
 				return .object
 			}
 		}
+		ast.Cast {
+			if expr.typ.kind.is_decimal() {
+				// A conversion whose result is a decimal object: the back end
+				// writes it when the source is a decimal value, an integer, a
+				// float or a double.
+				if e.decimal_of(expr.expr) {
+					return .object
+				}
+				if _ := decimal_integer_bytes(expr.expr.typ.kind) {
+					return .object
+				}
+				if expr.expr.typ.kind in [.double, .float] {
+					return .object
+				}
+			} else if e.decimal_of(expr.expr) {
+				// A conversion from a decimal that yields a value: a float, a
+				// double or an integer is written, and anything else is left
+				// uncovered.
+				if expr.typ.kind in [.double, .float] {
+					return .value
+				}
+				if _ := decimal_fix_target(expr.typ.kind) {
+					return .value
+				}
+			}
+		}
 		else {}
 	}
 	return .uncovered
@@ -794,11 +824,11 @@ fn (e Emitter) decimal_step(expr ast.Expr) DecimalStep {
 // store_decimal writes a decimal object's value from the initializer of a
 // declaration or the value of an assignment to a name. A constant goes in as the
 // bytes the encoding gives it; a step decimal_step answers .object for is written
-// by the arithmetic routine, which reads its operands where they live;
-// everything else is a value of the same decimal type, which the value path reads
-// into the floating accumulator and stores, and refuses by name what it cannot
-// write. depth is the level the caller writes at, which the value path turns into
-// the level below it for the value it reads.
+// by the arithmetic routine or by the conversion routine, which read their
+// operands where they live; everything else is a value of the same decimal type,
+// which the value path reads into the floating accumulator and stores, and
+// refuses by name what it cannot write. depth is the level the caller writes at,
+// which the value path turns into the level below it for the value it reads.
 fn (mut e Emitter) store_decimal(slot Slot, expr ast.Expr, line int, col int, depth int) !void {
 	if bytes := decimal_constant_bytes(expr) {
 		if bytes.len == slot.width {
@@ -817,6 +847,15 @@ fn (mut e Emitter) store_decimal(slot Slot, expr ast.Expr, line int, col int, de
 			ast.Unary {
 				return e.store_decimal_negate(slot, expr.expr, line, col, depth)
 			}
+			ast.Cast {
+				// A conversion whose result is this object: the conversion
+				// lane's routine writes it. The step is .object, so a routine
+				// is there; a value it does not write falls to the value path
+				// below, which refuses it by name.
+				if e.store_decimal_converted(slot, expr, line, col, depth)! {
+					return
+				}
+			}
 			else {}
 		}
 	}
@@ -826,8 +865,10 @@ fn (mut e Emitter) store_decimal(slot Slot, expr ast.Expr, line int, col int, de
 // store_decimal_through_object writes a decimal value through an address the
 // caller has already parked: what a dereference, a member or an element is
 // assigned. A step decimal_step answers .object for is written by the arithmetic
-// routine through the same address; every other value is the value path's store,
-// which refuses by name what it cannot write.
+// routine through the same address; a conversion is refused by name, because the
+// conversion routines write into an object the store names and not through an
+// address; every other value is the value path's store, which refuses by name
+// what it cannot write.
 fn (mut e Emitter) store_decimal_through_object(address Slot, expr ast.Expr, width int, line int, col int, depth int) !void {
 	if e.decimal_step(expr) == .object {
 		if decimal_width_of(expr.typ) != width {
@@ -840,6 +881,15 @@ fn (mut e Emitter) store_decimal_through_object(address Slot, expr ast.Expr, wid
 			}
 			ast.Unary {
 				return e.store_decimal_negate_at(address, expr.expr, line, col, depth)
+			}
+			ast.Cast {
+				// The conversion routines write into the storage of an object
+				// the store names, which is a frame slot. There is no form
+				// that writes one through an address the caller parked, so
+				// the conversion is refused by name here rather than written
+				// as something else.
+				e.diagnostics << problem(line, col, 'unsupported: a conversion to ${expr.typ.describe()} is stored through an address here, and this back end writes a decimal conversion only into the storage of an object it names')
+				return error('decimal conversion store')
 			}
 			else {}
 		}
