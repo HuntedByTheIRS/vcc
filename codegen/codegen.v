@@ -1036,6 +1036,10 @@ fn (mut e Emitter) build() ![]u8 {
 	// conversion carries none of them, which is why they are emitted from here
 	// rather than made part of every image.
 	e.emit_decimal_routines()!
+	// The routines a run-time decimal addition, subtraction or negation runs are
+	// written the same way, and only for the formats and operators a call site
+	// named.
+	e.emit_decimal_arith_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -2434,10 +2438,11 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	}
 	if slot.decimal && slot.count == 0 {
 		// An object of a decimal type declared with a value: a constant goes
-		// in as the bytes the encoding gives it, and a value of the same
-		// decimal type is read into the floating accumulator and stored.
+		// in as the bytes the encoding gives it, a sum, a difference or a
+		// negation is written by the arithmetic routine, and a value of the
+		// same decimal type is read into the floating accumulator and stored.
 		// Anything else is refused by name inside.
-		return e.store_decimal_value(slot, init, stmt.line, stmt.col, 0)
+		return e.store_decimal(slot, init, stmt.line, stmt.col, 0)
 	}
 	if slot.complex {
 		// A complex object is written by the conversion its type names rather
@@ -2594,8 +2599,11 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 	}
 	if target.decimal && target.count == 0 {
 		// The same store a declaration of a decimal type makes: a constant of
-		// the object's width or a value of the same decimal type.
-		return e.assign_decimal_local(target, expr, stmt.line, stmt.col, depth)
+		// the object's width, a sum, a difference or a negation the arithmetic
+		// routines cover, or a value of the same decimal type. A compound
+		// spelling is expanded to `r = r + a` where it is read, so `r += a` is
+		// the sum below and not a second implementation.
+		return e.store_decimal(target, expr, stmt.line, stmt.col, depth)
 	}
 	if target.complex {
 		return e.assign_complex_local(stmt, target, depth)
@@ -2666,7 +2674,7 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 	if unary.typ.kind.is_decimal() {
 		// A write through an address of a decimal type is the store a decimal
 		// object makes, at the address the pointer holds.
-		return e.store_decimal_through_address(address, expr, decimal_width_of(unary.typ),
+		return e.store_decimal_through_object(address, expr, decimal_width_of(unary.typ),
 			stmt.line, stmt.col, depth)
 	}
 	width := e.storage_width(unary.typ) or {
@@ -3399,7 +3407,7 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 		e.field_address(member, depth + 1, stmt.line, stmt.col)!
 		address := e.value_slot(depth)
 		e.store_accumulator(address, stmt.line, stmt.col)!
-		return e.store_decimal_through_address(address, expr, format.bytes(), stmt.line, stmt.col,
+		return e.store_decimal_through_object(address, expr, format.bytes(), stmt.line, stmt.col,
 			depth)
 	}
 	width := e.type_width(member.spelling) or {
@@ -3704,7 +3712,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 	if slot.decimal {
 		// An element of an array of a decimal type takes a value of its own
 		// type through the element's own address.
-		return e.store_decimal_through_address(address, expr, slot.width, stmt.line, stmt.col,
+		return e.store_decimal_through_object(address, expr, slot.width, stmt.line, stmt.col,
 			depth)
 	}
 	if slot.long_double {
@@ -3819,7 +3827,7 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 		// An element of a decimal type at a computed address: the same store a
 		// decimal object makes, through the address that is parked, and the
 		// expression has not been emitted yet because that path emits it.
-		return e.store_decimal_through_address(address, expr, decimal_width_of(index.typ),
+		return e.store_decimal_through_object(address, expr, decimal_width_of(index.typ),
 			stmt.line, stmt.col, depth)
 	}
 	e.emit_expr_at(expr, depth + 1)!
@@ -8811,12 +8819,20 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		return error('vector value')
 	}
 	if binary.left.typ.kind.is_decimal() || binary.right.typ.kind.is_decimal() {
-		// No operator this back end writes computes on a decimal, and the
-		// bytes in the floating accumulator are not a number to compute with:
-		// comparing or adding them as an integer would be a wrong answer
-		// nobody could see, so the step is refused where it is written.
-		e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} has a decimal operand, and this back end has no arithmetic or comparison for a decimal')
-		return error('decimal operand')
+		// decimal_step is the one place that answers which routines cover a
+		// decimal step. A covered step is written where it is written: an
+		// object routine by a store that has a destination to write into, a
+		// value routine by its own emitter. What reaches this value position
+		// is a step no routine covers, or an object routine with no
+		// destination here to write. Both are refused by name rather than
+		// computed with the bytes in the floating accumulator, which are not
+		// the number they look like.
+		if e.decimal_step(binary) == .uncovered {
+			e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} has a decimal operand, and this back end has no arithmetic or comparison for a decimal')
+			return error('decimal operand')
+		}
+		e.diagnostics << problem(binary.line, binary.col, 'unsupported: the decimal ${binary.op} is wanted as a value here, and this back end writes a decimal arithmetic result only into an object')
+		return error('decimal value step')
 	}
 	// A step with a complex operand is a comparison: the arithmetic is written by
 	// the complex paths into an object, and a step that reaches here is one whose
