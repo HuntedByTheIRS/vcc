@@ -1002,6 +1002,9 @@ fn (mut e Emitter) build() ![]u8 {
 	// conversion carries none of them, which is why they are emitted from here
 	// rather than made part of every image.
 	e.emit_decimal_routines()!
+	// The routines a decimal comparison runs are written beside them, and only
+	// the widths a comparison named are written.
+	e.emit_decimal_compare_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -6771,6 +6774,12 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// component's and the paths that want a floating value reach here.
 		return e.emit_complex_part(unary, depth)
 	}
+	if e.decimal_of(unary.expr) && unary.op == '!' {
+		// `!a` is the equality comparison against zero, which is a routine of its
+		// own for the same reason a comparison of two decimals is. The other
+		// operators a decimal has no form for are left to the refusals below.
+		return e.emit_decimal_logical_not(unary, depth)
+	}
 	if e.long_double_of(unary.expr) {
 		// The logical not asks whether the value is zero, which is the
 		// comparison with zero the x87 stack makes. The sign change is the
@@ -8587,6 +8596,14 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 	// because C99 defines no ordering on the complex types.
 	if binary.left.typ.kind.is_complex() || binary.right.typ.kind.is_complex() {
 		return e.emit_complex_comparison(binary, depth)
+	}
+	// A comparison with a decimal operand is a call into a routine of its own: a
+	// decimal is an object rather than a value of a register, so the operands are
+	// addressed where they live and the routine orders them. An operand that is not
+	// a decimal of the same width is refused inside, by name.
+	if binary.op in ['==', '!=', '<', '>', '<=', '>=']
+		&& (e.decimal_of(binary.left) || e.decimal_of(binary.right)) {
+		return e.emit_decimal_comparison(binary, depth)
 	}
 	if e.extended_step(binary) {
 		return e.emit_extended_binary(binary, depth)
