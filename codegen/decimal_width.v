@@ -548,6 +548,10 @@ fn (mut e Emitter) store_decimal_value(slot Slot, expr ast.Expr, line int, col i
 			e.emit_decimal_from_integer(slot, expr, 0)!
 			return true
 		}
+		if expr.expr.typ.kind in [.double, .float] {
+			e.emit_decimal_from_binary(slot, expr, 0)!
+			return true
+		}
 		return false
 	}
 	if expr is ast.Unary {

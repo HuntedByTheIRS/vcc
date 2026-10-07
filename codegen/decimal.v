@@ -95,6 +95,7 @@ struct DecimalRegisters {
 	r13  backend.Register
 	r14  backend.Register
 	r15  backend.Register
+	rsp  backend.Register
 	xmm0 backend.Register
 }
 
@@ -113,6 +114,7 @@ fn decimal_registers(t &backend.Target) ?DecimalRegisters {
 	r13 := t.reg('r13') or { return none }
 	r14 := t.reg('r14') or { return none }
 	r15 := t.reg('r15') or { return none }
+	rsp := t.reg('rsp') or { return none }
 	xmm0 := t.float_reg('xmm0') or { return none }
 	return DecimalRegisters{
 		rax:  rax
@@ -129,6 +131,7 @@ fn decimal_registers(t &backend.Target) ?DecimalRegisters {
 		r13:  r13
 		r14:  r14
 		r15:  r15
+		rsp:  rsp
 		xmm0: xmm0
 	}
 }

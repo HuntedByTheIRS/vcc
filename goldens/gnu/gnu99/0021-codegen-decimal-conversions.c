@@ -81,6 +81,68 @@ int main(void) {
 	hex(&fromsmall, 8);
 	hex(&fromhuge, 16);
 
+	// A double or a float to a decimal. A binary value is a significand times a
+	// power of two and a decimal one is a coefficient times a power of ten, so the
+	// two meet at ten: the coefficient is the significand times a power of five.
+	// The destination holds its own count of digits, so a long coefficient is
+	// rounded to even there while a short one stands as it is.
+	double bhalf = 1.5;
+	double btenth = 0.1;
+	double bbig = 1e30;
+	double bsmall64 = 1e-320;
+	float fhalf = 1.5f;
+	float ftenth = 0.1f;
+	float fmax = 3.4028235e38f;
+	float ftiny = 1e-45f;
+	_Decimal32 bh32 = (_Decimal32) bhalf;
+	_Decimal64 bh64 = (_Decimal64) bhalf;
+	_Decimal128 bh128 = (_Decimal128) bhalf;
+	_Decimal32 bt32 = (_Decimal32) btenth;
+	_Decimal64 bt64 = (_Decimal64) btenth;
+	_Decimal128 bt128 = (_Decimal128) btenth;
+	_Decimal64 bs64 = (_Decimal64) bbig;
+	_Decimal128 bs128 = (_Decimal128) bbig;
+	_Decimal64 bu64 = (_Decimal64) bsmall64;
+	_Decimal32 fh32 = (_Decimal32) fhalf;
+	_Decimal64 fh64 = (_Decimal64) fhalf;
+	_Decimal128 fh128 = (_Decimal128) fhalf;
+	_Decimal32 ft32 = (_Decimal32) ftenth;
+	_Decimal64 ft64 = (_Decimal64) ftenth;
+	_Decimal128 ft128 = (_Decimal128) ftenth;
+	_Decimal64 fm64 = (_Decimal64) fmax;
+	_Decimal128 fm128 = (_Decimal128) fmax;
+	_Decimal64 fu64 = (_Decimal64) ftiny;
+	hex(&bh32, 4);
+	hex(&bh64, 8);
+	hex(&bh128, 16);
+	hex(&bt32, 4);
+	hex(&bt64, 8);
+	hex(&bt128, 16);
+	hex(&bs64, 8);
+	hex(&bs128, 16);
+	hex(&bu64, 8);
+	hex(&fh32, 4);
+	hex(&fh64, 8);
+	hex(&fh128, 16);
+	hex(&ft32, 4);
+	hex(&ft64, 8);
+	hex(&ft128, 16);
+	hex(&fm64, 8);
+	hex(&fm128, 16);
+	hex(&fu64, 8);
+
+	// And the same conversions of objects the compiler cannot fold.
+	volatile double vbhalf = 1.5;
+	volatile float vftenth = 0.1f;
+	_Decimal32 vh32 = (_Decimal32) vbhalf;
+	_Decimal128 vh128 = (_Decimal128) vbhalf;
+	_Decimal64 vf64 = (_Decimal64) vftenth;
+	_Decimal128 vf128 = (_Decimal128) vftenth;
+	hex(&vh32, 4);
+	hex(&vh128, 16);
+	hex(&vf64, 8);
+	hex(&vf128, 16);
+
 	// A decimal of one width converted to another: every pair, both ways.
 	_Decimal64 a32 = (_Decimal64) s32;
 	_Decimal128 b32 = (_Decimal128) s32;
