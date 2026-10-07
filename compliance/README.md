@@ -106,12 +106,14 @@ vector type declared with `__attribute__((vector_size(N)))`,
 `__builtin_unreachable` and `__builtin_trap`, `__builtin_alloca`,
 `__builtin_object_size`, `__builtin_return_address`, and `asm goto`.
 
-Twenty-five of the 26 compile and run now. The one that does not is 1139, the
-decimal floating types: `_Decimal32`, `_Decimal64` and `_Decimal128` are refused
-by name where they are written, with the construct and its location, because this
-compiler has no decimal encoding and a number that is not the one the source
-wrote is worse than a refusal. Its `unimplemented:` line is the only one left in
-the range.
+All 26 compile and run now. 1139, the decimal floating types, was the last and the
+largest: `_Decimal32`, `_Decimal64` and `_Decimal128` needed a literal suffix and
+three type kinds, the BID encoding gcc stores them in, and a conversion to
+`double` that rounds the way gcc's does, which is code the program carries rather
+than something the compiler can fold. A number that is not the one the source
+wrote is worse than a refusal, so the refusal stood until the encoding and the
+conversion were measured against gcc rather than guessed. Nothing in the range
+carries an `unimplemented:` line any more.
 
 Each was compiled and run under `gcc -std=gnu99` first: it exits 0 and prints
 nothing. That is what makes "the program is right and only this compiler is
