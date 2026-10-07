@@ -1040,6 +1040,9 @@ fn (mut e Emitter) build() ![]u8 {
 	// written the same way, and only for the formats and operators a call site
 	// named.
 	e.emit_decimal_arith_routines()!
+	// The routines a decimal comparison runs are written beside them, and only
+	// the widths a comparison named are written.
+	e.emit_decimal_compare_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -6972,6 +6975,12 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// component's and the paths that want a floating value reach here.
 		return e.emit_complex_part(unary, depth)
 	}
+	if e.decimal_of(unary.expr) && unary.op == '!' {
+		// `!a` is the equality comparison against zero, which is a routine of its
+		// own for the same reason a comparison of two decimals is. The other
+		// operators a decimal has no form for are left to the refusals below.
+		return e.emit_decimal_logical_not(unary, depth)
+	}
 	if e.long_double_of(unary.expr) {
 		// The logical not asks whether the value is zero, which is the
 		// comparison with zero the x87 stack makes. The sign change is the
@@ -8827,12 +8836,26 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		// destination here to write. Both are refused by name rather than
 		// computed with the bytes in the floating accumulator, which are not
 		// the number they look like.
-		if e.decimal_step(binary) == .uncovered {
-			e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} has a decimal operand, and this back end has no arithmetic or comparison for a decimal')
-			return error('decimal operand')
+		//
+		// A comparison of two decimals is the step decimal_step answers .value
+		// for, and this is where its emitter is reached: the routine orders the
+		// two objects and leaves the operator's answer in the accumulator. Two
+		// decimals of different widths are refused inside that emitter, by name,
+		// and a comparison whose other operand is not a decimal is a step no
+		// routine covers, refused just below.
+		match e.decimal_step(binary) {
+			.uncovered {
+				e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} has a decimal operand, and this back end has no arithmetic or comparison for a decimal')
+				return error('decimal operand')
+			}
+			.value {
+				return e.emit_decimal_comparison(binary, depth)
+			}
+			.object {
+				e.diagnostics << problem(binary.line, binary.col, 'unsupported: the decimal ${binary.op} is wanted as a value here, and this back end writes a decimal arithmetic result only into an object')
+				return error('decimal value step')
+			}
 		}
-		e.diagnostics << problem(binary.line, binary.col, 'unsupported: the decimal ${binary.op} is wanted as a value here, and this back end writes a decimal arithmetic result only into an object')
-		return error('decimal value step')
 	}
 	// A step with a complex operand is a comparison: the arithmetic is written by
 	// the complex paths into an object, and a step that reaches here is one whose
