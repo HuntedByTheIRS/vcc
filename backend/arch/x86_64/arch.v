@@ -2393,6 +2393,37 @@ pub fn jump_below_rel32(disp i32) []u8 {
 	return conditional_jump(0x82, disp)
 }
 
+// jump_condition goes to the distance it carries when the flags the last
+// comparison set match any of the machine's conditions, which is the jcc the
+// branches beyond zero and not-zero are made of. The four jumps above name the
+// conditions the stub's own range splits read; this one names the rest, so a
+// caller with a condition rather than a flag does not have to spell the opcode.
+// The condition's code is the full setcc byte, and the jump opcode is that low
+// nibble under 0F, which is what conditional_jump writes.
+pub fn jump_condition(condition Condition, disp i32) []u8 {
+	return conditional_jump(0x80 | (condition.code() & 0x0f), disp)
+}
+
+// ret encodes `ret`, the return from a subroutine: it goes to the address the
+// call pushed. The emitter writes a routine's own return with this when the
+// routine has no frame of its own to leave through.
+pub fn ret() []u8 {
+	return [u8(0xc3)]
+}
+
+// pop_register encodes `pop <reg>`, which takes the word the stack pointer is at
+// into the register and raises the stack pointer past it. It is the other half of
+// push_register, and a routine that keeps a callee-saved register over work of
+// its own saves it with the one and restores it with the other.
+pub fn pop_register(reg Register) []u8 {
+	mut out := []u8{cap: 2}
+	if reg.code >= 8 {
+		out << u8(0x41)
+	}
+	out << u8(0x58 + (reg.code & 0x07))
+	return out
+}
+
 // conditional_jump is the two-byte opcode form: 0F, then the opcode the condition
 // owns, then the distance.
 fn conditional_jump(opcode u8, disp i32) []u8 {
@@ -2834,6 +2865,9 @@ pub:
 	jump_register                   fn (Register) ![]u8                     = unsafe { nil }
 	jump_rel32                      fn (i32) []u8                           = unsafe { nil }
 	jump_zero_rel32                 fn (i32) []u8                           = unsafe { nil }
+	jump_condition                  fn (Condition, i32) []u8                = unsafe { nil }
+	pop_register                    fn (Register) []u8                      = unsafe { nil }
+	ret                             fn () []u8                              = unsafe { nil }
 	lea_rip                         fn (Register, i32) []u8                 = unsafe { nil }
 	load_double_extended            fn (Register) ![]u8                     = unsafe { nil }
 	load_double_indirect            fn (Register, Register) ![]u8           = unsafe { nil }
@@ -2856,6 +2890,7 @@ pub:
 	mov_reg32                       fn (Register, Register) ![]u8           = unsafe { nil }
 	mov_reg64                       fn (Register, Register) ![]u8           = unsafe { nil }
 	move_double                     fn (Register, Register) ![]u8           = unsafe { nil }
+	move_word_to_double             fn (Register, Register) ![]u8           = unsafe { nil }
 	move_float                      fn (Register, Register) ![]u8           = unsafe { nil }
 	movzx_byte                      fn (Register) ![]u8                     = unsafe { nil }
 	mul_reg64                       fn (Register) ![]u8                     = unsafe { nil }
@@ -2986,6 +3021,9 @@ pub fn encoders() Encoders {
 		jump_register:                   &jump_register
 		jump_rel32:                      &jump_rel32
 		jump_zero_rel32:                 &jump_zero_rel32
+		jump_condition:                  &jump_condition
+		pop_register:                    &pop_register
+		ret:                             &ret
 		lea_rip:                         &lea_rip
 		load_double_extended:            &load_double_extended
 		load_double_indirect:            &load_double_indirect
@@ -3008,6 +3046,7 @@ pub fn encoders() Encoders {
 		mov_reg32:                       &mov_reg32
 		mov_reg64:                       &mov_reg64
 		move_double:                     &move_double
+		move_word_to_double:             &move_word_to_double
 		move_float:                      &move_float
 		movzx_byte:                      &movzx_byte
 		mul_reg64:                       &mul_reg64
