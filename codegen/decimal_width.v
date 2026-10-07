@@ -543,6 +543,20 @@ fn (mut e Emitter) store_decimal_value(slot Slot, expr ast.Expr, line int, col i
 		}
 		return false
 	}
+	if expr is ast.Unary {
+		if !expr.typ.kind.is_decimal() {
+			return false
+		}
+		if expr.op == '-' && expr.expr.typ.kind.is_decimal() {
+			e.emit_decimal_negate(slot, expr, 0)!
+			return true
+		}
+		if expr.op == '+' && expr.expr.typ.kind.is_decimal() && e.names_an_object(expr.expr) {
+			e.emit_decimal_copy(slot, expr.expr, line, col, 0)!
+			return true
+		}
+		return false
+	}
 	if expr.typ.kind.is_decimal() && e.names_an_object(expr) {
 		e.emit_decimal_copy(slot, expr, line, col, 0)!
 		return true
@@ -656,4 +670,84 @@ fn (e Emitter) emit_decimal_from_integer_routine(mut r DecimalRoutine, size int,
 	r.place('${name}_done')
 	r.op(r.t.pop_register(g.rbx))
 	r.op(r.t.ret())
+}
+
+// decimal_is_zero_name is the routine that answers whether a decimal of one
+// width is zero, which is what `!a` asks. A decimal is zero exactly when its
+// coefficient is zero: the sign does not matter, and neither does the exponent,
+// so a negative zero answers yes as gcc does.
+fn decimal_is_zero_name(src decimal.Format) string {
+	return 'vcc_decimal_is_zero_${src.bytes()}'
+}
+
+// emit_decimal_is_zero_routine writes that routine: it decodes the object where
+// it lies and answers one when the coefficient is zero and the value is not a
+// NaN or an infinity.
+fn (e Emitter) emit_decimal_is_zero_routine(mut r DecimalRoutine, src decimal.Format) !void {
+	g := r.reg
+	name := decimal_is_zero_name(src)
+	r.place(name)
+	r.call(decimal_decode_name(src))
+	r.op(r.t.xor_word(g.r10, g.r10)!)
+	r.op(r.t.test_word(g.r9)!)
+	r.branch(.not_equal, '${name}_done')
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.not_equal, '${name}_done')
+	r.op(r.t.test_word(g.rdx)!)
+	r.branch(.not_equal, '${name}_done')
+	r.op(r.t.move_immediate64(g.r10, 1)!)
+	r.place('${name}_done')
+	r.op(r.t.move_register64(g.rax, g.r10)!)
+	r.op(r.t.ret())
+}
+
+// emit_decimal_is_zero_test writes a `!a` whose operand is a decimal object. The
+// object is read where it lies and the answer is an int, so the operand's value
+// is never materialised in a register.
+fn (mut e Emitter) emit_decimal_is_zero_test(unary ast.Unary, depth int) !void {
+	if !e.names_an_object(unary.expr) {
+		e.diagnostics << problem(unary.line, unary.col, 'unsupported: a decimal logical negation reads its operand where it lies, and a ${unary.expr.typ.describe()} result does not lie anywhere')
+		return error('decimal object')
+	}
+	e.emit_address(ast.Unary{
+		op:   '&'
+		expr: unary.expr
+		typ:  unary.expr.typ
+		line: unary.line
+		col:  unary.col
+	}, depth + 1)!
+	name := decimal_is_zero_name(unary.expr.typ.kind.decimal_format())
+	e.decimal_convert_used[name] = true
+	e.reference(e.target.call_near(0), .call_local, name, '')
+}
+
+// emit_decimal_negate writes `-a` into a decimal object: the value is the
+// operand's bytes with the sign bit flipped, so the object is copied and the top
+// byte's highest bit inverted. Nothing is rounded and nothing overflows.
+fn (mut e Emitter) emit_decimal_negate(slot Slot, unary ast.Unary, depth int) !void {
+	g := decimal_registers(e.target) or {
+		e.diagnostics << problem(unary.line, unary.col, 'internal: the target has no register a decimal copy needs')
+		return error('decimal registers')
+	}
+	e.emit_decimal_address(unary.expr, depth)!
+	e.append(e.target.move_register64(g.rsi, e.accumulator(unary.line, unary.col)!)!)
+	e.leave_address(slot, unary.line, unary.col)!
+	e.append(e.target.move_register64(g.rdi, e.accumulator(unary.line, unary.col)!)!)
+	chunk := if slot.width >= 8 { 8 } else { 4 }
+	mut at := 0
+	for at < slot.width {
+		e.append(e.target.load_indirect(g.rsi, g.r10, chunk)!)
+		e.append(e.target.store_slot(g.rdi, 0, g.r10, chunk)!)
+		at += chunk
+		if at < slot.width {
+			e.append(e.target.add_immediate(g.rsi, i32(chunk)))
+			e.append(e.target.add_immediate(g.rdi, i32(chunk)))
+		}
+	}
+	e.append(e.target.add_immediate(g.rsi, i32(chunk - 1)))
+	e.append(e.target.add_immediate(g.rdi, i32(chunk - 1)))
+	e.append(e.target.load_indirect(g.rsi, g.r10, 1)!)
+	e.append(e.target.move_immediate64(g.r11, u64(0x80))!)
+	e.append(e.target.xor_word(g.r10, g.r11)!)
+	e.append(e.target.store_slot(g.rdi, 0, g.r10, 1)!)
 }

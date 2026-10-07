@@ -149,11 +149,19 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 			}
 		}
 	}
+	// Which formats have a zero test, which reads the object through a decode and
+	// answers an int.
+	mut zero_format := []bool{len: formats.len}
+	for j, format in formats {
+		if decimal_is_zero_name(format) in e.decimal_convert_used {
+			zero_format[j] = true
+		}
+	}
 	// Which formats a decode is read for: its own conversions, and the width
 	// conversions that start at it.
 	mut any_decode := []bool{}
 	for i, _ in formats {
-		any_decode << by_format[i].len > 0 || float_format[i]
+		any_decode << by_format[i].len > 0 || float_format[i] || zero_format[i]
 	}
 	for i, _ in formats {
 		for k, _ in pair_src {
@@ -164,6 +172,11 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 	}
 	mut any := any_fix || any_float || int_size.len > 0
 	for wants in width_format {
+		if wants {
+			any = true
+		}
+	}
+	for wants in zero_format {
 		if wants {
 			any = true
 		}
@@ -212,6 +225,11 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 	for k, _ in int_size {
 		e.emit_decimal_from_integer_routine(mut r, int_size[k], int_unsigned[k], formats[int_dst[k]])!
 	}
+	for j, wants in zero_format {
+		if wants {
+			e.emit_decimal_is_zero_routine(mut r, formats[j])!
+		}
+	}
 	base := e.program.text.len
 	bytes := r.resolved()
 	e.program.text << bytes
@@ -251,6 +269,10 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 					e.program.labels[label] = base + r.labels[label]
 				}
 			}
+		}
+		zero_label := decimal_is_zero_name(format)
+		if zero_label in r.labels {
+			e.program.labels[zero_label] = base + r.labels[zero_label]
 		}
 	}
 }

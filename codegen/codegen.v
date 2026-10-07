@@ -6756,6 +6756,11 @@ fn describe_target(expr ast.Expr) string {
 }
 
 fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
+	if unary.op == '!' && unary.expr.typ.kind.is_decimal() {
+		// Whether a decimal is zero is answered where the object lies, and the
+		// answer is an int; the operand's value is never read into a register.
+		return e.emit_decimal_is_zero_test(unary, depth)
+	}
 	if unary.op == '&&' {
 		// The address of a label, `&&name`. The operand is a label name and
 		// not a value to read, so it is not evaluated here: what is written is
