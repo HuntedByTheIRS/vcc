@@ -569,6 +569,11 @@ mut:
 	// format it used here and only those are written; a unit with no decimal
 	// value carries none of them.
 	decimal_used map[string]bool
+	// decimal_convert_used names the conversions beyond the one to double that a
+	// unit called for: a decimal to an integer, and the pairs codegen/decimal_convert.v
+	// writes. The same rule applies, and the names are the routine labels so a
+	// call site and the emitter agree on one name.
+	decimal_convert_used map[string]bool
 }
 
 // A frame is a multiple of sixteen so that every call made from the body starts
@@ -807,6 +812,7 @@ fn (mut e Emitter) build() ![]u8 {
 		return []u8{}
 	}
 	e.decimal_used = map[string]bool{}
+	e.decimal_convert_used = map[string]bool{}
 	// The libraries the image will name are settled before a byte is written.
 	// A -l name with no file behind it is an error a link makes, and the
 	// alternative is worse than an error: a program that compiles and then
@@ -1002,6 +1008,9 @@ fn (mut e Emitter) build() ![]u8 {
 	// conversion carries none of them, which is why they are emitted from here
 	// rather than made part of every image.
 	e.emit_decimal_routines()!
+	// The conversions beyond the one to double are written the same way, after the
+	// functions and only for the pairs a call site named.
+	e.emit_decimal_convert_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -7336,16 +7345,12 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 		return e.emit_expr_at(cast.expr, depth + 1)
 	}
 	if e.decimal_of(cast.expr) {
-		// A decimal value converts to a double and to nothing else here: the
-		// routine reads the object where it lives, and there is no value of the
-		// format this back end holds to convert from. The conversion is written
-		// whether or not the value is a constant, because a decimal object's
-		// value is the bytes it holds and not a number the reader folded.
-		if target.kind == .double {
-			return e.emit_decimal_to_double(cast.expr, cast.line, cast.col, depth)
-		}
-		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and only a conversion to double is implemented')
-		return error('decimal conversion')
+		// A decimal value converts as this file and codegen/decimal_convert.v
+		// implement it: to a double, to an integer, and, in time, the rest. The
+		// conversion is written whether or not the value is a constant, because a
+		// decimal object's value is the bytes it holds and not a number the reader
+		// folded.
+		return e.emit_decimal_conversion(cast, target, depth)
 	}
 	if target.kind.is_extended() {
 		// A conversion to the extended type: a source of the same type is the
