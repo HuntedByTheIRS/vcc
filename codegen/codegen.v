@@ -8836,12 +8836,26 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		// destination here to write. Both are refused by name rather than
 		// computed with the bytes in the floating accumulator, which are not
 		// the number they look like.
-		if e.decimal_step(binary) == .uncovered {
-			e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} has a decimal operand, and this back end has no arithmetic or comparison for a decimal')
-			return error('decimal operand')
+		//
+		// A comparison of two decimals is the step decimal_step answers .value
+		// for, and this is where its emitter is reached: the routine orders the
+		// two objects and leaves the operator's answer in the accumulator. Two
+		// decimals of different widths are refused inside that emitter, by name,
+		// and a comparison whose other operand is not a decimal is a step no
+		// routine covers, refused just below.
+		match e.decimal_step(binary) {
+			.uncovered {
+				e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} has a decimal operand, and this back end has no arithmetic or comparison for a decimal')
+				return error('decimal operand')
+			}
+			.value {
+				return e.emit_decimal_comparison(binary, depth)
+			}
+			.object {
+				e.diagnostics << problem(binary.line, binary.col, 'unsupported: the decimal ${binary.op} is wanted as a value here, and this back end writes a decimal arithmetic result only into an object')
+				return error('decimal value step')
+			}
 		}
-		e.diagnostics << problem(binary.line, binary.col, 'unsupported: the decimal ${binary.op} is wanted as a value here, and this back end writes a decimal arithmetic result only into an object')
-		return error('decimal value step')
 	}
 	// A step with a complex operand is a comparison: the arithmetic is written by
 	// the complex paths into an object, and a step that reaches here is one whose
@@ -8849,14 +8863,6 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 	// because C99 defines no ordering on the complex types.
 	if binary.left.typ.kind.is_complex() || binary.right.typ.kind.is_complex() {
 		return e.emit_complex_comparison(binary, depth)
-	}
-	// A comparison with a decimal operand is a call into a routine of its own: a
-	// decimal is an object rather than a value of a register, so the operands are
-	// addressed where they live and the routine orders them. An operand that is not
-	// a decimal of the same width is refused inside, by name.
-	if binary.op in ['==', '!=', '<', '>', '<=', '>=']
-		&& (e.decimal_of(binary.left) || e.decimal_of(binary.right)) {
-		return e.emit_decimal_comparison(binary, depth)
 	}
 	if e.extended_step(binary) {
 		return e.emit_extended_binary(binary, depth)

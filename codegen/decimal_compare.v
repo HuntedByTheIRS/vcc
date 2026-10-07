@@ -105,9 +105,10 @@ fn (e Emitter) decimal_operand_format(expr ast.Expr) ?decimal.Format {
 // of its own first, because the routine reads an object and a constant is one the
 // encoder can already produce the bytes of.
 //
-// Anything else - a decimal beside a value of another type, two decimals of
-// different widths, or an operand that is neither an object nor a constant - is
-// refused by name rather than compared at the wrong width.
+// The step reaching here is one decimal_step answered .value for, so its two
+// operands are decimals. Two decimals of different widths, or an operand that is
+// neither an object nor a constant, are refused by name rather than compared at
+// the wrong width.
 fn (mut e Emitter) emit_decimal_comparison(step ast.Binary, depth int) !void {
 	left := e.decimal_operand_format(step.left) or {
 		e.diagnostics << problem(step.line, step.col, 'unsupported: ${step.op} compares ${step.left.typ.describe()} with ${step.right.typ.describe()} here, and this back end compares two decimals of the same width')
