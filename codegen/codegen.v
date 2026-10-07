@@ -367,6 +367,13 @@ mut:
 	// parameters those are, and the width cannot answer it: a pair is sixteen
 	// bytes and is not handed over at that width.
 	wide_params map[string][]bool
+	// decimal_params says, for the same functions, which parameters are one of
+	// the decimal floating types, and how many bytes of one. Such a parameter
+	// travels in the floating-point register file, the way a double does, so a
+	// call has to know which parameters those are; the width alone cannot
+	// answer it, because a double parameter is eight bytes and so is a
+	// _Decimal64, and a zero entry means the parameter is not a decimal.
+	decimal_params map[string][]int
 	// extended_params says, for the same functions, which parameters are the
 	// extended floating type. Such a parameter is passed in memory, sixteen
 	// bytes at a time, rather than in a register, so a call has to know which
@@ -916,8 +923,21 @@ fn (mut e Emitter) build() ![]u8 {
 			mut wides := []bool{}
 			mut extendeds := []bool{}
 			mut complexes := []bool{}
+			mut decimals := []int{}
 			mut sized := true
 			for param in decl.params {
+				// A decimal parameter travels in the floating-point register
+				// file the way a double does, so which parameters are one is a
+				// question the width cannot answer: a double and a _Decimal64
+				// are both eight bytes. It is recorded here beside the other
+				// per-parameter facts, and a zero means the parameter is not a
+				// decimal.
+				decimal := if param.resolved.kind.is_decimal() {
+					decimal_width_of(param.resolved)
+				} else {
+					0
+				}
+				decimals << decimal
 				// Which parameters are 128-bit values is read here rather than
 				// from the width below, because the width of such a parameter is
 				// not the width it is handed over at: it travels as a pair of
@@ -946,6 +966,19 @@ fn (mut e Emitter) build() ![]u8 {
 					continue
 				}
 				aggregates << abi.Class{}
+				if decimal > 0 {
+					// A decimal is a value of its own width that travels in
+					// the floating-point file, so its width goes in the
+					// table and the classes flag stays false: whether an
+					// argument is a decimal is asked of decimal_params, and
+					// a call that hands a non-decimal to one is a conversion
+					// this back end does not make.
+					widths << decimal
+					classes << false
+					singles << false
+					unsigneds << false
+					continue
+				}
 				if width := e.type_width(param.typ) {
 					widths << width
 					// A parameter of either floating type travels in the
@@ -969,6 +1002,7 @@ fn (mut e Emitter) build() ![]u8 {
 			e.wide_params[decl.name] = wides
 			e.extended_params[decl.name] = extendeds
 			e.complex_long_double_params[decl.name] = complexes
+			e.decimal_params[decl.name] = decimals
 			if sized {
 				e.signatures[decl.name] = widths
 				e.float_params[decl.name] = classes
@@ -1011,6 +1045,13 @@ fn (mut e Emitter) build() ![]u8 {
 	// The conversions beyond the one to double are written the same way, after the
 	// functions and only for the pairs a call site named.
 	e.emit_decimal_convert_routines()!
+	// The routines a run-time decimal addition, subtraction or negation runs are
+	// written the same way, and only for the formats and operators a call site
+	// named.
+	e.emit_decimal_arith_routines()!
+	// The routines a decimal comparison runs are written beside them, and only
+	// the widths a comparison named are written.
+	e.emit_decimal_compare_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -1435,7 +1476,14 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		// comes back in the register the class names rather than converted. An
 		// object larger than one eightbyte is two registers or a copy in memory,
 		// which is the half of this that this compiler does not hand over.
-		if ret_class.first_floating && ret_class.bytes < e.target.word_size {
+		//
+		// A floating-class object smaller than a word is one this back end
+		// refuses, because it reads such an object as eight bytes; the one
+		// exception is an object that holds a decimal, which is four bytes in
+		// that class and whose four bytes are the whole of the value gcc hands
+		// back in the low half of xmm0.
+		if ret_class.first_floating && ret_class.bytes < e.target.word_size
+			&& !e.type_contains_decimal(decl.ret_type) {
 			e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, which is an object of ${ret_class.bytes} bytes whose class is the floating-point one, and this compiler moves such an object as eight bytes')
 			return error('aggregate floating class width')
 		}
@@ -1451,6 +1499,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 		&& decl.ret_type.kind != .pointer && decl.ret != 'int' && decl.ret != 'unsigned int'
 		&& decl.ret != 'void'
 		&& decl.ret != 'double' && decl.ret != 'float'
+		&& !decl.ret_type.kind.is_decimal()
 		&& !e.eight_byte_integer(types.from_words(decl.ret.split(' ')) or { types.Type{} })
 		&& !e.narrow_integer_spelling(decl.ret) {
 		e.diagnostics << problem(decl.line, decl.col, 'unsupported: ${decl.name} returns ${decl.ret}, and only int, unsigned int, the four 64-bit integers, the narrow integer types, float, double, a pointer and void are implemented')
@@ -1592,6 +1641,71 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			at := 2 * e.target.word_size + stacked * e.target.word_size
 			e.copy_stack_object(object, at, param.line, param.col)!
 			stacked += 2
+			continue
+		}
+		if param.resolved.kind.is_decimal() {
+			// A decimal parameter arrives in the floating-point argument
+			// file, the way gcc passes one: one register for the two narrow
+			// formats, four or eight bytes of it, and the xmm0:xmm1 pair for
+			// a _Decimal128. The value is stored into the parameter's own
+			// storage, so a parameter is read exactly the way a local is.
+			// Measured on gcc 16.2.1: every width is passed in xmm registers
+			// and nothing goes on the stack while the file has room.
+			decimal_width := decimal_width_of(param.resolved)
+			object := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col, false)!
+			base := e.frame_pointer(param.line, param.col)!
+			if decimal_width == 16 {
+				if e.target.float_arg_reg(doubles) != none && e.target.float_arg_reg(doubles + 1) != none {
+					low := e.target.float_arg_reg(doubles) or {
+						return error('no floating argument register for a _Decimal128')
+					}
+					high := e.target.float_arg_reg(doubles + 1) or {
+						return error('no second floating argument register for a _Decimal128')
+					}
+					e.append(e.target.store_double_slot(base, i32(object.offset), low)!)
+					e.append(e.target.store_double_slot(base, i32(object.offset) + 8, high)!)
+					doubles += 2
+					continue
+				}
+				// The pair arrived in memory instead: sixteen bytes at the
+				// alignment the type has, which is sixteen, so an odd number
+				// of eight-byte words before it is a padding word the caller
+				// wrote and is skipped. The same rule a long double parameter
+				// follows.
+				if stacked % 2 == 1 {
+					stacked++
+				}
+				at := 2 * e.target.word_size + stacked * e.target.word_size
+				low := e.float_accumulator(param.line, param.col)!
+				high := e.float_scratch(param.line, param.col)!
+				e.append(e.target.load_double_slot(base, i32(at), low)!)
+				e.append(e.target.load_double_slot(base, i32(at) + 8, high)!)
+				e.append(e.target.store_double_slot(base, i32(object.offset), low)!)
+				e.append(e.target.store_double_slot(base, i32(object.offset) + 8, high)!)
+				stacked += 2
+				continue
+			}
+			if register := e.target.float_arg_reg(doubles) {
+				if decimal_width == 4 {
+					e.append(e.target.store_float_slot(base, i32(object.offset), register)!)
+				} else {
+					e.append(e.target.store_double_slot(base, i32(object.offset), register)!)
+				}
+				doubles++
+				continue
+			}
+			// The argument registers ran out: a word of the stack, which is
+			// where the caller put the one word the two narrow formats take.
+			at := 2 * e.target.word_size + stacked * e.target.word_size
+			register := e.float_accumulator(param.line, param.col)!
+			if decimal_width == 4 {
+				e.append(e.target.load_float_slot(base, i32(at), register)!)
+				e.append(e.target.store_float_slot(base, i32(object.offset), register)!)
+			} else {
+				e.append(e.target.load_double_slot(base, i32(at), register)!)
+				e.append(e.target.store_double_slot(base, i32(object.offset), register)!)
+			}
+			stacked++
 			continue
 		}
 		// How this parameter is handed over is the target's answer for the type
@@ -1772,6 +1886,16 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			// that falls off its end leaves is pushed there: an int zero in the
 			// result register would be read as no long double at all.
 			e.append(e.target.extended_zero())
+		} else if decl.ret_type.kind.is_decimal() {
+			// A decimal comes back in the floating-point register file, so
+			// the zero a function that falls off its end leaves is cleared
+			// there: an int zero in the result register would be read as
+			// whatever the floating file happened to hold.
+			register := e.float_accumulator(decl.line, decl.col)!
+			e.append(e.target.zero_double(register)!)
+			if decimal_width_of(decl.ret_type) == 16 {
+				e.append(e.target.zero_double(e.float_scratch(decl.line, decl.col)!)!)
+			}
 		} else {
 			result := e.accumulator(decl.line, decl.col)!
 			e.append(e.target.move_immediate32(result, 0)!)
@@ -2120,6 +2244,15 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 		e.append(e.target.frame_epilogue())
 		return
 	}
+	if e.returning_decimal() {
+		// A decimal value comes back in the floating-point register file, so
+		// the expression is left in the decimal accumulator rather than
+		// converted into the general result register. The value an expression
+		// of the type is worth is already those bytes.
+		e.emit_expr(expr)!
+		e.append(e.target.frame_epilogue())
+		return
+	}
 	e.emit_expr(expr)!
 	e.convert_to_return(expr, stmt.line, stmt.col)!
 	e.append(e.target.frame_epilogue())
@@ -2316,11 +2449,12 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		return e.store_long_double(slot, init, stmt.line, stmt.col, 0)
 	}
 	if slot.decimal && slot.count == 0 {
-		// An object of a decimal type declared with a value: the object is
-		// storage and the value is the bytes the encoding gives it, so the
-		// constant is stored rather than computed. Anything but a constant of
-		// the object's own width is refused by name inside.
-		return e.store_decimal(slot, init, stmt.line, stmt.col)
+		// An object of a decimal type declared with a value: a constant goes
+		// in as the bytes the encoding gives it, a sum, a difference or a
+		// negation is written by the arithmetic routine, and a value of the
+		// same decimal type is read into the floating accumulator and stored.
+		// Anything else is refused by name inside.
+		return e.store_decimal(slot, init, stmt.line, stmt.col, 0)
 	}
 	if slot.complex {
 		// A complex object is written by the conversion its type names rather
@@ -2475,6 +2609,14 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		// are written.
 		return e.store_long_double(target, expr, stmt.line, stmt.col, depth)
 	}
+	if target.decimal && target.count == 0 {
+		// The same store a declaration of a decimal type makes: a constant of
+		// the object's width, a sum, a difference or a negation the arithmetic
+		// routines cover, or a value of the same decimal type. A compound
+		// spelling is expanded to `r = r + a` where it is read, so `r += a` is
+		// the sum below and not a second implementation.
+		return e.store_decimal(target, expr, stmt.line, stmt.col, depth)
+	}
 	if target.complex {
 		return e.assign_complex_local(stmt, target, depth)
 	}
@@ -2540,6 +2682,12 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 	}
 	if unary.typ.kind == .double {
 		return e.assign_double_at(stmt, address, expr, depth)
+	}
+	if unary.typ.kind.is_decimal() {
+		// A write through an address of a decimal type is the store a decimal
+		// object makes, at the address the pointer holds.
+		return e.store_decimal_through_object(address, expr, decimal_width_of(unary.typ),
+			stmt.line, stmt.col, depth)
 	}
 	width := e.storage_width(unary.typ) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: *p is assigned through an address of ${unary.typ.describe()}, and this back end writes ints, chars, doubles and pointers only')
@@ -3263,6 +3411,17 @@ fn (mut e Emitter) assign_member(stmt ast.Stmt, member ast.Field, expr ast.Expr,
 		e.store_accumulator(address, stmt.line, stmt.col)!
 		return e.assign_object(address, width, expr, stmt.line, stmt.col, depth)
 	}
+	if format := e.decimal_format_of(member.spelling) {
+		// A member of a decimal type takes a value of its own type through
+		// the member's own address: the object the member lies in may be a
+		// pointer's target or a top-level object, so the store cannot be an
+		// offset from the frame.
+		e.field_address(member, depth + 1, stmt.line, stmt.col)!
+		address := e.value_slot(depth)
+		e.store_accumulator(address, stmt.line, stmt.col)!
+		return e.store_decimal_through_object(address, expr, format.bytes(), stmt.line, stmt.col,
+			depth)
+	}
 	width := e.type_width(member.spelling) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the member ${member.name}.${member.member} is declared ${member.spelling}, and this back end stores ints, chars, floats, doubles and pointers only')
 		return error('unsupported member type')
@@ -3558,10 +3717,16 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.load_vla_base(slot, base, stmt.line, stmt.col)!
 		offset = 0
 	}
-	e.element_address(base, register, slot.width, offset, slot.wide || slot.long_double, slot.complex, stmt.target,
+	e.element_address(base, register, slot.width, offset, slot.wide || slot.long_double, slot.complex || slot.decimal, stmt.target,
 		stmt.line, stmt.col)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
+	if slot.decimal {
+		// An element of an array of a decimal type takes a value of its own
+		// type through the element's own address.
+		return e.store_decimal_through_object(address, expr, slot.width, stmt.line, stmt.col,
+			depth)
+	}
 	if slot.long_double {
 		// An element of the extended type is sixteen bytes at an address this
 		// back end can compute; the value goes in through the path an object of
@@ -3669,6 +3834,13 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 		// uses, and the expression has not been emitted yet because that path
 		// emits it.
 		return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
+	}
+	if index.typ.kind.is_decimal() {
+		// An element of a decimal type at a computed address: the same store a
+		// decimal object makes, through the address that is parked, and the
+		// expression has not been emitted yet because that path emits it.
+		return e.store_decimal_through_object(address, expr, decimal_width_of(index.typ),
+			stmt.line, stmt.col, depth)
 	}
 	e.emit_expr_at(expr, depth + 1)!
 	if index.typ.kind == .double {
@@ -5122,6 +5294,13 @@ fn (mut e Emitter) branch(kind image.FixupKind, name string, line int, col int) 
 // cleared by exclusive-or with itself rather than read from memory, so this costs
 // no constant.
 fn (mut e Emitter) emit_test(value ast.Expr, line int, col int) !void {
+	if value.typ.kind.is_decimal() {
+		// A truth value for a decimal is its comparison with zero, and this
+		// back end writes no comparison for one, so testing the bytes that
+		// happen to be in the accumulator would be an answer nobody asked for.
+		e.diagnostics << problem(line, col, 'unsupported: a ${value.typ.describe()} is tested as a condition, and this back end has no truth value for a decimal yet')
+		return error('decimal condition')
+	}
 	if e.long_double_of(value) {
 		// The truth value of a long double is its comparison with zero, which
 		// the x87 stack makes in the long-double file; the value's address is
@@ -5611,6 +5790,15 @@ fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
 // into a slot that holds one, an argument a parameter is one for, and the value a
 // function returning a double returns.
 fn (mut e Emitter) convert_to_double(expr ast.Expr, line int, col int) !void {
+	if e.decimal_of(expr) {
+		// A decimal becomes a double through the routine that reads the object
+		// where it lives, which is the path a cast that asks for the
+		// conversion takes. An implicit conversion has no place to park the
+		// object's address here, and computing with the bytes of the value
+		// instead would be a number nobody wrote, so it is refused by name.
+		e.diagnostics << problem(line, col, 'unsupported: a ${expr.typ.describe()} is converted to a double here without a cast, and this back end makes that conversion only where a cast asks for it')
+		return error('decimal to double')
+	}
 	if e.long_double_of(expr) {
 		// The value is in memory at the address the expression left in the
 		// accumulator, and the machine converts it on its x87 stack.
@@ -5713,6 +5901,14 @@ fn (mut e Emitter) convert_to_single(expr ast.Expr, line int, col int) !void {
 // one and 2^63 for an eight-byte one, while a signed destination has no such
 // values and its conversion is the one the machine has.
 fn (mut e Emitter) convert_to_int(expr ast.Expr, unsigned_target bool, target_width int, line int, col int) !void {
+	if expr.typ.kind.is_decimal() {
+		// Only a conversion to a double reads a decimal object where it lives,
+		// and there is no value of the format this back end holds to convert
+		// from, so a decimal that would become an integer is refused by name
+		// rather than stored with the bits of the floating accumulator.
+		e.diagnostics << problem(line, col, 'unsupported: a ${expr.typ.describe()} is converted to an integer here, and this back end has no conversion from a decimal except to a double')
+		return error('decimal to int')
+	}
 	if e.long_double_of(expr) {
 		// The destination truncates toward zero and the machine's instruction
 		// rounds to nearest even, so the two answers differ for a fractional
@@ -6058,14 +6254,12 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		}
 		ast.FloatLit {
 			if expr.typ.kind.is_decimal() {
-				// A decimal constant is a decimal coefficient and a power of
-				// ten, and no register holds that. This back end has no
-				// encoding for one yet, so the constant is refused by name
-				// with its location rather than materialized from `value`,
-				// which is zero for a decimal (ast.FloatLit) and would be a
-				// value nobody wrote.
-				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the decimal constant ${expr.text} is a ${expr.typ.describe()}, and this back end has no form for a decimal value yet')
-				return error('decimal constant')
+				// A decimal constant is materialized as a value: its
+				// encoded bytes are read out of the image into the floating
+				// accumulator, which is where gcc keeps one in flight. The
+				// constant also has a store into an object of its own type,
+				// which writes the same bytes where they live.
+				return e.emit_decimal_constant(expr, expr.line, expr.col)
 			}
 			if expr.typ.kind.is_extended() {
 				// A long double constant is materialized into a frame
@@ -6173,14 +6367,11 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				return e.leave_address(slot, expr.line, expr.col)
 			}
 			if slot.decimal && slot.count == 0 {
-				// A decimal value is an object in memory with no register this
-				// back end computes in: it is stored, addressed, and converted
-				// to a double, and reading its name as a value would have to
-				// answer with one. The refusal names what the object is good
-				// for rather than handing back an address as though it were the
-				// value.
-				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is declared ${expr.typ.describe()}, and this back end stores a decimal constant in an object, takes its address and converts it to double, but has no decimal value to read here')
-				return error('decimal value')
+				// A decimal object read as a value: its bytes are loaded into
+				// the floating accumulator, which is where a value of one
+				// travels. The name is not an address here, because a value of
+				// the type is what a context that reaches this wants.
+				return e.load_decimal_slot(slot, expr.line, expr.col)
 			}
 			if slot.wide {
 				// A 128-bit object is stored, copied and addressed, and it is
@@ -6272,6 +6463,15 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				// for: the member's own address is the part that works.
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores an object of that width but has no value of it to read')
 				return error('unsupported member type')
+			}
+			if format := e.decimal_format_of(expr.spelling) {
+				// A member of a decimal type is a decimal value at an offset
+				// into the object that holds it: the member's address is
+				// taken and its bytes are read into the floating accumulator
+				// through it.
+				e.field_address(expr, depth, expr.line, expr.col)!
+				register := e.accumulator(expr.line, expr.col)!
+				return e.load_decimal_at(register, 0, format.bytes(), expr.line, expr.col)
 			}
 			width := e.type_width(expr.spelling) or {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores ints, chars, floats, doubles and pointers only')
@@ -6432,22 +6632,12 @@ fn (mut e Emitter) emit_index(expr ast.Index, depth int) !void {
 // top-level object, whose storage is in the image and whose address is a
 // reference the layout fills in.
 fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, local bool, slot Slot) !void {
-	if expr.typ.kind.is_decimal() {
-		// An element of an array of a decimal type is a decimal value, and
-		// this back end has no form for one yet: reading the element's bytes
-		// as an integer of its width would answer with a number nobody wrote.
-		// The refusal is here because the named-array path reads every other
-		// element as an integer, where the general path refuses a type it has
-		// no width for.
-		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is a ${expr.typ.describe()}, and this back end has no form for a decimal value yet')
-		return error('decimal element')
-	}
 	if local {
 		e.emit_subscript_index(expr.index, depth + 1)!
 		base := e.slot_base_register(slot, expr.line, expr.col)!
 		register := e.accumulator(expr.line, expr.col)!
 		e.element_address(base, register, slot.width, slot.offset, slot.wide || slot.long_double,
-			expr.typ.is_array(), name, expr.line, expr.col)!
+			expr.typ.is_array() || slot.decimal, name, expr.line, expr.col)!
 		if expr.typ.is_array() {
 			// The element is itself an array, so reading it is not a load: its
 			// value is the address of its first element, which is what
@@ -6456,6 +6646,13 @@ fn (mut e Emitter) emit_named_index(expr ast.Index, name string, depth int, loca
 			// the row were a scalar, and stepping an index by that value is a
 			// wrong address.
 			return
+		}
+		if slot.decimal {
+			// An element of an array of a decimal type is a decimal value:
+			// its bytes are read into the floating accumulator through the
+			// element's own address, which element_address left in the
+			// accumulator.
+			return e.load_decimal_at(register, 0, slot.width, expr.line, expr.col)
 		}
 		if slot.wide {
 			e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${name} is an object of 128 bits, and this back end stores one and copies one but has no value of that width to read')
@@ -6556,6 +6753,13 @@ fn (mut e Emitter) emit_general_index(expr ast.Index, depth int) !void {
 	if expr.typ.kind == .double {
 		double_register := e.float_accumulator(expr.line, expr.col)!
 		e.append(e.target.load_double_indirect(address, double_register)!)
+		return
+	}
+	if expr.typ.kind.is_decimal() {
+		// An element of a decimal type is a decimal value at the address
+		// emit_element_address left in the accumulator: the bytes are read into
+		// the floating accumulator, which is where a value of one travels.
+		e.load_decimal_at(address, 0, decimal_width_of(expr.typ), expr.line, expr.col)!
 		return
 	}
 	width := e.storage_width(expr.typ) or {
@@ -6785,6 +6989,12 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// component's and the paths that want a floating value reach here.
 		return e.emit_complex_part(unary, depth)
 	}
+	if e.decimal_of(unary.expr) && unary.op == '!' {
+		// `!a` is the equality comparison against zero, which is a routine of its
+		// own for the same reason a comparison of two decimals is. The other
+		// operators a decimal has no form for are left to the refusals below.
+		return e.emit_decimal_logical_not(unary, depth)
+	}
 	if e.long_double_of(unary.expr) {
 		// The logical not asks whether the value is zero, which is the
 		// comparison with zero the x87 stack makes. The sign change is the
@@ -6806,6 +7016,36 @@ fn (mut e Emitter) emit_unary(unary ast.Unary, depth int) !void {
 		// A 128-bit operand is a pair rather than a value in the accumulator, so
 		// the operators it has a meaning for are computed on the pair.
 		return e.emit_wide_unary(unary, depth)
+	}
+	if unary.expr.typ.kind.is_decimal() {
+		// The operators a decimal has here are the sign change and the unary
+		// plus. Negating a decimal is flipping its sign bit, which is the top
+		// bit of the value at its own width: one bit in the floating
+		// accumulator for the two narrow formats and one bit in the high half
+		// of the pair for _Decimal128, which is the same bit a negated double
+		// and a negated float flip. The logical not and the complement ask
+		// questions this back end does not answer for a decimal, because both
+		// need its value compared and no comparison is written.
+		if unary.op != '+' && unary.op != '-' {
+			e.diagnostics << problem(unary.line, unary.col, 'unsupported: ${unary.op} takes a ${unary.expr.typ.describe()} operand, and this back end has no such operation for a decimal')
+			return error('decimal unary operand')
+		}
+		e.emit_expr_at(unary.expr, depth + 1)!
+		if unary.op == '-' {
+			register := e.scratch(unary.line, unary.col)!
+			match decimal_width_of(unary.expr.typ) {
+				4 {
+					e.append(e.target.negate_single(e.float_accumulator(unary.line, unary.col)!, register)!)
+				}
+				8 {
+					e.append(e.target.negate_double(e.float_accumulator(unary.line, unary.col)!, register)!)
+				}
+				else {
+					e.append(e.target.negate_double(e.float_scratch(unary.line, unary.col)!, register)!)
+				}
+			}
+		}
+		return
 	}
 	floating := e.floating_of(unary.expr)
 	single := e.single_of(unary.expr)
@@ -7701,6 +7941,12 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 		// of its sixteen bytes: there is no register to read them into.
 		return
 	}
+	if unary.typ.kind.is_decimal() {
+		// The object at the address is a decimal value: its bytes are read
+		// into the floating accumulator through the address the pointer holds,
+		// which is what makes `*p` a value of the type.
+		return e.load_decimal_at(address, 0, decimal_width_of(unary.typ), unary.line, unary.col)
+	}
 	width := e.storage_width(unary.typ) or {
 		e.diagnostics << problem(unary.line, unary.col, 'unsupported: * reads through an address of ${unary.typ.describe()}, and this back end reads ints, chars, doubles and pointers only')
 		return error('unsupported pointed-at type')
@@ -8590,6 +8836,36 @@ fn (mut e Emitter) emit_binary(binary ast.Binary, depth int) !void {
 		// answer rather than computing one lane or a wrong width.
 		e.diagnostics << problem(binary.line, binary.col, 'unsupported: the vector value ${binary.typ.describe()} is used where this back end does not compute it, and a vector is implemented only as the initialized object of a declaration')
 		return error('vector value')
+	}
+	if binary.left.typ.kind.is_decimal() || binary.right.typ.kind.is_decimal() {
+		// decimal_step is the one place that answers which routines cover a
+		// decimal step. A covered step is written where it is written: an
+		// object routine by a store that has a destination to write into, a
+		// value routine by its own emitter. What reaches this value position
+		// is a step no routine covers, or an object routine with no
+		// destination here to write. Both are refused by name rather than
+		// computed with the bytes in the floating accumulator, which are not
+		// the number they look like.
+		//
+		// A comparison of two decimals is the step decimal_step answers .value
+		// for, and this is where its emitter is reached: the routine orders the
+		// two objects and leaves the operator's answer in the accumulator. Two
+		// decimals of different widths are refused inside that emitter, by name,
+		// and a comparison whose other operand is not a decimal is a step no
+		// routine covers, refused just below.
+		match e.decimal_step(binary) {
+			.uncovered {
+				e.diagnostics << problem(binary.line, binary.col, 'unsupported: ${binary.op} has a decimal operand, and this back end has no arithmetic or comparison for a decimal')
+				return error('decimal operand')
+			}
+			.value {
+				return e.emit_decimal_comparison(binary, depth)
+			}
+			.object {
+				e.diagnostics << problem(binary.line, binary.col, 'unsupported: the decimal ${binary.op} is wanted as a value here, and this back end writes a decimal arithmetic result only into an object')
+				return error('decimal value step')
+			}
+		}
 	}
 	// A step with a complex operand is a comparison: the arithmetic is written by
 	// the complex paths into an object, and a step that reaches here is one whose
@@ -10655,6 +10931,88 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		// which file that register belongs to is the class its members make and
 		// not a property of the expression: a struct of one double travels where
 		// a double does.
+		//
+		// A decimal argument travels in the floating-point file at its own
+		// width: one register for the two narrow formats and the pair the two
+		// consecutive registers at position and position + 1 form for a
+		// _Decimal128. It is not an object of an aggregate type and its class
+		// is not the floating class of a double, so it is placed here before
+		// either of those is asked. Measured on gcc 16.2.1: every width goes
+		// in xmm registers, in the same sequence a double does.
+		if width := e.decimal_argument_width(call, i, arg) {
+			// A decimal parameter takes a decimal value and nothing else. The
+			// bits an int or a double leaves in the floating accumulator are
+			// not a decimal, and this back end has no conversion, so a
+			// mismatch is refused by name rather than passed with whatever the
+			// accumulator held.
+			if !arg.typ.kind.is_decimal() {
+				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${i + 1} of the call to ${call.name} is a ${arg.typ.describe()} handed to a decimal parameter, and this back end has no conversion')
+				return error('decimal argument type')
+			}
+			if decimal_width_of(arg.typ) != width {
+				e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${i + 1} of the call to ${call.name} is a ${arg.typ.describe()} handed to a parameter of a decimal type of a different width')
+				return error('decimal argument width')
+			}
+			if width == 16 {
+				if e.target.float_arg_reg(doubles) != none && e.target.float_arg_reg(doubles + 1) != none {
+					places << ArgPlace{
+						floating:      true
+						position:      doubles
+						decimal:       true
+						decimal_width: width
+					}
+					doubles += 2
+					continue
+				}
+				// The pair takes two registers at once, and with fewer than
+				// two left the convention passes the whole argument in memory,
+				// sixteen bytes at the alignment the type has, which is
+				// sixteen: the same padding word a long double argument needs
+				// when an odd number of eight-byte words is already there.
+				pad := stacked % 2 == 1
+				if pad {
+					stacked++
+				}
+				places << ArgPlace{
+					stack:         true
+					position:      stacked
+					decimal:       true
+					decimal_width: width
+					pad:           pad
+				}
+				stacked += 2
+				continue
+			}
+			if e.target.float_arg_reg(doubles) != none {
+				places << ArgPlace{
+					floating:      true
+					position:      doubles
+					decimal:       true
+					decimal_width: width
+				}
+				doubles++
+				continue
+			}
+			// The floating-point registers ran out: the argument goes on the
+			// stack as the one word the two narrow formats take, which is the
+			// same rule a floating value follows.
+			places << ArgPlace{
+				stack:         true
+				position:      stacked
+				decimal:       true
+				decimal_width: width
+			}
+			stacked++
+			continue
+		}
+		if arg.typ.kind.is_decimal() {
+			// A decimal handed to a parameter that is not of a decimal type
+			// would travel as its own bytes and be read as something else, and
+			// this back end has no conversion from a decimal to anything but a
+			// double.
+			e.diagnostics << problem(expr_line(arg), expr_col(arg), 'unsupported: argument ${i + 1} of the call to ${call.name} is a ${arg.typ.describe()} handed to a parameter that is not of a decimal type, and this back end has no conversion')
+			return error('decimal argument to a non-decimal parameter')
+		}
 		class := e.aggregate_argument(call, i)
 		if c := class {
 			if c.count > 2 {
@@ -10766,6 +11124,17 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// A long double is written in the stack pass, which pushes its two
 			// words straight from the value's sixteen bytes rather than parking
 			// the address of them in a slot.
+			continue
+		}
+		if place.decimal {
+			// A decimal argument is finished into a slot of its own, which is
+			// what keeps an argument that calls another function from landing
+			// on this one. Both the register pass and the stack pass read the
+			// parked bytes, so the expression is evaluated once here. The
+			// value is in the decimal accumulator after it runs.
+			pair := e.wide_pair_slot(mut e.wide_arguments, depth + i)
+			e.emit_expr_at(arg, depth + i + 1)!
+			e.store_decimal_accumulator_into(pair, place.decimal_width, line, col)!
 			continue
 		}
 		if place.object {
@@ -10881,6 +11250,21 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			arg := call.args[i]
 			line := expr_line(arg)
 			col := expr_col(arg)
+			if place.decimal {
+				// A decimal on the stack is the words of the value that the
+				// value pass parked, pushed from the last to the first so the
+				// low word ends at the lower address the callee reads first.
+				// A _Decimal128 that needed a padding word gets it below the
+				// two words, so the value still starts at a multiple of
+				// sixteen.
+				pair := e.wide_pair_slot(mut e.wide_arguments, depth + i)
+				e.push_decimal_argument(pair, place.decimal_width, line, col)!
+				if place.pad {
+					e.append(e.target.frame_reserve(u32(e.target.word_size)))
+					e.stack_pushed += e.target.word_size
+				}
+				continue
+			}
 			if place.extended {
 				// A long double goes on the stack as its own sixteen bytes: the
 				// words are pushed from the last to the first, so the low word
@@ -10994,6 +11378,18 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		if place.extended {
 			// A long double was pushed whole in the stack pass; no register is
 			// loaded for it.
+			continue
+		}
+		if place.decimal {
+			// A decimal was parked in a slot of its own by the value pass, so
+			// the argument registers are loaded from the parked bytes and not
+			// from any expression. A stack decimal was pushed already.
+			if place.stack {
+				continue
+			}
+			pair := e.wide_pair_slot(mut e.wide_arguments, depth + i)
+			e.load_decimal_from_slot_into_registers(pair, place.position, place.decimal_width,
+				line, col)!
 			continue
 		}
 		if place.object && !place.stack {
@@ -11192,6 +11588,12 @@ struct ArgPlace {
 	// stack says the argument is handed over on the stack rather than in a
 	// register, which is what happens to the ones a sequence ran out for.
 	stack bool
+	// decimal says the argument is one of the decimal floating types, which
+	// travels in the floating-point file at its own width: four or eight bytes
+	// in one register, and a _Decimal128 across the pair the two consecutive
+	// registers at position and position + 1 form. decimal_width is which.
+	decimal       bool
+	decimal_width int
 	// object says the argument is an object of an aggregate type rather than a
 	// value, which is read from its own bytes. When the object is in registers
 	// the second eightbyte of it travels in the register second_floating and

@@ -189,6 +189,39 @@ fn test_the_decimal_arithmetic_is_decimal() {
 	assert two_thirds.digits == '6666666666666667'.bytes(), 'two thirds was ${two_thirds}'
 }
 
+// A subtraction whose operands cancel, recorded from gcc 16.2.1, most significant
+// byte first like the table above. The zero that comes out carries the preferred
+// exponent, the smaller of the two operands' exponents, so most of these are not
+// the canonical zero a literal gets, and two of them sit at the format's own
+// exponent limit. The last row is a nonzero result kept for contrast: the rule
+// moves zeros and leaves other results alone.
+const measured_zero_differences = [
+	'0.0df 0.0df 32000000',
+	'1e7df 1e7df 36000000',
+	'1e-7df 1e-7df 2f000000',
+	'1e96df 1e96df 5f800000',
+	'0.0dd 0.0dd 31a0000000000000',
+	'1e19dd 1e19dd 3420000000000000',
+	'1e-398dd 1e-398dd 0000000000000000',
+	'1e384dd 1e384dd 5fe0000000000000',
+	'0.0dl 0.0dl 303e0000000000000000000000000000',
+	'1e30dl 1e30dl 307c0000000000000000000000000000',
+	'1e-6176dl 1e-6176dl 00000000000000000000000000000000',
+	'1e6144dl 1e6144dl 5ffe0000000000000000000000000000',
+	'1.0dd 2.0dd b1a000000000000a',
+]
+
+fn test_a_zero_result_carries_the_preferred_exponent() {
+	for row in measured_zero_differences {
+		parts := row.split(' ')
+		format := format_of(parts[0])
+		a := literal(parts[0], format)
+		b := literal(parts[1], format)
+		got := hex_of(encode(sub(a, b, format), format))
+		assert got == parts[2], '${parts[0]} - ${parts[1]}: got ${got}, gcc wrote ${parts[2]}'
+	}
+}
+
 fn test_rounding_ties_go_to_the_even_digit() {
 	// 15 to one digit is a tie between 1 and 2, and 2 is the even one.
 	digits, exponent := round_to('15'.bytes(), -2, 1)
@@ -209,7 +242,15 @@ fn test_comparison_orders_decimals_by_their_value() {
 	assert cmp_values(literal('0.1dd', .decimal64), literal('0.2dd', .decimal64)) == -1
 	assert cmp_values(literal('-1.0dd', .decimal64), literal('1.0dd', .decimal64)) == -1
 	assert cmp_values(literal('1e10dd', .decimal64), literal('9999999999.0dd', .decimal64)) == 1
-	assert cmp_values(zero(false), zero(true)) == 0
+	// A zero is ordered against the other value's sign, not its own: zero sits
+	// between the negative values and the positive ones. Measured on gcc 16.2.1,
+	// where `0.0dd < -1.0dd` is false and `-1.0dd < 0.0dd` is true.
+	assert cmp_values(literal('0.0dd', .decimal64), literal('-1.0dd', .decimal64)) == 1
+	assert cmp_values(literal('-1.0dd', .decimal64), literal('0.0dd', .decimal64)) == -1
+	assert cmp_values(literal('0.0dd', .decimal64), literal('1.0dd', .decimal64)) == -1
+	assert cmp_values(literal('1.0dd', .decimal64), literal('0.0dd', .decimal64)) == 1
+	assert cmp_values(zero(false), literal('-1.0dd', .decimal64)) == 1
+	assert cmp_values(zero(true), literal('-1.0dd', .decimal64)) == 1
 }
 
 fn test_an_exponent_the_format_cannot_hold_is_not_encoded() {

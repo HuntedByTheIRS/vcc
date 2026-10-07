@@ -523,12 +523,14 @@ fn (mut e Emitter) emit_decimal_copy(slot Slot, expr ast.Expr, line int, col int
 	}
 }
 
-// store_decimal_value writes a decimal into an object from a value that is not a
-// constant: a value of another width converted into this one, an integer
-// converted into it, or another object of the same type copied into it. It
-// answers whether it wrote, and a value it does not know is left for the caller
-// to refuse by name rather than written as something else.
-fn (mut e Emitter) store_decimal_value(slot Slot, expr ast.Expr, line int, col int) !bool {
+// store_decimal_converted writes a decimal into an object from a value that is
+// not a constant: a value of another width converted into this one, an integer
+// converted into it, a double or a float converted into it, or another object of
+// the same type copied into it. It answers whether it wrote, and a value it does
+// not know is left for the caller to refuse by name rather than written as
+// something else. The negation of an object is not one of these: the arithmetic
+// lane's routine writes it, and this file's own routine for it is gone.
+fn (mut e Emitter) store_decimal_converted(slot Slot, expr ast.Expr, line int, col int, depth int) !bool {
 	if expr is ast.Cast {
 		if !expr.typ.kind.is_decimal() {
 			return false
@@ -538,38 +540,31 @@ fn (mut e Emitter) store_decimal_value(slot Slot, expr ast.Expr, line int, col i
 				&& e.names_an_object(expr.expr) {
 				// A cast that names the width the value already has changes
 				// nothing, so the object is copied.
-				e.emit_decimal_copy(slot, expr.expr, line, col, 0)!
+				e.emit_decimal_copy(slot, expr.expr, line, col, depth)!
 				return true
 			}
-			e.emit_decimal_to_decimal(slot, expr, 0)!
+			e.emit_decimal_to_decimal(slot, expr, depth)!
 			return true
 		}
 		if _ := decimal_integer_bytes(expr.expr.typ.kind) {
-			e.emit_decimal_from_integer(slot, expr, 0)!
+			e.emit_decimal_from_integer(slot, expr, depth)!
 			return true
 		}
 		if expr.expr.typ.kind in [.double, .float] {
-			e.emit_decimal_from_binary(slot, expr, 0)!
+			e.emit_decimal_from_binary(slot, expr, depth)!
 			return true
 		}
 		return false
 	}
 	if expr is ast.Unary {
-		if !expr.typ.kind.is_decimal() {
-			return false
-		}
-		if expr.op == '-' && expr.expr.typ.kind.is_decimal() {
-			e.emit_decimal_negate(slot, expr, 0)!
-			return true
-		}
 		if expr.op == '+' && expr.expr.typ.kind.is_decimal() && e.names_an_object(expr.expr) {
-			e.emit_decimal_copy(slot, expr.expr, line, col, 0)!
+			e.emit_decimal_copy(slot, expr.expr, line, col, depth)!
 			return true
 		}
 		return false
 	}
 	if expr.typ.kind.is_decimal() && e.names_an_object(expr) {
-		e.emit_decimal_copy(slot, expr, line, col, 0)!
+		e.emit_decimal_copy(slot, expr, line, col, depth)!
 		return true
 	}
 	return false
@@ -730,35 +725,4 @@ fn (mut e Emitter) emit_decimal_is_zero_test(unary ast.Unary, depth int) !void {
 	name := decimal_is_zero_name(unary.expr.typ.kind.decimal_format())
 	e.decimal_convert_used[name] = true
 	e.reference(e.target.call_near(0), .call_local, name, '')
-}
-
-// emit_decimal_negate writes `-a` into a decimal object: the value is the
-// operand's bytes with the sign bit flipped, so the object is copied and the top
-// byte's highest bit inverted. Nothing is rounded and nothing overflows.
-fn (mut e Emitter) emit_decimal_negate(slot Slot, unary ast.Unary, depth int) !void {
-	g := decimal_registers(e.target) or {
-		e.diagnostics << problem(unary.line, unary.col, 'internal: the target has no register a decimal copy needs')
-		return error('decimal registers')
-	}
-	e.emit_decimal_address(unary.expr, depth)!
-	e.append(e.target.move_register64(g.rsi, e.accumulator(unary.line, unary.col)!)!)
-	e.leave_address(slot, unary.line, unary.col)!
-	e.append(e.target.move_register64(g.rdi, e.accumulator(unary.line, unary.col)!)!)
-	chunk := if slot.width >= 8 { 8 } else { 4 }
-	mut at := 0
-	for at < slot.width {
-		e.append(e.target.load_indirect(g.rsi, g.r10, chunk)!)
-		e.append(e.target.store_slot(g.rdi, 0, g.r10, chunk)!)
-		at += chunk
-		if at < slot.width {
-			e.append(e.target.add_immediate(g.rsi, i32(chunk)))
-			e.append(e.target.add_immediate(g.rdi, i32(chunk)))
-		}
-	}
-	e.append(e.target.add_immediate(g.rsi, i32(chunk - 1)))
-	e.append(e.target.add_immediate(g.rdi, i32(chunk - 1)))
-	e.append(e.target.load_indirect(g.rsi, g.r10, 1)!)
-	e.append(e.target.move_immediate64(g.r11, u64(0x80))!)
-	e.append(e.target.xor_word(g.r10, g.r11)!)
-	e.append(e.target.store_slot(g.rdi, 0, g.r10, 1)!)
 }

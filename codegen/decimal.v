@@ -76,10 +76,18 @@ mut:
 	bytes  []u8
 	labels map[string]int
 	relocs []DecimalReloc
+	// pre is the prefix a routine's own labels carry. Several routines are built
+	// into one DecimalRoutine and share the label map, and every routine names
+	// its internal labels the same way, so without a prefix the second routine's
+	// `zero`, `round` and `done` would overwrite the first's and the first
+	// routine would jump into the second.
+	pre string
 }
 
 // DecimalRegisters is the registers the routine works in, taken from the target
-// once so the code below names them rather than looking them up.
+// once so the code below names them rather than looking them up. rbp and rsp are
+// here because an arithmetic routine holds its decimal digits in a frame of its
+// own, while the conversion routine needs neither.
 struct DecimalRegisters {
 	rax  backend.Register
 	rbx  backend.Register
@@ -87,6 +95,8 @@ struct DecimalRegisters {
 	rdx  backend.Register
 	rsi  backend.Register
 	rdi  backend.Register
+	rbp  backend.Register
+	rsp  backend.Register
 	r8   backend.Register
 	r9   backend.Register
 	r10  backend.Register
@@ -95,7 +105,6 @@ struct DecimalRegisters {
 	r13  backend.Register
 	r14  backend.Register
 	r15  backend.Register
-	rsp  backend.Register
 	xmm0 backend.Register
 }
 
@@ -106,6 +115,8 @@ fn decimal_registers(t &backend.Target) ?DecimalRegisters {
 	rdx := t.reg('rdx') or { return none }
 	rsi := t.reg('rsi') or { return none }
 	rdi := t.reg('rdi') or { return none }
+	rbp := t.reg('rbp') or { return none }
+	rsp := t.reg('rsp') or { return none }
 	r8 := t.reg('r8') or { return none }
 	r9 := t.reg('r9') or { return none }
 	r10 := t.reg('r10') or { return none }
@@ -114,7 +125,6 @@ fn decimal_registers(t &backend.Target) ?DecimalRegisters {
 	r13 := t.reg('r13') or { return none }
 	r14 := t.reg('r14') or { return none }
 	r15 := t.reg('r15') or { return none }
-	rsp := t.reg('rsp') or { return none }
 	xmm0 := t.float_reg('xmm0') or { return none }
 	return DecimalRegisters{
 		rax:  rax
@@ -123,6 +133,8 @@ fn decimal_registers(t &backend.Target) ?DecimalRegisters {
 		rdx:  rdx
 		rsi:  rsi
 		rdi:  rdi
+		rbp:  rbp
+		rsp:  rsp
 		r8:   r8
 		r9:   r9
 		r10:  r10
@@ -131,7 +143,6 @@ fn decimal_registers(t &backend.Target) ?DecimalRegisters {
 		r13:  r13
 		r14:  r14
 		r15:  r15
-		rsp:  rsp
 		xmm0: xmm0
 	}
 }
@@ -144,6 +155,12 @@ fn (mut r DecimalRoutine) op(bytes []u8) {
 }
 
 fn (mut r DecimalRoutine) place(name string) {
+	r.labels[r.pre + name] = r.bytes.len
+}
+
+// entry places a label that is the routine's own name in the image, which a call
+// site reaches, so it is not prefixed.
+fn (mut r DecimalRoutine) entry(name string) {
 	r.labels[name] = r.bytes.len
 }
 
@@ -159,7 +176,7 @@ fn (mut r DecimalRoutine) jump(name string) {
 	r.op(r.t.jump(0))
 	r.relocs << DecimalReloc{
 		at:   r.bytes.len - 4
-		name: name
+		name: r.pre + name
 	}
 }
 
@@ -167,7 +184,7 @@ fn (mut r DecimalRoutine) branch(condition backend.Condition, name string) {
 	r.op(r.t.jump_condition(condition, 0))
 	r.relocs << DecimalReloc{
 		at:   r.bytes.len - 4
-		name: name
+		name: r.pre + name
 	}
 }
 
@@ -728,22 +745,207 @@ fn decimal_constant_bytes(expr ast.Expr) ?[]u8 {
 	return none
 }
 
-// store_decimal writes a decimal constant into an object of its type. The bytes
-// are the encoding the decimal module produces, which is gcc's own little-endian
-// BID form, so the object holds exactly what gcc would have stored. Anything that
-// is not a constant of the object's own width is refused by name.
-fn (mut e Emitter) store_decimal(slot Slot, expr ast.Expr, line int, col int) !void {
+// DecimalStep is how an implemented routine covers a decimal step. An object
+// routine writes a decimal result into an object through a destination address;
+// a value routine leaves its result in the accumulator. uncovered is a step no
+// routine writes, which is refused by name where it is written.
+enum DecimalStep {
+	uncovered
+	object
+	value
+}
+
+// decimal_step is the one place that answers whether an implemented decimal
+// routine covers a step, and of which shape. The run-time addition and
+// subtraction answer .object here, and a negation whose operand is an object
+// with them, because the routine reads each operand where it lives. Negation of
+// anything else - a constant, or another step - is not an object routine: it is
+// a sign flip the value path writes for every operand shape, so it is reached
+// there and not here. A comparison of two decimals answers .value: the routine
+// orders the two objects and leaves its order code in the accumulator, which the
+// call site turns into one of the six operators. A comparison whose operands are
+// not both decimals is not a step this back end has, and is left uncovered so it
+// stays refused. A lane that adds a routine adds its step to this one function
+// and its emitter beside the others, so the step is reached instead of meeting a
+// refusal written for a tree with no routine at all: the multiply and divide lane
+// will answer .object here.
+fn (e Emitter) decimal_step(expr ast.Expr) DecimalStep {
+	match expr {
+		ast.Binary {
+			if e.decimal_of(expr.left) && e.decimal_of(expr.right) {
+				if expr.op == '+' || expr.op == '-' {
+					return .object
+				}
+				if expr.op in ['==', '!=', '<', '>', '<=', '>='] {
+					return .value
+				}
+			}
+		}
+		ast.Unary {
+			if expr.op == '-' && e.decimal_of(expr.expr) && e.names_an_object(expr.expr) {
+				return .object
+			}
+		}
+		else {}
+	}
+	return .uncovered
+}
+
+// store_decimal writes a decimal object's value from the initializer of a
+// declaration or the value of an assignment to a name. A constant goes in as the
+// bytes the encoding gives it; a step decimal_step answers .object for is written
+// by the arithmetic routine, which reads its operands where they live;
+// everything else is a value of the same decimal type, which the value path reads
+// into the floating accumulator and stores, and refuses by name what it cannot
+// write. depth is the level the caller writes at, which the value path turns into
+// the level below it for the value it reads.
+fn (mut e Emitter) store_decimal(slot Slot, expr ast.Expr, line int, col int, depth int) !void {
 	if bytes := decimal_constant_bytes(expr) {
 		if bytes.len == slot.width {
 			return e.put_decimal_bytes(slot, bytes, line, col)
 		}
 	}
-	if e.store_decimal_value(slot, expr, line, col)! {
+	if e.decimal_step(expr) == .object {
+		if decimal_width_of(expr.typ) != slot.width {
+			e.diagnostics << problem(line, col, 'unsupported: a value of ${expr.typ.describe()} is stored in an object of a different decimal width')
+			return error('decimal width mismatch')
+		}
+		match expr {
+			ast.Binary {
+				return e.store_decimal_arith(slot, expr, line, col, depth)
+			}
+			ast.Unary {
+				return e.store_decimal_negate(slot, expr.expr, line, col, depth)
+			}
+			else {}
+		}
+	}
+	return e.store_decimal_value(slot, expr, line, col, depth)
+}
+
+// store_decimal_through_object writes a decimal value through an address the
+// caller has already parked: what a dereference, a member or an element is
+// assigned. A step decimal_step answers .object for is written by the arithmetic
+// routine through the same address; every other value is the value path's store,
+// which refuses by name what it cannot write.
+fn (mut e Emitter) store_decimal_through_object(address Slot, expr ast.Expr, width int, line int, col int, depth int) !void {
+	if e.decimal_step(expr) == .object {
+		if decimal_width_of(expr.typ) != width {
+			e.diagnostics << problem(line, col, 'unsupported: a value of ${expr.typ.describe()} is stored in a decimal object of a different width')
+			return error('decimal store width')
+		}
+		match expr {
+			ast.Binary {
+				return e.store_decimal_arith_at(address, expr, line, col, depth)
+			}
+			ast.Unary {
+				return e.store_decimal_negate_at(address, expr.expr, line, col, depth)
+			}
+			else {}
+		}
+	}
+	return e.store_decimal_through_address(address, expr, width, line, col, depth)
+}
+
+// address_of builds the address expression the emitter reads an object through.
+fn address_of(expr ast.Expr, line int, col int) ast.Unary {
+	return ast.Unary{
+		op:   '&'
+		expr: expr
+		typ:  expr.typ
+		line: line
+		col:  col
+	}
+}
+
+// decimal_destination puts the destination object's address into the register the
+// arithmetic routine reads it from. A frame slot is the frame plus its offset; an
+// address a caller parked already holds the address, which is read into the
+// register.
+fn (mut e Emitter) decimal_destination(frame Slot, through ?Slot, into backend.Register, line int, col int) !void {
+	if address := through {
+		e.load_argument(address, into, e.target.word_size, line, col)!
 		return
 	}
-	name := expr.typ.describe()
-	e.diagnostics << problem(line, col, 'unsupported: an object of a decimal type is initialised here, and only a constant of that same width belongs in one; this back end has no form for a ${name} initialiser')
-	return error('decimal initialiser')
+	base := e.slot_base_register(frame, line, col)!
+	e.append(e.target.address_of_slot(base, i32(frame.offset), into))
+}
+
+// store_decimal_arith writes a run-time sum or difference of two decimal objects
+// into a frame slot. The operand addresses are computed one level below the
+// destination, which is not a value slot, so nothing collides with it.
+fn (mut e Emitter) store_decimal_arith(slot Slot, binary ast.Binary, line int, col int, depth int) !void {
+	return e.emit_decimal_arith(slot, none, binary, line, col, depth)
+}
+
+// store_decimal_arith_at writes the same sum or difference through an address the
+// caller parked at depth. The operand addresses are computed one level deeper, so
+// they cannot reuse the slot the parked address lives in.
+fn (mut e Emitter) store_decimal_arith_at(address Slot, binary ast.Binary, line int, col int, depth int) !void {
+	return e.emit_decimal_arith(Slot{}, address, binary, line, col, depth)
+}
+
+// emit_decimal_arith writes a run-time sum or difference of two decimal objects.
+// The operands are read where they live, so each has to be an object, and the
+// routine is called with the destination in rdi and the two operands in rsi and
+// rdx. The operand addresses are pushed while the second one is computed, then
+// read back into the argument registers.
+fn (mut e Emitter) emit_decimal_arith(frame Slot, through ?Slot, binary ast.Binary, line int, col int, depth int) !void {
+	if !e.names_an_object(binary.left) || !e.names_an_object(binary.right) {
+		e.diagnostics << problem(line, col, 'unsupported: a ${binary.typ.describe()} is added here from a value that is not an object, and the routine reads each operand where it lives')
+		return error('decimal operand')
+	}
+	registers := decimal_registers(e.target) or {
+		e.diagnostics << problem(line, col, 'internal: the target has no register a decimal operation needs')
+		return error('decimal registers')
+	}
+	format := binary.typ.kind.decimal_format()
+	name := decimal_arith_name(format, binary.op == '-')
+	e.decimal_used[name] = true
+	accum := e.accumulator(line, col)!
+	e.emit_address(address_of(binary.left, line, col), depth + 1)!
+	e.append(e.target.push_register(accum))
+	e.emit_address(address_of(binary.right, line, col), depth + 1)!
+	e.append(e.target.push_register(accum))
+	e.decimal_destination(frame, through, registers.rdi, line, col)!
+	e.append(e.target.pop_register(registers.rdx))
+	e.append(e.target.pop_register(registers.rsi))
+	e.reference(e.target.call_near(0), .call_local, name, '')
+}
+
+// store_decimal_negate writes the negation of a decimal object into a frame slot.
+// gcc compiles `-a` to a sign flip on the stored word, which is what the routine
+// does.
+fn (mut e Emitter) store_decimal_negate(slot Slot, operand ast.Expr, line int, col int, depth int) !void {
+	return e.emit_decimal_negate(slot, none, operand, line, col, depth)
+}
+
+// store_decimal_negate_at writes the same negation through an address the caller
+// parked at depth.
+fn (mut e Emitter) store_decimal_negate_at(address Slot, operand ast.Expr, line int, col int, depth int) !void {
+	return e.emit_decimal_negate(Slot{}, address, operand, line, col, depth)
+}
+
+// emit_decimal_negate writes the negation of a decimal object. On entry the
+// operand's address is in rsi and the destination's in rdi.
+fn (mut e Emitter) emit_decimal_negate(frame Slot, through ?Slot, operand ast.Expr, line int, col int, depth int) !void {
+	if !e.names_an_object(operand) {
+		e.diagnostics << problem(line, col, 'unsupported: a ${operand.typ.describe()} is negated here, and the routine reads its operand where it lives')
+		return error('decimal operand')
+	}
+	registers := decimal_registers(e.target) or {
+		e.diagnostics << problem(line, col, 'internal: the target has no register a decimal operation needs')
+		return error('decimal registers')
+	}
+	format := operand.typ.kind.decimal_format()
+	name := decimal_arith_negate_name(format)
+	e.decimal_used[name] = true
+	accum := e.accumulator(line, col)!
+	e.emit_address(address_of(operand, line, col), depth + 1)!
+	e.append(e.target.push_register(accum))
+	e.decimal_destination(frame, through, registers.rdi, line, col)!
+	e.append(e.target.pop_register(registers.rsi))
+	e.reference(e.target.call_near(0), .call_local, name, '')
 }
 
 // put_decimal_bytes writes the encoded bytes into the object, a word at a time,
