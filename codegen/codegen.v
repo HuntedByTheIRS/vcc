@@ -1052,6 +1052,9 @@ fn (mut e Emitter) build() ![]u8 {
 	// The routines a decimal comparison runs are written beside them, and only
 	// the widths a comparison named are written.
 	e.emit_decimal_compare_routines()!
+	// The same for the multiplications and divisions a unit asked for at run
+	// time: only the formats and operators a call site named are written.
+	e.emit_decimal_muldiv_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -2451,9 +2454,11 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	if slot.decimal && slot.count == 0 {
 		// An object of a decimal type declared with a value: a constant goes
 		// in as the bytes the encoding gives it, a sum, a difference or a
-		// negation is written by the arithmetic routine, and a value of the
-		// same decimal type is read into the floating accumulator and stored.
-		// Anything else is refused by name inside.
+		// negation is written by the arithmetic routine, a product or a
+		// quotient by the multiplication and division routine, and a value of
+		// the same decimal type is read into the floating accumulator and
+		// stored. store_decimal asks decimal_step which of them the value is,
+		// and refuses by name what no routine covers.
 		return e.store_decimal(slot, init, stmt.line, stmt.col, 0)
 	}
 	if slot.complex {
@@ -2603,19 +2608,21 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
 	}
+	if target.decimal && target.count == 0 {
+		// The same store a declaration of a decimal type makes: a constant of
+		// the object's width, a sum, a difference, a product or a quotient the
+		// arithmetic or the multiplication and division routine cover, or a
+		// value of the same decimal type. store_decimal asks decimal_step which
+		// of them the value is. A compound spelling is expanded to `r = r + a`
+		// where it is read, so `r += a` is the sum below and not a second
+		// implementation.
+		return e.store_decimal(target, expr, stmt.line, stmt.col, depth)
+	}
 	if target.long_double && target.count == 0 {
 		// The same store a declaration of the type makes: the target's address
 		// is worked out, the value is converted or copied, and the sixteen bytes
 		// are written.
 		return e.store_long_double(target, expr, stmt.line, stmt.col, depth)
-	}
-	if target.decimal && target.count == 0 {
-		// The same store a declaration of a decimal type makes: a constant of
-		// the object's width, a sum, a difference or a negation the arithmetic
-		// routines cover, or a value of the same decimal type. A compound
-		// spelling is expanded to `r = r + a` where it is read, so `r += a` is
-		// the sum below and not a second implementation.
-		return e.store_decimal(target, expr, stmt.line, stmt.col, depth)
 	}
 	if target.complex {
 		return e.assign_complex_local(stmt, target, depth)

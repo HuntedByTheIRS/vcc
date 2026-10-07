@@ -114,18 +114,16 @@ fn test_a_decimal_and_a_non_decimal_do_not_mix_silently() {
 	assert found, 'the refusal is not named: ${emitted.diagnostics[0].msg}'
 }
 
-// A decimal is refused by name wherever nothing of one is handled. A
-// multiplication, a truth test and an implicit conversion to a double all
-// compute with the value, and the bytes in the floating accumulator are not a
-// number to compute with: answering with them would be a wrong number nobody
-// could see, so each is refused where it is written. A sum, a difference and a
-// negation are computed now, by the routines the emitter writes for them, and
-// negating a decimal is the same sign bit that routine flips. A comparison of
-// two decimals is computed too, by the comparison routine. The logical-not row
-// stays because the value it makes is an int, and a decimal object is not
-// initialised from an int here.
+// A decimal is refused by name wherever nothing of one is handled. A truth test
+// and an implicit conversion to a double compute with the value, and the bytes in
+// the floating accumulator are not a number to compute with: answering with them
+// would be a wrong number nobody could see, so each is refused where it is
+// written. A sum, a difference, a product, a quotient and a negation are computed
+// now, by the routines the emitter writes for them, and negating a decimal is the
+// same sign bit that routine flips. A comparison of two decimals is computed too,
+// by the comparison routine. The logical-not row stays because the value it makes
+// is an int, and a decimal object is not initialised from an int here.
 const decimal_value_unhandled_bodies = [
-	'_Decimal64 a = 1.5dd, b = 2.5dd; _Decimal64 c = a * b;',
 	'_Decimal64 a = 1.5dd; if (a) { return 1; }',
 	'_Decimal64 a = 1.5dd; double x = a;',
 	'_Decimal64 a = 1.5dd; _Decimal64 b = !a;',
