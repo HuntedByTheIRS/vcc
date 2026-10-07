@@ -112,7 +112,46 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 		}
 		float_format << wants_float
 	}
-	if !any_fix && !any_float {
+	// The width conversions this unit named, and the formats whose rounding and
+	// encoding routines they reach.
+	mut width_format := []bool{}
+	for _ in formats {
+		width_format << false
+	}
+	mut pair_src := []int{}
+	mut pair_dst := []int{}
+	for i, src in formats {
+		for j, dst in formats {
+			if i == j {
+				continue
+			}
+			if decimal_pair_name(src, dst) in e.decimal_convert_used {
+				pair_src << i
+				pair_dst << j
+				width_format[j] = true
+			}
+		}
+	}
+	// Which formats a decode is read for: its own conversions, and the width
+	// conversions that start at it.
+	mut any_decode := []bool{}
+	for i, _ in formats {
+		any_decode << by_format[i].len > 0 || float_format[i]
+	}
+	for i, _ in formats {
+		for k, _ in pair_src {
+			if pair_src[k] == i {
+				any_decode[i] = true
+			}
+		}
+	}
+	mut any := any_fix || any_float
+	for wants in width_format {
+		if wants {
+			any = true
+		}
+	}
+	if !any {
 		return
 	}
 	registers := decimal_registers(e.target) or {
@@ -131,7 +170,14 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 		e.decimal_to_float_core(mut r)!
 	}
 	for i, format in formats {
-		if by_format[i].len > 0 || float_format[i] {
+		if width_format[i] {
+			target := decimal_target(format)
+			e.emit_decimal_quantize(mut r, target)!
+			e.emit_decimal_encode(mut r, target)!
+		}
+	}
+	for i, format in formats {
+		if any_decode[i] {
 			e.decimal_decode(mut r, format)!
 		}
 	}
@@ -143,6 +189,9 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 			e.decimal_float_wrapper(mut r, format)!
 		}
 	}
+	for k, _ in pair_src {
+		e.emit_decimal_pair(mut r, formats[pair_src[k]], formats[pair_dst[k]])!
+	}
 	base := e.program.text.len
 	bytes := r.resolved()
 	e.program.text << bytes
@@ -153,9 +202,15 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 		e.program.labels[decimal_float_core_name] = base + r.labels[decimal_float_core_name]
 	}
 	for format in formats {
-		name := decimal_decode_name(format)
-		if name in r.labels {
-			e.program.labels[name] = base + r.labels[name]
+		for name in [
+			decimal_quantize_name(format),
+			decimal_encode_name(format),
+			decimal_decode_name(format),
+			decimal_float_name(format),
+		] {
+			if name in r.labels {
+				e.program.labels[name] = base + r.labels[name]
+			}
 		}
 		for target in [fix_int32, fix_uint32, fix_int64, fix_uint64] {
 			label := decimal_fix_name(format, target)
@@ -163,9 +218,11 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 				e.program.labels[label] = base + r.labels[label]
 			}
 		}
-		flabel := decimal_float_name(format)
-		if flabel in r.labels {
-			e.program.labels[flabel] = base + r.labels[flabel]
+		for dst in formats {
+			label := decimal_pair_name(format, dst)
+			if label in r.labels {
+				e.program.labels[label] = base + r.labels[label]
+			}
 		}
 	}
 }

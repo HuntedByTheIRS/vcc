@@ -735,6 +735,9 @@ fn (mut e Emitter) store_decimal(slot Slot, expr ast.Expr, line int, col int) !v
 			return e.put_decimal_bytes(slot, bytes, line, col)
 		}
 	}
+	if e.store_decimal_value(slot, expr, line, col)! {
+		return
+	}
 	name := expr.typ.describe()
 	e.diagnostics << problem(line, col, 'unsupported: an object of a decimal type is initialised here, and only a constant of that same width belongs in one; this back end has no form for a ${name} initialiser')
 	return error('decimal initialiser')
