@@ -260,7 +260,11 @@ fn note_member(r types.Representation, typ types.Type, start int, low int, high 
 		return
 	}
 	cover.covered = true
-	if typ.kind != .double {
+	if typ.kind != .double && !typ.kind.is_decimal() {
+		// A decimal floating type is an SSE class the way a double is, so an
+		// eightbyte that covers only decimals travels in the floating-point
+		// file. Measured on gcc 16.2.1, which passes a struct of one
+		// _Decimal64 in xmm0 and a struct of one _Decimal128 across xmm0:xmm1.
 		cover.other = true
 	}
 }
