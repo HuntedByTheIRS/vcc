@@ -181,13 +181,26 @@ pub fn zero(sign bool) Value {
 	}
 }
 
+// zero_at is a zero carrying the exponent the result of an operation has, which
+// is not always the exponent a plain zero carries. An addition and a subtraction
+// give their result the preferred exponent, the smaller of the two operands'
+// exponents, and gcc does the same: `1e7df - 1e7df` is a zero at a power of
+// seven and `1e-101df - 1e-101df` a zero at minus one hundred and one, while
+// `0.0df - 0.0df` is a zero at minus one because both operands were.
+pub fn zero_at(sign bool, exponent int) Value {
+	return Value{
+		sign:     sign
+		exponent: exponent
+	}
+}
+
 // is_zero says whether the value is a zero of either sign.
 pub fn (v Value) is_zero() bool {
 	return v.special == .finite && v.digits.len == 0
 }
 
-// from_text reads a decimal constant's body — the digits, the point and the
-// exponent, with the suffix already taken off — into a value. The digits are
+// from_text reads a decimal constant's body into a value: the digits, the point
+// and the exponent, with the suffix already taken off. The digits are
 // taken as written with the point removed and the exponent adjusted for it, then
 // rounded to the format's precision: that is what gcc stores, which is why
 // `1.0dd` is a coefficient of ten with a power of minus one rather than a
@@ -483,16 +496,20 @@ fn align(a Value, b Value) (Value, Value, bool) {
 
 // cmp_values compares two values: -1 when a is smaller, 0 when equal, 1 when
 // greater. Exponents are compared first through the digits' length, so no
-// scaling is needed and nothing is lost.
-fn cmp_values(a Value, b Value) int {
+// scaling is needed and nothing is lost. It is the order a folded comparison of
+// two decimal constants asks for. A zero is ordered against the other value's
+// sign, not its own: zero sits between the negative values and the positive
+// ones, so `0.0 < -1.0` is false and `-1.0 < 0.0` is true, whichever sign the
+// zero itself carries.
+pub fn cmp_values(a Value, b Value) int {
 	if a.is_zero() && b.is_zero() {
 		return 0
 	}
 	if a.is_zero() {
-		return if a.sign { 1 } else { -1 }
+		return if b.sign { 1 } else { -1 }
 	}
 	if b.is_zero() {
-		return if b.sign { -1 } else { 1 }
+		return if a.sign { -1 } else { 1 }
 	}
 	if a.sign != b.sign {
 		return if a.sign { -1 } else { 1 }
@@ -581,7 +598,8 @@ pub fn add(a Value, b Value, f Format) Value {
 		return special_sum(a, b)
 	}
 	if a.is_zero() && b.is_zero() {
-		return zero(a.sign && b.sign)
+		exponent := if a.exponent < b.exponent { a.exponent } else { b.exponent }
+		return zero_at(a.sign && b.sign, exponent)
 	}
 	l, r, _ := align(a, b)
 	mut digits := []u8{}
@@ -592,7 +610,11 @@ pub fn add(a Value, b Value, f Format) Value {
 	} else {
 		order := cmp_digits(l.digits, r.digits)
 		if order == 0 {
-			return zero(false)
+			// The operands cancel exactly. The zero that comes out carries the
+			// preferred exponent, which is the aligned exponent both operands
+			// now share, and a positive sign: an exact zero of two opposite
+			// values is plus zero in the rounding mode this compiler emits.
+			return zero_at(false, l.exponent)
 		} else if order > 0 {
 			digits = sub_digits(l.digits, r.digits)
 			sign = l.sign
