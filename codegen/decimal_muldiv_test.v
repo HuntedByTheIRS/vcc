@@ -127,3 +127,25 @@ fn test_a_run_time_muldiv_makes_the_bytes_gcc_makes() {
 		assert got == want, '${row}: the routine made ${got}, gcc made ${want}'
 	}
 }
+
+// A product or a quotient of one decimal format into an object of another is a
+// conversion this back end does not have, and the routine writes the width of
+// the format it was built for, so a narrower object would take bytes it does not
+// have. It has to be refused by name, the way the same value written as a
+// constant is, and not written past the end of the object.
+fn test_a_muldiv_of_another_width_is_refused_by_name() {
+	source := 'int main(void) {\n' +
+		'	volatile _Decimal128 a = 1.5dl;\n' +
+		'	volatile _Decimal128 b = 2.0dl;\n' +
+		'	_Decimal64 c = a * b;\n' +
+		'	return 0;\n' +
+		'}\n'
+	emitted := emit(decimal_muldiv_translation_unit(source), Options{})
+	mut refused := false
+	for diagnostic in emitted.diagnostics {
+		if diagnostic.msg.contains('only a constant of that same width') {
+			refused = true
+		}
+	}
+	assert refused, 'a _Decimal128 product into a _Decimal64 was not refused by name'
+}

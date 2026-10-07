@@ -2315,7 +2315,7 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		// the format and the operator; anything else is the bytes the encoding
 		// gives a constant, which is stored rather than computed. Anything that
 		// is neither is refused by name inside.
-		if !slot.captured && e.decimal_muldiv_of(init) {
+		if !slot.captured && e.decimal_muldiv_of(init, slot.width) {
 			return e.emit_decimal_muldiv(slot, init, stmt.line, stmt.col, 0)
 		}
 		return e.store_decimal(slot, init, stmt.line, stmt.col)
@@ -2471,7 +2471,7 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		// A product or a quotient of two decimal objects into a decimal object:
 		// the routine the format and the operator name computes it in place. A
 		// constant target is left to the store below.
-		if !target.captured && e.decimal_muldiv_of(expr) {
+		if !target.captured && e.decimal_muldiv_of(expr, target.width) {
 			return e.emit_decimal_muldiv(target, expr, stmt.line, stmt.col, depth)
 		}
 	}

@@ -129,10 +129,13 @@ fn decimal_muldiv_name(format decimal.Format, divide bool) string {
 }
 
 // decimal_muldiv_of says whether an expression is a decimal multiply or divide
-// whose two operands are objects this back end can take the address of, and
-// whose operands and result are plain locals. Anything else is refused by name
-// where the initialiser is stored.
-fn (e Emitter) decimal_muldiv_of(expr ast.Expr) bool {
+// whose two operands and its result are all of the destination's format, and
+// whose operands are objects this back end can take the address of, and whose
+// operands and result are plain locals. Anything else is refused by name where
+// the initialiser is stored: a product or quotient of another width is a
+// conversion this back end does not have, and the routine writes the width of
+// its own format, so a narrower destination would take bytes it does not have.
+fn (e Emitter) decimal_muldiv_of(expr ast.Expr, width int) bool {
 	if expr is ast.Binary {
 		if expr.op != '*' && expr.op != '/' {
 			return false
@@ -140,10 +143,17 @@ fn (e Emitter) decimal_muldiv_of(expr ast.Expr) bool {
 		if !expr.typ.kind.is_decimal() {
 			return false
 		}
+		format := expr.typ.kind.decimal_format()
+		if format.bytes() != width {
+			return false
+		}
 		if !e.names_an_object(expr.left) || !e.names_an_object(expr.right) {
 			return false
 		}
 		if !expr.left.typ.kind.is_decimal() || !expr.right.typ.kind.is_decimal() {
+			return false
+		}
+		if expr.left.typ.kind.decimal_format() != format || expr.right.typ.kind.decimal_format() != format {
 			return false
 		}
 		return e.decimal_operand_reachable(expr.left) && e.decimal_operand_reachable(expr.right)
