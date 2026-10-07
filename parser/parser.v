@@ -1117,14 +1117,20 @@ fn (mut p Parser) parse_binary(min_precedence int) !ast.Expr {
 		if short_circuit {
 			p.compound_unstable--
 		}
-		left = ast.Expr(ast.Binary{
+		binary := ast.Binary{
 			op:    t.text
 			left:  left
 			right: right
 			typ:   p.binary_type(t, left, right)
 			line:  t.line
 			col:   t.col
-		})
+		}
+		// A decimal operation over two decimal constants is evaluated here, the
+		// way gcc's front end evaluates it: what the program stores is the value
+		// and not the expression that computes it. Anything else stays in the
+		// tree, where the back end refuses a decimal value it has no form for by
+		// name rather than emitting a call to a routine that does not exist.
+		left = p.fold_decimal_binary(binary) or { ast.Expr(binary) }
 	}
 	return left
 }

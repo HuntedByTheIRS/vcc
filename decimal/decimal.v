@@ -496,11 +496,12 @@ fn align(a Value, b Value) (Value, Value, bool) {
 
 // cmp_values compares two values: -1 when a is smaller, 0 when equal, 1 when
 // greater. Exponents are compared first through the digits' length, so no
-// scaling is needed and nothing is lost. A zero is ordered against the other
-// value's sign, not its own: zero sits between the negative values and the
-// positive ones, so `0.0 < -1.0` is false and `-1.0 < 0.0` is true, whichever
-// sign the zero itself carries.
-fn cmp_values(a Value, b Value) int {
+// scaling is needed and nothing is lost. It is the order a folded comparison of
+// two decimal constants asks for. A zero is ordered against the other value's
+// sign, not its own: zero sits between the negative values and the positive
+// ones, so `0.0 < -1.0` is false and `-1.0 < 0.0` is true, whichever sign the
+// zero itself carries.
+pub fn cmp_values(a Value, b Value) int {
 	if a.is_zero() && b.is_zero() {
 		return 0
 	}
