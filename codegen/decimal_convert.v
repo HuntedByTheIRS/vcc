@@ -44,12 +44,22 @@ const fix_uint64 = 3
 // truncation core they share.
 const decimal_fix_core_name = 'vcc_decimal_fix_core'
 
+// decimal_float_core_name is the one shared scaling and rounding core that turns a
+// decoded decimal into a float. It follows decimal.v's double core step for step and
+// differs only in the rounding at the end, which is to twenty-four bits rather than
+// fifty-three and at the float format's exponent range.
+const decimal_float_core_name = 'vcc_decimal_to_float_core'
+
 fn decimal_decode_name(format decimal.Format) string {
 	return 'vcc_decimal_decode_${format.bytes()}'
 }
 
 fn decimal_fix_name(format decimal.Format, target int) string {
 	return 'vcc_decimal_fix_${format.bytes()}_c${target}'
+}
+
+fn decimal_float_name(format decimal.Format) string {
+	return 'vcc_decimal_to_float_${format.bytes()}'
 }
 
 // decimal_fix_target says which of the four integer conversions a cast to this type
@@ -81,20 +91,28 @@ fn decimal_fix_target(kind types.Kind) ?int {
 // the layout will place.
 fn (mut e Emitter) emit_decimal_convert_routines() !void {
 	formats := [decimal.Format.decimal32, decimal.Format.decimal64, decimal.Format.decimal128]
-	mut any_wanted := false
-	// Parallel to formats: which of the four targets each format asked for.
+	mut any_fix := false
+	mut any_float := false
+	// Parallel to formats: which of the four integer targets each format asked for,
+	// and whether it asked for a float.
 	mut by_format := [][]int{}
+	mut float_format := []bool{}
 	for format in formats {
 		mut targets := []int{}
 		for target in [fix_int32, fix_uint32, fix_int64, fix_uint64] {
 			if decimal_fix_name(format, target) in e.decimal_convert_used {
 				targets << target
-				any_wanted = true
+				any_fix = true
 			}
 		}
 		by_format << targets
+		wants_float := decimal_float_name(format) in e.decimal_convert_used
+		if wants_float {
+			any_float = true
+		}
+		float_format << wants_float
 	}
-	if !any_wanted {
+	if !any_fix && !any_float {
 		return
 	}
 	registers := decimal_registers(e.target) or {
@@ -106,9 +124,14 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 		reg:    registers
 		labels: map[string]int{}
 	}
-	e.decimal_fix_core(mut r)!
+	if any_fix {
+		e.decimal_fix_core(mut r)!
+	}
+	if any_float {
+		e.decimal_to_float_core(mut r)!
+	}
 	for i, format in formats {
-		if by_format[i].len > 0 {
+		if by_format[i].len > 0 || float_format[i] {
 			e.decimal_decode(mut r, format)!
 		}
 	}
@@ -116,11 +139,19 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 		for target in by_format[i] {
 			e.decimal_fix_wrapper(mut r, format, target)!
 		}
+		if float_format[i] {
+			e.decimal_float_wrapper(mut r, format)!
+		}
 	}
 	base := e.program.text.len
 	bytes := r.resolved()
 	e.program.text << bytes
-	e.program.labels[decimal_fix_core_name] = base + r.labels[decimal_fix_core_name]
+	if any_fix {
+		e.program.labels[decimal_fix_core_name] = base + r.labels[decimal_fix_core_name]
+	}
+	if any_float {
+		e.program.labels[decimal_float_core_name] = base + r.labels[decimal_float_core_name]
+	}
 	for format in formats {
 		name := decimal_decode_name(format)
 		if name in r.labels {
@@ -131,6 +162,10 @@ fn (mut e Emitter) emit_decimal_convert_routines() !void {
 			if label in r.labels {
 				e.program.labels[label] = base + r.labels[label]
 			}
+		}
+		flabel := decimal_float_name(format)
+		if flabel in r.labels {
+			e.program.labels[flabel] = base + r.labels[flabel]
 		}
 	}
 }
@@ -544,9 +579,341 @@ fn (mut e Emitter) emit_decimal_conversion(cast ast.Cast, target types.Type, dep
 	if target.kind == .double {
 		return e.emit_decimal_to_double(cast.expr, cast.line, cast.col, depth)
 	}
+	if target.kind == .float {
+		return e.emit_decimal_to_float(cast.expr, cast.line, cast.col, depth)
+	}
 	if decimal_fix_target(target.kind) != none {
 		return e.emit_decimal_to_integer(cast.expr, target, cast.line, cast.col, depth)
 	}
-	e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and only a conversion to a double or to an integer is implemented')
+	e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and only a conversion to a float, a double or an integer is implemented')
 	return error('decimal conversion')
+}
+
+// emit_decimal_to_float converts a decimal object to a float at run time. As with
+// the other conversions the object has to be a name, a member or an element, because
+// the routine reads it where it lives, and the result arrives in xmm0.
+fn (mut e Emitter) emit_decimal_to_float(expr ast.Expr, line int, col int, depth int) !void {
+	if !e.names_an_object(expr) {
+		e.diagnostics << problem(line, col, 'unsupported: a ${expr.typ.describe()} is converted to float here, and only an object of one can be, because the conversion reads it where it lives')
+		return error('decimal value')
+	}
+	e.emit_address(ast.Unary{
+		op:   '&'
+		expr: expr
+		typ:  expr.typ
+		line: line
+		col:  col
+	}, depth + 1)!
+	name := decimal_float_name(expr.typ.kind.decimal_format())
+	e.decimal_convert_used[name] = true
+	e.reference(e.target.call_near(0), .call_local, name, '')
+}
+
+// decimal_float_wrapper is the float conversion's entry: it decodes the object and
+// hands a finite value to the shared core, and writes the float's own infinity or
+// quiet NaN for a special. The sign is the decimal's in every case.
+fn (e Emitter) decimal_float_wrapper(mut r DecimalRoutine, format decimal.Format) !void {
+	g := r.reg
+	name := decimal_float_name(format)
+	r.place(name)
+	r.call(decimal_decode_name(format))
+	r.op(r.t.test_word(g.r9)!)
+	r.branch(.not_equal, '${name}_special')
+	r.call(decimal_float_core_name)
+	r.op(r.t.move_word_to_double(g.xmm0, g.rax)!)
+	r.op(r.t.ret())
+	r.place('${name}_special')
+	r.op(r.t.move_immediate64(g.rax, 0x7f800000)!)
+	r.op(r.t.move_register64(g.r10, g.r8)!)
+	r.op(r.t.shift_left_word(g.r10, 31)!)
+	r.op(r.t.or_word(g.rax, g.r10)!)
+	r.op(r.t.move_register64(g.r11, g.r9)!)
+	r.op(r.t.add_immediate(g.r11, -2))
+	r.branch(.not_equal, '${name}_special_done')
+	r.op(r.t.move_immediate64(g.rax, 0x7fc00000)!)
+	r.place('${name}_special_done')
+	r.op(r.t.move_word_to_double(g.xmm0, g.rax)!)
+	r.op(r.t.ret())
+}
+
+// decimal_to_float_core scales a decoded decimal to the leading sixty-four bits of
+// its coefficient with a sticky bit and rounds once to a float. It is decimal.v's
+// double core with the four-byte format's constants: twenty-four bits kept, an
+// unbiased exponent that runs to 127 before it overflows, a subnormal that keeps
+// fewer bits, and the result left as the float's own bits in rax.
+//
+// On entry rax:rdx is the coefficient, rcx the exponent, r8 the sign and r9 the
+// special kind (zero for finite; the wrapper answers the specials).
+fn (e Emitter) decimal_to_float_core(mut r DecimalRoutine) !void {
+	g := r.reg
+	r.place(decimal_float_core_name)
+	r.op(r.t.push_register(g.rbx))
+	r.op(r.t.push_register(g.r12))
+	r.op(r.t.push_register(g.r13))
+	r.op(r.t.push_register(g.r14))
+	r.op(r.t.push_register(g.r15))
+	r.op(r.t.move_register64(g.r9, g.rax)!) // c_lo
+	r.op(r.t.move_register64(g.r10, g.rdx)!) // c_hi
+	r.op(r.t.move_register64(g.rsi, g.rcx)!) // exp10
+	r.op(r.t.xor_word(g.r13, g.r13)!) // sticky = 0
+	// The coefficient is put in the top of a word, its dropped bits in the sticky.
+	r.op(r.t.test_word(g.r10)!)
+	r.branch(.equal, 'f_low')
+	r.op(r.t.count_leading(g.rcx, g.r10, true)!)
+	r.op(r.t.move_immediate64(g.r14, 64)!)
+	r.op(r.t.subtract_word(g.r14, g.rcx)!)
+	r.op(r.t.move_immediate64(g.r15, 1)!)
+	r.op(r.t.move_register64(g.rcx, g.r14)!)
+	r.op(r.t.shift_left_word_register(g.r15)!)
+	r.op(r.t.add_immediate(g.r15, -1))
+	r.op(r.t.move_register64(g.rax, g.r9)!)
+	r.op(r.t.and_word(g.rax, g.r15)!)
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.equal, 'f_hi_clean')
+	r.op(r.t.move_immediate64(g.r13, 1)!)
+	r.place('f_hi_clean')
+	r.op(r.t.move_register64(g.rcx, g.r14)!)
+	r.op(r.t.move_register64(g.rax, g.r9)!)
+	r.op(r.t.shift_right_word_register(g.rax)!)
+	r.op(r.t.move_register64(g.r11, g.r10)!)
+	r.op(r.t.move_immediate64(g.rcx, 64)!)
+	r.op(r.t.subtract_word(g.rcx, g.r14)!)
+	r.op(r.t.shift_left_word_register(g.r11)!)
+	r.op(r.t.or_word(g.r11, g.rax)!)
+	r.op(r.t.move_register64(g.rbx, g.r11)!)
+	r.op(r.t.move_register64(g.r12, g.r14)!)
+	r.jump('f_scaled')
+	r.place('f_low')
+	r.op(r.t.test_word(g.r9)!)
+	r.branch(.equal, 'f_zero')
+	r.op(r.t.count_leading(g.rcx, g.r9, true)!)
+	r.op(r.t.move_register64(g.rbx, g.r9)!)
+	r.op(r.t.shift_left_word_register(g.rbx)!)
+	r.op(r.t.negate_word(g.rcx)!)
+	r.op(r.t.move_register64(g.r12, g.rcx)!)
+	r.place('f_scaled')
+	// Scale up, nineteen digits at a time, keeping the leading sixty-four bits.
+	r.place('f_up')
+	r.op(r.t.test_word(g.rsi)!)
+	r.branch(.less_or_equal, 'f_down')
+	r.op(r.t.move_register64(g.rcx, g.rsi)!)
+	r.op(r.t.add_immediate(g.rcx, -19))
+	r.branch(.less_or_equal, 'f_up_exp')
+	r.op(r.t.move_immediate64(g.r9, 19)!)
+	r.jump('f_up_chunk')
+	r.place('f_up_exp')
+	r.op(r.t.move_register64(g.r9, g.rsi)!)
+	r.place('f_up_chunk')
+	r.op(r.t.move_immediate64(g.r14, 1)!)
+	r.op(r.t.move_register64(g.r15, g.r9)!)
+	r.place('f_up_power')
+	r.op(r.t.test_word(g.r15)!)
+	r.branch(.equal, 'f_up_powered')
+	r.op(r.t.imul_immediate(g.r14, 10))
+	r.op(r.t.add_immediate(g.r15, -1))
+	r.jump('f_up_power')
+	r.place('f_up_powered')
+	r.op(r.t.move_register64(g.rax, g.rbx)!)
+	r.op(r.t.multiply_pair(g.r14)!) // rdx:rax = mant * d
+	r.op(r.t.count_leading(g.rcx, g.rdx, true)!)
+	r.op(r.t.move_immediate64(g.r14, 64)!)
+	r.op(r.t.subtract_word(g.r14, g.rcx)!)
+	r.op(r.t.move_register64(g.rcx, g.r14)!)
+	r.op(r.t.add_immediate(g.rcx, -64))
+	r.branch(.equal, 'f_up_full')
+	r.op(r.t.move_immediate64(g.r15, 1)!)
+	r.op(r.t.move_register64(g.rcx, g.r14)!)
+	r.op(r.t.shift_left_word_register(g.r15)!)
+	r.op(r.t.add_immediate(g.r15, -1))
+	r.op(r.t.move_register64(g.r11, g.rax)!)
+	r.op(r.t.and_word(g.r11, g.r15)!)
+	r.op(r.t.test_word(g.r11)!)
+	r.branch(.equal, 'f_up_clean')
+	r.op(r.t.move_immediate64(g.r13, 1)!)
+	r.place('f_up_clean')
+	r.op(r.t.move_register64(g.rcx, g.r14)!)
+	r.op(r.t.move_register64(g.r11, g.rax)!)
+	r.op(r.t.shift_right_word_register(g.r11)!)
+	r.op(r.t.move_immediate64(g.rcx, 64)!)
+	r.op(r.t.subtract_word(g.rcx, g.r14)!)
+	r.op(r.t.shift_left_word_register(g.rdx)!)
+	r.op(r.t.or_word(g.rdx, g.r11)!)
+	r.op(r.t.move_register64(g.rbx, g.rdx)!)
+	r.op(r.t.add_reg64(g.r12, g.r14))
+	r.op(r.t.subtract_word(g.rsi, g.r9)!)
+	r.jump('f_up')
+	r.place('f_up_full')
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.equal, 'f_up_full_clean')
+	r.op(r.t.move_immediate64(g.r13, 1)!)
+	r.place('f_up_full_clean')
+	r.op(r.t.move_register64(g.rbx, g.rdx)!)
+	r.op(r.t.add_immediate(g.r12, 64))
+	r.op(r.t.subtract_word(g.rsi, g.r9)!)
+	r.jump('f_up')
+	// Scale down, dividing a numerator scaled by the top bit of the divisor.
+	r.place('f_down')
+	r.op(r.t.test_word(g.rsi)!)
+	r.branch(.equal, 'f_round')
+	r.op(r.t.move_register64(g.rcx, g.rsi)!)
+	r.op(r.t.negate_word(g.rcx)!)
+	r.op(r.t.add_immediate(g.rcx, -19))
+	r.branch(.less_or_equal, 'f_down_exp')
+	r.op(r.t.move_immediate64(g.r9, 19)!)
+	r.jump('f_down_chunk')
+	r.place('f_down_exp')
+	r.op(r.t.move_register64(g.r9, g.rsi)!)
+	r.op(r.t.negate_word(g.r9)!)
+	r.place('f_down_chunk')
+	r.op(r.t.move_immediate64(g.r14, 1)!)
+	r.op(r.t.move_register64(g.r15, g.r9)!)
+	r.place('f_down_power')
+	r.op(r.t.test_word(g.r15)!)
+	r.branch(.equal, 'f_down_powered')
+	r.op(r.t.imul_immediate(g.r14, 10))
+	r.op(r.t.add_immediate(g.r15, -1))
+	r.jump('f_down_power')
+	r.place('f_down_powered')
+	r.op(r.t.count_leading(g.rcx, g.r14, true)!)
+	r.op(r.t.move_immediate64(g.r11, 63)!)
+	r.op(r.t.subtract_word(g.r11, g.rcx)!)
+	r.op(r.t.move_register64(g.rax, g.rbx)!)
+	r.op(r.t.move_register64(g.rcx, g.r11)!)
+	r.op(r.t.shift_left_word_register(g.rax)!)
+	r.op(r.t.move_register64(g.r15, g.rbx)!)
+	r.op(r.t.move_immediate64(g.rcx, 64)!)
+	r.op(r.t.subtract_word(g.rcx, g.r11)!)
+	r.op(r.t.shift_right_word_register(g.r15)!)
+	r.op(r.t.move_register64(g.rdx, g.r15)!)
+	r.op(r.t.subtract_word(g.r12, g.r11)!)
+	r.op(r.t.divide_pair(g.r14)!)
+	r.op(r.t.test_word(g.rdx)!)
+	r.branch(.equal, 'f_down_clean')
+	r.op(r.t.move_immediate64(g.r13, 1)!)
+	r.place('f_down_clean')
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.equal, 'f_zero')
+	r.op(r.t.count_leading(g.rcx, g.rax, true)!)
+	r.op(r.t.move_register64(g.r15, g.rcx)!)
+	r.op(r.t.shift_left_word_register(g.rax)!)
+	r.op(r.t.subtract_word(g.r12, g.r15)!)
+	r.op(r.t.move_register64(g.rbx, g.rax)!)
+	r.op(r.t.add_reg64(g.rsi, g.r9))
+	r.jump('f_down')
+	// Round once, to nearest with ties to even, to the twenty-four bits a float keeps.
+	r.place('f_round')
+	r.op(r.t.move_register64(g.rax, g.rbx)!)
+	r.op(r.t.shift_right_word(g.rax, 40)!)
+	r.op(r.t.move_register64(g.rcx, g.rbx)!)
+	r.op(r.t.move_immediate64(g.r15, 0xffffffffff)!)
+	r.op(r.t.and_word(g.rcx, g.r15)!)
+	r.op(r.t.move_immediate64(g.r15, 0x8000000000)!)
+	r.op(r.t.move_register64(g.r11, g.rcx)!)
+	r.op(r.t.subtract_word(g.r11, g.r15)!)
+	r.branch(.below, 'f_kept')
+	r.branch(.above, 'f_carry')
+	r.op(r.t.test_word(g.r13)!)
+	r.branch(.not_equal, 'f_carry')
+	r.op(r.t.move_register64(g.rcx, g.rax)!)
+	r.op(r.t.and_immediate(g.rcx, 1)!)
+	r.op(r.t.test_word(g.rcx)!)
+	r.branch(.not_equal, 'f_carry')
+	r.jump('f_kept')
+	r.place('f_carry')
+	r.op(r.t.add_immediate(g.rax, 1))
+	r.place('f_kept')
+	r.op(r.t.move_register64(g.r14, g.r12)!)
+	r.op(r.t.add_immediate(g.r14, 63))
+	r.op(r.t.move_immediate64(g.r15, 1)!)
+	r.op(r.t.move_immediate64(g.r9, 24)!)
+	r.op(r.t.shift_left_word_register(g.r15)!)
+	r.op(r.t.move_register64(g.r11, g.rax)!)
+	r.op(r.t.subtract_word(g.r11, g.r15)!)
+	r.branch(.not_equal, 'f_no_carry')
+	r.op(r.t.shift_right_word(g.rax, 1)!)
+	r.op(r.t.add_immediate(g.r14, 1))
+	r.place('f_no_carry')
+	r.op(r.t.move_register64(g.r11, g.r14)!)
+	r.op(r.t.add_immediate(g.r11, -128))
+	r.branch(.greater_or_equal, 'f_inf')
+	r.op(r.t.move_register64(g.r11, g.r14)!)
+	r.op(r.t.add_immediate(g.r11, 126))
+	r.branch(.greater_or_equal, 'f_normal')
+	r.jump('f_subnormal')
+	r.place('f_normal')
+	r.op(r.t.move_register64(g.rcx, g.r14)!)
+	r.op(r.t.add_immediate(g.rcx, 127))
+	r.op(r.t.shift_left_word(g.rcx, 23)!)
+	r.op(r.t.move_immediate64(g.r15, 0x7fffff)!)
+	r.op(r.t.and_word(g.rax, g.r15)!)
+	r.op(r.t.or_word(g.rcx, g.rax)!)
+	r.op(r.t.move_register64(g.r15, g.r8)!)
+	r.op(r.t.shift_left_word(g.r15, 31)!)
+	r.op(r.t.or_word(g.rcx, g.r15)!)
+	r.op(r.t.move_register64(g.rax, g.rcx)!)
+	r.jump('f_finish')
+	r.place('f_inf')
+	r.op(r.t.move_immediate64(g.rcx, 0x7f800000)!)
+	r.op(r.t.move_register64(g.r15, g.r8)!)
+	r.op(r.t.shift_left_word(g.r15, 31)!)
+	r.op(r.t.or_word(g.rcx, g.r15)!)
+	r.op(r.t.move_register64(g.rax, g.rcx)!)
+	r.jump('f_finish')
+	r.place('f_zero')
+	r.op(r.t.move_register64(g.rax, g.r8)!)
+	r.op(r.t.shift_left_word(g.rax, 31)!)
+	r.jump('f_finish')
+	r.place('f_subnormal')
+	r.op(r.t.move_register64(g.rcx, g.r14)!)
+	r.op(r.t.add_immediate(g.rcx, 126))
+	r.op(r.t.negate_word(g.rcx)!)
+	r.op(r.t.move_register64(g.r11, g.rcx)!)
+	r.op(r.t.add_immediate(g.r11, -64))
+	r.branch(.greater_or_equal, 'f_zero')
+	r.op(r.t.move_register64(g.rdi, g.rcx)!)
+	r.op(r.t.move_immediate64(g.r10, 1)!)
+	r.op(r.t.shift_left_word_register(g.r10)!)
+	r.op(r.t.add_immediate(g.r10, -1))
+	r.op(r.t.move_register64(g.r9, g.rax)!)
+	r.op(r.t.and_word(g.r9, g.r10)!)
+	r.op(r.t.move_register64(g.r11, g.rax)!)
+	r.op(r.t.shift_right_word_register(g.r11)!)
+	r.op(r.t.move_register64(g.rcx, g.rdi)!)
+	r.op(r.t.add_immediate(g.rcx, -1))
+	r.op(r.t.move_immediate64(g.r15, 1)!)
+	r.op(r.t.shift_left_word_register(g.r15)!)
+	r.op(r.t.move_register64(g.rcx, g.r9)!)
+	r.op(r.t.subtract_word(g.rcx, g.r15)!)
+	r.branch(.above, 'f_sub_carry')
+	r.branch(.below, 'f_sub_kept')
+	r.op(r.t.test_word(g.r13)!)
+	r.branch(.not_equal, 'f_sub_carry')
+	r.op(r.t.move_register64(g.rcx, g.r11)!)
+	r.op(r.t.and_immediate(g.rcx, 1)!)
+	r.op(r.t.test_word(g.rcx)!)
+	r.branch(.not_equal, 'f_sub_carry')
+	r.jump('f_sub_kept')
+	r.place('f_sub_carry')
+	r.op(r.t.add_immediate(g.r11, 1))
+	r.place('f_sub_kept')
+	r.op(r.t.move_immediate64(g.r15, 1)!)
+	r.op(r.t.move_immediate64(g.rcx, 23)!)
+	r.op(r.t.shift_left_word_register(g.r15)!)
+	r.op(r.t.move_register64(g.rcx, g.r11)!)
+	r.op(r.t.subtract_word(g.rcx, g.r15)!)
+	r.branch(.not_equal, 'f_sub_not_one')
+	r.op(r.t.move_register64(g.r11, g.r15)!)
+	r.place('f_sub_not_one')
+	r.op(r.t.move_register64(g.rcx, g.r11)!)
+	r.op(r.t.move_register64(g.r15, g.r8)!)
+	r.op(r.t.shift_left_word(g.r15, 31)!)
+	r.op(r.t.or_word(g.rcx, g.r15)!)
+	r.op(r.t.move_register64(g.rax, g.rcx)!)
+	r.place('f_finish')
+	r.op(r.t.pop_register(g.r15))
+	r.op(r.t.pop_register(g.r14))
+	r.op(r.t.pop_register(g.r13))
+	r.op(r.t.pop_register(g.r12))
+	r.op(r.t.pop_register(g.rbx))
+	r.op(r.t.ret())
 }
