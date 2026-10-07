@@ -28,6 +28,14 @@ import decimal
 // from rbp, which the routine sets to the base of the frame on entry. The
 // buffers are sized for the widest format: a 34-digit product of 34-digit
 // coefficients, and a remainder that never outgrows its divisor.
+//
+// A coefficient's digits run downward from its buffer's end (the address the
+// to_digits walk passes is the byte just above the string), and the product runs
+// upward from md_bufq, so each buffer's end leaves the one before it room for the
+// widest string that reaches there. The dividend's 34-digit coefficient is the
+// one that makes the gap below md_bufa matter: the division loop reads those
+// digits while md_i and md_count are live, so md_bufa has to clear md_count by
+// the full 34 digits rather than by the 16 a decimal64 coefficient needs.
 const md_dest = 0
 const md_signa = 8
 const md_expb = 16
@@ -48,10 +56,10 @@ const md_lenr = 128
 const md_ptrr = 136
 const md_i = 144
 const md_count = 152
-const md_bufa = 176
-const md_bufb = 224
-const md_bufq = 272
-const md_bufr = 368
+const md_bufa = 200
+const md_bufb = 248
+const md_bufq = 296
+const md_bufr = 400
 const md_accs = 560
 const md_frame = 896
 
