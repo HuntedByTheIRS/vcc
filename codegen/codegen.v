@@ -131,6 +131,13 @@ struct Slot {
 	// no register this back end computes in, so the value lives in memory and
 	// the name of such a slot is the address of it.
 	long_double bool
+	// decimal is set for a slot holding one of the decimal floating types, which
+	// is an object and not a value of a register this back end computes in: the
+	// name of such a slot is the address of it, a constant is stored in it as
+	// the bytes the decimal module encodes, and its only conversion is to a
+	// double, which is a routine. width is the format's size, four, eight or
+	// sixteen bytes.
+	decimal bool
 	// complex is set for a slot holding an object of a complex type: two
 	// components of the same real type, stored one after the other, which is the
 	// layout the model measured and the one gcc hands over. Such a slot is an
@@ -557,6 +564,11 @@ mut:
 	// than restarting at each function, because every label of every function
 	// lives in the same table.
 	next_label int
+	// decimal_used names the conversion routines a unit has called for. The
+	// routines are emitted after the functions, so a call site records which
+	// format it used here and only those are written; a unit with no decimal
+	// value carries none of them.
+	decimal_used map[string]bool
 }
 
 // A frame is a multiple of sixteen so that every call made from the body starts
@@ -794,6 +806,7 @@ fn (mut e Emitter) build() ![]u8 {
 		e.emit_start()!
 		return []u8{}
 	}
+	e.decimal_used = map[string]bool{}
 	// The libraries the image will name are settled before a byte is written.
 	// A -l name with no file behind it is an error a link makes, and the
 	// alternative is worse than an error: a program that compiles and then
@@ -984,6 +997,11 @@ fn (mut e Emitter) build() ![]u8 {
 	// definition in the order it was written, which is what keeps the storage at
 	// the same offsets and the object at the same bytes every run.
 	e.place_defined_objects()
+	// The routines a decimal conversion runs are written behind the functions,
+	// and only the formats a call site named are written. A unit with no decimal
+	// conversion carries none of them, which is why they are emitted from here
+	// rather than made part of every image.
+	e.emit_decimal_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -2287,6 +2305,13 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		// copied if it is a long double, and converted by the machine's x87 moves
 		// if it is a double, a float or an integer.
 		return e.store_long_double(slot, init, stmt.line, stmt.col, 0)
+	}
+	if slot.decimal && slot.count == 0 {
+		// An object of a decimal type declared with a value: the object is
+		// storage and the value is the bytes the encoding gives it, so the
+		// constant is stored rather than computed. Anything but a constant of
+		// the object's own width is refused by name inside.
+		return e.store_decimal(slot, init, stmt.line, stmt.col)
 	}
 	if slot.complex {
 		// A complex object is written by the conversion its type names rather
@@ -4330,6 +4355,12 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 	// sixteen bytes, the format's own size, and a slot whose name is the address
 	// of the object for the same reason a 128-bit one is.
 	long_double := bytes == 0 && e.writes_a_long_double(written)
+	// A decimal floating type is the third object sized by its own layout rather
+	// than by a value: four, eight or sixteen bytes, and a slot whose name is the
+	// address of the object, because there is no register here a decimal value is
+	// computed in. Its width comes from the format's size, the same number the
+	// model gives a constant of the type.
+	decimal := bytes == 0 && written.contains('_Decimal') && e.decimal_format_of(written) != none
 	// An object of an aggregate type is sized by the layout the reader worked
 	// out rather than by its spelling: `struct S` is a name the back end has no
 	// width for, and the members are what say how many bytes the object is.
@@ -4353,6 +4384,8 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 		wide_bytes
 	} else if long_double {
 		long_double_bytes
+	} else if decimal {
+		(e.decimal_format_of(written) or { return error('decimal width') }).bytes()
 	} else {
 		e.type_width(written) or {
 			e.diagnostics << problem(line, col, 'unsupported: ${name} is declared ${written}, and this back end stores ints, chars, floats, doubles and pointers only')
@@ -4371,6 +4404,7 @@ fn (mut e Emitter) declare(name string, written string, count int, bytes int, st
 		bytes:       if wide { wide_bytes } else { bytes }
 		wide:        wide
 		long_double: long_double
+		decimal:     decimal
 		offset:      slot.offset
 		width:       width
 		count:       count
@@ -6129,6 +6163,16 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				// everywhere in this back end.
 				return e.leave_address(slot, expr.line, expr.col)
 			}
+			if slot.decimal && slot.count == 0 {
+				// A decimal value is an object in memory with no register this
+				// back end computes in: it is stored, addressed, and converted
+				// to a double, and reading its name as a value would have to
+				// answer with one. The refusal names what the object is good
+				// for rather than handing back an address as though it were the
+				// value.
+				e.diagnostics << problem(expr.line, expr.col, 'unsupported: ${expr.name} is declared ${expr.typ.describe()}, and this back end stores a decimal constant in an object, takes its address and converts it to double, but has no decimal value to read here')
+				return error('decimal value')
+			}
 			if slot.wide {
 				// A 128-bit object is stored, copied and addressed, and it is
 				// not a value this back end has: reading the name would have to
@@ -7290,6 +7334,18 @@ fn (mut e Emitter) emit_cast(cast ast.Cast, depth int) !void {
 	if message := types.function_void_pointer_problem(cast.typ, cast.expr.typ) {
 		e.diagnostics << pedantic(cast.line, cast.col, message)
 		return e.emit_expr_at(cast.expr, depth + 1)
+	}
+	if e.decimal_of(cast.expr) {
+		// A decimal value converts to a double and to nothing else here: the
+		// routine reads the object where it lives, and there is no value of the
+		// format this back end holds to convert from. The conversion is written
+		// whether or not the value is a constant, because a decimal object's
+		// value is the bytes it holds and not a number the reader folded.
+		if target.kind == .double {
+			return e.emit_decimal_to_double(cast.expr, cast.line, cast.col, depth)
+		}
+		e.diagnostics << problem(cast.line, cast.col, 'unsupported: a conversion from ${cast.expr.typ.describe()} to ${cast.spelling} is not one this back end makes, and only a conversion to double is implemented')
+		return error('decimal conversion')
 	}
 	if target.kind.is_extended() {
 		// A conversion to the extended type: a source of the same type is the
