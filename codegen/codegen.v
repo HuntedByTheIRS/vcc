@@ -1002,6 +1002,9 @@ fn (mut e Emitter) build() ![]u8 {
 	// conversion carries none of them, which is why they are emitted from here
 	// rather than made part of every image.
 	e.emit_decimal_routines()!
+	// The same for the multiplications and divisions a unit asked for at run
+	// time: only the formats and operators a call site named are written.
+	e.emit_decimal_muldiv_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
@@ -2307,10 +2310,13 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		return e.store_long_double(slot, init, stmt.line, stmt.col, 0)
 	}
 	if slot.decimal && slot.count == 0 {
-		// An object of a decimal type declared with a value: the object is
-		// storage and the value is the bytes the encoding gives it, so the
-		// constant is stored rather than computed. Anything but a constant of
-		// the object's own width is refused by name inside.
+		// An object of a decimal type declared with a value: a product is
+		// computed by a routine written for the format; anything else is the
+		// bytes the encoding gives a constant, which is stored rather than
+		// computed. Anything that is neither is refused by name inside.
+		if !slot.captured && e.decimal_muldiv_of(init) {
+			return e.emit_decimal_muldiv(slot, init, stmt.line, stmt.col, 0)
+		}
 		return e.store_decimal(slot, init, stmt.line, stmt.col)
 	}
 	if slot.complex {
@@ -2459,6 +2465,14 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		}
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: ${stmt.target} is assigned to, and no local of that name is in scope')
 		return error('unknown assignment target')
+	}
+	if target.decimal && target.count == 0 {
+		// A product of two decimal objects into a decimal object: the routine
+		// the format names computes it in place. A constant target is left to the
+		// store below.
+		if !target.captured && e.decimal_muldiv_of(expr) {
+			return e.emit_decimal_muldiv(target, expr, stmt.line, stmt.col, depth)
+		}
 	}
 	if target.long_double && target.count == 0 {
 		// The same store a declaration of the type makes: the target's address
