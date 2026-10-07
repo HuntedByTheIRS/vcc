@@ -132,7 +132,9 @@ fn test_a_run_time_muldiv_makes_the_bytes_gcc_makes() {
 // conversion this back end does not have, and the routine writes the width of
 // the format it was built for, so a narrower object would take bytes it does not
 // have. It has to be refused by name, the way the same value written as a
-// constant is, and not written past the end of the object.
+// constant is, and not written past the end of the object. decimal_step answers
+// the step .object whatever the destination's width, so the store's own width
+// check is the refusal that fires here.
 fn test_a_muldiv_of_another_width_is_refused_by_name() {
 	source := 'int main(void) {\n' +
 		'	volatile _Decimal128 a = 1.5dl;\n' +
@@ -143,7 +145,7 @@ fn test_a_muldiv_of_another_width_is_refused_by_name() {
 	emitted := emit(decimal_muldiv_translation_unit(source), Options{})
 	mut refused := false
 	for diagnostic in emitted.diagnostics {
-		if diagnostic.msg.contains('only a constant of that same width') {
+		if diagnostic.msg.contains('different decimal width') {
 			refused = true
 		}
 	}
