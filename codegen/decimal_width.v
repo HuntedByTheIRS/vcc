@@ -534,6 +534,13 @@ fn (mut e Emitter) store_decimal_value(slot Slot, expr ast.Expr, line int, col i
 			return false
 		}
 		if expr.expr.typ.kind.is_decimal() {
+			if expr.expr.typ.kind.decimal_format() == expr.typ.kind.decimal_format()
+				&& e.names_an_object(expr.expr) {
+				// A cast that names the width the value already has changes
+				// nothing, so the object is copied.
+				e.emit_decimal_copy(slot, expr.expr, line, col, 0)!
+				return true
+			}
 			e.emit_decimal_to_decimal(slot, expr, 0)!
 			return true
 		}
