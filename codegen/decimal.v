@@ -76,10 +76,18 @@ mut:
 	bytes  []u8
 	labels map[string]int
 	relocs []DecimalReloc
+	// pre is the prefix a routine's own labels carry. Several routines are built
+	// into one DecimalRoutine and share the label map, and every routine names
+	// its internal labels the same way, so without a prefix the second routine's
+	// `zero`, `round` and `done` would overwrite the first's and the first
+	// routine would jump into the second.
+	pre string
 }
 
 // DecimalRegisters is the registers the routine works in, taken from the target
-// once so the code below names them rather than looking them up.
+// once so the code below names them rather than looking them up. rbp and rsp are
+// here because an arithmetic routine holds its decimal digits in a frame of its
+// own, while the conversion routine needs neither.
 struct DecimalRegisters {
 	rax  backend.Register
 	rbx  backend.Register
@@ -87,6 +95,8 @@ struct DecimalRegisters {
 	rdx  backend.Register
 	rsi  backend.Register
 	rdi  backend.Register
+	rbp  backend.Register
+	rsp  backend.Register
 	r8   backend.Register
 	r9   backend.Register
 	r10  backend.Register
@@ -105,6 +115,8 @@ fn decimal_registers(t &backend.Target) ?DecimalRegisters {
 	rdx := t.reg('rdx') or { return none }
 	rsi := t.reg('rsi') or { return none }
 	rdi := t.reg('rdi') or { return none }
+	rbp := t.reg('rbp') or { return none }
+	rsp := t.reg('rsp') or { return none }
 	r8 := t.reg('r8') or { return none }
 	r9 := t.reg('r9') or { return none }
 	r10 := t.reg('r10') or { return none }
@@ -121,6 +133,8 @@ fn decimal_registers(t &backend.Target) ?DecimalRegisters {
 		rdx:  rdx
 		rsi:  rsi
 		rdi:  rdi
+		rbp:  rbp
+		rsp:  rsp
 		r8:   r8
 		r9:   r9
 		r10:  r10
@@ -141,6 +155,12 @@ fn (mut r DecimalRoutine) op(bytes []u8) {
 }
 
 fn (mut r DecimalRoutine) place(name string) {
+	r.labels[r.pre + name] = r.bytes.len
+}
+
+// entry places a label that is the routine's own name in the image, which a call
+// site reaches, so it is not prefixed.
+fn (mut r DecimalRoutine) entry(name string) {
 	r.labels[name] = r.bytes.len
 }
 
@@ -156,7 +176,7 @@ fn (mut r DecimalRoutine) jump(name string) {
 	r.op(r.t.jump(0))
 	r.relocs << DecimalReloc{
 		at:   r.bytes.len - 4
-		name: name
+		name: r.pre + name
 	}
 }
 
@@ -164,7 +184,7 @@ fn (mut r DecimalRoutine) branch(condition backend.Condition, name string) {
 	r.op(r.t.jump_condition(condition, 0))
 	r.relocs << DecimalReloc{
 		at:   r.bytes.len - 4
-		name: name
+		name: r.pre + name
 	}
 }
 
@@ -735,9 +755,90 @@ fn (mut e Emitter) store_decimal(slot Slot, expr ast.Expr, line int, col int) !v
 			return e.put_decimal_bytes(slot, bytes, line, col)
 		}
 	}
+	// A run-time sum or difference of two decimal objects, or a negation of one,
+	// is emitted as a call into a routine the emitter writes: the operands are
+	// read where they live and the result is written into the object. Anything
+	// else is refused by name below.
+	match expr {
+		ast.Binary {
+			if (expr.op == '+' || expr.op == '-') && e.decimal_of(expr.left)
+				&& e.decimal_of(expr.right) {
+				return e.store_decimal_arith(slot, expr, line, col)
+			}
+		}
+		ast.Unary {
+			if expr.op == '-' && e.decimal_of(expr.expr) {
+				return e.store_decimal_negate(slot, expr.expr, line, col)
+			}
+		}
+		else {}
+	}
 	name := expr.typ.describe()
 	e.diagnostics << problem(line, col, 'unsupported: an object of a decimal type is initialised here, and only a constant of that same width belongs in one; this back end has no form for a ${name} initialiser')
 	return error('decimal initialiser')
+}
+
+// address_of builds the address expression the emitter reads an object through.
+fn address_of(expr ast.Expr, line int, col int) ast.Unary {
+	return ast.Unary{
+		op:   '&'
+		expr: expr
+		typ:  expr.typ
+		line: line
+		col:  col
+	}
+}
+
+// store_decimal_arith writes a run-time sum or difference of two decimal objects.
+// The operands are read where they live, so each has to be an object, and the
+// routine is called with the destination in rdi and the two operands in rsi and
+// rdx. The operand addresses are pushed while the second one is computed, then
+// read back into the argument registers.
+fn (mut e Emitter) store_decimal_arith(slot Slot, binary ast.Binary, line int, col int) !void {
+	if !e.names_an_object(binary.left) || !e.names_an_object(binary.right) {
+		e.diagnostics << problem(line, col, 'unsupported: a ${binary.typ.describe()} is added here from a value that is not an object, and the routine reads each operand where it lives')
+		return error('decimal operand')
+	}
+	registers := decimal_registers(e.target) or {
+		e.diagnostics << problem(line, col, 'internal: the target has no register a decimal operation needs')
+		return error('decimal registers')
+	}
+	format := binary.typ.kind.decimal_format()
+	name := decimal_arith_name(format, binary.op == '-')
+	e.decimal_used[name] = true
+	base := e.slot_base_register(slot, line, col)!
+	accum := e.accumulator(line, col)!
+	e.emit_address(address_of(binary.left, line, col), 1)!
+	e.append(e.target.push_register(accum))
+	e.emit_address(address_of(binary.right, line, col), 1)!
+	e.append(e.target.push_register(accum))
+	e.append(e.target.address_of_slot(base, i32(slot.offset), registers.rdi))
+	e.append(e.target.pop_register(registers.rdx))
+	e.append(e.target.pop_register(registers.rsi))
+	e.reference(e.target.call_near(0), .call_local, name, '')
+}
+
+// store_decimal_negate writes the negation of a decimal object. gcc compiles
+// `-a` to a sign flip on the stored word, which is what the routine does.
+fn (mut e Emitter) store_decimal_negate(slot Slot, operand ast.Expr, line int, col int) !void {
+	if !e.names_an_object(operand) {
+		e.diagnostics << problem(line, col, 'unsupported: a ${operand.typ.describe()} is negated here, and the routine reads its operand where it lives')
+		return error('decimal operand')
+	}
+	registers := decimal_registers(e.target) or {
+		e.diagnostics << problem(line, col, 'internal: the target has no register a decimal operation needs')
+		return error('decimal registers')
+	}
+	format := operand.typ.kind.decimal_format()
+	name := decimal_arith_negate_name(format)
+	e.decimal_used[name] = true
+	base := e.slot_base_register(slot, line, col)!
+	accum := e.accumulator(line, col)!
+	e.emit_address(address_of(operand, line, col), 1)!
+	e.append(e.target.push_register(accum))
+	e.append(e.target.address_of_slot(base, i32(slot.offset), registers.rdi))
+	e.append(e.target.pop_register(registers.rsi))
+	e.reference(e.target.call_near(0), .call_local, name, '')
 }
 
 // put_decimal_bytes writes the encoded bytes into the object, a word at a time,

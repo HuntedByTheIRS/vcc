@@ -1002,6 +1002,10 @@ fn (mut e Emitter) build() ![]u8 {
 	// conversion carries none of them, which is why they are emitted from here
 	// rather than made part of every image.
 	e.emit_decimal_routines()!
+	// The routines a run-time decimal addition, subtraction or negation runs are
+	// written the same way, and only for the formats and operators a call site
+	// named.
+	e.emit_decimal_arith_routines()!
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link
