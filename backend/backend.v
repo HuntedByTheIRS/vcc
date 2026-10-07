@@ -358,6 +358,13 @@ pub fn (t &Target) call_near(disp i32) []u8 {
 	return t.encoders.call_rel32(disp)
 }
 
+// ret is the return from a subroutine, the address the matching call pushed. A
+// routine the emitter writes for itself, with no frame of its own, leaves through
+// it; the functions the emitter builds leave through their frame's epilogue.
+pub fn (t &Target) ret() []u8 {
+	return t.encoders.ret()
+}
+
 // call_slot is a call to the address a quadword holds, found through a
 // displacement from the instruction. A dynamically linked program reaches the
 // library's functions this way, because the library's address is not known until
@@ -548,6 +555,14 @@ pub fn (t &Target) remainder() ?Register {
 // convention says they are.
 pub fn (t &Target) push_register(reg Register) []u8 {
 	return t.encoders.push_register(t.describe(reg))
+}
+
+// pop_register is push_register's other half: it takes a word off the stack into a
+// register. A routine keeps a callee-saved register it works in by pushing it on
+// entry and popping it before it returns, and the emitter's own frames only ever
+// push, so this is the encoder those routines need.
+pub fn (t &Target) pop_register(reg Register) []u8 {
+	return t.encoders.pop_register(t.describe(reg))
 }
 
 pub fn (t &Target) stack_release(size u32) []u8 {
@@ -932,6 +947,14 @@ pub fn (t &Target) move_register64(dst Register, src Register) ![]u8 {
 	return t.encoders.mov_reg64(t.describe(dst), t.describe(src))
 }
 
+// move_word_to_double copies a general register's bits into a floating-point one
+// without converting between the two kinds of value, which is how a routine that
+// computes a double's bits as an integer hands them back. The machine has the
+// move as the same movq the sign flip of a double uses, written the other way.
+pub fn (t &Target) move_word_to_double(dst Register, src Register) ![]u8 {
+	return t.encoders.move_word_to_double(t.describe(dst), t.describe(src))
+}
+
 // condition_of is the order an operator names as the machine's condition, and the
 // one place the two translations between an operator and an instruction's test
 // meet: a comparison and a branch both ask it.
@@ -1268,6 +1291,15 @@ pub fn (t &Target) jump_if_zero(disp i32) []u8 {
 
 pub fn (t &Target) jump_if_not_zero(disp i32) []u8 {
 	return t.encoders.jump_nonzero_rel32(disp)
+}
+
+// jump_condition is the conditional jump for any of the machine's conditions,
+// where jump_if_zero and jump_if_not_zero name only the two a truth test reads.
+// The decimal conversion routines branch on a sign, on an unsigned order and on
+// a comparison with a constant, so they need the whole set; the displacement is
+// the caller's, and a caller that does not know it yet fills the four bytes in.
+pub fn (t &Target) jump_condition(condition Condition, disp i32) []u8 {
+	return t.encoders.jump_condition(condition, disp)
 }
 
 // The instructions a value two words wide needs. Such a value lives in the pair the
