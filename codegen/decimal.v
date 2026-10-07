@@ -758,22 +758,19 @@ enum DecimalStep {
 // decimal_step is the one place that answers whether an implemented decimal
 // routine covers a step, and of which shape. The run-time addition and
 // subtraction answer .object here, and a negation whose operand is an object
-// with them, because the routine reads each operand where it lives. Negation of
-// anything else - a constant, or another step - is not an object routine: it is
-// a sign flip the value path writes for every operand shape, so it is reached
-// there and not here. A comparison of two decimals answers .value: the routine
-// orders the two objects and leaves its order code in the accumulator, which the
-// call site turns into one of the six operators. A comparison whose operands are
-// not both decimals is not a step this back end has, and is left uncovered so it
-// stays refused. A lane that adds a routine adds its step to this one function
-// and its emitter beside the others, so the step is reached instead of meeting a
-// refusal written for a tree with no routine at all: the multiply and divide lane
-// will answer .object here.
+// with them, because the routine reads each operand where it lives. A product or
+// a quotient of two decimals is the object routine the multiplication and
+// division lane added, so it answers .object here too and is reached by the same
+// store. A comparison of two decimals answers .value: the routine orders the two
+// objects and leaves its order code in the accumulator, which the call site turns
+// into one of the six operators. A comparison whose operands are not both
+// decimals is not a step this back end has, and is left uncovered so it stays
+// refused.
 fn (e Emitter) decimal_step(expr ast.Expr) DecimalStep {
 	match expr {
 		ast.Binary {
 			if e.decimal_of(expr.left) && e.decimal_of(expr.right) {
-				if expr.op == '+' || expr.op == '-' {
+				if expr.op in ['+', '-', '*', '/'] {
 					return .object
 				}
 				if expr.op in ['==', '!=', '<', '>', '<=', '>='] {
@@ -812,6 +809,9 @@ fn (mut e Emitter) store_decimal(slot Slot, expr ast.Expr, line int, col int, de
 		}
 		match expr {
 			ast.Binary {
+				if expr.op == '*' || expr.op == '/' {
+					return e.store_decimal_muldiv(slot, expr, line, col, depth)
+				}
 				return e.store_decimal_arith(slot, expr, line, col, depth)
 			}
 			ast.Unary {
@@ -836,6 +836,9 @@ fn (mut e Emitter) store_decimal_through_object(address Slot, expr ast.Expr, wid
 		}
 		match expr {
 			ast.Binary {
+				if expr.op == '*' || expr.op == '/' {
+					return e.store_decimal_muldiv_at(address, expr, line, col, depth)
+				}
 				return e.store_decimal_arith_at(address, expr, line, col, depth)
 			}
 			ast.Unary {

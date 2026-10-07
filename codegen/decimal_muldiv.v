@@ -128,37 +128,18 @@ fn decimal_muldiv_name(format decimal.Format, divide bool) string {
 	return 'vcc_decimal_${op}_${format.bytes()}'
 }
 
-// decimal_muldiv_of says whether an expression is a decimal multiply or divide
-// whose two operands and its result are all of the destination's format, and
-// whose operands are objects this back end can take the address of, and whose
-// operands and result are plain locals. Anything else is refused by name where
-// the initialiser is stored: a product or quotient of another width is a
-// conversion this back end does not have, and the routine writes the width of
-// its own format, so a narrower destination would take bytes it does not have.
-fn (e Emitter) decimal_muldiv_of(expr ast.Expr, width int) bool {
-	if expr is ast.Binary {
-		if expr.op != '*' && expr.op != '/' {
-			return false
-		}
-		if !expr.typ.kind.is_decimal() {
-			return false
-		}
-		format := expr.typ.kind.decimal_format()
-		if format.bytes() != width {
-			return false
-		}
-		if !e.names_an_object(expr.left) || !e.names_an_object(expr.right) {
-			return false
-		}
-		if !expr.left.typ.kind.is_decimal() || !expr.right.typ.kind.is_decimal() {
-			return false
-		}
-		if expr.left.typ.kind.decimal_format() != format || expr.right.typ.kind.decimal_format() != format {
-			return false
-		}
-		return e.decimal_operand_reachable(expr.left) && e.decimal_operand_reachable(expr.right)
-	}
-	return false
+// store_decimal_muldiv writes a run-time product or quotient of two decimal
+// objects into a frame slot. The operand addresses are computed one level below
+// the destination, which is not a value slot, so nothing collides with it.
+fn (mut e Emitter) store_decimal_muldiv(slot Slot, binary ast.Binary, line int, col int, depth int) !void {
+	return e.emit_decimal_muldiv(slot, none, binary, line, col, depth)
+}
+
+// store_decimal_muldiv_at writes the same product or quotient through an address
+// the caller parked at depth. The operand addresses are computed one level
+// deeper, so they cannot reuse the slot the parked address lives in.
+fn (mut e Emitter) store_decimal_muldiv_at(address Slot, binary ast.Binary, line int, col int, depth int) !void {
+	return e.emit_decimal_muldiv(Slot{}, address, binary, line, col, depth)
 }
 
 // decimal_operand_reachable says whether an operand's address can be worked out
@@ -174,19 +155,39 @@ fn (e Emitter) decimal_operand_reachable(expr ast.Expr) bool {
 	return true
 }
 
-// emit_decimal_muldiv writes a product or a quotient at run time. The expression
-// is a multiply or a divide of two decimal objects; the routine the format and
-// the operator name takes the destination's address in rdi and the two operands'
-// addresses in rsi and rdx, and writes the result into the destination, leaving
-// its address in the accumulator the way a value of the expression would.
-fn (mut e Emitter) emit_decimal_muldiv(slot Slot, expr ast.Expr, line int, col int, depth int) !void {
-	binary := expr as ast.Binary
-	format := expr.typ.kind.decimal_format()
+// emit_decimal_muldiv writes a product or a quotient at run time. The routine the
+// format and the operator name takes the destination's address in rdi and the two
+// operands' addresses in rsi and rdx, and writes the result into the destination,
+// leaving its address in the accumulator the way a value of the expression would.
+// The routine reads each operand where it lives and writes the width of its own
+// format, so both operands have to be objects of the result's own format, and
+// reachable without a static chain, which the parked addresses cannot survive.
+// Anything else is refused by name here rather than emitted as bytes that are not
+// gcc's: a product of another decimal width is a conversion this back end does not
+// have, and the routine would read the wrong number of bytes for it.
+fn (mut e Emitter) emit_decimal_muldiv(frame Slot, through ?Slot, binary ast.Binary, line int, col int, depth int) !void {
+	format := binary.typ.kind.decimal_format()
+	if !e.names_an_object(binary.left) || !e.names_an_object(binary.right) {
+		e.diagnostics << problem(line, col, 'unsupported: a ${binary.typ.describe()} is computed here from a value that is not an object, and the routine reads each operand where it lives')
+		return error('decimal operand')
+	}
+	if binary.left.typ.kind.decimal_format() != format
+		|| binary.right.typ.kind.decimal_format() != format {
+		e.diagnostics << problem(line, col, 'unsupported: a ${binary.typ.describe()} is computed here from an operand of another decimal width, and this back end has no conversion between the decimal widths')
+		return error('decimal operand width')
+	}
+	if !e.decimal_operand_reachable(binary.left) || !e.decimal_operand_reachable(binary.right) {
+		e.diagnostics << problem(line, col, 'unsupported: a ${binary.typ.describe()} is computed here from an operand an enclosing function owns, and the parked addresses the routine reads cannot reach it')
+		return error('decimal operand capture')
+	}
 	divide := binary.op == '/'
 	name := decimal_muldiv_name(format, divide)
 	e.decimal_used[name] = true
-	// The left operand's address waits in a value slot while the right is
-	// reached, since reaching the right can use the registers.
+	// The left operand's address is pushed while the right is reached, since
+	// reaching the right can use the registers, and the destination is worked
+	// out last: a parked destination address lives in a slot, and computing the
+	// operand addresses over a slot the caller parked would overwrite it.
+	accumulator := e.accumulator(line, col)!
 	e.emit_address(ast.Unary{
 		op:   '&'
 		expr: binary.left
@@ -194,8 +195,7 @@ fn (mut e Emitter) emit_decimal_muldiv(slot Slot, expr ast.Expr, line int, col i
 		line: line
 		col:  col
 	}, depth + 1)!
-	parked := e.value_slot(depth)
-	e.store_accumulator(parked, line, col)!
+	e.append(e.target.push_register(accumulator))
 	e.emit_address(ast.Unary{
 		op:   '&'
 		expr: binary.right
@@ -203,24 +203,22 @@ fn (mut e Emitter) emit_decimal_muldiv(slot Slot, expr ast.Expr, line int, col i
 		line: line
 		col:  col
 	}, depth + 1)!
-	accumulator := e.accumulator(line, col)!
+	e.append(e.target.push_register(accumulator))
 	right := e.target.reg('rdx') or {
 		e.diagnostics << problem(line, col, 'internal: no register named rdx for a decimal operation')
 		return error('no rdx')
 	}
-	e.append(e.target.move_register64(right, accumulator)!)
-	e.load_accumulator(parked, line, col)!
 	left := e.target.reg('rsi') or {
 		e.diagnostics << problem(line, col, 'internal: no register named rsi for a decimal operation')
 		return error('no rsi')
 	}
-	e.append(e.target.move_register64(left, accumulator)!)
 	dest := e.target.reg('rdi') or {
 		e.diagnostics << problem(line, col, 'internal: no register named rdi for a decimal operation')
 		return error('no rdi')
 	}
-	base := e.slot_base_register(slot, line, col)!
-	e.append(e.target.address_of_slot(base, slot.offset, dest))
+	e.decimal_destination(frame, through, dest, line, col)!
+	e.append(e.target.pop_register(right))
+	e.append(e.target.pop_register(left))
 	e.reference(e.target.call_near(0), .call_local, name, '')
 	e.append(e.target.move_register64(accumulator, dest)!)
 }

@@ -2448,10 +2448,8 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		// negation is written by the arithmetic routine, a product or a
 		// quotient by the multiplication and division routine, and a value of
 		// the same decimal type is read into the floating accumulator and
-		// stored. Anything else is refused by name inside.
-		if !slot.captured && e.decimal_muldiv_of(init, slot.width) {
-			return e.emit_decimal_muldiv(slot, init, stmt.line, stmt.col, 0)
-		}
+		// stored. store_decimal asks decimal_step which of them the value is,
+		// and refuses by name what no routine covers.
 		return e.store_decimal(slot, init, stmt.line, stmt.col, 0)
 	}
 	if slot.complex {
@@ -2602,17 +2600,13 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		return error('unknown assignment target')
 	}
 	if target.decimal && target.count == 0 {
-		// A product or a quotient of two decimal objects into a decimal object:
-		// the routine the format and the operator name computes it in place. A
-		// constant target is left to the store below.
-		if !target.captured && e.decimal_muldiv_of(expr, target.width) {
-			return e.emit_decimal_muldiv(target, expr, stmt.line, stmt.col, depth)
-		}
 		// The same store a declaration of a decimal type makes: a constant of
-		// the object's width, a sum, a difference or a negation the arithmetic
-		// routines cover, or a value of the same decimal type. A compound
-		// spelling is expanded to `r = r + a` where it is read, so `r += a` is
-		// the sum below and not a second implementation.
+		// the object's width, a sum, a difference, a product or a quotient the
+		// arithmetic or the multiplication and division routine cover, or a
+		// value of the same decimal type. store_decimal asks decimal_step which
+		// of them the value is. A compound spelling is expanded to `r = r + a`
+		// where it is read, so `r += a` is the sum below and not a second
+		// implementation.
 		return e.store_decimal(target, expr, stmt.line, stmt.col, depth)
 	}
 	if target.long_double && target.count == 0 {
