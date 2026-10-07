@@ -2310,10 +2310,11 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 		return e.store_long_double(slot, init, stmt.line, stmt.col, 0)
 	}
 	if slot.decimal && slot.count == 0 {
-		// An object of a decimal type declared with a value: a product is
-		// computed by a routine written for the format; anything else is the
-		// bytes the encoding gives a constant, which is stored rather than
-		// computed. Anything that is neither is refused by name inside.
+		// An object of a decimal type declared with a value: a product or a
+		// quotient of two decimal objects is computed by a routine written for
+		// the format and the operator; anything else is the bytes the encoding
+		// gives a constant, which is stored rather than computed. Anything that
+		// is neither is refused by name inside.
 		if !slot.captured && e.decimal_muldiv_of(init) {
 			return e.emit_decimal_muldiv(slot, init, stmt.line, stmt.col, 0)
 		}
@@ -2467,9 +2468,9 @@ fn (mut e Emitter) emit_assign(stmt ast.Stmt, depth int) !void {
 		return error('unknown assignment target')
 	}
 	if target.decimal && target.count == 0 {
-		// A product of two decimal objects into a decimal object: the routine
-		// the format names computes it in place. A constant target is left to the
-		// store below.
+		// A product or a quotient of two decimal objects into a decimal object:
+		// the routine the format and the operator name computes it in place. A
+		// constant target is left to the store below.
 		if !target.captured && e.decimal_muldiv_of(expr) {
 			return e.emit_decimal_muldiv(target, expr, stmt.line, stmt.col, depth)
 		}

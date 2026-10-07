@@ -1,29 +1,30 @@
-// Run-time multiplication of the decimal floating types.
+// Run-time multiplication and division of the decimal floating types.
 //
 // The reader and the type model carry `_Decimal32`, `_Decimal64` and
-// `_Decimal128` as far as the value of a constant. A program that multiplies two
-// of them at run time needs a routine the emitter writes, the way a conversion
-// does, because no register holds a decimal value: the operands are objects in
-// memory and the result is written into an object.
+// `_Decimal128` as far as the value of a constant. A program that multiplies or
+// divides two of them at run time needs a routine the emitter writes, the way a
+// conversion does, because no register holds a decimal value: the operands are
+// objects in memory and the result is written into an object.
 //
-// The algorithm here is the one decimal/decimal.v's mul describes, measured
-// against gcc 16.2.1 byte for byte: the exponents add, the coefficient is carried
-// as decimal digits, and the rounding is round half to even with a sticky bit for
-// everything shifted out. gcc reaches libgcc's __bid_* routines for the same
-// operation, and its bytes are the specification this follows.
+// The algorithms here are the ones decimal/decimal.v's mul and div describe,
+// measured against gcc 16.2.1 byte for byte: the exponents add for a product and
+// subtract for a quotient, the coefficient is carried as decimal digits, and the
+// rounding is round half to even with a sticky bit for everything shifted out.
+// gcc reaches libgcc's __bid_* routines for the same operation, and its bytes
+// are the specification this follows.
 //
 // A routine takes the destination's address in rdi and the two operands'
 // addresses in rsi and rdx, and writes the result into the destination. The
 // formats differ in their field widths and in nothing else of consequence, so
-// each format gets a routine of its own assembled from the same pieces here, with
-// the format's constants inlined.
+// each format and operator gets a routine of its own assembled from the same
+// pieces here, with the format's constants inlined.
 module codegen
 
 import backend
 import ast
 import decimal
 
-// The scratch frame one multiplication routine opens. Everything below is an offset
+// The scratch frame one mul/div routine opens. Everything below is an offset
 // from rbp, which the routine sets to the base of the frame on entry. The
 // buffers are sized for the widest format: a 34-digit product of 34-digit
 // coefficients, and a remainder that never outgrows its divisor.
@@ -114,17 +115,18 @@ fn muldiv_format(format decimal.Format) MulDivFormat {
 }
 
 // decimal_muldiv_name is the label one format and operator enters.
-fn decimal_muldiv_name(format decimal.Format) string {
-	return 'vcc_decimal_mul_${format.bytes()}'
+fn decimal_muldiv_name(format decimal.Format, divide bool) string {
+	op := if divide { 'div' } else { 'mul' }
+	return 'vcc_decimal_${op}_${format.bytes()}'
 }
 
-// decimal_muldiv_of says whether an expression is a decimal multiply
+// decimal_muldiv_of says whether an expression is a decimal multiply or divide
 // whose two operands are objects this back end can take the address of, and
 // whose operands and result are plain locals. Anything else is refused by name
 // where the initialiser is stored.
 fn (e Emitter) decimal_muldiv_of(expr ast.Expr) bool {
 	if expr is ast.Binary {
-		if expr.op != '*' {
+		if expr.op != '*' && expr.op != '/' {
 			return false
 		}
 		if !expr.typ.kind.is_decimal() {
@@ -154,15 +156,16 @@ fn (e Emitter) decimal_operand_reachable(expr ast.Expr) bool {
 	return true
 }
 
-// emit_decimal_muldiv writes a product at run time. The expression is a
-// multiply of two decimal objects; the routine the format and
+// emit_decimal_muldiv writes a product or a quotient at run time. The expression
+// is a multiply or a divide of two decimal objects; the routine the format and
 // the operator name takes the destination's address in rdi and the two operands'
 // addresses in rsi and rdx, and writes the result into the destination, leaving
 // its address in the accumulator the way a value of the expression would.
 fn (mut e Emitter) emit_decimal_muldiv(slot Slot, expr ast.Expr, line int, col int, depth int) !void {
 	binary := expr as ast.Binary
 	format := expr.typ.kind.decimal_format()
-	name := decimal_muldiv_name(format)
+	divide := binary.op == '/'
+	name := decimal_muldiv_name(format, divide)
 	e.decimal_used[name] = true
 	// The left operand's address waits in a value slot while the right is
 	// reached, since reaching the right can use the registers.
@@ -207,15 +210,17 @@ fn (mut e Emitter) emit_decimal_muldiv(slot Slot, expr ast.Expr, line int, col i
 // emit_decimal_muldiv_routines writes the routines a unit used, and no others.
 fn (mut e Emitter) emit_decimal_muldiv_routines() !void {
 	for format in [decimal.Format.decimal32, decimal.Format.decimal64, decimal.Format.decimal128] {
-		name := decimal_muldiv_name(format)
-		if name in e.decimal_used {
-			e.emit_decimal_muldiv_routine(format)!
+		for divide in [false, true] {
+			name := decimal_muldiv_name(format, divide)
+			if name in e.decimal_used {
+				e.emit_decimal_muldiv_routine(format, divide)!
+			}
 		}
 	}
 }
 
 // emit_decimal_muldiv_routine assembles and appends one operation's routine.
-fn (mut e Emitter) emit_decimal_muldiv_routine(format decimal.Format) !void {
+fn (mut e Emitter) emit_decimal_muldiv_routine(format decimal.Format, divide bool) !void {
 	f := muldiv_format(format)
 	registers := decimal_registers(e.target) or {
 		e.diagnostics << problem(1, 1, 'internal: the target has no register a decimal operation needs')
@@ -235,7 +240,7 @@ fn (mut e Emitter) emit_decimal_muldiv_routine(format decimal.Format) !void {
 		e.diagnostics << problem(1, 1, 'internal: no register named rsp for the decimal operation frame')
 		return error('no rsp')
 	}
-	name := decimal_muldiv_name(format)
+	name := decimal_muldiv_name(format, divide)
 	r.place(name)
 	// The frame: the callee-saved registers the routine works in, and the
 	// scratch below them.
@@ -269,9 +274,13 @@ fn (mut e Emitter) emit_decimal_muldiv_routine(format decimal.Format) !void {
 	muldiv_to_digits(mut r, f, g, md_lenb, md_ptrb, md_bufb, 'tb')!
 	// A special operand decides the whole result: no coefficient arithmetic is
 	// right for it, and the answers are the specification's own.
-	muldiv_specials(mut r, f, 'sp_skip')!
-	muldiv_multiply(mut r, g)!
-	muldiv_combine_exponents(mut r, g)!
+	muldiv_specials(mut r, f, divide, 'sp_skip')!
+	if divide {
+		muldiv_divide(mut r, g, f)!
+	} else {
+		muldiv_multiply(mut r, g)!
+		muldiv_combine_exponents(mut r, g)!
+	}
 	r.place('sp_skip')
 	// Round to the format's precision, ties to even, and put the result into the
 	// format's range.
@@ -631,8 +640,256 @@ fn muldiv_multiply(mut r DecimalRoutine, g DecimalRegisters) !void {
 	r.place('mp_end')
 }
 
+// muldiv_divide computes the quotient's digits by schoolbook long division. The
+// digits are produced the way decimal/decimal.v's div does, and the way gcc's
+// runtime does: the dividend's digits come down one at a time while the
+// quotient's integer part is formed, then zeros come down until the remainder is
+// used up or the quotient holds one digit more than the format keeps, and what
+// is left of the remainder is the sticky bit the rounding uses.
+fn muldiv_divide(mut r DecimalRoutine, g DecimalRegisters, f MulDivFormat) !void {
+	base := muldiv_base(r)!
+	// The quotient's sign is the exclusive or of the operands' signs.
+	r.op(r.t.load_slot(base, md_signa, g.rax, 8)!)
+	r.op(r.t.load_slot(base, md_signb, g.rcx, 8)!)
+	r.op(r.t.xor_word(g.rax, g.rcx)!)
+	r.op(r.t.store_slot(base, md_signa, g.rax, 8)!)
+	// A zero divisor is an infinity, or a NaN when the dividend is zero too.
+	r.op(r.t.load_slot(base, md_lenb, g.rax, 8)!)
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.not_equal, 'dv_nz')
+	r.op(r.t.move_immediate64(g.rax, 1)!)
+	r.op(r.t.load_slot(base, md_lena, g.rcx, 8)!)
+	r.op(r.t.test_word(g.rcx)!)
+	r.branch(.not_equal, 'dv_mark')
+	r.op(r.t.move_immediate64(g.rax, 2)!)
+	r.place('dv_mark')
+	r.op(r.t.store_slot(base, md_special, g.rax, 8)!)
+	r.jump('dv_end')
+	r.place('dv_nz')
+	// A zero dividend is a zero whose exponent is the difference.
+	r.op(r.t.load_slot(base, md_lena, g.rax, 8)!)
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.not_equal, 'dv_go')
+	r.op(r.t.load_slot(base, md_expa, g.rax, 8)!)
+	r.op(r.t.load_slot(base, md_expb, g.rcx, 8)!)
+	r.op(r.t.subtract_word(g.rax, g.rcx)!)
+	r.op(r.t.store_slot(base, md_expa, g.rax, 8)!)
+	r.jump('dv_end')
+	r.place('dv_go')
+	// The quotient keeps no leading zeros, so its length counts its significant
+	// digits; the remainder starts empty and the zeros brought down are counted
+	// so their power of ten can come off the exponent.
+	r.op(r.t.move_register64(g.rdi, base)!)
+	r.op(r.t.add_immediate(g.rdi, md_bufq))
+	r.op(r.t.store_slot(base, md_ptrq, g.rdi, 8)!)
+	r.op(r.t.move_register64(g.rdi, base)!)
+	r.op(r.t.add_immediate(g.rdi, md_bufr))
+	r.op(r.t.store_slot(base, md_ptrr, g.rdi, 8)!)
+	r.op(r.t.xor_word(g.rax, g.rax)!)
+	r.op(r.t.store_slot(base, md_lenq, g.rax, 8)!)
+	r.op(r.t.store_slot(base, md_lenr, g.rax, 8)!)
+	r.op(r.t.store_slot(base, md_i, g.rax, 8)!)
+	r.op(r.t.store_slot(base, md_f, g.rax, 8)!)
+	// The integer part: the dividend's digits come down in turn.
+	r.place('dv_loop')
+	r.op(r.t.load_slot(base, md_i, g.rax, 8)!)
+	r.op(r.t.load_slot(base, md_lena, g.rcx, 8)!)
+	r.op(r.t.subtract_word(g.rcx, g.rax)!)
+	r.branch(.less_or_equal, 'dv_frac')
+	r.op(r.t.load_slot(base, md_ptra, g.rdx, 8)!)
+	r.op(r.t.add_reg64(g.rdx, g.rax))
+	r.op(r.t.load_indirect_unsigned(g.rdx, g.r11, 1)!)
+	muldiv_bring_down(mut r, g, g.r11, 'di')!
+	muldiv_quotient_digit(mut r, g, f, 'di')!
+	r.op(r.t.load_slot(base, md_i, g.rax, 8)!)
+	r.op(r.t.add_immediate(g.rax, 1))
+	r.op(r.t.store_slot(base, md_i, g.rax, 8)!)
+	r.jump('dv_loop')
+	// The fraction: a zero comes down until the remainder is used up or the
+	// quotient holds one digit more than the format keeps.
+	r.place('dv_frac')
+	r.place('dv_floop')
+	r.op(r.t.load_slot(base, md_lenr, g.rax, 8)!)
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.equal, 'dv_done')
+	r.op(r.t.load_slot(base, md_lenq, g.rax, 8)!)
+	r.op(r.t.add_immediate(g.rax, -(f.digits + 1)))
+	r.branch(.greater_or_equal, 'dv_done')
+	r.op(r.t.xor_word(g.r11, g.r11)!)
+	muldiv_bring_down(mut r, g, g.r11, 'df')!
+	muldiv_quotient_digit(mut r, g, f, 'df')!
+	r.op(r.t.load_slot(base, md_f, g.rax, 8)!)
+	r.op(r.t.add_immediate(g.rax, 1))
+	r.op(r.t.store_slot(base, md_f, g.rax, 8)!)
+	r.jump('dv_floop')
+	r.place('dv_done')
+	// What is left of the remainder is the sticky bit.
+	r.op(r.t.load_slot(base, md_lenr, g.rax, 8)!)
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.equal, 'dv_no_sticky')
+	r.op(r.t.move_immediate64(g.rax, 1)!)
+	r.jump('dv_sticky')
+	r.place('dv_no_sticky')
+	r.op(r.t.xor_word(g.rax, g.rax)!)
+	r.place('dv_sticky')
+	r.op(r.t.store_slot(base, md_sticky, g.rax, 8)!)
+	// The exponent is the difference less the zeros that came down.
+	r.op(r.t.load_slot(base, md_expa, g.rax, 8)!)
+	r.op(r.t.load_slot(base, md_expb, g.rcx, 8)!)
+	r.op(r.t.subtract_word(g.rax, g.rcx)!)
+	r.op(r.t.load_slot(base, md_f, g.rcx, 8)!)
+	r.op(r.t.subtract_word(g.rax, g.rcx)!)
+	r.op(r.t.store_slot(base, md_expa, g.rax, 8)!)
+	r.place('dv_end')
+}
+
+// muldiv_bring_down appends one digit to the remainder, the way a long division
+// brings the next digit of the dividend down: a zero onto an empty remainder is
+// nothing, since the remainder keeps no leading zero.
+fn muldiv_bring_down(mut r DecimalRoutine, g DecimalRegisters, digit backend.Register, tag string) !void {
+	base := muldiv_base(r)!
+	r.op(r.t.load_slot(base, md_lenr, g.rcx, 8)!)
+	r.op(r.t.test_word(g.rcx)!)
+	r.branch(.not_equal, '${tag}_br')
+	r.op(r.t.test_word(digit)!)
+	r.branch(.equal, '${tag}_brskip')
+	r.place('${tag}_br')
+	r.op(r.t.load_slot(base, md_ptrr, g.rdi, 8)!)
+	r.op(r.t.add_reg64(g.rdi, g.rcx))
+	r.op(r.t.store_indirect(g.rdi, digit, 1)!)
+	r.op(r.t.add_immediate(g.rcx, 1))
+	r.op(r.t.store_slot(base, md_lenr, g.rcx, 8)!)
+	r.place('${tag}_brskip')
+}
+
+// muldiv_quotient_digit subtracts the divisor from the remainder as often as it
+// goes, counts how often, and appends that count to the quotient as a digit.
+// The quotient keeps no leading zeros.
+fn muldiv_quotient_digit(mut r DecimalRoutine, g DecimalRegisters, f MulDivFormat, tag string) !void {
+	base := muldiv_base(r)!
+	r.op(r.t.xor_word(g.rax, g.rax)!)
+	r.op(r.t.store_slot(base, md_count, g.rax, 8)!)
+	r.place('${tag}_qd')
+	r.op(r.t.load_slot(base, md_count, g.rax, 8)!)
+	r.op(r.t.add_immediate(g.rax, -9))
+	r.branch(.greater_or_equal, '${tag}_qdone')
+	r.op(r.t.load_slot(base, md_lenr, g.rax, 8)!)
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.equal, '${tag}_qdone')
+	muldiv_remainder_ge(mut r, g, '${tag}qd')!
+	r.place('${tag}qd_ge_true')
+	r.op(r.t.load_slot(base, md_count, g.rax, 8)!)
+	r.op(r.t.add_immediate(g.rax, 1))
+	r.op(r.t.store_slot(base, md_count, g.rax, 8)!)
+	muldiv_subtract_divisor(mut r, g, '${tag}qd')!
+	r.jump('${tag}_qd')
+	r.place('${tag}qd_ge_false')
+	r.place('${tag}_qdone')
+	r.op(r.t.load_slot(base, md_count, g.rax, 8)!)
+	r.op(r.t.load_slot(base, md_lenq, g.rcx, 8)!)
+	r.op(r.t.test_word(g.rcx)!)
+	r.branch(.not_equal, '${tag}_qstore')
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.equal, '${tag}_qskip')
+	r.place('${tag}_qstore')
+	r.op(r.t.load_slot(base, md_ptrq, g.rdi, 8)!)
+	r.op(r.t.add_reg64(g.rdi, g.rcx))
+	r.op(r.t.store_indirect(g.rdi, g.rax, 1)!)
+	r.op(r.t.add_immediate(g.rcx, 1))
+	r.op(r.t.store_slot(base, md_lenq, g.rcx, 8)!)
+	r.place('${tag}_qskip')
+}
+
+// muldiv_remainder_ge leaves one in rax when the remainder is at least the
+// divisor, and zero otherwise. Both are stripped digit strings.
+fn muldiv_remainder_ge(mut r DecimalRoutine, g DecimalRegisters, tag string) !void {
+	base := muldiv_base(r)!
+	r.op(r.t.load_slot(base, md_lenr, g.rax, 8)!)
+	r.op(r.t.load_slot(base, md_lenb, g.rcx, 8)!)
+	r.op(r.t.move_register64(g.rdx, g.rax)!)
+	r.op(r.t.subtract_word(g.rdx, g.rcx)!)
+	r.branch(.greater, '${tag}_ge_true')
+	r.branch(.less, '${tag}_ge_false')
+	// Equal lengths: the digits decide.
+	r.op(r.t.load_slot(base, md_ptrr, g.rsi, 8)!)
+	r.op(r.t.load_slot(base, md_ptrb, g.rdi, 8)!)
+	r.op(r.t.move_register64(g.rcx, g.rax)!)
+	r.place('${tag}_ge_dloop')
+	r.op(r.t.move_register64(g.rdx, g.rcx)!)
+	r.op(r.t.test_word(g.rdx)!)
+	r.branch(.equal, '${tag}_ge_true')
+	r.op(r.t.load_indirect_unsigned(g.rsi, g.rax, 1)!)
+	r.op(r.t.load_indirect_unsigned(g.rdi, g.rdx, 1)!)
+	r.op(r.t.move_register64(g.r8, g.rax)!)
+	r.op(r.t.subtract_word(g.r8, g.rdx)!)
+	r.branch(.greater, '${tag}_ge_true')
+	r.branch(.less, '${tag}_ge_false')
+	r.op(r.t.add_immediate(g.rsi, 1))
+	r.op(r.t.add_immediate(g.rdi, 1))
+	r.op(r.t.add_immediate(g.rcx, -1))
+	r.jump('${tag}_ge_dloop')
+	r.place('${tag}_ge_false')
+	r.op(r.t.xor_word(g.rax, g.rax)!)
+	r.jump('${tag}_ge_end')
+	r.place('${tag}_ge_true')
+	r.op(r.t.move_immediate64(g.rax, 1)!)
+	r.place('${tag}_ge_end')
+}
+
+// muldiv_subtract_divisor takes the divisor from the remainder in place and
+// strips the leading zeros the subtraction left.
+fn muldiv_subtract_divisor(mut r DecimalRoutine, g DecimalRegisters, tag string) !void {
+	base := muldiv_base(r)!
+	// The distance between the two least significant digits, which is how far
+	// the divisor's digits sit above the remainder's; the remainder is never
+	// shorter than the divisor when this is reached.
+	r.op(r.t.load_slot(base, md_lenr, g.rcx, 8)!)
+	r.op(r.t.load_slot(base, md_lenb, g.rdx, 8)!)
+	r.op(r.t.move_register64(g.r11, g.rcx)!)
+	r.op(r.t.subtract_word(g.r11, g.rdx)!)
+	// The borrow runs from the least significant digit up.
+	r.op(r.t.xor_word(g.r8, g.r8)!)
+	r.op(r.t.load_slot(base, md_ptrr, g.rsi, 8)!)
+	r.op(r.t.load_slot(base, md_ptrb, g.r13, 8)!)
+	r.place('${tag}_sd_loop')
+	r.op(r.t.move_register64(g.rdx, g.rcx)!)
+	r.op(r.t.test_word(g.rdx)!)
+	r.branch(.equal, '${tag}_sd_done')
+	r.op(r.t.move_register64(g.r9, g.rcx)!)
+	r.op(r.t.add_immediate(g.r9, -1))
+	r.op(r.t.address_of_element(g.rsi, g.r9, 1, 0, g.rdi)!)
+	r.op(r.t.load_indirect_unsigned(g.rdi, g.rax, 1)!)
+	r.op(r.t.subtract_word(g.rax, g.r8)!)
+	// The divisor has a digit for this position only while the position is
+	// inside it; above that only the borrow comes off.
+	r.op(r.t.move_register64(g.r10, g.r9)!)
+	r.op(r.t.subtract_word(g.r10, g.r11)!)
+	r.branch(.less, '${tag}_sd_within')
+	r.op(r.t.address_of_element(g.r13, g.r10, 1, 0, g.r10)!)
+	r.op(r.t.load_indirect_unsigned(g.r10, g.rdx, 1)!)
+	r.op(r.t.subtract_word(g.rax, g.rdx)!)
+	r.place('${tag}_sd_within')
+	r.op(r.t.move_register64(g.r10, g.rax)!)
+	r.op(r.t.add_immediate(g.r10, 10))
+	r.op(r.t.test_word(g.rax)!)
+	r.branch(.less, '${tag}_sd_borrow')
+	r.op(r.t.move_register64(g.rdx, g.rax)!)
+	r.op(r.t.xor_word(g.r8, g.r8)!)
+	r.jump('${tag}_sd_store')
+	r.place('${tag}_sd_borrow')
+	r.op(r.t.move_register64(g.rdx, g.r10)!)
+	r.op(r.t.move_immediate64(g.r8, 1)!)
+	r.place('${tag}_sd_store')
+	r.op(r.t.store_indirect(g.rdi, g.rdx, 1)!)
+	r.op(r.t.add_immediate(g.rcx, -1))
+	r.jump('${tag}_sd_loop')
+	r.place('${tag}_sd_done')
+	muldiv_strip(mut r, g, md_ptrr, md_lenr, '${tag}sd')!
+}
+
 // muldiv_combine_exponents adds the two exponents for a product, and takes the
-// sign of the result from the two signs.
+// sign of the result from the two signs; a quotient's difference is made where
+// the digits are.
 fn muldiv_combine_exponents(mut r DecimalRoutine, g DecimalRegisters) !void {
 	base := muldiv_base(r)!
 	r.op(r.t.load_slot(base, md_expa, g.rax, 8)!)
@@ -655,9 +912,9 @@ fn muldiv_apply_dropped(mut r DecimalRoutine, g DecimalRegisters) !void {
 	r.op(r.t.store_slot(base, md_expa, g.rax, 8)!)
 }
 
-// muldiv_specials answers a product with a special operand, and leaves the
+// muldiv_specials answers the operations with a special operand, and leaves the
 // result's marker and exponent in place for the encode, jumping past the digits.
-fn muldiv_specials(mut r DecimalRoutine, f MulDivFormat, skip string) !void {
+fn muldiv_specials(mut r DecimalRoutine, f MulDivFormat, divide bool, skip string) !void {
 	g := r.reg
 	base := muldiv_base(r)!
 	r.op(r.t.load_slot(base, md_sigq, g.rax, 8)!)
@@ -678,22 +935,44 @@ fn muldiv_specials(mut r DecimalRoutine, f MulDivFormat, skip string) !void {
 	r.op(r.t.load_slot(base, md_special, g.rax, 8)!)
 	r.op(r.t.add_immediate(g.rax, -2))
 	r.branch(.equal, 'sp_nan')
-	// A finite zero times an infinity is a NaN; any other infinity is one.
-	r.op(r.t.load_slot(base, md_sigq, g.rax, 8)!)
-	r.op(r.t.add_immediate(g.rax, -1))
-	r.branch(.not_equal, 'sp_check_a')
-	r.op(r.t.load_slot(base, md_lenb, g.rax, 8)!)
-	r.op(r.t.test_word(g.rax)!)
-	r.branch(.equal, 'sp_nan')
-	r.jump('sp_inf')
-	r.place('sp_check_a')
-	r.op(r.t.load_slot(base, md_special, g.rax, 8)!)
-	r.op(r.t.add_immediate(g.rax, -1))
-	r.branch(.not_equal, 'sp_none')
-	r.op(r.t.load_slot(base, md_lena, g.rax, 8)!)
-	r.op(r.t.test_word(g.rax)!)
-	r.branch(.equal, 'sp_nan')
-	r.jump('sp_inf')
+	if divide {
+		// Infinity over infinity is a NaN; infinity anywhere else stays infinite,
+		// and a finite over an infinity is a zero.
+		r.op(r.t.load_slot(base, md_sigq, g.rax, 8)!)
+		r.op(r.t.add_immediate(g.rax, -1))
+		r.branch(.equal, 'sp_inf')
+		r.op(r.t.load_slot(base, md_special, g.rax, 8)!)
+		r.op(r.t.add_immediate(g.rax, -1))
+		r.branch(.equal, 'sp_inf_finite_over')
+		r.jump('sp_none')
+		r.place('sp_inf_finite_over')
+		r.op(r.t.load_slot(base, md_sigq, g.rax, 8)!)
+		r.op(r.t.add_immediate(g.rax, -1))
+		r.branch(.equal, 'sp_nan')
+		// finite / infinity -> zero with the difference of the exponents
+		r.op(r.t.load_slot(base, md_expa, g.rax, 8)!)
+		r.op(r.t.load_slot(base, md_expb, g.rdx, 8)!)
+		r.op(r.t.subtract_word(g.rax, g.rdx)!)
+		r.op(r.t.store_slot(base, md_expa, g.rax, 8)!)
+		r.jump(skip)
+	} else {
+		// A finite zero times an infinity is a NaN; any other infinity is one.
+		r.op(r.t.load_slot(base, md_sigq, g.rax, 8)!)
+		r.op(r.t.add_immediate(g.rax, -1))
+		r.branch(.not_equal, 'sp_check_a')
+		r.op(r.t.load_slot(base, md_lenb, g.rax, 8)!)
+		r.op(r.t.test_word(g.rax)!)
+		r.branch(.equal, 'sp_nan')
+		r.jump('sp_inf')
+		r.place('sp_check_a')
+		r.op(r.t.load_slot(base, md_special, g.rax, 8)!)
+		r.op(r.t.add_immediate(g.rax, -1))
+		r.branch(.not_equal, 'sp_none')
+		r.op(r.t.load_slot(base, md_lena, g.rax, 8)!)
+		r.op(r.t.test_word(g.rax)!)
+		r.branch(.equal, 'sp_nan')
+		r.jump('sp_inf')
+	}
 	r.place('sp_nan')
 	r.op(r.t.move_immediate64(g.rax, 2)!)
 	r.op(r.t.store_slot(base, md_special, g.rax, 8)!)
