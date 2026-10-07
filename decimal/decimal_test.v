@@ -242,7 +242,15 @@ fn test_comparison_orders_decimals_by_their_value() {
 	assert cmp_values(literal('0.1dd', .decimal64), literal('0.2dd', .decimal64)) == -1
 	assert cmp_values(literal('-1.0dd', .decimal64), literal('1.0dd', .decimal64)) == -1
 	assert cmp_values(literal('1e10dd', .decimal64), literal('9999999999.0dd', .decimal64)) == 1
-	assert cmp_values(zero(false), zero(true)) == 0
+	// A zero is ordered against the other value's sign, not its own: zero sits
+	// between the negative values and the positive ones. Measured on gcc 16.2.1,
+	// where `0.0dd < -1.0dd` is false and `-1.0dd < 0.0dd` is true.
+	assert cmp_values(literal('0.0dd', .decimal64), literal('-1.0dd', .decimal64)) == 1
+	assert cmp_values(literal('-1.0dd', .decimal64), literal('0.0dd', .decimal64)) == -1
+	assert cmp_values(literal('0.0dd', .decimal64), literal('1.0dd', .decimal64)) == -1
+	assert cmp_values(literal('1.0dd', .decimal64), literal('0.0dd', .decimal64)) == 1
+	assert cmp_values(zero(false), literal('-1.0dd', .decimal64)) == 1
+	assert cmp_values(zero(true), literal('-1.0dd', .decimal64)) == 1
 }
 
 fn test_an_exponent_the_format_cannot_hold_is_not_encoded() {
