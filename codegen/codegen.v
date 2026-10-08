@@ -2687,6 +2687,12 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 		// bytes are not a width the machine moves in one instruction.
 		return e.store_long_double_at(address, expr, stmt.line, stmt.col, depth)
 	}
+	if unary.typ.kind == .float {
+		// A write through an address of a float is the store the
+		// single-precision instruction makes, which is the width the pointed-at
+		// type has: the double path below is the same shape at eight bytes.
+		return e.assign_single_at(stmt, address, expr, depth)
+	}
 	if unary.typ.kind == .double {
 		return e.assign_double_at(stmt, address, expr, depth)
 	}
@@ -2900,6 +2906,24 @@ fn (mut e Emitter) assign_double_at(stmt ast.Stmt, address Slot, expr ast.Expr, 
 	address_register := e.scratch(stmt.line, stmt.col)!
 	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
 	e.append(e.target.store_double_indirect(address_register, value)!)
+}
+
+// assign_single_at writes a float through an address: the value is converted to
+// the type the address points at and stored by the instruction that moves four
+// bytes, which makes it the same store as assign_double_at at the width of the
+// single-precision instructions. A pointer is the one value it refuses, for the
+// reason the double path refuses one: a pointer is not an arithmetic type.
+fn (mut e Emitter) assign_single_at(stmt ast.Stmt, address Slot, expr ast.Expr, depth int) !void {
+	if !e.floating_of(expr) && e.is_a_pointer(expr) {
+		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored through an address of float, and there is no conversion between them')
+		return error('pointer into a float')
+	}
+	e.emit_expr_at(expr, depth + 1)!
+	e.convert_to_single(expr, stmt.line, stmt.col)!
+	value := e.float_accumulator(stmt.line, stmt.col)!
+	address_register := e.scratch(stmt.line, stmt.col)!
+	e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.store_float_indirect(address_register, value)!)
 }
 
 // assign_object_local writes an object into a local object: the destination's
@@ -3863,6 +3887,17 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 			stmt.line, stmt.col, depth)
 	}
 	e.emit_expr_at(expr, depth + 1)!
+	if index.typ.kind == .float {
+		if !e.floating_of(expr) && e.is_a_pointer(expr) {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored in an element that holds a float, and there is no conversion between them')
+			return error('pointer into a float')
+		}
+		e.convert_to_single(expr, stmt.line, stmt.col)!
+		value := e.float_accumulator(stmt.line, stmt.col)!
+		e.load_argument(address, address_register, e.target.word_size, stmt.line, stmt.col)!
+		e.append(e.target.store_float_indirect(address_register, value)!)
+		return
+	}
 	if index.typ.kind == .double {
 		if !e.floating_of(expr) && e.is_a_pointer(expr) {
 			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: a pointer is stored in an element that holds a double, and there is no conversion between them')
@@ -7966,6 +8001,15 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 		// (*row)[1]` reads arr[1], and reading the array's bytes into a register
 		// instead leaves a small number where an address was expected, so a
 		// subscript of it reads through that number.
+		return
+	}
+	if unary.typ.kind == .float {
+		// The object at the address is a float, so it is read by the
+		// instruction that moves one rather than by an integer load of four
+		// bytes: the same distinction the double arm above makes, at the
+		// width the single-precision instructions use.
+		float_register := e.float_accumulator(unary.line, unary.col)!
+		e.append(e.target.load_float_indirect(address, float_register)!)
 		return
 	}
 	if unary.typ.kind == .double {
