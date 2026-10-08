@@ -3239,6 +3239,19 @@ fn (mut e Emitter) emit_aggregate_into(destination Slot, expr ast.Expr, depth in
 			return e.write_aggregate_value(destination, expr, depth)
 		}
 	}
+	if expr is ast.Cast {
+		// A cast to a type of another class would be a conversion, but a cast
+		// whose operand is already an object of an aggregate type is not one:
+		// the two types are compatible or the type checker refused the program,
+		// so what the operand is worth is what the cast is worth and the
+		// operand's own shape decides how its bytes are written. V's own
+		// generated C writes this at every array it makes, as
+		// `Array res = (Array)(__new_array_noscan(...))`, and one such cast is
+		// how a packed structure's bytes are read back out of an array.
+		if expr.expr.typ.is_aggregate() {
+			return e.write_aggregate_value(destination, expr.expr, depth)
+		}
+	}
 	e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: an object handed over by value has to be a name, an element or a member, and this expression is not one')
 	return error('not an object')
 }
