@@ -6139,10 +6139,11 @@ fn (mut e Emitter) store_wide_at(address Slot, expr ast.Expr, line int, col int,
 // converted to the slot's type first, which is the conversion the language makes
 // when a value is assigned to an object of another type (6.5.16.1) and the one
 // extend_operand_to_word writes for the store below: `long v = i` is the int
-// sign-extended into the whole slot, and an unsigned int takes zeros there. A
-// value wider than the slot is refused, because the store moves the slot's bytes
-// and the top of the value would be dropped; storing a pointer in four bytes is
-// that case.
+// sign-extended into the whole slot, and an unsigned int takes zeros there. An
+// integer wider than the slot is narrowed the way the language narrows it
+// (6.3.1.3), which is what the store leaves when it moves the slot's bytes: the
+// low ones. An address in a slot of fewer bytes is refused instead, because that
+// is not a conversion at all, and it is the shape `int x = p` has.
 //
 // A slot holding a double is the exception to that, and the reason the check is
 // written around the conversion: the language converts an integer to a double
@@ -6208,7 +6209,14 @@ fn (mut e Emitter) store_value(slot Slot, expr ast.Expr, line int, col int) !voi
 			e.diagnostics << problem(line, col, 'unsupported: the value is one this back end cannot size, so it cannot be stored')
 			return error('unknown width')
 		}
-		if width > slot.width && !(slot.width < 4 && width == 4) {
+		if width > slot.width && e.is_a_pointer(expr) {
+			// An integer wider than the slot is the narrowing conversion the
+			// language defines (6.3.1.3), and the store below leaves the low
+			// bytes of the value, which is what that conversion leaves:
+			// `int pad = width - s.len;` in V's own generated C narrows an
+			// eight-byte difference into a four-byte object. An address is not
+			// a narrower integer: no pointer is stored in an integer of fewer
+			// bytes without a cast, and this shape has none.
 			e.diagnostics << problem(line, col, 'unsupported: a value of ${width} bytes is stored into a slot of ${slot.width}')
 			return error('width mismatch')
 		}
