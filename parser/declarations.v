@@ -3556,6 +3556,17 @@ fn (mut p Parser) fill_one(typ types.Type, items []BraceElement, start int, base
 			p.write_brace_leaf(typ, base, item, mut writes)
 			return start + 1
 		}
+		// An element that is an expression of the aggregate's own type is the
+		// subobject's value, not the first of the initializers the elision
+		// rule spreads over its members: in `struct S s = {t, 1}` with `t` a
+		// `struct S`, `t` initializes `s` whole and `1` goes to the next
+		// member. Read as elision, `t`'s own first member would be written
+		// where `s`'s first member is, and every element after it would land
+		// in the wrong member.
+		if p.element_is_the_subobject(typ, item) {
+			p.write_brace_leaf(typ, base, item, mut writes)
+			return start + 1
+		}
 		// Brace elision: the elements that follow initialize the aggregate's own
 		// subobjects, which is the shape `struct S s = {1, 2, 3};` has for a
 		// struct whose first member is a struct.
@@ -3563,6 +3574,23 @@ fn (mut p Parser) fill_one(typ types.Type, items []BraceElement, start int, base
 	}
 	p.write_brace_leaf(typ, base, item, mut writes)
 	return start + 1
+}
+
+// element_is_the_subobject answers whether the element is an expression of the
+// aggregate's own type, which 6.7.8p13 makes the subobject's whole value rather
+// than the first initializer the elision rule would spread over its members.
+// Only a struct or a union is asked: an array has no value that could be handed
+// an array whole, and an element of scalar type is written by the leaf path on
+// either reading.
+fn (p Parser) element_is_the_subobject(typ types.Type, element BraceElement) bool {
+	if typ.kind !in [types.Kind.struct_, .union_] {
+		return false
+	}
+	expr := element.expr or { return false }
+	if !expr.typ.is_aggregate() {
+		return false
+	}
+	return types.unqualified(expr.typ).same(types.unqualified(typ))
 }
 
 // fill_designated applies the designators that follow the one a caller already
