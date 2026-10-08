@@ -9688,7 +9688,7 @@ fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
 				// first element, a char is the int it is read as, and anything
 				// else is as wide as it was defined.
 				if object := e.global_shape(expr.name) {
-					if object.count > 0 {
+					if expr.typ.is_array() || object.count > 0 {
 						return e.target.word_size
 					}
 					return if object.width < 4 { 4 } else { object.width }
