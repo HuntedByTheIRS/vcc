@@ -5666,9 +5666,24 @@ fn (mut p Parser) declare_name(name string, typ types.Type, at tokenize.Token, d
 			p.error_at(at, 'a constraint violation: ${name} is declared as ${earlier.typ.describe()} in this scope and this declaration gives it ${typ.describe()}, and two declarations of one name in one scope have to describe one type')
 		}
 	}
+	// The type the name is given is the composite of this declaration and the one
+	// already in scope when the two describe one object: 6.2.7p3 makes an array
+	// declared with a size and one declared without describe the sized array,
+	// whichever of the two wrote the size, so a declaration that wrote none does
+	// not take the size away from a name a definition gave one. Only a declaration
+	// of the same object is composited, which is a declaration with the same
+	// linkage; a name an inner block introduces for itself keeps its own type.
+	mut stored := typ
+	if earlier := previous {
+		if linkage != .none && earlier.linkage == linkage {
+			if composite := array_composite(earlier.typ, typ) {
+				stored = composite
+			}
+		}
+	}
 	p.scopes.declare(types.Symbol{
 		name:    name
-		typ:     typ
+		typ:     stored
 		storage: p.pending_storage
 		linkage: linkage
 		line:    at.line
@@ -5693,12 +5708,62 @@ fn redeclaration_conflicts(earlier types.Type, later types.Type) bool {
 	if earlier.compatible(later) {
 		return false
 	}
+	// 6.2.7p2-3: two array types are compatible when one has a size and the
+	// other does not, and the composite type is the one that has it. The pair
+	// is not the same type and is still one object, so it is not a conflict.
+	if _ := array_composite(earlier, later) {
+		return false
+	}
 	if earlier.is_function() && later.is_function() && !(earlier.prototyped && later.prototyped) {
 		earlier_returns := earlier.returns() or { return true }
 		later_returns := later.returns() or { return true }
 		return !earlier_returns.compatible(later_returns)
 	}
 	return true
+}
+
+// array_composite is the composite type 6.2.7p3 gives two array declarations of
+// one name: two array types are compatible when their element types are, and
+// either both sizes are written and equal or one declaration wrote none, and the
+// composite type is the one with a size. It answers none when the two are not
+// two such arrays, which leaves the pair to the comparison that answers for
+// every other shape. A variable-length array has no size a constant names and a
+// vector is one type or another, so neither is composited here.
+//
+// The answer is a fact about the two declarations and not about the name they
+// are of, so it is asked both where a redeclaration is checked and where the
+// type the name keeps is chosen.
+fn array_composite(earlier types.Type, later types.Type) ?types.Type {
+	if earlier.kind != .array || later.kind != .array {
+		return none
+	}
+	if earlier.vla || later.vla || earlier.vector || later.vector {
+		return none
+	}
+	earlier_element := earlier.element() or { return none }
+	later_element := later.element() or { return none }
+	mut element := earlier_element
+	if earlier_element.kind == .array && later_element.kind == .array {
+		// `int a[][3]` against `int a[2][3]`: the outer sizes compose and the
+		// element is the row the two inner declarations compose to.
+		element = array_composite(earlier_element, later_element) or { return none }
+	} else if !earlier_element.same(later_element) {
+		return none
+	}
+	if earlier.count < 0 {
+		if later.count < 0 {
+			// Neither wrote a size, which the comparison above already answers.
+			return none
+		}
+		return types.array_of(element, later.count)
+	}
+	if later.count < 0 {
+		return types.array_of(element, earlier.count)
+	}
+	if earlier.count != later.count {
+		return none
+	}
+	return types.array_of(element, earlier.count)
 }
 
 // declare_parameters declares a definition's parameters in the scope around its

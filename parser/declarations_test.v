@@ -1964,6 +1964,40 @@ fn test_a_redeclaration_with_a_different_type_is_refused() {
 	assert declarations_of('int f(int a);\nint f(char b);\nint main(void) { return 0; }').diagnostics.len == 1
 }
 
+// 6.2.7p2-3: two array types are compatible when one has a size and the other
+// does not, and the composite type is the one that has it, so a declaration of
+// `int a[]` and a declaration of `int a[3]` describe one object of three
+// elements whichever of the two wrote the size. Measured, gcc 16.2.1 under
+// `-std=c99` accepts both orders and the object keeps three elements; this
+// reader refused the pair as two declarations that describe two types.
+fn test_an_array_declared_with_and_without_a_size_is_one_object() {
+	later_sized := declarations_of('extern int a[];\nint a[3] = {1, 2, 3};\nint main(void) { return a[0]; }')
+	assert later_sized.diagnostics.len == 0
+	assert later_sized.unit.globals.len == 1
+	assert later_sized.unit.globals[0].count == 3
+	earlier_sized := declarations_of('int a[3] = {1, 2, 3};\nextern int a[];\nint main(void) { return a[0]; }')
+	assert earlier_sized.diagnostics.len == 0
+	assert earlier_sized.unit.globals.len == 1
+	assert earlier_sized.unit.globals[0].count == 3
+	// Two declarations that both write a size and disagree are still two types.
+	differ := declarations_of('int a[2];\nint a[3] = {1, 2, 3};\nint main(void) { return a[0]; }')
+	assert differ.diagnostics.len == 1
+}
+
+// 6.5.2.2 and 6.2.7: a declaration of an array with no size inside a body that
+// is extern declares the object outside the block rather than one of its own, so
+// the type the name has in the block is the composite of the two declarations,
+// which is the sized one. Measured, gcc 16.2.1 under `-std=c99` accepts it and
+// `sizeof` inside the body is the object's; this reader refused the declaration
+// as an array that needs a size.
+fn test_an_extern_array_declared_in_a_body_takes_the_object_size() {
+	accepted := declarations_of('int a[3] = {1, 2, 3};\nint main(void) { extern int a[]; return sizeof(a) != 12; }')
+	assert accepted.diagnostics.len == 0
+	// A declaration in a body that is not extern is an object of the block, so
+	// it still needs the size the block's own storage would take.
+	assert declarations_of('int main(void) { int a[]; return 0; }').diagnostics.len == 1
+}
+
 // 6.7.6.3p15: a parameter declared with a qualified type is taken as having the
 // unqualified version of its declared type, so a qualifier on the parameter's
 // own type does not make a second declaration of the name a different type.
