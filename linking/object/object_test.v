@@ -629,8 +629,10 @@ fn test_an_ifunc_symbol_is_recorded() {
 }
 
 // A thread-local model this reader does not carry is refused by name rather than
-// treated as another kind.
-fn test_a_thread_local_model_this_reader_does_not_carry_is_refused() {
+// treated as another kind. A general-dynamic reference is carried, but only as
+// the paired two-instruction sequence a compiler writes; a `lea` with no call to
+// the general-dynamic helper after it is not that shape and is refused by name.
+fn test_a_thread_local_reference_that_is_not_the_paired_sequence_is_refused() {
 	sections := [
 		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: []u8{len: 8, init: u8(0x90)} },
 	]
@@ -644,10 +646,71 @@ fn test_a_thread_local_model_this_reader_does_not_carry_is_refused() {
 	obj := build_object(sections, symbols, relocations)
 	read(obj, host()) or {
 		assert err.msg().contains('TLSGD')
-		assert err.msg().contains('unknown relocation type')
+		assert err.msg().contains('__tls_get_addr')
 		return
 	}
-	assert false, 'the reader accepted a TLSGD relocation'
+	assert false, 'the reader accepted a general-dynamic reference that is not the paired sequence'
+}
+
+// The paired general-dynamic sequence is relaxed into the local-exec one in
+// place, because the variable it names is one the image holds: the two
+// instructions that reach the general-dynamic helper become the two that read
+// the thread pointer and add the variable's offset, the call is not a reference
+// the link carries, and one thread pointer offset reference is recorded at the
+// `lea`'s displacement in the new sequence.
+fn test_a_paired_general_dynamic_reference_is_relaxed_to_local_exec() {
+	// The general-dynamic pair as a compiler writes it: a `data16 rex.W lea` and
+	// a `data16 data16 rex.W call`, sixteen bytes together.
+	mut code := []u8{}
+	code << [u8(0x66), u8(0x48), u8(0x8d), u8(0x3d), u8(0), u8(0), u8(0), u8(0)]
+	code << [u8(0x66), u8(0x66), u8(0x48), u8(0xe8), u8(0), u8(0), u8(0), u8(0)]
+	sections := [
+		BuildSection{ name: '.mycode', kind: 1, flags: 0x6, align: 16, data: code },
+		BuildSection{ name: '.tbss', kind: 8, flags: 0x403, align: 8, data: []u8{len: 8, init: u8(0)} },
+	]
+	symbols := [
+		BuildSymbol{ name: '.mycode', info: 0x03, shndx: 1, value: 0, size: 0 },
+		BuildSymbol{ name: 'setting', info: 0x11, shndx: 2, value: 0, size: 8 },
+		BuildSymbol{ name: '__tls_get_addr', info: 0x10, shndx: 0, value: 0, size: 0 },
+	]
+	relocations := [
+		BuildRelocation{ target: 1, offset: 4, symbol: 2, kind: 19, addend: -4 },
+		BuildRelocation{ target: 1, offset: 12, symbol: 3, kind: 4, addend: -4 },
+	]
+	got := read(build_object(sections, symbols, relocations), host()) or {
+		panic('the reader refused a paired general-dynamic reference: ${err.msg()}')
+	}
+	// The local-exec sequence: `mov %fs:0,%rax` then `lea disp32(%rax),%rax`,
+	// with the displacement left zero for the link to fill.
+	assert got.text == [
+		u8(0x64),
+		u8(0x48),
+		u8(0x8b),
+		u8(0x04),
+		u8(0x25),
+		u8(0x00),
+		u8(0x00),
+		u8(0x00),
+		u8(0x00),
+		u8(0x48),
+		u8(0x8d),
+		u8(0x80),
+		u8(0x00),
+		u8(0x00),
+		u8(0x00),
+		u8(0x00),
+	]
+	// One reference, at the new sequence's `lea` displacement, and the call the
+	// relaxation removed is not an import of the unit.
+	assert got.relocations.len == 1
+	assert got.relocations[0].kind == .tpoff
+	assert got.relocations[0].place == .text
+	assert got.relocations[0].width == .narrow
+	assert got.relocations[0].name == 'setting'
+	assert got.relocations[0].offset == 12
+	assert got.relocations[0].addend == 0
+	assert '__tls_get_addr' !in got.imports
+	assert got.tls_labels['setting'] == 0
 }
 
 // A reference to a symbol defined in a section that is not part of the unit is
