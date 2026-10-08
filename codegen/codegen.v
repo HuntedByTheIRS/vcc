@@ -1802,6 +1802,19 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 			stacked++
 			continue
 		}
+		// A complete aggregate of no bytes is the one object the classifier
+		// answers nothing for, because a count of eightbytes of zero is not a
+		// count. V's own generated C declares `struct Error { E_STRUCT_DECL; };`
+		// and the macro is empty for a compiler that is neither tcc nor MSVC, so
+		// Error is an object of no bytes and the parameter is storage none of
+		// them occupies. An object that size takes no argument register and no
+		// word of the stack, so nothing is read on the way in and nothing is
+		// counted. Reason through the classifier: an aggregate of bytes was
+		// answered above, so an aggregate reaching here has none.
+		if e.known_aggregate_bytes(param.resolved) != none {
+			_ := e.declare(param.name, param.typ, 0, 0, 0, param.line, param.col, true)!
+			continue
+		}
 		// A parameter is one value in a register or one on the stack, and an
 		// object of an aggregate type passed by value is neither: its spelling
 		// reaches `type_width` and is refused there by name.
@@ -3885,6 +3898,19 @@ fn (mut e Emitter) assign_subscript(stmt ast.Stmt, subscript ast.Expr, expr ast.
 		// expression has not been emitted yet because that path emits it.
 		return e.store_decimal_through_object(address, expr, decimal_width_of(index.typ),
 			stmt.line, stmt.col, depth)
+	}
+	if index.typ.is_aggregate() {
+		// An element of an aggregate type is an object at the address the
+		// subscript computed, and what is written there is the object copy the
+		// same assignment between two objects makes: `a[i] = a[j]` for an array
+		// of structs moves the bytes, and neither element is read as a value.
+		// Without this the element's spelling has no width to store at, which is
+		// what V's own generated C reaches in the insert of a B-tree node.
+		width := e.known_aggregate_bytes(index.typ) or {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an element of ${index.typ.describe()} is assigned through an address, and an object of that type has no size here')
+			return error('incomplete element type')
+		}
+		return e.assign_object(address, width, expr, stmt.line, stmt.col, depth)
 	}
 	e.emit_expr_at(expr, depth + 1)!
 	if index.typ.kind == .float {
