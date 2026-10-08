@@ -194,11 +194,16 @@ fn test_a_designated_aggregate_member_takes_the_element_as_its_value() {
 	assert stores == 1
 }
 
-// The positional form is the one that still elides: `(struct S){v, 3}` walks
-// into the aggregate member and writes v into T's first member, so no store
-// names `t` as a subobject of the literal. Each of this pair fails if the reader
-// treats its shape as the other.
-fn test_a_positional_flat_list_still_elides_into_an_aggregate_member() {
+// A positional element whose own type is the member's type is the member's
+// value: `(struct S){v, 3}` with `v` a `struct T` and S's first member a
+// `struct T` writes v into that member whole, and 3 into the member after it.
+// 6.7.8p13 makes the element the value of the subobject when its type is
+// compatible with the subobject's type, which a positional element of the
+// member's own type is; elision is what happens to an element that is not.
+// Measured on gcc 16.2.1 and tcc 0.9.27 on this machine: the same source reads
+// back as t = {1, 2} and n = 3, which is the reading a whole-member store makes
+// and not the one that spreads two elements over t's own members.
+fn test_a_positional_element_of_the_members_own_type_is_the_member() {
 	result := compound_parsed('struct T { int x; int y; };\nstruct S { struct T t; int n; };\nint main(void) { struct T v = {1, 2}; struct S s = (struct S){v, 3}; return 0; }')
 	assert result.diagnostics.len == 0
 	mut body := []ast.Stmt{}
@@ -215,13 +220,29 @@ fn test_a_positional_flat_list_still_elides_into_an_aggregate_member() {
 		}
 	}
 	assert object.len > 0
+	mut stores := 0
 	for stmt in body {
 		if stmt.kind != .assign || stmt.target != object {
 			continue
 		}
 		field := stmt.field or { continue }
-		assert field.typ.kind != .struct_
+		if field.typ.kind != .struct_ {
+			continue
+		}
+		// The member sits at the start of the object and takes the whole value
+		// the element wrote, which is the name `v` and not a walk into T's own
+		// members. The scalar element after it is a store of `n`, which carries
+		// no field of the struct type and is not counted here.
+		stores++
+		assert field.offset == 0
+		value := stmt.expr or {
+			assert false
+			return
+		}
+		assert value is ast.Ident
+		assert (value as ast.Ident).name == 'v'
 	}
+	assert stores == 1
 }
 
 // A designator may name a member an anonymous struct contributes, because
@@ -315,4 +336,36 @@ fn test_a_cast_to_a_union_type_refuses_an_operand_no_member_has() {
 	result := parse(lexed.tokens)
 	assert result.diagnostics.len > 0
 	assert result.diagnostics[0].msg.contains('no member of')
+}
+
+// A positional flat list whose elements are not the member own type still elides
+// into it: no element of `(struct S){1, 2, 3}` is a `struct T`, so the first two
+// write the members of t and the third writes the member after t. Each of this
+// pair fails if the reader treats its shape as the other. Measured on gcc 16.2.1
+// on this machine: the list reads back as t = {1, 2} and n = 3, which is what
+// the elision rule and not the whole-member reading gives.
+fn test_a_positional_flat_list_of_values_still_elides_into_an_aggregate_member() {
+	result := compound_parsed('struct T { int x; int y; };\nstruct S { struct T t; int n; };\nint main(void) { struct S s = (struct S){1, 2, 3}; return 0; }')
+	assert result.diagnostics.len == 0
+	mut body := []ast.Stmt{}
+	for decl in result.unit.decls {
+		if decl.name == 'main' {
+			body = decl.body
+		}
+	}
+	assert body.len > 0
+	mut object := ''
+	for stmt in body {
+		if stmt.kind == .var_decl && stmt.decl_name.starts_with('__vcc_compound_') {
+			object = stmt.decl_name
+		}
+	}
+	assert object.len > 0
+	for stmt in body {
+		if stmt.kind != .assign || stmt.target != object {
+			continue
+		}
+		field := stmt.field or { continue }
+		assert field.typ.kind != .struct_
+	}
 }
