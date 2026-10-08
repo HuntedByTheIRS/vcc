@@ -44,9 +44,9 @@ import time
 
 // The floors are low-water marks: the gate fails if a corpus drops below them, so
 // one goes up by one with each case added. Measured on this tree, the corpora hold
-// 59 regression and 44 golden cases, well above what the floors ask for, which is
+// 60 regression and 44 golden cases, well above what the floors ask for, which is
 // the point of a floor rather than a tally.
-const regression_floor = 58
+const regression_floor = 59
 const goldens_floor = 25
 
 const compile_head = '-x c -std='

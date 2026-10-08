@@ -30,6 +30,21 @@ struct PendingBound {
 	at_col    int
 }
 
+// PendingTentativeArray is a file-scope declaration that gave a name an array
+// type with no size and no initializer, which 6.9.2p2 completes to one element at
+// the end of the translation unit when nothing else defines the name. The name,
+// the spelling the object was declared with, and the incomplete type wait here,
+// and the object is laid out from the end of the file, where the composite type
+// of every declaration of the name is known: `int a[]; int a[3] = {...};` is
+// three elements, and `int a[];` alone is one.
+struct PendingTentativeArray {
+	name     string
+	spelling string
+	typ      types.Type
+	line     int
+	col      int
+}
+
 // IdentSpan is the first and the last place an identifier text appears in the
 // token stream. Both are token indices, and a name that appears once has the
 // same number for each.
@@ -147,6 +162,13 @@ mut:
 	// not declare enumeration constants. Reporting the second as a bound that is
 	// not constant would name a cause the compiler cannot show.
 	pending_bounds []PendingBound
+	// tentative_arrays is every file-scope object whose declaration gave it an
+	// array type with no size and no initializer. Such a declaration is a
+	// tentative definition, and 6.9.2p2 completes it to one element at the end
+	// of the translation unit when nothing else defines the name, so the object
+	// is laid out from the end of the file and not while the declaration is
+	// read: a later declaration that writes a size is what the name is instead.
+	tentative_arrays []PendingTentativeArray
 	// bound_name is the first name a bound written in brackets carried that the
 	// scope at that point did not have, with where it was written. The suffix
 	// reader fills it for the declaration reader to keep on its step.
@@ -377,6 +399,12 @@ fn (mut p Parser) parse_unit() ast.TranslationUnit {
 		p.pending_storage = .automatic
 		decls << p.parse_declaration()
 	}
+	// A file-scope declaration that gave an array type with no size and no
+	// initializer is a tentative definition, and 6.9.2p2 completes it to one
+	// element now that the whole file has been read, unless a later declaration
+	// wrote a size for it. The storage is laid out from here, because the size a
+	// definition gives the name is a question only the end of the file answers.
+	p.complete_tentative_arrays()
 	return ast.TranslationUnit{
 		decls:          decls
 		globals:        p.globals

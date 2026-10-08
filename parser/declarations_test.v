@@ -1998,6 +1998,28 @@ fn test_an_extern_array_declared_in_a_body_takes_the_object_size() {
 	assert declarations_of('int main(void) { int a[]; return 0; }').diagnostics.len == 1
 }
 
+// 6.9.2p2: a tentative definition whose array type has no size is completed to
+// one element at the end of the translation unit when nothing else defines the
+// name, and a later declaration that writes a size is the composite type the
+// name takes instead. Measured, gcc 16.2.1 under `-std=c99` gives `int a[];` a
+// real address and one element, and `int b[]; int b[3];` three elements.
+fn test_a_tentative_definition_with_no_size_takes_one_element() {
+	one := declarations_of('int a[];\nint main(void) { return a == 0; }')
+	assert one.diagnostics.len == 0
+	assert one.unit.globals.len == 1
+	assert one.unit.globals[0].count == 1
+	completed := declarations_of('int b[];\nint b[3];\nint main(void) { return sizeof(b) != 12; }')
+	assert completed.diagnostics.len == 0
+	assert completed.unit.globals.len == 1
+	assert completed.unit.globals[0].count == 3
+	// An extern declaration lays out no storage of its own, so a tentative
+	// definition it sizes is still the declaration that creates the object.
+	sized_by_extern := declarations_of('int c[];\nextern int c[2];\nint main(void) { return sizeof(c) != 8; }')
+	assert sized_by_extern.diagnostics.len == 0
+	assert sized_by_extern.unit.globals.len == 1
+	assert sized_by_extern.unit.globals[0].count == 2
+}
+
 // 6.7.6.3p15: a parameter declared with a qualified type is taken as having the
 // unqualified version of its declared type, so a qualifier on the parameter's
 // own type does not make a second declaration of the name a different type.
