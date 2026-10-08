@@ -3220,6 +3220,15 @@ fn (mut e Emitter) emit_aggregate_into(destination Slot, expr ast.Expr, depth in
 		e.place(end_label)
 		return
 	}
+	if expr is ast.StmtExpr {
+		// A statement expression whose value is an object: the body's statements
+		// run in the order they were written and the value expression is the
+		// object, which is the same object the expression would be on its own,
+		// so the branch below writes it. V's own generated C writes one of these
+		// at every v_panic of a message it builds in place, where the value
+		// expression is the call that joins the parts.
+		return e.emit_statement_expression_into(destination, expr, depth)
+	}
 	if expr is ast.Call {
 		// A call of an aggregate type has a path: assign_object writes the
 		// bytes the call hands back, and the destination's address is parked
@@ -7354,6 +7363,28 @@ fn (mut e Emitter) emit_statement_expression(expr ast.StmtExpr, as_value bool) !
 	if value := expr.value {
 		e.emit_expr_at(value, 0)!
 	}
+	e.pop_scope()
+	e.slot_base = saved
+}
+
+// emit_statement_expression_into writes a statement expression whose value is an
+// object of an aggregate type into storage the caller reserved. The body runs the
+// way emit_statement_expression runs it, in one scope and above the slots the
+// expression around it is using, and the value expression is then written as the
+// object it is rather than left in a register: the register a statement
+// expression's value travels in is one a value fits in, and an aggregate is the
+// case that has no such register. It is the object counterpart of
+// emit_statement_expression, which can only hand a value back.
+fn (mut e Emitter) emit_statement_expression_into(destination Slot, expr ast.StmtExpr, depth int) !void {
+	value := expr.value or {
+		e.diagnostics << problem(expr.line, expr.col, 'unsupported: a statement expression used as an object has no value, because its last statement is not an expression statement')
+		return error('statement expression without a value')
+	}
+	saved := e.slot_base
+	e.slot_base = e.values.len
+	e.push_scope()
+	_ := e.emit_statements(expr.body)!
+	e.write_aggregate_value(destination, value, depth)!
 	e.pop_scope()
 	e.slot_base = saved
 }
