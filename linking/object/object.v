@@ -162,6 +162,57 @@ const relocation_tpoff32 = u32(23) // R_X86_64_TPOFF32
 const relocation_pc64 = u32(24) // R_X86_64_PC64
 const relocation_got_pc_relative_x = u32(41) // R_X86_64_GOTPCRELX
 const relocation_rex_got_pc_relative_x = u32(42) // R_X86_64_REX_GOTPCRELX
+// R_X86_64_TLSGD names a general-dynamic thread-local reference. The compiler
+// writes it as two instructions: a `lea` that loads the address of the
+// variable's thread-local index in the global offset table, and a call to the
+// general-dynamic helper __tls_get_addr that the loader answers with the
+// variable's address in this thread. This reader carries the reference by
+// relaxing it to the local-exec sequence, which reaches the variable through the
+// thread pointer directly, because the variable it names is one the image holds.
+const relocation_tls_gd = u32(19)
+
+// tls_get_addr_symbol is the helper a general-dynamic thread-local reference
+// calls. The reader recognizes the reference by this name on the call half of
+// the pair, so the two instructions are relaxed as one thing rather than as a
+// `lea` and an ordinary call.
+const tls_get_addr_symbol = '__tls_get_addr'
+
+// The general-dynamic thread-local sequence, as a compiler writes it, and the
+// local-exec sequence that replaces it. The general-dynamic pair carries two
+// redundant `data16` prefixes on each instruction, which pad it to sixteen
+// bytes, and the local-exec sequence is sixteen bytes too: a `mov` that reads
+// the thread pointer and a `lea` that adds the variable's offset. The sequences
+// are the same length, so relaxing one moves no code.
+const tls_gd_lea_prefix = [u8(0x66), u8(0x48), u8(0x8d), u8(0x3d)]
+const tls_gd_call_prefix = [u8(0x66), u8(0x66), u8(0x48), u8(0xe8)]
+const tls_sequence_len = 16
+const tls_sequence_from_thread_pointer = [
+	u8(0x64),
+	u8(0x48),
+	u8(0x8b),
+	u8(0x04),
+	u8(0x25),
+	u8(0x00),
+	u8(0x00),
+	u8(0x00),
+	u8(0x00),
+	u8(0x48),
+	u8(0x8d),
+	u8(0x80),
+	u8(0x00),
+	u8(0x00),
+	u8(0x00),
+	u8(0x00),
+]
+// tls_gd_field_offset is how far the reference's own field, the `lea`'s
+// displacement, lies past the start of the general-dynamic sequence, and
+// tls_sequence_displacement is where the field lands in the local-exec sequence:
+// the `lea`'s displacement again. tls_gd_call_gap is how far the paired call's
+// field lies past the reference's own. The reference the caller records is
+// written at the second place, and the pair is recognized by the third.
+const tls_gd_field_offset = 4
+const tls_sequence_displacement = 12
+const tls_gd_call_gap = 8
 
 // Blob is which of a unit's three parts a section belongs to. A section that is
 // not SHF_ALLOC, or one that is not a type this reader carries, has `none`. The
@@ -768,6 +819,7 @@ fn read_relocations(bytes []u8, sections []Section, layout Layout, mut program i
 		base := layout.base_of[int(reloca.info)]
 		is_table := target.kind == sht_init_array || target.kind == sht_fini_array
 		count := reloca.size / elf_relocation_size
+		pairs := gd_pair_calls(bytes, reloca, symtab, strtab)
 		for entry in 0 .. count {
 			at := reloca.offset + entry * elf_relocation_size
 			r_offset := read_u64(bytes, at)!
@@ -776,6 +828,38 @@ fn read_relocations(bytes []u8, sections []Section, layout Layout, mut program i
 			kind := u32(r_info & 0xffffffff)
 			sym_index := int(r_info >> 32)
 			sym := parse_symbol(bytes, symtab, sym_index)!
+			if r_offset in pairs {
+				// The call half of a general-dynamic thread-local reference.
+				// The pair was relaxed whole, so this field lies inside the
+				// bytes the relaxation rewrote and no relocation may fill it.
+				continue
+			}
+			if kind == relocation_tls_gd {
+				// A general-dynamic thread-local reference: relaxed to the
+				// local-exec sequence, which reaches the variable through the
+				// thread pointer instead of through the general-dynamic helper.
+				// The reference is one thing, so it is required to be the pair
+				// a compiler writes; the call it relaxes away is the entry the
+				// pair check above recognized, and a `lea` without it is a shape
+				// this reader does not carry.
+				if place != .text {
+					return error('unknown relocation type ${kind} at offset ${r_offset}: a general-dynamic thread-local reference is a code reference')
+				}
+				if u64(int(r_offset) + tls_gd_call_gap) !in pairs {
+					return error('the general-dynamic thread-local reference (R_X86_64_TLSGD) at offset ${r_offset} is not the paired sequence this reader relaxes: no ${tls_get_addr_symbol} call follows it')
+				}
+				resolution := reader.resolve(symtab, strtab, sym_index, sym, layout)!
+				field := relax_tls_gd(mut program.text, base + int(r_offset) - tls_gd_field_offset)!
+				program.relocations << image.Relocation{
+					offset: field
+					place:  image.RelocationPlace.text
+					kind:   image.RelocationKind.tpoff
+					name:   resolution.name
+					addend: 0
+					width:  image.RelocationWidth.narrow
+				}
+				continue
+			}
 			if place == .tls {
 				// A field in the thread-local image holds an address the link
 				// writes, the eight bytes a table entry or a writable object's
@@ -999,7 +1083,75 @@ fn relocation_name(kind u32) string {
 fn unknown_relocation_message(kind u32, offset u64) string {
 	name := relocation_name(kind)
 	named := if name == '' { '' } else { ' (${name})' }
-	return 'unknown relocation type ${kind}${named} at offset ${offset}: this reader accepts ${relocation_pc_relative} (R_X86_64_PC32), ${relocation_plt} (R_X86_64_PLT32), ${relocation_got_pc_relative} (R_X86_64_GOTPCREL), ${relocation_got_pc_relative_x} (R_X86_64_GOTPCRELX), ${relocation_rex_got_pc_relative_x} (R_X86_64_REX_GOTPCRELX), ${relocation_absolute} (R_X86_64_64), ${relocation_32} (R_X86_64_32), ${relocation_32s} (R_X86_64_32S), ${relocation_pc64} (R_X86_64_PC64), ${relocation_tpoff32} (R_X86_64_TPOFF32) and ${relocation_tpoff64} (R_X86_64_TPOFF64) and ${relocation_got_tpoff} (R_X86_64_GOTTPOFF) in the code and read-only data'
+	return 'unknown relocation type ${kind}${named} at offset ${offset}: this reader accepts ${relocation_pc_relative} (R_X86_64_PC32), ${relocation_plt} (R_X86_64_PLT32), ${relocation_got_pc_relative} (R_X86_64_GOTPCREL), ${relocation_got_pc_relative_x} (R_X86_64_GOTPCRELX), ${relocation_rex_got_pc_relative_x} (R_X86_64_REX_GOTPCRELX), ${relocation_absolute} (R_X86_64_64), ${relocation_32} (R_X86_64_32), ${relocation_32s} (R_X86_64_32S), ${relocation_pc64} (R_X86_64_PC64), ${relocation_tpoff32} (R_X86_64_TPOFF32), ${relocation_tpoff64} (R_X86_64_TPOFF64) and ${relocation_got_tpoff} (R_X86_64_GOTTPOFF) in the code and read-only data, and the ${relocation_tls_gd} (R_X86_64_TLSGD) pair in the code, which it relaxes to the local-exec sequence'
+}
+
+// gd_pair_calls is the offset of every relocation that is the call half of a
+// general-dynamic thread-local reference, keyed by the offset it fills. The
+// reference is relaxed as one thing, so the field the call's relocation would
+// fill lies inside the bytes the relaxation rewrote: the pair is read as a
+// single reference and the call is skipped rather than looked up as an import.
+// The two halves are recognized together, a `lea` whose type is R_X86_64_TLSGD
+// and the R_X86_64_PLT32 to __tls_get_addr eight bytes past its field, so a call
+// to the helper that is not part of such a reference is left as the ordinary
+// call it is. The pairs are found before the entries are applied, because the
+// two halves need not stand next to each other in the table.
+fn gd_pair_calls(bytes []u8, reloca Section, symtab Section, strtab []u8) map[u64]bool {
+	mut gd := map[u64]bool{}
+	mut calls := map[u64]bool{}
+	count := reloca.size / elf_relocation_size
+	for entry in 0 .. count {
+		at := reloca.offset + entry * elf_relocation_size
+		r_offset := read_u64(bytes, at) or { continue }
+		r_info := read_u64(bytes, at + 8) or { continue }
+		kind := u32(r_info & 0xffffffff)
+		if kind == relocation_tls_gd {
+			gd[r_offset] = true
+			continue
+		}
+		if kind != relocation_plt {
+			continue
+		}
+		index := int(r_info >> 32)
+		name := symbol_name(bytes, symtab, strtab, index) or { continue }
+		if name == tls_get_addr_symbol {
+			calls[r_offset] = true
+		}
+	}
+	mut pairs := map[u64]bool{}
+	for call_offset, _ in calls {
+		if call_offset >= u64(tls_gd_call_gap) && gd[call_offset - tls_gd_call_gap] {
+			pairs[call_offset] = true
+		}
+	}
+	return pairs
+}
+
+// relax_tls_gd rewrites the general-dynamic thread-local sequence that begins at
+// `sequence` into the local-exec one, because the variable the reference names is
+// one this image holds: the thread pointer already reaches its copy, so the call
+// through the general-dynamic helper is removed and the variable's thread
+// pointer offset is known here. The caller records a thread pointer offset
+// reference at the `lea`'s displacement in the new sequence and returns it. Both
+// sequences are sixteen bytes, so nothing after them moves. The two instructions
+// are checked against the shape a compiler writes before anything is written, so
+// a reference this reader does not recognize is refused rather than half-relaxed.
+fn relax_tls_gd(mut text []u8, sequence int) !int {
+	if sequence < 0 || sequence + tls_sequence_len > text.len {
+		return error('a general-dynamic thread-local reference at offset ${sequence} does not lie in the ${text.len} bytes of code carried so far')
+	}
+	for i in 0 .. 4 {
+		if text[sequence + i] != tls_gd_lea_prefix[i] {
+			return error('the general-dynamic thread-local reference at offset ${sequence} does not begin with the instruction this reader relaxes')
+		}
+		if text[sequence + 8 + i] != tls_gd_call_prefix[i] {
+			return error('the general-dynamic thread-local reference at offset ${sequence} does not hold the call this reader relaxes')
+		}
+	}
+	for i in 0 .. tls_sequence_len {
+		text[sequence + i] = tls_sequence_from_thread_pointer[i]
+	}
+	return sequence + tls_sequence_displacement
 }
 
 // referenced_symtab is the symbol table a relocation section reads its symbols

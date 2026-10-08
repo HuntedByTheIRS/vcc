@@ -410,3 +410,29 @@ fn test_the_stub_calls_an_entry_another_unit_defines() {
 	assert merged.labels['main'] == 5
 	assert merged.text[5] == u8(0xcc)
 }
+
+// The names a program's own runtime reaches for describe the image rather than
+// a symbol in a library: `__data_start` and `data_start` are the start of the
+// writable data and `_end` is its end, so a link that is asked for them answers
+// from the layout it made rather than refusing them as undefined. The two starts
+// come before the end, and the end is past the storage the units brought.
+fn test_the_image_answers_the_data_bounds_its_own_runtime_reaches_for() {
+	mut main := defining('main', []u8{len: 1, init: u8(0x90)})
+	main.globals_blob = [u8(0x01), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0)]
+	main.globals['one'] = image.GlobalSlot{
+		offset: 0
+		width:  8
+	}
+	main.globals_alignment = 8
+	main.imports << '__data_start'
+	main.imports << 'data_start'
+	main.imports << '_end'
+	merged := link([main], options('main')) or { panic('the link failed: ${err.msg()}') }
+	assert '__data_start' in merged.bound
+	assert 'data_start' in merged.bound
+	assert '_end' in merged.bound
+	assert merged.bound['__data_start'].offset == 0
+	assert merged.bound['data_start'].offset == 0
+	assert merged.bound['_end'].offset == merged.globals_blob.len
+	assert merged.bound['data_start'].offset < merged.bound['_end'].offset
+}

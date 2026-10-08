@@ -91,17 +91,35 @@ pub fn link(units []image.Program, options Options) !image.Program {
 			}
 		}
 	}
-	// Two more names the runtime's own startup reaches for are the link's to
-	// answer, because they are about the image rather than about a symbol in it:
+	// More names the runtime's own startup reaches for are the link's to answer,
+	// because they are about the image rather than about a symbol in it:
 	// `__ehdr_start` is where the image begins, which is what a program reads to
-	// find its own program headers, and `_end` is where its writable data stops,
-	// which is where a program that grows a heap out of the image starts.
+	// find its own program headers.
 	//
-	// The region between `__bss_start` and `_end` is the storage that has no
-	// bytes in the file, and this image has none: every zero it holds is written
-	// into the file, so the region is empty and both ends and `_edata` name the
-	// same place. Answering with the start of the writable data would have the C
-	// library zero the initializers it just loaded.
+	// The rest bound the writable data. `__data_start` and its alias `data_start`
+	// name its first byte and `_end` its last, and those are the ends the Boehm
+	// collector registers as the program's data roots. The region between
+	// `__bss_start` and `_end` is the storage that has no bytes in the file, and
+	// this image has none: every zero it holds is written into the file, so the
+	// region is empty and both ends and `_edata` name the same place. Answering
+	// the bounds with the start of the writable data would have the C library
+	// zero the initializers it just loaded.
+	//
+	// Each is answered from the layout, and only the ones something in the link
+	// actually named.
+	mut data_bounds := map[string]int{}
+	data_bounds['__data_start'] = 0
+	data_bounds['data_start'] = 0
+	data_bounds['_edata'] = layout.globals_len
+	data_bounds['__bss_start'] = layout.globals_len
+	data_bounds['_end'] = layout.globals_len
+	for name, offset in data_bounds {
+		if name in names.imports || name in names.object_imports || name in names.copy_objects {
+			bound[name] = image.Definition{
+				offset: offset
+			}
+		}
+	}
 	if '__ehdr_start' in names.imports {
 		bound['__ehdr_start'] = image.Definition{
 			image_base: true
@@ -159,8 +177,11 @@ pub fn link(units []image.Program, options Options) !image.Program {
 	mut copies := []string{cap: names.copy_objects.len}
 	for name in names.copy_objects {
 		// A copy object a unit defines is not a copy any more: the image holds
-		// the object itself, and the loader is not asked to fill it.
-		if name !in names.definitions {
+		// the object itself, and the loader is not asked to fill it. A name the
+		// link answers from its own layout is not a copy either: there is no
+		// library object to copy, and the name is bound to the place the layout
+		// gave it.
+		if name !in names.definitions && name !in bound {
 			copies << name
 		}
 	}
