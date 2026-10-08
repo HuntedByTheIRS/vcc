@@ -2252,19 +2252,27 @@ pub fn (c Condition) code() u8 {
 }
 
 // set_condition writes the outcome of the comparison just made into the low byte
-// of a register, as zero or one. Only one byte is written, so only the first
-// four registers can be the destination.
+// of a register, as zero or one. The register is the one the value is in, which
+// for a `_Bool` parameter is the one its position gave it, so the byte is named
+// with the REX prefix byte_rex answers rather than being one of the four with a
+// name of their own.
 pub fn set_condition(condition Condition, reg Register) ![]u8 {
-	byte_operand(reg)!
-	return [u8(0x0f), u8(0x90 | condition.code()), u8(0xc0 | (reg.code & 0x07))]
+	mut out := byte_rex(reg, false)!
+	out << u8(0x0f)
+	out << u8(0x90 | condition.code())
+	out << u8(0xc0 | (reg.code & 0x07))
+	return out
 }
 
 // movzx_byte widens that byte into the whole register: the language's comparison
 // is a value of int width, and the bits above the byte have to be zero for the
 // value to be one.
 pub fn movzx_byte(reg Register) ![]u8 {
-	byte_operand(reg)!
-	return [u8(0x0f), 0xb6, u8(0xc0 | ((reg.code & 0x07) << 3) | (reg.code & 0x07))]
+	mut out := byte_rex(reg, true)!
+	out << u8(0x0f)
+	out << 0xb6
+	out << u8(0xc0 | ((reg.code & 0x07) << 3) | (reg.code & 0x07))
+	return out
 }
 
 // sign_extend_byte widens a byte into the whole register with its sign kept,
@@ -2359,6 +2367,37 @@ fn byte_operand(reg Register) ! {
 	if reg.code >= 4 {
 		return error('${name}: a one-byte operand is the low byte of one of the first four registers, and ${reg.name} is not one of them')
 	}
+}
+
+// byte_rex is the REX byte a one-byte operand of a general-purpose register
+// needs, or none when the register's low byte has a name of its own. al, cl, dl
+// and bl are the four that have one; the low byte of the next four is the same
+// register number under a REX prefix with no bit set, which is why 0x40 is
+// written for them rather than left out, and a register past the eighth carries
+// the bit of the field the modrm byte gives it. A conditional set writes the low
+// byte of the register its opcode names, so that field is the rm one; a widening
+// move reads the byte out of the rm field and writes the whole register in the
+// reg field.
+//
+// The conditional set and the move that widens it are asked for with whatever
+// register a `_Bool` value is in, and the ABI hands a `_Bool` parameter over in
+// the register its position gives it: a second parameter arrives in esi, whose
+// low byte is sil. So these two instructions are written for every
+// general-purpose register and not only the first four, which is what
+// byte_operand asks of the instructions whose byte operand has to be one of the
+// four.
+fn byte_rex(reg Register, reg_field bool) ![]u8 {
+	if reg.width != 4 && reg.width != 8 {
+		return error('${name}: a one-byte operand is the low byte of a general-purpose register, and ${reg.name} is not one')
+	}
+	if reg.code < 4 {
+		return []u8{}
+	}
+	mut rex := u8(0x40)
+	if reg.code >= 8 {
+		rex |= if reg_field { u8(0x04) } else { u8(0x01) }
+	}
+	return [rex]
 }
 
 // The jumps a branch is made of. The unconditional one goes to the distance it

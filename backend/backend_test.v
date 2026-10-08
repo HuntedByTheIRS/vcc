@@ -480,10 +480,20 @@ fn test_a_comparison_becomes_a_zero_or_a_one_in_the_register() {
 		0xc0,
 	]
 	assert target.compare('<<', eax, ecx) or { []u8{} }.len == 0
-	// Only the first four registers have a one-byte name a conditional set can
-	// write, so anything else is refused rather than encoded at the wrong width.
+	// A register whose low byte has a name of its own needs no prefix, and one
+	// whose low byte is the same register number under a prefix needs the prefix
+	// with no bit set. gas reads the four bytes below as `sete %dil`.
 	edi := target.reg('edi') or { panic('the target description has no such name') }
-	assert x86_64.set_condition(.equal, target.describe(edi)) or { []u8{} }.len == 0
+	assert x86_64.set_condition(.equal, target.describe(edi)) or { []u8{} } == [
+		u8(0x40),
+		0x0f,
+		0x94,
+		0xc7,
+	]
+	// A register that is not a general-purpose one holds no byte to write, so it
+	// is refused rather than encoded at the wrong width.
+	xmm0 := target.float_reg('xmm0') or { panic('the target description has no such name') }
+	assert x86_64.set_condition(.equal, target.describe(xmm0)) or { []u8{} }.len == 0
 }
 
 fn test_a_comparison_of_two_addresses_is_made_at_the_width_of_a_word() {
@@ -1146,12 +1156,17 @@ fn test_the_unsigned_orders_are_the_bytes_the_machine_reads() {
 		0xb6,
 		0xc0,
 	]
-	// A register with no one-byte name cannot be the destination of a conditional
-	// set, and the same refusal stands on the Target.
+	// A register whose low byte is the same number under a prefix carries that
+	// prefix, and gas reads the four bytes below as `setb %dil`.
 	rdi := target.reg('rdi') or { panic('the target description has no such name') }
-	assert x86_64.set_condition(.below, target.describe(rdi)) or { []u8{} }.len == 0
-	assert target.set_condition(.above, rdi) or { []u8{} }.len == 0
-	assert target.widen_byte(rdi) or { []u8{} }.len == 0
+	assert x86_64.set_condition(.below, target.describe(rdi)) or { []u8{} } == [
+		u8(0x40),
+		0x0f,
+		0x92,
+		0xc7,
+	]
+	assert target.set_condition(.above, rdi) or { []u8{} } == [u8(0x40), 0x0f, 0x97, 0xc7]
+	assert target.widen_byte(rdi) or { []u8{} } == [u8(0x40), 0x0f, 0xb6, 0xff]
 }
 
 // The single-precision instructions, held to the bytes gas produces for them the
