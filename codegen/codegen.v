@@ -3093,6 +3093,20 @@ fn (mut e Emitter) copy_frame_object(source Slot, destination Slot, width int, l
 // the signature the declaration gave, so a call to a function this file defines
 // knows; a call to a name nothing declares has no signature, and an object is
 // refused there rather than handed to a function whose convention is unknown.
+// object_of_no_bytes says whether a type is an object of an aggregate kind with
+// no bytes at all, which is what an empty structure is. The machine has no
+// register for one, no word of the stack and nothing to load: the object is
+// handed over as nothing and read as nothing. V's own generated C has one at
+// every interface call, because the structure an interface holds an object inside
+// is empty when no compiler macro fills its declaration in, and so does every
+// function that returns one of its result structures.
+fn (e Emitter) object_of_no_bytes(t types.Type) bool {
+	if !t.is_aggregate() {
+		return false
+	}
+	return (e.representation.size_of(t) or { 1 }) == 0
+}
+
 fn (e Emitter) aggregate_argument(call ast.Call, position int) ?abi.Class {
 	if parameter := call_parameter(call, position) {
 		// The callee's parameter type is the object that travels, so its class is
@@ -6615,6 +6629,15 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 				register := e.accumulator(expr.line, expr.col)!
 				return e.load_decimal_at(register, 0, format.bytes(), expr.line, expr.col)
 			}
+			if e.object_of_no_bytes(expr.typ) {
+				// A member of no bytes has no value to read: what a member of
+				// an aggregate type is worth is its bytes, and an empty
+				// structure has none, so the member's address is the whole of
+				// what there is and nothing is loaded. V's own generated C
+				// reaches this at every interface call it writes,
+				// `Error__msg(((None__*)i->_object)->Error)`.
+				return
+			}
 			width := e.type_width(expr.spelling) or {
 				e.diagnostics << problem(expr.line, expr.col, 'unsupported: the member ${expr.name}.${expr.member} is declared ${expr.spelling}, and this back end stores ints, chars, floats, doubles and pointers only')
 				return error('unsupported member type')
@@ -8142,6 +8165,15 @@ fn (mut e Emitter) emit_deref(unary ast.Unary, depth int) !void {
 		// into the floating accumulator through the address the pointer holds,
 		// which is what makes `*p` a value of the type.
 		return e.load_decimal_at(address, 0, decimal_width_of(unary.typ), unary.line, unary.col)
+	}
+	if e.object_of_no_bytes(unary.typ) {
+		// An object of no bytes has no value to read and no storage to read it
+		// from, so the address the pointer holds is the whole of what there
+		// is and nothing is loaded. V's own generated C reaches this in every
+		// interface call it writes: `return Error__msg(*(Error*)i->_object)`,
+		// where the structure an interface holds an object inside is empty
+		// because no compiler macro fills its declaration in.
+		return
 	}
 	width := e.storage_width(unary.typ) or {
 		e.diagnostics << problem(unary.line, unary.col, 'unsupported: * reads through an address of ${unary.typ.describe()}, and this back end reads ints, chars, doubles and pointers only')
@@ -11075,6 +11107,18 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	mut doubles := 0
 	mut stacked := 0
 	for i, arg in call.args {
+		if e.object_of_no_bytes(arg.typ) {
+			// An object of no bytes is handed over as nothing: it is not
+			// computed into a slot, because there is nothing to load, and it
+			// spends no register, because the callee's parameter of the same
+			// type takes none. Measured on gcc 16.2.1, `f(struct E e, int x)`
+			// receives x in the first argument register and nothing at all for
+			// e, so the arguments beside it keep the places they had.
+			places << ArgPlace{
+				position: integers
+			}
+			continue
+		}
 		if e.long_double_argument(call, i, arg) != none {
 			// A long double is handed over in memory: sixteen bytes, at the
 			// alignment the type has, which is sixteen. An odd number of
@@ -11316,6 +11360,12 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 		place := places[i]
 		line := expr_line(arg)
 		col := expr_col(arg)
+		if e.object_of_no_bytes(arg.typ) {
+			// An object of no bytes is not computed and not parked: an empty
+			// structure has no bytes for a load to bring into a register, and
+			// the callee reads nothing for it.
+			continue
+		}
 		if place.extended {
 			// A long double is written in the stack pass, which pushes its two
 			// words straight from the value's sixteen bytes rather than parking
@@ -11647,6 +11697,11 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			return error('too many arguments')
 		}
 		width := e.passed_width(call, widths, i, arg, place.floating)!
+		if width == 0 {
+			// An argument that hands over nothing: no register is loaded for
+			// it, and the register its place named is not spent.
+			continue
+		}
 		e.load_argument(slot, register, width, line, col)!
 	}
 	if indirect {
@@ -12167,6 +12222,13 @@ fn (mut e Emitter) passed_width(call ast.Call, widths []int, position int, arg a
 	}
 	if floating {
 		return e.target.word_size
+	}
+	// An argument of an aggregate type with no bytes hands over nothing, which
+	// is the same answer the parameter's own declaration takes it as: no
+	// register and no word of the stack. Its value is not read here, because
+	// an object of no bytes has no bytes to read.
+	if e.object_of_no_bytes(arg.typ) {
+		return 0
 	}
 	actual := e.width_of(arg)
 	if e.floating_of(arg) {
