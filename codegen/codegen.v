@@ -2696,6 +2696,19 @@ fn (mut e Emitter) assign_deref(stmt ast.Stmt, target ast.Expr, expr ast.Expr, d
 		return e.store_decimal_through_object(address, expr, decimal_width_of(unary.typ),
 			stmt.line, stmt.col, depth)
 	}
+	if unary.typ.is_aggregate() {
+		// A write through an address of an aggregate type is the object copy an
+		// assignment to an object of the same type is, at the address the
+		// pointer holds: the bytes move in the chunks the machine moves in one
+		// instruction and neither object is read as a value. Without this the
+		// address has no width to store at, which is what `*q = qq` for a
+		// sixteen-byte object used to be refused for.
+		width := e.known_aggregate_bytes(unary.typ) or {
+			e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: *p is assigned through an address of ${unary.typ.describe()}, and an object of that type has no size here')
+			return error('incomplete pointed-at type')
+		}
+		return e.assign_object(address, width, expr, stmt.line, stmt.col, depth)
+	}
 	width := e.storage_width(unary.typ) or {
 		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: *p is assigned through an address of ${unary.typ.describe()}, and this back end writes ints, chars, doubles and pointers only')
 		return error('unsupported pointed-at type')
