@@ -3689,7 +3689,11 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 			e.reference_object_address(base, stmt.target)
 			is_wide := !object.object && object.width == wide_bytes
 			long_double := e.global_array_is_long_double(stmt.target)
-			e.element_address(base, register, object.width, 0, is_wide || long_double, false, stmt.target,
+			// An element that is itself an object is addressed and not read
+			// here: what the store writes is the object's bytes, which the
+			// aggregate branch below copies, so the sixteen-byte refusal the
+			// flag keeps off does not apply to it.
+			e.element_address(base, register, object.width, 0, is_wide || long_double, object.object, stmt.target,
 				stmt.line,
 				stmt.col)!
 			address := e.value_slot(depth)
@@ -3704,6 +3708,17 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 				// An element of that width takes the two words an object of the type
 				// takes, through the element's own address.
 				return e.store_wide_at(address, expr, stmt.line, stmt.col, depth)
+			}
+			if expr.typ.is_aggregate() && !expr.typ.is_array() {
+				// An element of an aggregate type is an object at the address the
+				// subscript computed, and what is written into it is the object
+				// copy the same assignment between two objects makes. Neither
+				// side is read as a value: the machine moves four widths and an
+				// object of twenty-four bytes is not one of them. An array is
+				// not one of these sources: a string literal written where an
+				// element holds a pointer is the decay the element's own store
+				// makes.
+				return e.assign_object(address, object.width, expr, stmt.line, stmt.col, depth)
 			}
 			e.emit_expr_at(expr, depth + 1)!
 			address_register := e.scratch(stmt.line, stmt.col)!
@@ -3789,7 +3804,7 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		e.load_vla_base(slot, base, stmt.line, stmt.col)!
 		offset = 0
 	}
-	e.element_address(base, register, slot.width, offset, slot.wide || slot.long_double, slot.complex || slot.decimal, stmt.target,
+	e.element_address(base, register, slot.width, offset, slot.wide || slot.long_double, slot.complex || slot.decimal || slot.bytes > 0, stmt.target,
 		stmt.line, stmt.col)!
 	address := e.value_slot(depth)
 	e.store_accumulator(address, stmt.line, stmt.col)!
@@ -3819,6 +3834,16 @@ fn (mut e Emitter) assign_element(stmt ast.Stmt, subscript ast.Expr, expr ast.Ex
 		// An element of that width takes the two words an object of the type takes,
 		// through the element's own address.
 		return e.store_wide_at(address, expr, stmt.line, stmt.col, depth)
+	}
+	if expr.typ.is_aggregate() && !expr.typ.is_array() {
+		// An element of an aggregate type is an object at the address the index
+		// computed, and what is written into it is the object copy the same
+		// assignment between two objects makes: the destination an object is
+		// written through and the source it is written from are both storage,
+		// and neither is read as a value. An array source is not one of these:
+		// a string literal written where the element holds a pointer is the
+		// decay the element's own store makes.
+		return e.assign_object(address, slot.width, expr, stmt.line, stmt.col, depth)
 	}
 	e.emit_expr_at(expr, depth + 1)!
 	address_register := e.scratch(stmt.line, stmt.col)!
@@ -6893,7 +6918,13 @@ fn (mut e Emitter) emit_element_address(expr ast.Index, depth int) !void {
 		e.diagnostics << problem(expr.line, expr.col, 'unsupported: an element of ${expr.typ.describe()} has no size this back end can scale an index by')
 		return error('no element size')
 	}
-	e.element_address(other, index, stride, 0, stride == wide_bytes, expr.typ.is_array(), 'the element', expr.line, expr.col)!
+	// The flag says the element's address is the whole of what the caller wants,
+	// which an element that is itself an object is: an array's value is its
+	// address, and a structure's is its bytes, which a caller reaches by copying
+	// them. A caller that wants a value in the element is refused where it asks
+	// for one, because a whole element of an aggregate type has no load or store
+	// this machine writes in one instruction.
+	e.element_address(other, index, stride, 0, stride == wide_bytes, expr.typ.is_aggregate(), 'the element', expr.line, expr.col)!
 }
 
 // emit_dynamic_element_address is emit_element_address for an element whose stride

@@ -2519,8 +2519,9 @@ fn test_an_array_of_128_bit_objects_is_written_and_read_at_an_element_address() 
 
 // The machine scales an index by one, two, four or eight and by no other number, so
 // an array of objects of any other size is a multiply and an add. Measured on gcc
-// 16.2.1, the two programs below return 44, and a whole element of a sixteen-byte
-// struct is refused by name rather than passed to the encoding.
+// 16.2.1, the three programs below return 44, 44 and 41: the last is a whole
+// element of a sixteen-byte structure, which is the object copy an assignment
+// between two objects makes rather than a value there is an instruction for.
 fn test_an_element_of_a_size_the_machine_does_not_scale_is_a_multiply_and_an_add() {
 	twelve := emit(translation_unit('struct S { int a; int b; int c; }; int main() { struct S s[3]; s[2].b = 300; return (int)(char)s[2].b; }'),
 		Options{})
@@ -2530,10 +2531,10 @@ fn test_an_element_of_a_size_the_machine_does_not_scale_is_a_multiply_and_an_add
 		Options{})
 	assert through_an_index.diagnostics.len == 0
 	assert run_image(through_an_index.bytes) == 44
-	whole := emit(translation_unit('struct S { int a; int b; int c; int d; }; int main() { struct S s[2]; s[0] = s[1]; return 0; }'),
+	whole := emit(translation_unit('struct S { int a; int b; int c; int d; }; int main() { struct S s[2]; s[1].d = 41; s[0] = s[1]; return s[0].d; }'),
 		Options{})
-	assert whole.diagnostics.len == 1
-	assert whole.diagnostics[0].msg.contains('elements of 16 bytes')
+	assert whole.diagnostics.len == 0
+	assert run_image(whole.bytes) == 41
 }
 
 // A constant stored into an element is written at the element's width, which is
