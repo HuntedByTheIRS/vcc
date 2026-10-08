@@ -700,8 +700,14 @@ pub fn emit(unit ast.TranslationUnit, opts Options) Result {
 	image_bytes := emitter.build() or {
 		// A stage that failed without reporting why still owes a message: an
 		// empty output file that says nothing is the worst outcome available,
-		// and it is what an error raised past a diagnostic produces.
-		if emitter.diagnostics.len == 0 {
+		// and it is what an error raised past a diagnostic produces. The test
+		// is for an error and not for any diagnostic at all, because a
+		// diagnostic the flags silence is one the caller never prints: a
+		// back end that raised a warning about a construct and then failed
+		// for another reason would leave the caller with no message and an
+		// empty file, and count it a success. It is the same question the
+		// check below asks, where an error is what drops the image.
+		if tokenize.errors(emitter.diagnostics).len == 0 {
 			emitter.diagnostics << problem(1, 1, 'internal: the image could not be produced: ${err.msg()}')
 		}
 		return Result{
