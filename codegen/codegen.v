@@ -12191,16 +12191,20 @@ fn (e Emitter) parameter_wants_a_word(widths []int, position int, arg ast.Expr) 
 }
 
 // widening_or_narrowing_integer says whether the two widths are a conversion
-// between two integer values rather than a mismatch: a four-byte value handed to an
-// eight-byte parameter is widened where it is parked, and an eight-byte value
-// handed to a four-byte parameter is read as its low bytes, which is the value
-// taken modulo the parameter's width. A pointer on either side is not either of
-// those, because the bits of an address are not an integer's value.
+// between two integer values rather than a mismatch: a narrower value handed to a
+// wider parameter is widened where it is parked, and a wider one handed to a
+// narrower parameter is read as its low bytes, which is the value taken modulo
+// the parameter's width. Every pair of integer widths the machine has is such a
+// conversion, because an argument is converted to the parameter's type as an
+// assignment would convert it (C99 6.5.2.2), and the emitters below park the
+// value at the parameter's width for all of them. A pointer on either side is not
+// a conversion, because the bits of an address are not an integer's value, and
+// neither is a value of 128 bits, which travels as a pair and not as a width.
 fn (e Emitter) widening_or_narrowing_integer(actual int, expected int, arg ast.Expr) bool {
 	if e.floating_of(arg) || e.is_a_pointer(arg) {
 		return false
 	}
-	return (actual == 4 && expected == 8) || (actual == 8 && expected == 4)
+	return actual in [1, 2, 4, 8] && expected in [1, 2, 4, 8]
 }
 
 // import_symbol records a library symbol the image needs, once. The order the
