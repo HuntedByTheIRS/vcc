@@ -207,22 +207,6 @@ pub fn data_fixups(unit image.Program, unit_index int, globals_base int, text_ba
 			name = label_key(unit, unit_index, fixup.name)
 		} else if fixup.kind == .global_address {
 			name = object_key(unit, unit_index, fixup.name)
-		} else if fixup.kind == .section_address {
-			// A section key names a place in one of the unit's own blobs, and
-			// the object measured the byte from its own copy of that blob. The
-			// merged copy starts elsewhere, so the byte gains its blob's base.
-			match name {
-				image.section_key_text {
-					addend += text_base
-				}
-				image.section_key_rodata {
-					addend += string_base
-				}
-				image.section_key_data {
-					addend += globals_base
-				}
-				else {}
-			}
 		}
 		out << image.DataFixup{
 			offset: fixup.offset + globals_base
@@ -241,7 +225,9 @@ pub fn data_fixups(unit image.Program, unit_index int, globals_base int, text_ba
 // reference. The section keys are compared only against a reference that names
 // a place, and this is what tells the two apart. The reader's own place
 // references are section_address, and a named object another unit left in its
-// read-only data arrives as an import_address carrying the read-only key.
+// read-only data arrives as an import_address carrying the read-only key, so
+// asking for section_address alone would drop that second case rather than
+// narrow this one.
 fn names_a_string_literal(kind image.FixupKind) bool {
 	return kind == .take_address || kind == .take_wide_address
 }
