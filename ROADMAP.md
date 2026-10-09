@@ -215,17 +215,26 @@ src.c` exits 0 and writes 46,067,936 bytes, the size of the object the host
 writes for the same file, and gcc links that object into a compiler that runs
 and reports its version.
 
-What is not clean is the output itself, and it is this milestone's business
-rather than a neighbour's. A compiler built this way writes the wrong bytes
-where the section names belong in the objects it writes: `.text`, `.rodata` and
-`.data` come out as bytes of the section contents, so its string table holds
-`55 48 89 e5 48` where `.text` belongs, and a two-line C file shows it as
-plainly as the tree's own 5.5 MB of generated C. It is also not deterministic
-where the host is: the same input compiled twice gives objects differing in two
-or three bytes, and two builds of vcc differ by twenty-six. Neither stops an
-image from linking, so the chain runs end to end today. Printing the name
-strings at the point the object writer interns them, in a build of vcc-v1, is
-what would say whether the names are wrong or the table they are read out of is.
+The output was not clean for a while, and that was this milestone's business
+rather than a neighbour's. A compiler built this way wrote the wrong bytes where
+the section names belong in the objects it writes: `.text`, `.rodata` and
+`.data` came out as the bytes of the section contents, so its string table held
+`55 48 89 e5 48` where `.text` belongs. The cause sat in the link rather than in
+the writer. The image keys a string by the literal's own bytes, this tree's
+object writer builds its name table from literals that spell the three section
+keys, and the writable-data rewrite compared every reference's name against
+those keys, so a reference to the literal `.text` was rewritten into a reference
+to the code section and the field came back holding the section's start.
+
+The comparison is by kind now (`b710ccb`): a key is compared only against a
+reference whose kind names a place, which is what a relocatable object states,
+and a `take_address` names an interned entry whatever it spells. `v test .` is
+51/51, the corpus is 118 passed and 0 failed, the gate passes, and a compiler
+built by this one writes `\0.text\0.rela.text\0.rodata\0.data\0` into
+`.shstrtab` where it wrote code bytes. The two-to-three-byte difference between
+two runs of one binary did not reproduce once the names were right, and the
+twenty-six bytes between two builds of vcc is two builds rather than one input
+compiled twice.
 
 
 ## Later, and not yet planned
