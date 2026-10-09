@@ -42,8 +42,8 @@ rather than a fix.
 Everything else exits non-zero with a diagnostic naming the construct.
 
 The numbers, from `tools/bench.vsh` against the tcc V vendors: on a 20000-term
-constant chain vcc is about 27x its wall time and 16x its peak memory, and at
-100000 terms about 69x and 57x. The ratio grows with the input because tcc's
+constant chain vcc is about 17x its wall time and 15x its peak memory, and at
+100000 terms about 38x and 62x. The ratio grows with the input because tcc's
 time is nearly flat while vcc's tracks the tokens and nodes it allocates. That
 gap is the M6 problem, and it is measured rather than felt.
 

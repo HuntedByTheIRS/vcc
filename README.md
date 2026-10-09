@@ -245,13 +245,14 @@ Speed is the number to watch, and it is not close yet. Measured with
 
 | terms | vcc wall | tcc wall | ratio | vcc peak | tcc peak | ratio |
 |---|---|---|---|---|---|---|
-| 2 000 | 30.2 ms | 5.1 ms | 6.0x | 14.4 MB | 3.4 MB | 4.2x |
-| 20 000 | 196.2 ms | 7.2 ms | 27.1x | 55.4 MB | 3.4 MB | 16.4x |
+| 2 000 | 18.5 ms | 5.3 ms | 3.5x | 16.5 MB | 3.1 MB | 5.3x |
+| 20 000 | 117.4 ms | 6.9 ms | 17.0x | 49.3 MB | 3.2 MB | 15.4x |
 
-The ratio grows with the input because tcc's own time barely moves, 5.1 ms to
-7.2 ms across these two counts, while vcc's tracks the tokens and nodes it
+The ratio grows with the input because tcc's own time barely moves, 5.3 ms to
+6.9 ms across these two counts, while vcc's tracks the tokens and nodes it
 allocates. That is a design problem and the M6 problem, not a constant factor to
-trim.
+trim. Each row is one run: repeated runs of the same count move by about five
+percent.
 
 ## Extras
 
