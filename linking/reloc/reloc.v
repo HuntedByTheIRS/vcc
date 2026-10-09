@@ -175,8 +175,9 @@ pub fn data_fixups(unit image.Program, unit_index int, globals_base int, text_ba
 		mut kind := fixup.kind
 		mut name := fixup.name
 		mut addend := fixup.addend
-		if fixup.name == image.section_key_text || fixup.name == image.section_key_rodata
-			|| fixup.name == image.section_key_data {
+		if !names_a_string_literal(fixup.kind)
+			&& (fixup.name == image.section_key_text || fixup.name == image.section_key_rodata
+				|| fixup.name == image.section_key_data) {
 			// A reference to a section's content rather than to a name: what the
 			// unit called a read-only object of its own, this reader keys by the
 			// section it lies in. The reference is a place, not a symbol, so it is
@@ -230,6 +231,19 @@ pub fn data_fixups(unit image.Program, unit_index int, globals_base int, text_ba
 			addend: addend
 		}
 	}
+}
+
+// names_a_string_literal says whether a reference's name is a key into the
+// image's read-only data rather than the name of a symbol or a place. The
+// emitter keys such an entry by the literal's own text, so the name can spell
+// anything a literal holds, a section key among them: a program whose string
+// `.text` is a file-scope pointer initializer puts `.text` on a take_address
+// reference. The section keys are compared only against a reference that names
+// a place, and this is what tells the two apart. The reader's own place
+// references are section_address, and a named object another unit left in its
+// read-only data arrives as an import_address carrying the read-only key.
+fn names_a_string_literal(kind image.FixupKind) bool {
+	return kind == .take_address || kind == .take_wide_address
 }
 
 // reference_name is the name a code reference is written under in the merged

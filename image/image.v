@@ -84,7 +84,10 @@ pub:
 // The names a relocation uses for a unit's own sections, so that a reference to
 // a place rather than to a symbol is spelled the same way in the reader and in
 // the container that fills it in. A section key cannot be a C identifier, so it
-// never meets the name of a symbol.
+// never meets the name of a symbol. It can meet the text of a string literal,
+// which is keyed by its own bytes and may spell `.text`, so a key is compared
+// only against a reference whose kind says it names a place: `linking/reloc/`
+// keeps the two apart by kind and not by the name.
 pub const section_key_text = '.text'
 pub const section_key_rodata = '.rodata'
 pub const section_key_data = '.data'

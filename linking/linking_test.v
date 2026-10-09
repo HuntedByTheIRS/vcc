@@ -436,3 +436,31 @@ fn test_the_image_answers_the_data_bounds_its_own_runtime_reaches_for() {
 	assert merged.bound['_end'].offset == merged.globals_blob.len
 	assert merged.bound['data_start'].offset < merged.bound['_end'].offset
 }
+
+// The image's read-only data is keyed by a string's own bytes, so a literal may
+// spell a section's name: `.text` is four characters a program can hold. The
+// section keys are compared only against a reference that names a place, so such
+// a literal keeps its address. A name comparison alone would rewrite this field
+// to the start of the merged code, which is a wrong value the program cannot
+// tell from a right one.
+fn test_a_literal_that_spells_a_section_key_keeps_the_literal() {
+	mut main := defining('main', [u8(0x90)])
+	// One eight-byte pointer in the writable data, at offset 0.
+	main.globals_blob = [u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0)]
+	main.globals_alignment = 8
+	main.string_blob = '.text\x00'.bytes()
+	main.strings['.text'] = 0
+	main.data_fixups << image.DataFixup{
+		offset: 0
+		kind:   .take_address
+		name:   '.text'
+	}
+	merged := link([main], options('main')) or { panic('the link failed: ${err.msg()}') }
+	assert merged.data_fixups.len == 1
+	assert merged.data_fixups[0].kind == .take_address
+	assert merged.data_fixups[0].name == '.text'
+	assert merged.data_fixups[0].offset == 0
+	// The literal is still the entry the container looks the name up in.
+	assert '.text' in merged.strings
+	assert merged.strings['.text'] == 0
+}
