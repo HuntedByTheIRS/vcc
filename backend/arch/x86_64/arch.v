@@ -2266,8 +2266,17 @@ pub fn set_condition(condition Condition, reg Register) ![]u8 {
 
 // movzx_byte widens that byte into the whole register: the language's comparison
 // is a value of int width, and the bits above the byte have to be zero for the
-// value to be one.
+// value to be one. The move names one register in each field, the byte it reads
+// in the rm one and the whole register it writes in the reg one, and both are
+// this one register, so a register past the eighth needs REX.R and REX.B together
+// the way half_extension writes them. With REX.R alone the byte operand reads al,
+// cl, dl or bl and the byte in r8b..r15b is never read: a `_Bool` parameter the
+// ABI hands over in r8d came back as the zero in eax rather than as the value.
 pub fn movzx_byte(reg Register) ![]u8 {
+	if reg.code >= 8 {
+		return [u8(0x45) /* REX.R | REX.B */
+			0x0f, 0xb6, u8(0xc0 | ((reg.code & 0x07) << 3) | (reg.code & 0x07))]
+	}
 	mut out := byte_rex(reg, true)!
 	out << u8(0x0f)
 	out << 0xb6
@@ -2385,7 +2394,9 @@ fn byte_operand(reg Register) ! {
 // low byte is sil. So these two instructions are written for every
 // general-purpose register and not only the first four, which is what
 // byte_operand asks of the instructions whose byte operand has to be one of the
-// four.
+// four. A widening move names the same register in both fields at once, so it
+// carries both bits itself rather than asking for one of them, which is what
+// half_extension and movzx_byte do.
 fn byte_rex(reg Register, reg_field bool) ![]u8 {
 	if reg.width != 4 && reg.width != 8 {
 		return error('${name}: a one-byte operand is the low byte of a general-purpose register, and ${reg.name} is not one')

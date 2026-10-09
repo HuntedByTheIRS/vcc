@@ -467,6 +467,18 @@ fn test_a_comparison_becomes_a_zero_or_a_one_in_the_register() {
 		0xb6,
 		0xc0,
 	]
+	// A register past the eighth is named in both fields of that move, the byte it
+	// reads and the whole register it writes, so its prefix carries both bits. gas
+	// reads the four bytes below as `movzbl %r8b,%r8d`. With REX.R alone the byte
+	// operand is al, and a `_Bool` parameter the ABI hands over in r8d is lost:
+	// measured, a call passing one answered 43 where gcc 16.2.1 answers 1043.
+	r8d := target.reg('r8d') or { panic('the target description has no such name') }
+	assert x86_64.movzx_byte(target.describe(r8d)) or { panic('the target description has no such name') } == [
+		u8(0x45),
+		0x0f,
+		0xb6,
+		0xc0,
+	]
 	// The whole shape the emitter asks for, and the operator spelled the way the
 	// language spells it.
 	assert target.compare('<=', eax, ecx) or { panic('the target description has no such name') } == [
