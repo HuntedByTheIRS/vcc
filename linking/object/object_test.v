@@ -117,7 +117,11 @@ fn test_a_relocatable_object_reads_back_as_the_unit_that_wrote_it() {
 	assert got.globals['p'].offset == 8
 	assert got.globals['p'].width == 8
 	assert got.globals_alignment == 8
-	assert got.string_blob == program.string_blob
+	// The read-only data now carries the unwind table after the strings. The
+	// sample defines no function body, so the table is empty, but the section
+	// itself still pads the read-only blob up to its own alignment.
+	assert got.string_blob[0..program.string_blob.len] == program.string_blob
+	assert got.eh_frame_run.len == 0
 	// The strings and doubles tables stay empty: a reference to the read-only
 	// data arrives as a relocation against the section, not as a name.
 	assert got.strings.len == 0

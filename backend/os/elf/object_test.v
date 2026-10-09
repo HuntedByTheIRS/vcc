@@ -701,12 +701,148 @@ fn test_the_string_tables_start_with_a_null_byte_and_hold_each_name() {
 		section_shstrtab,
 		section_gnu_stack,
 		section_rela_data,
+		section_eh_frame,
+		section_rela_eh_frame,
 	]
 	expected := ['.text', '.rela.text', '.rodata', '.data', '.symtab', '.strtab', '.shstrtab',
-		'.note.GNU-stack', '.rela.data']
+		'.note.GNU-stack', '.rela.data', '.eh_frame', '.rela.eh_frame']
 	for i, index in indices {
 		header := section_header_at(bytes, index)
 		offset := int(u32_at(bytes, header))
 		assert name_at(bytes, shstrtab + offset) == expected[i]
 	}
+}
+
+// The unwind table is what lets a stack walker find the frame of a function
+// this object defines. It is allocated and read-only, and its relocations live
+// beside it in a table of their own, resolved against the same symbol table and
+// against .eh_frame rather than against .text.
+fn eh_frame_section(bytes []u8) []u8 {
+	offset := section_offset(bytes, section_eh_frame)
+	return bytes[offset..offset + section_size(bytes, section_eh_frame)]
+}
+
+fn eh_frame_relocation_offset(bytes []u8, index int) u64 {
+	at := section_offset(bytes, section_rela_eh_frame) + index * elf_relocation_size
+	return u64_at(bytes, at)
+}
+
+fn eh_frame_relocation_info(bytes []u8, index int) u64 {
+	at := section_offset(bytes, section_rela_eh_frame) + index * elf_relocation_size
+	return u64_at(bytes, at + 8)
+}
+
+fn eh_frame_relocation_addend(bytes []u8, index int) i64 {
+	at := section_offset(bytes, section_rela_eh_frame) + index * elf_relocation_size
+	return i64(u64_at(bytes, at + 16))
+}
+
+fn eh_frame_relocation_count(bytes []u8) int {
+	return section_size(bytes, section_rela_eh_frame) / elf_relocation_size
+}
+
+// two_bodies is a unit with two function bodies, the second following the first
+// in the code, and two bytes of code after them that are not a function: the
+// routines an image writes behind its functions are code in the same section, so
+// a body's length comes from the run and not from the distance to the end.
+fn two_bodies() image.Program {
+	mut program := image.Program{}
+	program.text = [u8(0x55), u8(0xc3), u8(0x55), u8(0xc3), u8(0x90), u8(0x90)]
+	program.defined['first'] = true
+	program.defined['second'] = true
+	program.labels['first'] = 0
+	program.labels['second'] = 2
+	program.function_runs << image.CodeRun{
+		base: 0
+		len:  2
+	}
+	program.function_runs << image.CodeRun{
+		base: 2
+		len:  2
+	}
+	return program
+}
+
+fn test_the_unwind_table_is_an_allocated_read_only_section_with_a_relocation_table() {
+	bytes := object(two_bodies(), x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	table := section_header_at(bytes, section_eh_frame)
+	assert u32_at(bytes, table + 4) == sht_progbits
+	assert u64_at(bytes, table + 8) == shf_alloc
+	assert u32_at(bytes, table + 40) == 0
+	assert u64_at(bytes, table + 48) == 8
+	assert u64_at(bytes, table + 56) == 0
+	rela := section_header_at(bytes, section_rela_eh_frame)
+	assert u32_at(bytes, rela + 4) == sht_rela
+	assert u32_at(bytes, rela + 40) == section_symtab
+	assert u32_at(bytes, rela + 44) == section_eh_frame
+	assert u64_at(bytes, rela + 48) == 8
+	assert u64_at(bytes, rela + 56) == elf_relocation_size
+}
+
+// One CIE serves every function, because each body follows the same prologue
+// and the frame is not moved again inside it: the canonical frame address is
+// rbp plus sixteen, the saved frame pointer is at CFA minus sixteen, and the
+// return address is at CFA minus eight. The entry is a version 1 frame with the
+// "zR" augmentation, and an FDE's initial location is a four-byte distance from
+// the field, which is the encoding gcc writes.
+fn test_the_cie_states_the_one_frame_rule() {
+	bytes := object(two_bodies(), x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	table := eh_frame_section(bytes)
+	assert u32_at(table, 0) == 20 // the entry's length, minus its own four bytes
+	assert u32_at(table, 4) == 0 // the CIE id, which is what makes it a CIE
+	assert table[8] == 1 // version 1
+	assert table[9] == 0x7a && table[10] == 0x52 && table[11] == 0 // "zR"
+	assert table[12] == 1 // code alignment factor
+	assert table[13] == 0x78 // data alignment factor: -8
+	assert table[14] == 16 // return address register
+	assert table[15] == 1 // one byte of augmentation data
+	assert table[16] == 0x1b // FDE encoding: pcrel | sdata4
+	// DW_CFA_def_cfa rbp,16 ; DW_CFA_offset rbp,-16 ; DW_CFA_offset rip,-8
+	assert table[17] == 0x0c && table[18] == 6 && table[19] == 16
+	assert table[20] == 0x86 && table[21] == 2
+	assert table[22] == 0x90 && table[23] == 1
+}
+
+// One FDE per function body, each carrying the body's place and length and no
+// instructions of its own: the CIE's rule is the entry's rule. The first entry
+// begins right after the CIE and points back at it.
+fn test_the_unwind_table_has_one_entry_per_function_body() {
+	bytes := object(two_bodies(), x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	table := eh_frame_section(bytes)
+	// The CIE is twenty-four bytes and each entry is twenty.
+	assert table.len == 24 + 2 * 20
+	assert u32_at(table, 24) == 16 // the entry's length
+	assert u32_at(table, 28) == 28 // (24 + 4) back to the CIE at zero
+	assert u32_at(table, 32) == 0 // the initial location: a relocation fills it
+	assert u32_at(table, 36) == 2 // the first body's length
+	assert u32_at(table, 44) == 16
+	assert u32_at(table, 48) == 48 // (44 + 4) back to the same CIE
+	assert u32_at(table, 52) == 0
+	assert u32_at(table, 56) == 2 // the second body's length, not the four bytes left
+}
+
+// The initial location of an FDE is the distance from its own field to the
+// function, so it is written as a relocation against the .text section symbol at
+// the function's offset: the object has no addresses and the link settles this
+// one the way it settles a call.
+fn test_each_unwind_entry_relocates_against_text_at_its_function() {
+	bytes := object(two_bodies(), x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	assert eh_frame_relocation_count(bytes) == 2
+	// The field is eight bytes into each entry, past the length and the pointer
+	// back at the CIE.
+	assert eh_frame_relocation_offset(bytes, 0) == 32
+	info := eh_frame_relocation_info(bytes, 0)
+	assert u32(info >> 32) == symbol_text_section
+	assert u32(info & 0xffffffff) == x86_64().address_relocation()
+	assert eh_frame_relocation_addend(bytes, 0) == 0
+	assert eh_frame_relocation_offset(bytes, 1) == 52
+	assert eh_frame_relocation_addend(bytes, 1) == 2
 }

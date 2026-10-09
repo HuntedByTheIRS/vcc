@@ -83,7 +83,13 @@ const section_gnu_stack = 8
 // pointer initializer is. They sit in a table of their own because a relocation
 // is against one section, and these are against .data.
 const section_rela_data = 9
-const section_count = 10
+// The unwind table: how a stack walker finds the frame of every function this
+// object defines. It follows the read-only data because a program's copy of it
+// is read-only, and its relocations live in the same kind of table as the
+// code's, against .eh_frame rather than against .text.
+const section_eh_frame = 10
+const section_rela_eh_frame = 11
+const section_count = 12
 
 // The three symbols every object has before its own: one per section a reference
 // can be made against. A reference to a string is a reference to .rodata at an
@@ -109,6 +115,10 @@ struct NameOffsets {
 	shstrtab  int
 	gnu_stack int
 	rela_data int
+	// eh_frame is the unwind table and rela_eh_frame the relocations that
+	// fill in where each function it describes begins.
+	eh_frame      int
+	rela_eh_frame int
 }
 
 // PartSizes is how long each part of the object is. The sizes are kept apart from
@@ -126,20 +136,26 @@ struct PartSizes {
 	symtab    int
 	strtab    int
 	shstrtab  int
+	// eh_frame is the unwind table, and rela_eh_frame the relocations that
+	// fill in its initial locations.
+	eh_frame      int
+	rela_eh_frame int
 }
 
 // PartOffsets is where each part of the object landed, as a file offset.
 struct PartOffsets {
-	text      int
-	rodata    int
-	data      int
-	rela      int
-	rela_data int
-	symtab    int
-	strtab    int
-	shstrtab  int
-	headers   int
-	total     int
+	text          int
+	rodata        int
+	data          int
+	rela          int
+	rela_data     int
+	eh_frame      int
+	rela_eh_frame int
+	symtab        int
+	strtab        int
+	shstrtab      int
+	headers       int
+	total         int
 }
 
 // ObjectRelocation is one hole the linker has to fill: where it is in .text,
@@ -394,24 +410,33 @@ pub fn object(program image.Program, target backend.Target) ![]u8 {
 			}
 		}
 	}
+	// The unwind table: one CIE stating the rule every function this unit
+	// emits follows, and one FDE per function body saying where it lies and
+	// how long it is. The addresses belong to the link, so each FDE's initial
+	// location is left to a relocation against .text.
+	eh_frame, eh_frame_relocations := unwind_table(program)
 	names, shstrtab := section_names()
 	sizes := PartSizes{
-		text:      text.len
-		rodata:    program.string_blob.len
-		data:      program.globals_blob.len
-		rela:      relocations.len * elf_relocation_size
-		rela_data: data_relocations.len * elf_relocation_size
-		symtab:    symbol_count * elf_symbol_size
-		strtab:    strtab.len
-		shstrtab:  shstrtab.len
+		text:          text.len
+		rodata:        program.string_blob.len
+		data:          program.globals_blob.len
+		rela:          relocations.len * elf_relocation_size
+		rela_data:     data_relocations.len * elf_relocation_size
+		eh_frame:      eh_frame.len
+		rela_eh_frame: eh_frame_relocations.len * elf_relocation_size
+		symtab:        symbol_count * elf_symbol_size
+		strtab:        strtab.len
+		shstrtab:      shstrtab.len
 	}
 	parts := place(sizes)
 	mut output := []u8{len: parts.total, init: u8(0)}
 	put(mut output, parts.text, text)
 	put(mut output, parts.rodata, program.string_blob)
 	put(mut output, parts.data, program.globals_blob)
+	put(mut output, parts.eh_frame, eh_frame)
 	emit_object_relocations(mut output, parts, relocations, target)
 	emit_object_data_relocations(mut output, parts, data_relocations)
+	emit_object_eh_frame_relocations(mut output, parts, eh_frame_relocations, target)
 	emit_object_symbols(mut output, parts, program, local_names, global_names, symbol_index,
 		name_offset)
 	put(mut output, parts.strtab, strtab)
@@ -443,16 +468,20 @@ fn section_names() (NameOffsets, []u8) {
 	shstrtab := intern_name(mut table, '.shstrtab')
 	gnu_stack := intern_name(mut table, '.note.GNU-stack')
 	rela_data := intern_name(mut table, '.rela.data')
+	eh_frame := intern_name(mut table, '.eh_frame')
+	rela_eh_frame := intern_name(mut table, '.rela.eh_frame')
 	return NameOffsets{
-		text:      text
-		rela:      rela
-		rodata:    rodata
-		data:      data
-		symtab:    symtab
-		strtab:    strtab
-		shstrtab:  shstrtab
-		gnu_stack: gnu_stack
-		rela_data: rela_data
+		text:          text
+		rela:          rela
+		rodata:        rodata
+		data:          data
+		symtab:        symtab
+		strtab:        strtab
+		shstrtab:      shstrtab
+		gnu_stack:     gnu_stack
+		rela_data:     rela_data
+		eh_frame:      eh_frame
+		rela_eh_frame: rela_eh_frame
 	}, table
 }
 
@@ -475,10 +504,14 @@ fn place(sizes PartSizes) PartOffsets {
 	offset = align(offset + sizes.rodata, 8)
 	data := offset
 	offset = align(offset + sizes.data, 8)
+	eh_frame := offset
+	offset = align(offset + sizes.eh_frame, 8)
 	rela := offset
 	offset = align(offset + sizes.rela, 8)
 	rela_data := offset
 	offset = align(offset + sizes.rela_data, 8)
+	rela_eh_frame := offset
+	offset = align(offset + sizes.rela_eh_frame, 8)
 	symtab := offset
 	offset = align(offset + sizes.symtab, 8)
 	strtab := offset
@@ -487,16 +520,18 @@ fn place(sizes PartSizes) PartOffsets {
 	offset = align(offset + sizes.shstrtab, 8)
 	headers := offset
 	return PartOffsets{
-		text:      text
-		rodata:    rodata
-		data:      data
-		rela:      rela
-		rela_data: rela_data
-		symtab:    symtab
-		strtab:    strtab
-		shstrtab:  shstrtab
-		headers:   headers
-		total:     offset + section_count * elf_section_header_size
+		text:          text
+		rodata:        rodata
+		data:          data
+		eh_frame:      eh_frame
+		rela:          rela
+		rela_data:     rela_data
+		rela_eh_frame: rela_eh_frame
+		symtab:        symtab
+		strtab:        strtab
+		shstrtab:      shstrtab
+		headers:       headers
+		total:         offset + section_count * elf_section_header_size
 	}
 }
 
@@ -535,6 +570,121 @@ fn emit_object_data_relocations(mut output []u8, parts PartOffsets, relocations 
 		put_u64(mut output, at + 8, (u64(relocation.symbol) << 32) | relocation_absolute)
 		put_u64(mut output, at + 16, u64(relocation.addend))
 	}
+}
+
+// emit_object_eh_frame_relocations writes one relocation per function the
+// unwind table describes: the four-byte initial-location field of its FDE is a
+// PC-relative distance to the function, so the field names .text at the
+// function's offset and the link writes the distance into it. The addend is the
+// function's offset in .text, which is what the section symbol's value plus the
+// addend has to come to.
+fn emit_object_eh_frame_relocations(mut output []u8, parts PartOffsets, relocations []ObjectRelocation, target backend.Target) {
+	for i, relocation in relocations {
+		at := parts.rela_eh_frame + i * elf_relocation_size
+		put_u64(mut output, at, u64(relocation.offset))
+		put_u64(mut output, at + 8, (u64(relocation.symbol) << 32) | u64(target.address_relocation()))
+		put_u64(mut output, at + 16, u64(relocation.addend))
+	}
+}
+
+// eh_frame_cie is the one CIE the unit's unwind table carries, and the reason
+// one CIE is enough: every function this compiler emits opens with the same
+// prologue, so the rule that says where a frame begins and where its saved
+// registers are does not change from one body to the next.
+//
+// The body is captured between a pushed frame pointer and a frame reserved
+// beneath it, and the reservation is not moved again inside the body except by
+// a matching release and reserve around a call, so the canonical frame address
+// is rbp plus sixteen for the whole body. The caller's return address lies at
+// CFA minus eight, which is where the call left it, and the frame pointer this
+// function saved lies at CFA minus sixteen. The CIE states all three. The return
+// address's own rule is not optional: a walker that does not know where the
+// return address is saved cannot find the caller's program counter, and the walk
+// stops or reads a value that is not one.
+//
+// The encoding is gcc's: a version 1 frame, the standard "zR" augmentation whose
+// one byte says an FDE's initial location is a four-byte distance measured from
+// the field, code alignment 1 and data alignment -8, and the return address in
+// column 16. The entry's length comes to a multiple of four with no padding,
+// which is what lets a following entry begin there.
+fn frame_cie() []u8 {
+	mut entry := []u8{}
+	// The length of everything below it, then the identifier zero that marks
+	// this entry as a CIE rather than an FDE, then the version.
+	entry << u8(0x14)
+	entry << u8(0x00)
+	entry << u8(0x00)
+	entry << u8(0x00)
+	entry << u8(0x00)
+	entry << u8(0x00)
+	entry << u8(0x00)
+	entry << u8(0x00)
+	entry << u8(0x01)
+	// The augmentation string "zR": an FDE may carry augmentation data of its
+	// own, and one byte of this CIE's augmentation data says how an FDE's
+	// initial location is encoded.
+	entry << u8(0x7a)
+	entry << u8(0x52)
+	entry << u8(0x00)
+	// Code alignment 1, data alignment -8, and the return address in column 16.
+	entry << u8(0x01)
+	entry << u8(0x78)
+	entry << u8(0x10)
+	// One byte of augmentation data: DW_EH_PE_pcrel | DW_EH_PE_sdata4, a
+	// four-byte signed distance measured from the field itself.
+	entry << u8(0x01)
+	entry << u8(0x1b)
+	// The rule: DW_CFA_def_cfa rbp,16; DW_CFA_offset rbp,-16; and
+	// DW_CFA_offset rip,-8. The operand of an offset is divided by the data
+	// alignment, so -16 is written 2 and -8 is written 1.
+	entry << u8(0x0c)
+	entry << u8(0x06)
+	entry << u8(0x10)
+	entry << u8(0x86)
+	entry << u8(0x02)
+	entry << u8(0x90)
+	entry << u8(0x01)
+	return entry
+}
+
+// unwind_table builds the unit's `.eh_frame`: the one CIE every function points
+// at, and one FDE per function body. Each FDE names the function's place and
+// length, and says its rule is the CIE's by carrying no instructions of its own.
+//
+// The initial location is left as zero and a relocation against .text at the
+// function's offset: an object has no addresses, and the link is what writes the
+// distance the field has to hold.
+fn unwind_table(program image.Program) ([]u8, []ObjectRelocation) {
+	// A unit with no function body has nothing to describe, and emits no table:
+	// a C compiler writes none for a translation unit with no functions, and an
+	// empty `.eh_frame` would be bytes a walker reads and finds nothing in.
+	if program.function_runs.len == 0 {
+		return []u8{}, []ObjectRelocation{}
+	}
+	mut table := frame_cie()
+	mut relocations := []ObjectRelocation{}
+	for run in program.function_runs {
+		entry := table.len
+		mut fde := []u8{len: 20, init: u8(0)}
+		put_u32(mut fde, 0, 16) // the entry below, minus these four
+		// The four bytes at offset four point back at the CIE. The value is
+		// the distance from the field to the CIE's first byte, and the CIE is
+		// the table's first bytes, so it is the field's own offset.
+		put_u32(mut fde, 4, u32(entry + 4))
+		// Offset eight is the initial location, zero until the link fills it.
+		// The four bytes at offset twelve are the length of the body.
+		put_u32(mut fde, 12, u32(run.len))
+		// Offset sixteen is the one byte of augmentation data, zero, and the
+		// three bytes after it are DW_CFA_nop padding to a four-byte length.
+		table << fde
+		relocations << ObjectRelocation{
+			offset: entry + 8
+			symbol: symbol_text_section
+			addend: i64(run.base)
+			call:   false
+		}
+	}
+	return table, relocations
 }
 
 // emit_object_symbols writes the static symbol table: the null entry the format
@@ -650,6 +800,15 @@ fn emit_object_section_headers(mut output []u8, parts PartOffsets, sizes PartSiz
 	put_section_header(mut output, parts.headers + section_rela_data * elf_section_header_size,
 		names.rela_data, sht_rela, 0, parts.rela_data, sizes.rela_data,
 		section_symtab, section_data, 8, elf_relocation_size)
+	// The unwind table is allocated and read-only, and its own relocations live
+	// beside it the way the code's do, resolved against the same symbol table
+	// and against .eh_frame rather than against .text.
+	put_section_header(mut output, parts.headers + section_eh_frame * elf_section_header_size,
+		names.eh_frame, sht_progbits, shf_alloc, parts.eh_frame, sizes.eh_frame,
+		0, 0, 8, 0)
+	put_section_header(mut output, parts.headers + section_rela_eh_frame * elf_section_header_size,
+		names.rela_eh_frame, sht_rela, 0, parts.rela_eh_frame, sizes.rela_eh_frame,
+		section_symtab, section_eh_frame, 8, elf_relocation_size)
 }
 
 fn put_section_header(mut output []u8, at int, name int, kind u32, flags u64, offset int, size int, link u32, info u32, alignment u64, entry_size u64) {

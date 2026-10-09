@@ -252,6 +252,14 @@ pub mut:
 	// before the library, so a call to a function whose body comes later in the
 	// file binds to that function and not to a symbol of the same name.
 	defined map[string]bool
+	// function_runs is where each function body the emitter wrote lies in
+	// `text`, in the order it was written. A body is not the only code in the
+	// section: the routines an image writes behind the functions are code too,
+	// so a container that has to state a function's range reads it here rather
+	// than taking whatever the next label leaves. A nested function is a body
+	// of its own and has a run of its own, written after the body it is
+	// nested in.
+	function_runs []CodeRun
 	// imports are the library symbols the image needs, in the order they were
 	// first called, so that the same input produces the same bytes every run.
 	imports []string

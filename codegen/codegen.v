@@ -1539,7 +1539,8 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	}
 	// The prologue is what a call to this function jumps to, so the label goes
 	// in front of it.
-	e.program.labels[decl.name] = e.program.text.len
+	function_start := e.program.text.len
+	e.program.labels[decl.name] = function_start
 	e.append(e.target.frame_prologue())
 	// The frame is opened with a size of zero and filled in once the body has
 	// been walked: the size is the sum of what the body asked for, and the body
@@ -1940,6 +1941,15 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	// and this subtraction has to keep it that way or a call inside the body
 	// reaches a function whose own frame is off by the remainder.
 	e.fill_frame(frame_at, align(e.frame_used, frame_alignment))
+	// The body is complete, and where it ends is what a container describing
+	// a frame needs: the routines an image writes behind the functions are
+	// code in the same section, so the next label is not this body's end.
+	// The nested functions the body declared are emitted after it and take
+	// runs of their own.
+	e.program.function_runs << image.CodeRun{
+		base: function_start
+		len:  e.program.text.len - function_start
+	}
 	// The next function starts with a frame and a scratch area of its own. The
 	// labels are the one thing that carries over: they are numbered across the
 	// whole file, because jumps of every function share one table.
