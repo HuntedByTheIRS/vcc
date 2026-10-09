@@ -95,6 +95,32 @@ fn test_a_shared_library_beside_an_archive_is_the_one_the_search_finds() {
 	assert named.soname == 'libprobe.a'
 }
 
+// A GNU ld script that names an archive beside its shared object brings that archive
+// to the link. This is the shape /usr/lib/libc.so has, and libc_nonshared.a is where
+// glibc keeps the functions that cannot live in a shared object at all, `atexit`
+// among them. Reading only the first name a script gives leaves those undefined.
+fn test_a_script_that_names_an_archive_brings_it_to_the_link() {
+	dir := library_dir('script_archive')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	system_dirs := backend.host() or { panic('this test needs the host target') }.library_dirs
+	shared := find_system_library(system_dirs, 'libm.so.6') or { return }
+	copy_bytes(shared, os.join_path(dir, 'libprobe.so.6'))
+	os.write_file(os.join_path(dir, 'libprobe_nonshared.a'), '!<arch>\n') or { panic(err) }
+	os.write_file(os.join_path(dir, 'libprobe.so'), '/* GNU ld script\nGROUP ( libprobe.so.6  libprobe_nonshared.a  AS_NEEDED ( libprobe.so.6 ) ) */\n') or {
+		panic(err)
+	}
+	found := resolve_library('probe', [dir]) or { panic(err) }
+	assert !found.archive
+	assert found.soname == 'libm.so.6'
+	archives := archive_libraries(['probe'], [dir]) or { panic(err) }
+	assert archives.len == 1
+	assert archives[0].path == os.join_path(dir, 'libprobe_nonshared.a')
+	assert archives[0].soname == 'libprobe_nonshared.a'
+	assert archives[0].archive
+}
+
 // A name that resolved to nothing is the search's own refusal, and
 // archive_libraries propagates it rather than answering an empty list.
 fn test_archive_libraries_propagates_a_name_the_search_does_not_have() {

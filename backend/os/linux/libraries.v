@@ -106,18 +106,90 @@ pub fn archive_libraries(names []string, dirs []string) ![]Library {
 	mut out := []Library{}
 	for given in names {
 		library := resolve_library(given, dirs)!
-		if !library.archive {
-			continue
-		}
-		mut seen := false
-		for existing in out {
-			if existing.path == library.path {
-				seen = true
-				break
+		// A library that is a GNU ld script can name archives beside itself, and those
+		// are files a link reads members from in the same way: /usr/lib/libc.so is
+		// `GROUP ( libc.so.6  libc_nonshared.a  AS_NEEDED ( ld-linux-x86-64.so.2 ) )`,
+		// and libc_nonshared.a is where glibc keeps the functions that cannot live in
+		// a shared object at all, `atexit` among them. Leaving them out is what makes
+		// a link say a function the C library plainly has is defined by no library the
+		// image names.
+		for extra in library_archives(library) {
+			mut seen := false
+			for existing in out {
+				if existing.path == extra.path {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				out << extra
 			}
 		}
-		if !seen {
-			out << library
+	}
+	return out
+}
+
+// library_archives_of is the archives one `-l` name brings a link beside the library it
+// resolves to. A caller wants this rather than resolve_library when the archive is the
+// point: the C library's ld script names libc_nonshared.a beside libc.so.6, and that
+// archive is where glibc keeps the functions the shared object does not export.
+pub fn library_archives_of(given string, dirs []string) []Library {
+	library := resolve_library(given, dirs) or { return []Library{} }
+	return library_archives(library)
+}
+
+// library_archives is what one library brings a link beyond itself: the library, when
+// the file is an ar container; the archives a GNU ld script names, when the file is one
+// of those; and nothing, when the file is an object the loader maps.
+fn library_archives(library Library) []Library {
+	if library.archive {
+		return [library]
+	}
+	text := os.read_file(library.path) or { return []Library{} }
+	bytes := text.bytes()
+	if is_elf(bytes) {
+		return []Library{}
+	}
+	if bytes.len >= 2 && bytes[0] == `!` && bytes[1] == `<` {
+		return [archive_library(library.path)]
+	}
+	return script_archives(text, library.path)
+}
+
+// script_archives reads the archives a GNU ld script names. Every word of the group is
+// read and the ones that are ar containers are answered, which is all a script here
+// needs: /usr/lib/libm.so is `GROUP ( libm.so.6  AS_NEEDED ( libmvec.so.1 ) )` and
+// answers nothing, while libc.so carries libc_nonshared.a beside its shared object.
+//
+// A list introduced by AS_NEEDED is read the same way, so a script that named an
+// archive inside one would have it read here. That is stricter than the loader's rule
+// and it is what this link does with an archive it is handed, since an archive is read
+// for the names it answers rather than mapped.
+fn script_archives(text string, path string) []Library {
+	mut out := []Library{}
+	dir := os.dir(path)
+	for marker in ['GROUP', 'INPUT'] {
+		open := text.index('${marker} (') or { continue }
+		rest := text[open + marker.len + 2..]
+		mut at := 0
+		for at < rest.len && rest[at] != `)` {
+			if is_script_space(rest[at]) {
+				at++
+				continue
+			}
+			mut word := ''
+			for at < rest.len && !is_script_space(rest[at]) && rest[at] != `)` {
+				word += rest[at].ascii_str()
+				at++
+			}
+			if word == '' || word == 'AS_NEEDED' {
+				continue
+			}
+			candidate := if word.starts_with('/') { word } else { os.join_path(dir, word) }
+			member := os.read_file(candidate) or { continue }
+			if member.len >= 2 && member[0] == `!` && member[1] == `<` {
+				out << archive_library(candidate)
+			}
 		}
 	}
 	return out

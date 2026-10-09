@@ -1545,6 +1545,29 @@ pub fn (t &Target) base_library() string {
 	return t.base_library_name
 }
 
+// base_library_archives is the archives the C library brings a link beside the shared
+// object the image asks the loader for: the files the ld script beside that object
+// names. glibc keeps the functions that cannot live in a shared object at all in
+// libc_nonshared.a, `atexit` among them, and a link that maps libc.so.6 and pulls no
+// archive still has to answer for the objects that call one: an object read out of a
+// library archive is the case that makes the difference, since this compiler emits the
+// wrapper for a call it compiles itself.
+//
+// The name is asked for by its `-l` spelling rather than by file, so the system's own
+// search resolves it to the script, which is where the archive is written down.
+pub fn (t &Target) base_library_archives(given []string) []Library {
+	archives := linux.library_archives_of(linux.base_library_flag, t.link_dirs(given))
+	mut out := []Library{}
+	for archive in archives {
+		out << Library{
+			path:    archive.path
+			soname:  archive.soname
+			archive: true
+		}
+	}
+	return out
+}
+
 // link_dirs is everywhere a link on this system looks for a file: the
 // directories a -l name goes through, with the toolchain's own support
 // directory last. It is last so that a library the system keeps is the one a -l
@@ -1563,7 +1586,21 @@ pub fn (t &Target) link_dirs(given []string) []string {
 // crt1.o has no entry point at all, and crti.o/crtn.o are what open and close
 // the initialisation and finalisation sections the C library's startup reads.
 pub fn (t &Target) start_file_paths(kind linux.LinkKind, given []string) !([]string, []string) {
-	files := linux.start_files(kind)
+	return t.resolve_start_files(linux.start_files(kind), given)
+}
+
+// stub_start_file_paths is start_file_paths for a link that brings its own entry point:
+// the same resolution over the set with crt1.o left out.
+pub fn (t &Target) stub_start_file_paths(given []string) !([]string, []string) {
+	return t.resolve_start_files(linux.stub_start_files(), given)
+}
+
+// resolve_start_files resolves one set of start files in the directories a link
+// searches. A name this system does not have is an error rather than a link made
+// without it: a static program started without crt1.o has no entry point at all, and
+// crti.o/crtn.o are what open and close the initialisation and finalisation sections
+// the C library's startup reads.
+fn (t &Target) resolve_start_files(files linux.StartFiles, given []string) !([]string, []string) {
 	dirs := t.link_dirs(given)
 	mut before := []string{cap: files.before.len}
 	for name in files.before {

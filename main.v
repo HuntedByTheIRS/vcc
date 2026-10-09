@@ -607,20 +607,31 @@ fn link_inputs(opts cli.Options) {
 	// same rule below. Nothing else about the name is kept: the image asks the
 	// loader for no name for a static archive, so the archive contributes no
 	// DT_NEEDED entry.
+	//
+	// The C library is on every image whether or not a -l named it, and the archives
+	// the ld script beside its shared object names are inputs of the same kind. glibc
+	// keeps there the functions that cannot live in a shared object at all, `atexit`
+	// among them, so a dynamic link that maps libc.so.6 and pulls no archive of its own
+	// still owes an answer for every object that calls one. A static link has them
+	// through static_support_libraries, which is read where the start files are.
+	mut support := []backend.Library{}
 	if opts.libraries.len > 0 {
-		named := target.archive_libraries(opts.libraries, opts.library_dirs) or {
+		support << target.archive_libraries(opts.libraries, opts.library_dirs) or {
 			abort(err.msg())
 			return
 		}
-		for file in named {
-			source := read_source(file.path) or {
-				abort('cannot read ${file.path}: ${err.msg()}')
-				return
-			}
-			archives << archive.read(source.bytes()) or {
-				abort('${file.path}: ${err.msg()}')
-				return
-			}
+	}
+	if output_kind != .static_program && output_kind != .shared {
+		support << target.base_library_archives(opts.library_dirs)
+	}
+	for file in support {
+		source := read_source(file.path) or {
+			abort('cannot read ${file.path}: ${err.msg()}')
+			return
+		}
+		archives << archive.read(source.bytes()) or {
+			abort('${file.path}: ${err.msg()}')
+			return
 		}
 	}
 	// A link that carries a constructor table is started by the C library's own
@@ -666,9 +677,8 @@ fn link_inputs(opts cli.Options) {
 				return
 			}
 		}
-		// A static link resolves the library's own objects out of its archives. A
-		// dynamic one reaches the same names in the shared library the image
-		// already asks the loader for, so it pulls no archive of its own.
+		// A static link resolves the library's own objects out of its archives, and
+		// static_support_libraries is where its list is written down.
 		if output_kind == .static_program {
 			for path in target.static_support_libraries(opts.library_dirs) {
 				source := read_source(path) or {
@@ -695,6 +705,29 @@ fn link_inputs(opts cli.Options) {
 			exit(1)
 		}
 		units.prepend(stub.program)
+		// The stub is the entry point, so crt1.o is the one start file this link
+		// leaves out. The rest go around the units the way they do a link that takes
+		// the C library's entry, and crtbegin.o is where __dso_handle is defined. A
+		// program built without them links with an undefined __dso_handle the moment
+		// the C library's non-shared archive is read, which is where atexit lives.
+		before, after := target.stub_start_file_paths(opts.library_dirs) or {
+			abort(err.msg())
+			return
+		}
+		mut i := before.len
+		for i > 0 {
+			i--
+			units.prepend(read_unit(before[i], target) or {
+				abort('${before[i]}: ${err.msg()}')
+				return
+			})
+		}
+		for path in after {
+			units << read_unit(path, target) or {
+				abort('${path}: ${err.msg()}')
+				return
+			}
+		}
 	}
 	// An archive is pulled apart only for the names the link still needs. A
 	// member whose symbols nothing refers to stays where it is, the way a linker
@@ -705,20 +738,21 @@ fn link_inputs(opts cli.Options) {
 	if archives.len > 0 {
 		mut provided := link_provides(units)
 		mut needed := link_needs(units)
-		units << pull_archives(archives, target, mut needed, mut provided) or {
+		pulled := pull_archives(archives, target, mut needed, mut provided) or {
 			abort(err.msg())
 			return
 		}
-	}
-	// A constructor table that arrived with a member pulled out of an archive is
-	// one the program's own startup would have to walk, and this link is not
-	// started by the library: the stub calls `main` and leaves, so the
-	// constructor would be skipped in silence. The decision above is made from
-	// the units the command line named, and this is the one case an archive can
-	// still add to it.
-	if !reach && output_kind != .shared && has_constructors(units) {
-		abort('a member pulled out of an archive carries a constructor, and this link is not started by the C library: name the library with -l, or the constructor would never run')
-		return
+		// A constructor table that arrived with a member pulled out of an archive is
+		// one the program's own startup would have to walk, and this link is not
+		// started by the library: the stub calls `main` and leaves, so the constructor
+		// would be skipped in silence. Only the pulled members are asked, because the
+		// start files carry constructors of their own - crtbegin.o registers a frame -
+		// and those are the compiler's own startup rather than the program's.
+		if !reach && output_kind != .shared && has_constructors(pulled) {
+			abort('a member pulled out of an archive carries a constructor, and this link is not started by the C library: name the library with -l, or the constructor would never run')
+			return
+		}
+		units << pulled
 	}
 	mut started := time.now()
 	merged := linking.link(units, linking.Options{

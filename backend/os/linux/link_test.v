@@ -23,6 +23,19 @@ fn start_file_in(dirs []string, stem string) string {
 	}
 }
 
+// A link that brings its own entry point leaves crt1.o out and keeps the rest of the
+// program's start files, and crtbegin.o is the one that matters: it is where
+// __dso_handle is defined, which libc_nonshared.a's atexit reaches for.
+fn test_the_stub_start_files_leave_out_the_entry_point_and_keep_the_rest() {
+	stub := stub_start_files()
+	program := start_files(.program)
+	assert 'crt1.o' !in stub.before
+	assert 'crti.o' in stub.before
+	assert 'crtbegin.o' in stub.before
+	assert stub.before.len == program.before.len - 1
+	assert stub.after == program.after
+}
+
 fn test_the_link_arguments_name_the_loader_the_start_files_and_the_directories() {
 	host := backend.host() or { panic('this test needs the host target') }
 	dirs := host.link_dirs([]string{})

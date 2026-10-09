@@ -88,6 +88,28 @@ pub fn start_files(kind LinkKind) StartFiles {
 	}
 }
 
+// stub_start_files are the start files a program this compiler gives its own entry
+// point is still made of. crt1.o is the one file left out, because it holds the entry
+// point and this link has one of its own. The rest stay: crti.o and crtn.o are what
+// open and close the initialisation and finalisation sections the C library's startup
+// reads, and crtbegin.o is where __dso_handle is defined, which libc_nonshared.a's
+// atexit reaches for. A program built without them links with an undefined
+// __dso_handle and stops, which is the same shape as the program that takes the C
+// library's own entry and names all of them.
+pub fn stub_start_files() StartFiles {
+	files := start_files(.program)
+	mut before := []string{cap: files.before.len}
+	for start in files.before {
+		if start != 'crt1.o' {
+			before << start
+		}
+	}
+	return StartFiles{
+		before: before
+		after:  files.after
+	}
+}
+
 // link_group are the libraries a static link resolves against each other rather
 // than one after the other. It is the one link where the order cannot be
 // written down: libgcc's unwinding reaches for the C library's threads and the
