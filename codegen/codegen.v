@@ -11798,6 +11798,14 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	// The widths the callee's parameters were declared with, read once for the
 	// call: every argument asks the same table, and a lookup per argument is a
 	// string-keyed map probe in the middle of the emitter's hottest loop.
+	// An argument is evaluated at a depth past this call's own argument slots,
+	// because those are where the arguments already parked wait until the end of
+	// the call, when the registers are loaded from them. An argument that is
+	// itself a call reaches the depths its own arguments use, and a nested call
+	// that shares a level with the enclosing one writes over an argument that is
+	// still waiting: measured on the tree's own C, `start` arrived at
+	// parser__Parser__fill_member as a stack address, because the nested
+	// array_get inside the argument after it took the slot it was parked in.
 	widths := e.call_widths(call)
 	for i, arg in call.args {
 		place := places[i]
@@ -11822,7 +11830,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// parked bytes, so the expression is evaluated once here. The
 			// value is in the decimal accumulator after it runs.
 			pair := e.wide_pair_slot(mut e.wide_arguments, depth + i)
-			e.emit_expr_at(arg, depth + i + 1)!
+			e.emit_expr_at(arg, depth + call.args.len + i + 1)!
 			e.store_decimal_accumulator_into(pair, place.decimal_width, line, col)!
 			continue
 		}
@@ -11842,7 +11850,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 					e.diagnostics << problem(call.line, call.col, 'internal: an object handed over in two registers has no class in the signature of ${call.name}')
 					return error('no class')
 				}
-				e.object_hand_over_address(arg, class, depth + i + 1)!
+				e.object_hand_over_address(arg, class, depth + call.args.len + i + 1)!
 				e.store_accumulator(e.value_slot(depth + i), line, col)!
 			}
 			continue
@@ -11854,7 +11862,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// into both words, the way a return of a narrower expression from
 			// such a function is.
 			pair := e.wide_pair_slot(mut e.wide_arguments, depth + i)
-			e.emit_value(arg, depth + i + 1)!
+			e.emit_value(arg, depth + call.args.len + i + 1)!
 			if e.wide_value(arg) {
 				e.store_pair(pair, line, col)!
 			} else {
@@ -11868,7 +11876,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			// is taken and the one eightbyte the convention puts in a register
 			// is read from it. A struct of one double is bits moved through the
 			// floating file, which is the same eight bytes.
-			e.object_hand_over_address(arg, class, depth + i + 1)!
+			e.object_hand_over_address(arg, class, depth + call.args.len + i + 1)!
 			base := e.accumulator(line, col)!
 			if class.first_floating {
 				double_register := e.float_accumulator(line, col)!
@@ -11888,7 +11896,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			continue
 		}
 		if place.floating {
-			e.emit_expr_at(arg, depth + i + 1)!
+			e.emit_expr_at(arg, depth + call.args.len + i + 1)!
 			single := e.argument_is_single(call, i)
 			e.convert_to_float_class(arg, single, line, col)!
 			slot := e.value_slot(depth + i)
@@ -11907,7 +11915,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 			e.store_double_accumulator(slot, line, col)!
 			continue
 		}
-		e.emit_expr_at(arg, depth + i + 1)!
+		e.emit_expr_at(arg, depth + call.args.len + i + 1)!
 		// A double handed to a parameter that is not one is truncated to the
 		// integer the parameter holds, which is the conversion the language
 		// defines between the two classes. The parameter's own width is what
@@ -11976,9 +11984,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				// argument path builds where a real argument has to become a
 				// complex value first.
 				if place.complex_long_double {
-					e.complex_long_double_argument_address(arg, depth + i + 1)!
+					e.complex_long_double_argument_address(arg, depth + call.args.len + i + 1)!
 				} else {
-					e.emit_expr_at(arg, depth + i + 1)!
+					e.emit_expr_at(arg, depth + call.args.len + i + 1)!
 				}
 				source := e.value_slot(depth + i)
 				e.store_accumulator(source, line, col)!
@@ -12017,7 +12025,7 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 					e.diagnostics << problem(call.line, call.col, 'internal: an object handed over on the stack has no class in the signature of ${call.name}')
 					return error('no class')
 				}
-				e.object_hand_over_address(arg, class, depth + i + 1)!
+				e.object_hand_over_address(arg, class, depth + call.args.len + i + 1)!
 				source := e.value_slot(depth + i)
 				e.store_accumulator(source, line, col)!
 				mut k := place.words - 1
