@@ -7686,7 +7686,21 @@ fn (mut e Emitter) emit_statement_expression(expr ast.StmtExpr, as_value bool) !
 	e.push_scope()
 	_ := e.emit_statements(expr.body)!
 	if value := expr.value {
-		e.emit_expr_at(value, 0)!
+		if as_value {
+			e.emit_expr_at(value, 0)!
+		} else if value.typ.kind in [.struct_, .union_, .array] {
+			// The construct is a statement, so what its last expression is worth is
+			// not wanted. A value of an aggregate type is not one a register holds,
+			// so there is no register to leave unread, and `emit_discard` evaluates
+			// what the expression is written with and loads nothing.
+			e.emit_discard(value, 0)!
+		} else {
+			// A value the construct does not want is evaluated for what it does,
+			// which is the rule an expression statement follows. V's own generated C
+			// writes `({ string__free(&key); });` to close a scope, where the call
+			// is the whole of what the statement does.
+			e.emit_effect(value, 0)!
+		}
 	}
 	e.pop_scope()
 	e.slot_base = saved

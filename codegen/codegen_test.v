@@ -1706,6 +1706,21 @@ fn test_a_discarded_read_of_an_aggregate_is_its_address_expression() {
 	assert run_image(emitted.bytes) == 4
 }
 
+// A statement expression used as a statement is the construct for what its body does:
+// its last expression is evaluated for what it does rather than read for its value,
+// which is the rule an expression statement follows. V's own generated C writes
+// `({ string__free(&key); });` at the end of a scope-clone loop, where the call is the
+// whole of what the statement does.
+//
+// Measured on gcc 16.2.1, which compiles this under -std=gnu11 and exits 4: the call in
+// the first construct runs, and the value the second one computes is thrown away.
+fn test_a_statement_expression_used_as_a_statement_is_what_its_body_does() {
+	emitted := emit(translation_unit('unsigned long calls = 0;\nvoid note(void) { calls = calls + 1; }\nint main(void) {\n\t({ note(); });\n\tint x = 3;\n\t({ x + 1; });\n\treturn (int)(calls + x);\n}'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
+}
+
 // The address of a dereference is the pointer and not a read of what it points at:
 // 6.5.3.2p3 has neither operator evaluated and the result as if both were omitted.
 // V's own generated C takes addresses this way at every map write into a scope,
