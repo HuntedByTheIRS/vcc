@@ -12321,10 +12321,26 @@ fn (mut e Emitter) import_copy_object(name string) {
 // care which it is, and the place that lays out storage asks `global_of` rather
 // than this.
 fn (e Emitter) global_definition(name string) ?ast.Global {
+	mut declared := ?ast.Global(none)
 	for global in e.unit.globals {
-		if global.name == name {
+		if global.name != name {
+			continue
+		}
+		// A tentative definition and the definition that follows it are one
+		// object (6.9.2), and the initializer the object holds is the
+		// definition's: with `int x;` then `int x = 5;`, reading x gives 5 and
+		// not the zero the tentative declaration would leave. So a declaration
+		// that wrote a value is answered over one that wrote none, and the first
+		// declaration written decides among those alike.
+		if has_initializer(global) {
 			return global
 		}
+		if declared == none {
+			declared = global
+		}
+	}
+	if global := declared {
+		return global
 	}
 	for global in e.unit.extern_objects {
 		if global.name == name {
@@ -12332,6 +12348,16 @@ fn (e Emitter) global_definition(name string) ?ast.Global {
 		}
 	}
 	return none
+}
+
+// has_initializer says whether a top-level declaration wrote a value: a number, a
+// float, a long double, an address, or a brace list of any of those. A declaration
+// that wrote none is a tentative definition, which 6.9.2 makes one object with the
+// definition that follows it, and the object takes the definition's initializer.
+fn has_initializer(global ast.Global) bool {
+	return global.init != none || global.init_float != none || global.init_long != none
+		|| global.address != none || global.inits.len > 0 || global.init_floats.len > 0
+		|| global.address_inits.len > 0
 }
 
 // global_shape is what a top-level object's declaration says about its storage:
