@@ -307,7 +307,13 @@ fn (p Parser) specifier_clause(spec DeclSpec, tag_clause types.Type) types.Type 
 fn (p Parser) name_clause(name string) types.Type {
 	if symbol := p.scopes.lookup(name) {
 		if symbol.is_typedef() {
-			return symbol.typ
+			// The type a name stands for is answered through the tag namespace the
+			// same way a specifier of the tag itself is. A typedef of a pointer to a
+			// function is why: V's own generated C writes the name of a result
+			// structure in a function-pointer typedef before the structure's body,
+			// and the structure that call produces is only complete once the body
+			// has been read.
+			return p.tagged_type(symbol.typ)
 		}
 	}
 	return types.opaque_type(name)

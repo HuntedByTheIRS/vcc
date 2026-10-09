@@ -1438,9 +1438,11 @@ fn (mut p Parser) parse_member(base string, object ?ast.Expr, aggregate types.Ty
 // it is: its members are the tag's, and a lookup could only find the tag of some
 // other scope wearing the same name.
 fn (p Parser) tagged_type(aggregate types.Type) types.Type {
-	if aggregate.kind !in [types.Kind.struct_, .union_] || aggregate.tag == ''
-		|| aggregate.is_complete() {
-		return aggregate
+	mut answered := aggregate
+	p.complete_parts(mut answered)
+	if answered.kind !in [types.Kind.struct_, .union_] || answered.tag == ''
+		|| answered.is_complete() {
+		return answered
 	}
 	// A tag is declared under the keyword and the tag as they were written, which
 	// is an unqualified aggregate's description; the qualifiers a type carries are
@@ -1448,8 +1450,43 @@ fn (p Parser) tagged_type(aggregate types.Type) types.Type {
 	// The tag's members are the type's, but the qualifiers on the reading that
 	// asked are kept, because `const S x;` written through a typedef of `struct S`
 	// is a const object of the completed type.
-	found := p.scopes.lookup_tag(types.unqualified(aggregate).describe()) or { return aggregate }
-	return types.qualified(found, aggregate.quals)
+	found := p.scopes.lookup_tag(types.unqualified(answered).describe()) or { return answered }
+	return types.qualified(found, answered.quals)
+}
+
+// complete_parts fills in every aggregate tag a type carries a mention of, in
+// place, walking the parts a mention can sit in: a pointer's base, an array's
+// element, and a function's return type and parameter types. The function type is
+// the part worth doing this for: V's own generated C writes
+// `typedef struct __v_result_Array (*fn)(...)` before the structure's body, and a
+// call through that pointer reads the width of its result from the structure's
+// type. The mention is one heap Type that every copy of the type points at, so
+// filling it in reaches all of them and keeps the shape the declaration gave it,
+// where rebuilding the type does neither.
+fn (p Parser) complete_parts(mut t types.Type) {
+	match t.kind {
+		.pointer, .array {
+			if t.base != unsafe { nil } {
+				p.complete_parts(mut *t.base)
+			}
+		}
+		.function {
+			if t.base != unsafe { nil } {
+				p.complete_parts(mut *t.base)
+			}
+			for i in 0 .. t.params.len {
+				p.complete_parts(mut t.params[i].typ)
+			}
+		}
+		.struct_, .union_ {
+			if t.tag == '' || t.is_complete() {
+				return
+			}
+			found := p.scopes.lookup_tag(types.unqualified(t).describe()) or { return }
+			t = types.qualified(found, t.quals)
+		}
+		else {}
+	}
 }
 
 // aggregate_bytes is how many bytes of storage an object of this type takes when
