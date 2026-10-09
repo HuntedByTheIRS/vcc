@@ -5801,6 +5801,27 @@ fn (mut e Emitter) remainder(line int, col int) !backend.Register {
 	}
 }
 
+// store_chunked_into_slot writes a register into a slot whose width is not one the
+// machine moves, which is an object of an aggregate type handed over in a register:
+// the low chunk goes where the object is and each chunk above it is shifted down out
+// of a copy of the register first, so the register itself is left as it was. A
+// three-byte object is a two-byte write and a one-byte write of the register shifted
+// sixteen bits down, which is the shape gcc emits for the same store.
+fn (mut e Emitter) store_chunked_into_slot(slot Slot, register backend.Register, line int, col int) !void {
+	base := e.slot_base_register(slot, line, col)!
+	piece := e.scratch(line, col)!
+	mut done := 0
+	for done < slot.width {
+		chunk := machine_chunk(slot.width - done)
+		e.append(e.target.move_register64(piece, register)!)
+		if done > 0 {
+			e.append(e.target.shift_right_word(piece, u8(done * 8))!)
+		}
+		e.append(e.target.store_slot(base, slot.offset + done, piece, chunk)!)
+		done += chunk
+	}
+}
+
 // store_register writes a register into a slot at the slot's width. A slot
 // holding a `_Bool` converts the value on the way in: 6.3.1.2 says every store
 // into one makes the value 0 or 1, so `_Bool b = 42;` leaves 1 and not 42.
@@ -5810,6 +5831,9 @@ fn (mut e Emitter) store_register(slot Slot, register backend.Register, line int
 		// with no members is: there is nothing for the register to write and the
 		// object is not made of the value. Nothing is emitted.
 		return
+	}
+	if !machine_width_is_a_move(slot.width) {
+		return e.store_chunked_into_slot(slot, register, line, col)
 	}
 	if slot.boolean {
 		e.append(e.target.test(register)!)
@@ -5845,6 +5869,96 @@ fn (mut e Emitter) load_accumulator(slot Slot, line int, col int) !void {
 	e.append(e.target.load_slot(base, slot.offset, register, slot.width)!)
 }
 
+// machine_chunk is the widest move the machine has that fits in `remaining` bytes,
+// which is how an object of a width the machine does not move is moved: eight, then
+// four, then two, then one.
+fn machine_chunk(remaining int) int {
+	if remaining >= 8 {
+		return 8
+	}
+	if remaining >= 4 {
+		return 4
+	}
+	if remaining >= 2 {
+		return 2
+	}
+	return 1
+}
+
+// machine_width_is_a_move says whether a width is one the machine moves through an
+// address or a frame slot. What is handed over at a width that is not one of these
+// is an object of an aggregate type: the calling convention gives a structure of
+// three bytes three, and no machine has a three-byte move.
+fn machine_width_is_a_move(width int) bool {
+	return width == 1 || width == 2 || width == 4 || width == 8
+}
+
+// load_chunked_argument reads an object of `width` bytes out of a frame slot into a
+// register, where the width is the one the calling convention hands the object over
+// at rather than one the machine moves. The bytes go in a machine-wide chunk at a
+// time and each chunk above the first is shifted into place, so a three-byte object
+// is a two-byte read and a one-byte read shifted sixteen bits, which is the shape
+// gcc emits for the same argument. The chunk reads take the bits above them as zero,
+// because what is being put together is a bit pattern and not a value.
+fn (mut e Emitter) load_chunked_argument(slot Slot, register backend.Register, width int, line int, col int) !void {
+	base := e.slot_base_register(slot, line, col)!
+	mut done := 0
+	for done < width {
+		chunk := machine_chunk(width - done)
+		if done == 0 {
+			if chunk < 4 {
+				e.append(e.target.load_slot_unsigned(base, slot.offset, register, chunk)!)
+			} else {
+				e.append(e.target.load_slot(base, slot.offset, register, chunk)!)
+			}
+		} else {
+			piece := e.scratch(line, col)!
+			if chunk < 4 {
+				e.append(e.target.load_slot_unsigned(base, slot.offset + done, piece, chunk)!)
+			} else {
+				e.append(e.target.load_slot(base, slot.offset + done, piece, chunk)!)
+			}
+			e.append(e.target.shift_left_word(piece, u8(done * 8))!)
+			e.append(e.target.or_word(register, piece)!)
+		}
+		done += chunk
+	}
+}
+
+// load_chunked_indirect is load_chunked_argument where the object is named by an
+// address in a register rather than by a frame slot, which is how an argument that
+// is an object is handed over: the address is walked with a register of its own
+// because the register the value ends in is where the address was, and the walking
+// register is what is left of the address once the low chunk has replaced it.
+fn (mut e Emitter) load_chunked_indirect(address backend.Register, register backend.Register, width int, line int, col int) !void {
+	at := e.scratch(line, col)!
+	e.append(e.target.move_register64(at, address)!)
+	mut done := 0
+	for done < width {
+		chunk := machine_chunk(width - done)
+		if done > 0 {
+			e.append(e.target.add_immediate(at, done))
+		}
+		if done == 0 {
+			if chunk < 4 {
+				e.append(e.target.load_indirect_unsigned(at, register, chunk)!)
+			} else {
+				e.append(e.target.load_indirect(at, register, chunk)!)
+			}
+		} else {
+			piece := e.remainder(line, col)!
+			if chunk < 4 {
+				e.append(e.target.load_indirect_unsigned(at, piece, chunk)!)
+			} else {
+				e.append(e.target.load_indirect(at, piece, chunk)!)
+			}
+			e.append(e.target.shift_left_word(piece, u8(done * 8))!)
+			e.append(e.target.or_word(register, piece)!)
+		}
+		done += chunk
+	}
+}
+
 // load_argument reads one argument slot into the register that carries that
 // position, at the width the argument is passed at. A char or a short argument is
 // read at its own width whatever width the call asks for, because the read is
@@ -5859,6 +5973,9 @@ fn (mut e Emitter) load_argument(slot Slot, register backend.Register, width int
 		}
 		e.append(e.target.load_slot(base, slot.offset, register, slot.width)!)
 		return
+	}
+	if !machine_width_is_a_move(width) {
+		return e.load_chunked_argument(slot, register, width, line, col)
 	}
 	e.append(e.target.load_slot(base, slot.offset, register, width)!)
 }
@@ -11736,7 +11853,14 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				e.store_double_accumulator(e.value_slot(depth + i), line, col)!
 				continue
 			}
-			e.append(e.target.load_indirect(base, base, class.bytes)!)
+			if machine_width_is_a_move(class.bytes) {
+				e.append(e.target.load_indirect(base, base, class.bytes)!)
+			} else {
+				// An object whose size is not one the machine moves travels in a
+				// register all the same, so its bytes are read one machine-wide
+				// chunk at a time.
+				e.load_chunked_indirect(base, base, class.bytes, line, col)!
+			}
 			e.store_accumulator(e.value_slot(depth + i), line, col)!
 			continue
 		}

@@ -1706,6 +1706,20 @@ fn test_a_discarded_read_of_an_aggregate_is_its_address_expression() {
 	assert run_image(emitted.bytes) == 4
 }
 
+// A structure whose size is not one the machine moves travels in a register all the
+// same: the calling convention gives three bytes one register and the low three bytes
+// of it, and the emitter puts them there one machine-wide chunk at a time and takes
+// them apart the same way, in the callee and in a return as well as in the caller.
+//
+// Measured on gcc 16.2.1, which compiles this under -std=c99 -pedantic-errors and
+// exits 9: the three bytes survive the call and the return, and the type is 3 bytes.
+fn test_an_object_of_a_width_the_machine_does_not_move_travels_in_a_register() {
+	emitted := emit(translation_unit('struct T { unsigned char a; unsigned char b; unsigned char c; };\nstruct T id(struct T x) { return x; }\nint main(void) {\n\tstruct T a;\n\ta.a = 1;\n\ta.b = 2;\n\ta.c = 3;\n\tstruct T b = id(a);\n\treturn (int)(sizeof(struct T) + b.a + b.b + b.c);\n}'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 9
+}
+
 // An empty structure is a complete object of no bytes, and V's own generated C has one
 // wherever a compiler macro leaves a declaration it would otherwise fill in: E_STRUCT
 // is empty unless __TINYC__ or _MSC_VER is defined, and this compiler defines neither,
