@@ -7349,6 +7349,19 @@ fn (mut e Emitter) emit_address(unary ast.Unary, depth int) !void {
 			col:  unary.col
 		}, depth)
 	}
+	operand := unary.expr
+	if operand is ast.Unary {
+		if operand.op == '*' {
+			// `&*p` is `p`: 6.5.3.2p3 has neither operator evaluated and the
+			// result as if both were omitted, so what is emitted is the pointer
+			// expression's own value and nothing is read from it. V's own
+			// generated C reaches this at
+			// `map__set(&(*(map*)array_get(e->scopes, e->scopes.len - 1)), ...)`,
+			// where the address of the map in the current scope is what the call
+			// has already answered.
+			return e.emit_expr_at(operand.expr, depth + 1)
+		}
+	}
 	e.diagnostics << problem(unary.line, unary.col, 'unsupported: the address of ${describe_target(unary.expr)} is not implemented, and only a local or a top-level object has one this back end can take')
 	return error('no address')
 }

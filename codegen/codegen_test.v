@@ -1706,6 +1706,22 @@ fn test_a_discarded_read_of_an_aggregate_is_its_address_expression() {
 	assert run_image(emitted.bytes) == 4
 }
 
+// The address of a dereference is the pointer and not a read of what it points at:
+// 6.5.3.2p3 has neither operator evaluated and the result as if both were omitted.
+// V's own generated C takes addresses this way at every map write into a scope,
+// `map__set(&(*(map*)array_get(e->scopes, e->scopes.len - 1)), &key, &value)`, where
+// the address of the map is the call's own answer.
+//
+// Measured on gcc 16.2.1, which compiles this under -std=c99 -pedantic-errors and
+// exits 10: the write through the pointer reaches words[1], which holds 9 rather than
+// the 4 the initializer put there.
+fn test_the_address_of_a_dereference_is_the_pointer() {
+	emitted := emit(translation_unit('typedef struct { unsigned long a; unsigned long b; } Pair;\nunsigned long words[2] = {3, 4};\nunsigned long calls = 0;\nunsigned long *pick(unsigned long i) { calls = calls + 1; return &words[i]; }\nint main(void) {\n\tPair *p = &*(Pair *)pick(1);\n\tp->a = 9;\n\treturn (int)(words[1] + calls);\n}'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 10
+}
+
 // A void expression in a statement is evaluated for its side effects and its
 // value thrown away, which is where a conversion to void and a read through an
 // address of void are legal. Measured on gcc 16.2.1, which compiles and runs
