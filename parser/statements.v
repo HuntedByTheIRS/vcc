@@ -2034,7 +2034,18 @@ fn (mut p Parser) parse_local_declaration() []ast.Stmt {
 		// 2, 3};` declares a of three. A list the reader refused has already
 		// been named and the size is not reported a second time. An array whose
 		// bound is a value has its size, so this refusal is not about it.
-		if array_object && array_count <= 0 && !brace && !from_string && !declared.has_vla() {
+		//
+		// An `extern` declaration is the exception. 6.7.2.1p4-5 lets an array
+		// be declared with no size wherever a declaration may appear, and a
+		// declaration in a block that is extern (6.5.2.2) declares the object
+		// outside the block rather than one of its own, so the size is the
+		// object's: `int a[3]; void f(void) { extern int a[]; }` gives f no
+		// storage and reads the three elements a has. The type the name keeps
+		// inside the block is the composite of the two declarations, which is
+		// the sized one, and the declaration reader (declare_name) is where
+		// that is chosen.
+		if array_object && array_count <= 0 && !brace && !from_string && !declared.has_vla()
+			&& !spec.is_extern {
 			p.error_at(d.array_at(), 'unsupported: an array declaration in a body needs a size that is a number and more than zero')
 			p.skip_declaration()
 			return stmts

@@ -1450,6 +1450,30 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 		}
 		return true
 	}
+	// A tentative definition of an array with no size is completed at the end
+	// of the translation unit: 6.9.2p2 gives the name the composite type of
+	// every declaration of it, which for a name nothing else defines is one
+	// element. Whether a later declaration writes a size is a question only the
+	// end of the file answers, so the object waits there and is laid out from
+	// the size the name turns out to have rather than from a size nothing has
+	// given it yet. An element type this reader has not completed leaves the
+	// declaration to the refusals below, which name what has no size, and a
+	// bound that was written and evaluated to zero is a zero-size array and not
+	// an incomplete one, so it takes the path below too.
+	if data_name.len > 0 && !data_defined && !d.array_sized() && !data_clause.is_complete() {
+		if element := data_clause.element() {
+			if element.is_complete() {
+				p.tentative_arrays << PendingTentativeArray{
+					name:     data_name
+					spelling: data_type
+					typ:      data_clause
+					line:     data_at.line
+					col:      data_at.col
+				}
+				return true
+			}
+		}
+	}
 	// A pointer object at the top level is one word of storage, and what it
 	// points at does not decide how wide it is: 6.2.5 lets a pointer name an
 	// incomplete type, and the back end sizes a pointer from its star rather
@@ -1632,6 +1656,55 @@ fn (mut p Parser) parse_file_object_declarator(mut spec DeclSpec, d Declarator, 
 		col:           data_at.col
 	}
 	return true
+}
+
+// complete_tentative_arrays gives every file-scope name whose declaration wrote
+// an array type with no size and no initializer the type 6.9.2p2 gives it: the
+// composite type of every declaration of the name, which for a name no
+// declaration sized is one element. A name another declaration already laid out
+// has storage of its own and the size that declaration gave it, so this leaves
+// it alone: `int a[]; int a[3] = {...};` is the definition's object, and
+// `int a[];` alone is the one element this gives.
+//
+// It runs once, after the whole file has been read, with the file scope the only
+// one open, so the name here is the name the unit declares and the answer is the
+// composite type of every declaration of it. A declaration that wrote no size is
+// not a declaration that laid the object out, so a name completed only by an
+// `extern` declaration is sized here like any other tentative definition. The
+// storage is laid out from the completed type and the count travels beside it,
+// the same shape `int a[1];` reaches the image as.
+fn (mut p Parser) complete_tentative_arrays() {
+	for pending in p.tentative_arrays {
+		mut laid_out := false
+		for global in p.globals {
+			if global.name == pending.name {
+				laid_out = true
+				break
+			}
+		}
+		if laid_out {
+			continue
+		}
+		symbol := p.scopes.lookup(pending.name) or { continue }
+		mut completed := symbol.typ
+		if !completed.is_array() {
+			continue
+		}
+		if !completed.is_complete() {
+			element := pending.typ.element() or { continue }
+			completed = types.array_of(element, 1)
+		}
+		p.scopes.complete_type(pending.name, completed)
+		count := if completed.count > 0 { completed.count } else { 1 }
+		p.globals << ast.Global{
+			name:     pending.name
+			typ:      pending.spelling
+			resolved: completed
+			count:    count
+			line:     pending.line
+			col:      pending.col
+		}
+	}
 }
 
 // parse_static_assertion reads a static assertion, the declaration C11 spells
@@ -5672,9 +5745,24 @@ fn (mut p Parser) declare_name(name string, typ types.Type, at tokenize.Token, d
 			p.error_at(at, 'a constraint violation: ${name} is declared as ${earlier.typ.describe()} in this scope and this declaration gives it ${typ.describe()}, and two declarations of one name in one scope have to describe one type')
 		}
 	}
+	// The type the name is given is the composite of this declaration and the one
+	// already in scope when the two describe one object: 6.2.7p3 makes an array
+	// declared with a size and one declared without describe the sized array,
+	// whichever of the two wrote the size, so a declaration that wrote none does
+	// not take the size away from a name a definition gave one. Only a declaration
+	// of the same object is composited, which is a declaration with the same
+	// linkage; a name an inner block introduces for itself keeps its own type.
+	mut stored := typ
+	if earlier := previous {
+		if linkage != .none && earlier.linkage == linkage {
+			if composite := array_composite(earlier.typ, typ) {
+				stored = composite
+			}
+		}
+	}
 	p.scopes.declare(types.Symbol{
 		name:    name
-		typ:     typ
+		typ:     stored
 		storage: p.pending_storage
 		linkage: linkage
 		line:    at.line
@@ -5699,12 +5787,62 @@ fn redeclaration_conflicts(earlier types.Type, later types.Type) bool {
 	if earlier.compatible(later) {
 		return false
 	}
+	// 6.2.7p2-3: two array types are compatible when one has a size and the
+	// other does not, and the composite type is the one that has it. The pair
+	// is not the same type and is still one object, so it is not a conflict.
+	if _ := array_composite(earlier, later) {
+		return false
+	}
 	if earlier.is_function() && later.is_function() && !(earlier.prototyped && later.prototyped) {
 		earlier_returns := earlier.returns() or { return true }
 		later_returns := later.returns() or { return true }
 		return !earlier_returns.compatible(later_returns)
 	}
 	return true
+}
+
+// array_composite is the composite type 6.2.7p3 gives two array declarations of
+// one name: two array types are compatible when their element types are, and
+// either both sizes are written and equal or one declaration wrote none, and the
+// composite type is the one with a size. It answers none when the two are not
+// two such arrays, which leaves the pair to the comparison that answers for
+// every other shape. A variable-length array has no size a constant names and a
+// vector is one type or another, so neither is composited here.
+//
+// The answer is a fact about the two declarations and not about the name they
+// are of, so it is asked both where a redeclaration is checked and where the
+// type the name keeps is chosen.
+fn array_composite(earlier types.Type, later types.Type) ?types.Type {
+	if earlier.kind != .array || later.kind != .array {
+		return none
+	}
+	if earlier.vla || later.vla || earlier.vector || later.vector {
+		return none
+	}
+	earlier_element := earlier.element() or { return none }
+	later_element := later.element() or { return none }
+	mut element := earlier_element
+	if earlier_element.kind == .array && later_element.kind == .array {
+		// `int a[][3]` against `int a[2][3]`: the outer sizes compose and the
+		// element is the row the two inner declarations compose to.
+		element = array_composite(earlier_element, later_element) or { return none }
+	} else if !earlier_element.same(later_element) {
+		return none
+	}
+	if earlier.count < 0 {
+		if later.count < 0 {
+			// Neither wrote a size, which the comparison above already answers.
+			return none
+		}
+		return types.array_of(element, later.count)
+	}
+	if later.count < 0 {
+		return types.array_of(element, earlier.count)
+	}
+	if earlier.count != later.count {
+		return none
+	}
+	return types.array_of(element, earlier.count)
 }
 
 // declare_parameters declares a definition's parameters in the scope around its
