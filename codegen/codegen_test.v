@@ -1406,7 +1406,10 @@ fn test_the_image_is_a_dynamic_elf_the_kernel_can_start() {
 	assert u16_at(bytes, 16) == 2 // ET_EXEC
 	assert u16_at(bytes, 18) == 62 // EM_X86_64
 	headers := segments(bytes)
-	assert headers.len == 4
+	// Five: the interpreter, the one load segment, the dynamic table, the
+	// unwind table's index (PT_GNU_EH_FRAME, which a program with a function
+	// body carries), and the stack.
+	assert headers.len == 5
 	interp := only_segment(headers, elf.elf_ph_type_interp)
 	assert read_string(bytes, int(interp.offset)) == emitted.target.interpreter
 	load := only_segment(headers, elf.elf_ph_type_load)

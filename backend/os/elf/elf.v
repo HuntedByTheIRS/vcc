@@ -66,6 +66,14 @@ pub const elf_ph_type_interp = u32(3)
 // p_memsz - p_filesz zeroed. p_vaddr has to lie inside a PT_LOAD that is mapped
 // from the file, because that copy reads it from there.
 pub const elf_ph_type_tls = u32(7)
+// PT_GNU_EH_FRAME names the unwind table's index. An unwinder reads it before
+// it looks at any frame: the header it points at, `.eh_frame_hdr`, holds one
+// entry per function body naming the address the body covers and the frame
+// description that covers it, sorted by address so the lookup is a binary
+// search. A binary whose frames would otherwise be found by scanning the table
+// finds none without this header, which is why a program this compiler links
+// carries it and not only the table.
+const elf_ph_type_gnu_eh_frame = u32(0x6474E550)
 const elf_ph_type_gnu_stack = u32(0x6474E551)
 
 // The segment permissions, combined where a segment needs more than one.
@@ -192,7 +200,14 @@ struct Sections {
 	got     int
 	rela    int
 	dynamic int
-	total   int
+	// eh_frame is the unwind table: one CIE the emitter's prologue rule
+	// describes and one FDE per function body, and eh_frame_hdr the table that
+	// indexes it by the address each body covers. Both are read-only, both lie
+	// in the one segment the image maps, and PT_GNU_EH_FRAME names the second
+	// so an unwinder can reach the first without scanning.
+	eh_frame     int
+	eh_frame_hdr int
+	total        int
 }
 
 // executable wraps a program in an ELF64 image that a Linux kernel can start and
@@ -303,7 +318,11 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	// from, and the layout has to know before it places the first part.
 	has_tls := program.tls_size > 0
 	has_dynamic := kind != .static_program
-	header_count := program_header_count(kind, has_tls)
+	// A program with function bodies carries the table that describes them and
+	// the header that indexes it. An image with no body carries neither, and
+	// writes the same bytes it wrote before there was a table.
+	has_eh_frame := program.function_runs.len > 0
+	header_count := program_header_count(kind, has_tls, has_eh_frame)
 	sections := layout(program, target, interp.len, dynstr.len, libraries.len, external,
 		exports.len, extra.len, relocation_total, header_count, has_dynamic)
 	// The image a Linux kernel starts is built here. The name is not `image`,
@@ -326,6 +345,14 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	if has_dynamic {
 		emit_dynamic(mut output, sections, program, dynstr.len, needed, base, relocation_total)
 	}
+	// The unwind table and the header that indexes it are written here rather
+	// than by a relocation: the layout has settled where the code and the two
+	// tables lie, so the distance an FDE measures to its body is the finished
+	// layout's own, and the load base cancels out of it.
+	put(mut output, sections.eh_frame, image_eh_frame_section(program, sections.text,
+		sections.eh_frame))
+	put(mut output, sections.eh_frame_hdr, image_eh_frame_header(program, sections.text,
+		sections.eh_frame, sections.eh_frame_hdr))
 	// A shared object has no entry point: the loader calls the initializers and
 	// then whatever the program that loaded it names, and there is no place in
 	// the file for the kernel to jump to.
@@ -333,7 +360,7 @@ pub fn write(program image.Program, target backend.Target, kind linux.LinkKind) 
 	e_type := if shared { elf_type_dyn } else { elf_type_exec }
 	emit_header(mut output, target, entry, e_type, header_count)
 	emit_program_headers(mut output, target, sections, program, interp.len, libraries.len,
-		kind, has_tls, base)
+		kind, has_tls, has_eh_frame, base)
 	patch(mut output, program, target, sections, base, extra)!
 	return output
 }
@@ -382,13 +409,18 @@ fn check_kind(program image.Program, kind linux.LinkKind) ! {
 // nothing loads it. An image with thread-local storage adds one more, the PT_TLS
 // header the runtime reads the block out of, and it is a header of its own for
 // every kind that defines a thread-local.
-fn program_header_count(kind linux.LinkKind, has_tls bool) int {
+fn program_header_count(kind linux.LinkKind, has_tls bool, has_eh_frame bool) int {
 	mut count := match kind {
 		.program { int(elf_program_header_count) }
 		.static_program { 2 }
 		.shared { 3 }
 	}
 	if has_tls {
+		count++
+	}
+	// An image with function bodies carries PT_GNU_EH_FRAME for the table that
+	// indexes them, and it is a header of its own for every kind.
+	if has_eh_frame {
 		count++
 	}
 	return count
@@ -637,21 +669,132 @@ fn layout(program image.Program, target backend.Target, interp_len int, dynstr_l
 		offset = align(offset + dynamic_entry_count(library_count, program.init_array.count,
 			program.fini_array.count) * elf_dynamic_entry_size, 8)
 	}
+	// The unwind table and the header that indexes it come last, in the
+	// read-only part of the image the one segment maps. They are placed after
+	// every part whose offset is already spoken for, so adding them moves
+	// nothing that came before, which is what keeps every reference the layout
+	// has already settled pointing where it did.
+	eh_frame := offset
+	offset = align(offset + program_eh_frame_size(program), 8)
+	eh_frame_hdr := offset
+	offset = align(offset + program_eh_frame_hdr_size(program), 4)
 	return Sections{
-		interp:  interp
-		text:    text
-		plt:     plt
-		dynstr:  dynstr
-		strings: strings
-		globals: globals
-		tls:     tls
-		dynsym:  dynsym
-		hash:    hash
-		got:     got
-		rela:    rela
-		dynamic: dynamic
-		total:   align(offset, int(target.page_size))
+		interp:       interp
+		text:         text
+		plt:          plt
+		dynstr:       dynstr
+		strings:      strings
+		globals:      globals
+		tls:          tls
+		dynsym:       dynsym
+		hash:         hash
+		got:          got
+		rela:         rela
+		dynamic:      dynamic
+		eh_frame:     eh_frame
+		eh_frame_hdr: eh_frame_hdr
+		total:        align(offset, int(target.page_size))
 	}
+}
+
+// program_eh_frame_size is how many bytes the image's `.eh_frame` takes: the one
+// CIE, one twenty-byte FDE per function body, and the four-byte zero-length
+// record that ends the table. An image with no body has no table and takes no
+// bytes.
+fn program_eh_frame_size(program image.Program) int {
+	if program.function_runs.len == 0 {
+		return 0
+	}
+	return frame_cie().len + program.function_runs.len * 20 + 4
+}
+
+// program_eh_frame_hdr_size is how many bytes the header takes: the version and
+// the three encoding bytes, the four-byte table address and the four-byte entry
+// count, then eight bytes (an address and an FDE pointer) per function body. An
+// image with no body has no header and takes no bytes.
+fn program_eh_frame_hdr_size(program image.Program) int {
+	if program.function_runs.len == 0 {
+		return 0
+	}
+	return 12 + program.function_runs.len * 8
+}
+
+// eh_frame_address_order is the program's function bodies in the order the header's
+// table has to hold them: by address, because the unwinder binary-searches the
+// table and a scan that met them out of order would look in the wrong half. A
+// program's bodies are usually written in address order already, so the sort
+// costs little and makes the table correct whatever order the emitter wrote.
+fn eh_frame_address_order(program image.Program) []image.CodeRun {
+	mut runs := program.function_runs.clone()
+	runs.sort(a.base < b.base)
+	return runs
+}
+
+// image_eh_frame_section builds the image's `.eh_frame`: the one CIE that describes
+// this emitter's prologue, then one FDE per function body in address order, then
+// a zero-length record that ends the table the way a scan which does not go
+// through the header stops.
+//
+// An FDE names the body's place and length and carries no instructions of its
+// own, because the CIE's rule describes the whole prologue. The initial location
+// is a four-byte signed distance from the field itself to where the body begins,
+// which is the encoding the CIE names (DW_EH_PE_pcrel | DW_EH_PE_sdata4): the
+// same rule the object writer states, except that here the link has settled
+// every address, so the distance is written rather than left to a relocation.
+// The load base cancels out of the subtraction because both fields move with the
+// image.
+fn image_eh_frame_section(program image.Program, text int, eh_frame int) []u8 {
+	if program.function_runs.len == 0 {
+		return []u8{}
+	}
+	mut table := frame_cie()
+	for run in eh_frame_address_order(program) {
+		entry := table.len
+		mut fde := []u8{len: 20, init: u8(0)}
+		put_u32(mut fde, 0, 16) // the entry below, minus these four
+		// The four bytes at offset four point back at the CIE: the distance
+		// from the field to the CIE's first byte, which is the table's start.
+		put_u32(mut fde, 4, u32(entry + 4))
+		location := (text + run.base) - (eh_frame + entry + 8)
+		put_u32(mut fde, 8, u32(i32(location)))
+		put_u32(mut fde, 12, u32(run.len))
+		table << fde
+	}
+	table << [u8(0), u8(0), u8(0), u8(0)]
+	return table
+}
+
+// image_eh_frame_header builds the image's `.eh_frame_hdr`: the version and the three
+// encoding bytes an unwinder reads before the table, the address of `.eh_frame`,
+// how many entries there are, and one entry per function body in address order.
+//
+// The first field is a four-byte distance from itself to the table (pcrel,
+// sdata4), the count is a plain four-byte number (udata4, absolute), and each
+// entry is two four-byte distances measured from the start of this header
+// (datarel, sdata4): the address a body begins at and the FDE that describes it.
+// The encodings and the datarel base are gcc's, read off a binary it wrote.
+fn image_eh_frame_header(program image.Program, text int, eh_frame int, header int) []u8 {
+	if program.function_runs.len == 0 {
+		return []u8{}
+	}
+	runs := eh_frame_address_order(program)
+	mut hdr := []u8{len: 12 + runs.len * 8, init: u8(0)}
+	hdr[0] = 1 // version 1
+	// The pointer to `.eh_frame` is pcrel|sdata4, the entry count is
+	// udata4|absolute, and the search table is datarel|sdata4.
+	hdr[1] = 0x1b
+	hdr[2] = 0x03
+	hdr[3] = 0x3b
+	put_u32(mut hdr, 4, u32(i32(eh_frame - (header + 4))))
+	put_u32(mut hdr, 8, u32(runs.len))
+	for i, run in runs {
+		at := 12 + i * 8
+		location := (text + run.base) - header
+		put_u32(mut hdr, at, u32(i32(location)))
+		fde := frame_cie().len + i * 20
+		put_u32(mut hdr, at + 4, u32(i32((eh_frame + fde) - header)))
+	}
+	return hdr
 }
 
 // hash_size is the size of the SysV hash table for a symbol count: one bucket,
@@ -1085,7 +1228,7 @@ fn emit_header(mut output []u8, target backend.Target, entry u64, e_type u16, he
 // the thread-local block when the image defines one, and the stack. The kind
 // settles the first three, and a thread-local is a header of its own for every
 // kind, which is why it is passed in rather than read off the kind.
-fn emit_program_headers(mut output []u8, target backend.Target, sections Sections, program image.Program, interp_len int, library_count int, kind linux.LinkKind, has_tls bool, base u64) {
+fn emit_program_headers(mut output []u8, target backend.Target, sections Sections, program image.Program, interp_len int, library_count int, kind linux.LinkKind, has_tls bool, has_eh_frame bool, base u64) {
 	mut at := int(elf_header_size)
 	// PT_INTERP: the loader the kernel hands the process to. Only a dynamic
 	// program names one; the other two kinds write no header here.
@@ -1142,6 +1285,23 @@ fn emit_program_headers(mut output []u8, target backend.Target, sections Section
 		put_u64(mut output, at + 32, u64(program.tls_blob.len))
 		put_u64(mut output, at + 40, u64(tls_memsz(program)))
 		put_u64(mut output, at + 48, u64(tls_alignment_of(program)))
+		at += int(elf_program_header_size)
+	}
+	// PT_GNU_EH_FRAME: the header that indexes the unwind table. An unwinder
+	// finds it here and reads the table through it, so a body whose FDE it
+	// would not reach by scanning is still described. It is read-only, its
+	// p_vaddr is where the header lies in the one segment the image maps, and
+	// its alignment is the four bytes every field in the header is.
+	if has_eh_frame {
+		size := u64(program_eh_frame_hdr_size(program))
+		put_u32(mut output, at, elf_ph_type_gnu_eh_frame)
+		put_u32(mut output, at + 4, elf_ph_flags_read)
+		put_u64(mut output, at + 8, u64(sections.eh_frame_hdr))
+		put_u64(mut output, at + 16, base + u64(sections.eh_frame_hdr))
+		put_u64(mut output, at + 24, base + u64(sections.eh_frame_hdr))
+		put_u64(mut output, at + 32, size)
+		put_u64(mut output, at + 40, size)
+		put_u64(mut output, at + 48, 4)
 		at += int(elf_program_header_size)
 	}
 	// PT_GNU_STACK: the stack is readable and writable, and executable only when

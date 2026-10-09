@@ -601,3 +601,76 @@ fn test_a_thread_local_reads_its_initial_value_through_the_pointer() {
 	os.rm(path) or {}
 	assert result.exit_code == 42
 }
+
+// An image with function bodies carries the unwind table and the header that
+// indexes it, and PT_GNU_EH_FRAME names the header so an unwinder reaches the
+// table without scanning. Two bodies make the shape visible: the table is one
+// CIE, one FDE per body and a zero record that ends it, and the header's search
+// table is sorted by the address each body covers and points at the FDE that
+// describes it. The bodies are handed out of address order so the sort is
+// exercised, and the FDE measures to its body from its own field while the
+// search table measures from the header's start, which is the datarel encoding
+// gcc writes.
+fn test_function_bodies_write_an_unwind_table_the_header_indexes() {
+	target := se_target()
+	mut program := image.Program{}
+	program.text = []u8{len: 64, init: u8(0x90)}
+	program.function_runs << image.CodeRun{
+		base: 32
+		len:  16
+	}
+	program.function_runs << image.CodeRun{
+		base: 0
+		len:  8
+	}
+	bytes := write(program, target, .program) or {
+		panic('the dynamic program was not written: ${err.msg()}')
+	}
+	at := se_phdr_of(bytes, elf_ph_type_gnu_eh_frame)
+	assert at >= 0
+	assert se32(bytes, at + 4) == elf_ph_flags_read
+	// The one segment maps the whole file, so a virtual address is the base
+	// plus the file offset, and the block is the fixed header and two entries.
+	assert se64(bytes, at + 16) == target.load_base + se64(bytes, at + 8)
+	assert se64(bytes, at + 32) == 12 + 2 * 8
+	assert se64(bytes, at + 48) == 4
+	hdr := int(se64(bytes, at + 8))
+	// The version and the three encodings are gcc's, and the table address is
+	// a distance from the field itself to `.eh_frame`.
+	assert bytes[hdr] == u8(1)
+	assert bytes[hdr + 1] == u8(0x1b)
+	assert bytes[hdr + 2] == u8(0x03)
+	assert bytes[hdr + 3] == u8(0x3b)
+	assert se32(bytes, hdr + 8) == 2
+	eh_frame := hdr + 4 + int(i32(se32(bytes, hdr + 4)))
+	text := int(se64(bytes, 24)) - int(target.load_base)
+	// The CIE is the table's first entry; the two FDEs follow it in address
+	// order, the body at zero before the one at thirty-two.
+	assert se32(bytes, eh_frame) == 20
+	first_fde := eh_frame + 24
+	second_fde := first_fde + 20
+	assert se32(bytes, first_fde) == 16
+	// The search table's first entry is the body that begins lowest, and it
+	// names the FDE that describes it.
+	assert hdr + int(i32(se32(bytes, hdr + 12))) == text
+	assert hdr + int(i32(se32(bytes, hdr + 16))) == first_fde
+	assert first_fde + 8 + int(i32(se32(bytes, first_fde + 8))) == text
+	assert se32(bytes, first_fde + 12) == 8
+	assert hdr + int(i32(se32(bytes, hdr + 20))) == text + 32
+	assert second_fde + 8 + int(i32(se32(bytes, second_fde + 8))) == text + 32
+	assert se32(bytes, second_fde + 12) == 16
+}
+
+// An image with no function body writes no table and no header, and its header
+// count is the one the kind always had: the unwind table's header is not carried
+// when there is nothing to index.
+fn test_an_image_with_no_function_body_writes_no_unwind_header() {
+	target := se_target()
+	mut program := image.Program{}
+	program.text = []u8{len: 8, init: u8(0x90)}
+	bytes := write(program, target, .program) or {
+		panic('the dynamic program was not written: ${err.msg()}')
+	}
+	assert se16(bytes, 56) == 4
+	assert se_phdr_of(bytes, elf_ph_type_gnu_eh_frame) == -1
+}
