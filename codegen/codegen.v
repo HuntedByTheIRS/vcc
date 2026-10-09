@@ -531,6 +531,16 @@ mut:
 	// write over the slot `a` is waiting in, which is a wrong value rather than
 	// a refused one.
 	slot_base int
+	// argument_credit is the total argument count of the calls an expression is
+	// being emitted inside, which is how much deeper than its own nesting the
+	// depth it is handed is. An argument is emitted at a depth past the slots the
+	// enclosing call's own arguments wait in, so that a call written inside an
+	// argument list keys its levels clear of them; that is a level concern, and
+	// this is the same number kept for the one place it is not one: the nesting
+	// limit. With it a call of a hundred arguments is not reported as a hundred
+	// levels deep, and an expression that is genuinely nested past the limit still
+	// is.
+	argument_credit int
 	// wide_left and wide_right are the slots a 128-bit step keeps its two
 	// operands in, one slot per level of nesting and one for each side: a pair is
 	// two words, and two pairs do not fit in the registers a step has while the
@@ -1189,7 +1199,7 @@ fn (mut e Emitter) check_statements(stmts []ast.Stmt, depth int) !void {
 // check_expression walks one expression. A tree deeper than the emitter's own
 // walk would go is left to the emitter's depth report, which is the same number.
 fn (mut e Emitter) check_expression(expr ast.Expr, depth int) !void {
-	if depth > max_emit_depth {
+	if depth - e.argument_credit > max_emit_depth {
 		return
 	}
 	if expr is ast.IntLit {
@@ -1946,6 +1956,7 @@ fn (mut e Emitter) emit_function(decl ast.FnDecl) !void {
 	e.values = []Slot{}
 	e.callees = []Slot{}
 	e.slot_base = 0
+	e.argument_credit = 0
 	e.vla_saves = []int{}
 	e.cleanups = [][]Cleanup{}
 	e.wide_left = []Slot{}
@@ -6168,7 +6179,7 @@ fn (e Emitter) double_of(expr ast.Expr) bool {
 }
 
 fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
-	if depth > max_emit_depth {
+	if depth - e.argument_credit > max_emit_depth {
 		return false
 	}
 	// A long double is a floating type in the language and not a value of the
@@ -6296,7 +6307,7 @@ fn (e Emitter) floating_at(expr ast.Expr, depth int) bool {
 // is the same walk rather than a second idea: every case that answers here also
 // answers floating_at, and the cases that are not a float do not.
 fn (e Emitter) single_at(expr ast.Expr, depth int) bool {
-	if depth > max_emit_depth {
+	if depth - e.argument_credit > max_emit_depth {
 		return false
 	}
 	// The same guard floating_at carries: the extended type is not a value of
@@ -6823,7 +6834,7 @@ fn (mut e Emitter) emit_expr_at(expr ast.Expr, depth int) !void {
 		e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: a value of type ${expr.typ.describe()} is two components, and a complex value used as a single one is not computed here')
 		return error('complex value as a value')
 	}
-	if depth > max_emit_depth {
+	if depth - e.argument_credit > max_emit_depth {
 		e.diagnostics << problem(expr_line(expr), expr_col(expr), 'unsupported: the expression is nested more than ${max_emit_depth} levels deep')
 		return error('expression nested too deeply')
 	}
@@ -10316,7 +10327,7 @@ fn (e Emitter) width_of(expr ast.Expr) ?int {
 }
 
 fn (e Emitter) width_of_at(expr ast.Expr, depth int) ?int {
-	if depth > max_emit_depth {
+	if depth - e.argument_credit > max_emit_depth {
 		return none
 	}
 	return match expr {
@@ -10579,7 +10590,7 @@ fn (e Emitter) constant(expr ast.Expr) ?i64 {
 }
 
 fn (e Emitter) constant_at(expr ast.Expr, depth int) ?i64 {
-	if depth > max_emit_depth {
+	if depth - e.argument_credit > max_emit_depth {
 		return none
 	}
 	mut spine := []ast.Binary{}
@@ -11569,6 +11580,17 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	// than in the result register. The call is written the same way as any
 	// other, and what it is worth to the expression around it is settled after
 	// the call runs, at each of the places below that emit one.
+	// The depth an argument is emitted at carries this call's argument count, so a
+	// call written inside an argument list keys its levels past the levels this
+	// call's arguments are parked in. That count is not nesting, so it is credited
+	// back where the nesting limit is asked, and the credit is given back on every
+	// way out of this call: an argument that is itself a call runs these same
+	// lines, and the count it adds has to come off again when it returns.
+	entry_credit := e.argument_credit
+	e.argument_credit = entry_credit + call.args.len
+	defer {
+		e.argument_credit = entry_credit
+	}
 	mut places := []ArgPlace{cap: call.args.len}
 	// A call written to an expression calls the address that expression is
 	// worth. The address is computed before anything else and waits in a slot of
