@@ -207,6 +207,26 @@ step 3 produced, and comparing the behavior of `vcc-v2` with `vcc-v1` on the sam
 inputs. The chain is then part of CI, because a fixed point that is not
 continuously checked is a fixed point nobody has.
 
+Measured on this tree, in the in-house form of steps 2 and 4 rather than planned:
+with `-std=gnu11`, which is what V passes by default, `v -nocache -cc ./vcc
+-showcc -o vcc-v1 .` exits 0, and `v -cc vcc-v1 -o vcc-v2 .` exits 0 as well.
+vcc-v1 compiles the C V emits for this tree: `vcc-v1 -c -std=gnu11 -w -o src.o
+src.c` exits 0 and writes 46,067,936 bytes, the size of the object the host
+writes for the same file, and gcc links that object into a compiler that runs
+and reports its version.
+
+What is not clean is the output itself, and it is this milestone's business
+rather than a neighbour's. A compiler built this way writes the wrong bytes
+where the section names belong in the objects it writes: `.text`, `.rodata` and
+`.data` come out as bytes of the section contents, so its string table holds
+`55 48 89 e5 48` where `.text` belongs, and a two-line C file shows it as
+plainly as the tree's own 5.5 MB of generated C. It is also not deterministic
+where the host is: the same input compiled twice gives objects differing in two
+or three bytes, and two builds of vcc differ by twenty-six. Neither stops an
+image from linking, so the chain runs end to end today. Printing the name
+strings at the point the object writer interns them, in a build of vcc-v1, is
+what would say whether the names are wrong or the table they are read out of is.
+
 
 ## Later, and not yet planned
 
