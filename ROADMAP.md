@@ -236,6 +236,24 @@ two runs of one binary did not reproduce once the names were right, and the
 twenty-six bytes between two builds of vcc is two builds rather than one input
 compiled twice.
 
+Step 4 is not met. What this compiler builds runs and gets simple programs
+right, but it segfaults on some inputs: `-c` on
+`compliance/gnu/gnu99/0013-hosted-known-1.c` with `-std=gnu99`, and on
+`compliance/iso/c99/1123-vprintf-formats-through-a-va-list.c` with `-std=c99`,
+both exit 139, and so does the same file with `-o` in place of `-c`. The crash
+is in the compiler rather than in the link, since `-c` alone reproduces it, and
+it is not in this tree's source, since `v -o vcc .` from the same commit
+compiles both files and the gate passes. The class is floating point and
+variable arguments: the compliance run under a compiler this one built reports
+170 problems, and the names are the math cases, `isinf`, `fpclassify`,
+`lround`, `fma`, `copysign`, `scalbn`, beside `vprintf` through a `va_list`. A
+second run reported 171, so one case is not stable between runs. The first
+compiler is therefore miscompiling part of the C that implements its own
+floating point and variadic paths, which is the fixed point step 4 exists to
+catch. A compiler built this way is 45,785,088 bytes and statically linked;
+`v -o vcc .` writes 7,103,184. Check which one is in the tree before trusting
+it.
+
 
 ## Later, and not yet planned
 
