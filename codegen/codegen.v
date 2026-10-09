@@ -2066,23 +2066,260 @@ fn (mut e Emitter) emit_statements(stmts []ast.Stmt) !bool {
 // pass that reordered or elided a memory access across the statement would have
 // to honour that clobber before it could run under this tree.
 //
-// A statement that writes an instruction is refused by name, with its text and
-// its location. Emitting nothing for one would be a value the program asked for
-// and did not get, which is the wrong answer this compiler does not write: the
-// emitter has no way to place an instruction's registers from a constraint
-// string, so the honest half step is to refuse rather than to guess. The refusal
-// is placed here, at the statement, and not where the statement was read, so a
-// body the program never reaches is not a refusal: `parser/declarations.v`
-// skips a `static` definition nothing in the file names before its body is
-// read, and a statement in one of those is never seen at all.
+// A statement that writes an instruction goes to `emit_asm_instructions`, which
+// emits the instructions this back end knows and refuses the rest by name, with
+// the instruction text and the location. Emitting nothing for one would be a
+// value the program asked for and did not get, which is the wrong answer this
+// compiler does not write. The refusal is placed here, at the statement, and not
+// where the statement was read, so a body the program never reaches is not a
+// refusal: `parser/declarations.v` skips a `static` definition nothing in the
+// file names before its body is read, and a statement in one of those is never
+// seen at all.
 fn (mut e Emitter) emit_asm(stmt ast.Stmt) !void {
 	if stmt.asm_is_goto() || stmt.asm_goto_labels().len > 0 {
 		return e.emit_asm_goto(stmt)
 	}
-	if stmt.asm_text().len > 0 || stmt.asm_outputs() > 0 || stmt.asm_inputs() > 0 {
-		e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm statement ${stmt.asm_spelling()} is not emitted by this compiler')
-		return error('asm statement')
+	if stmt.asm_text().len == 0 && stmt.asm_outputs() == 0 && stmt.asm_inputs() == 0 {
+		// The barrier: nothing the compiler can see, and the whole of what this
+		// statement does.
+		return
 	}
+	return e.emit_asm_instructions(stmt)
+}
+
+// asm_registers is the three registers a statement-level asm works in, as the
+// target's table names them: the register a pair's low half travels in, the one
+// its high half travels in, and one the compiler may pick for an operand whose
+// constraint leaves the register open.
+struct AsmRegisters {
+	accumulator backend.Register
+	remainder   backend.Register
+	scratch     backend.Register
+}
+
+// emit_asm_instructions emits the instructions of a statement-level asm whose text
+// is one of the shapes V's own generated C writes, with each operand's value in the
+// register its constraint names.
+//
+// The vocabulary is four instructions. `div` and `mulq` work on the pair rdx:rax,
+// `addq %[z], %%rax` adds an operand into the low half of that pair and
+// `adcq $0, %%rdx` carries into the high one; together they are the 128-bit divide
+// and the 128-bit multiply-add V generates for `bits.div_64`, `bits.mul_64` and
+// `bits.mul_add_64`. Nothing else is emitted: a template naming another instruction,
+// or writing these instructions with other operands than the ones they need, is
+// refused with its text and its location rather than approximated.
+//
+// The constraint strings are roles and not register names. `a` is the register a
+// function leaves its result in, `d` the one a pair's second half travels in, and
+// `r` a register the compiler may pick. The target's table names all three, so no
+// spelling of a register is written here, and the instruction text is checked
+// against the register the emitter is about to use rather than trusted: a template
+// that writes `%%rcx` where this back end places rdx is refused, not rewritten.
+fn (mut e Emitter) emit_asm_instructions(stmt ast.Stmt) !void {
+	line := stmt.line
+	col := stmt.col
+	inputs := stmt.asm_input_operands()
+	outputs := stmt.asm_output_operands()
+	lines := asm_instruction_lines(stmt.asm_text())
+	// Every input is read out of its object before any register is loaded:
+	// evaluating an expression uses the accumulator, so a value still in it when
+	// the next operand was evaluated would be lost. A value that is not the
+	// machine's word wide is refused, because the instructions below are the
+	// machine's word-wide ones and a four-byte value in a word register is a
+	// different instruction than the text names.
+	mut values := []Slot{cap: inputs.len}
+	for operand in inputs {
+		width := e.width_of(operand.value) or { -1 }
+		if width != e.target.word_size {
+			return e.refuse_asm(stmt, "the operand ${asm_operand_spelling(operand)} is not the machine's word wide, and the instructions this back end emits are the word-wide ones")
+		}
+		slot := e.reserve(e.target.word_size)
+		// The value is written first and stored afterwards, which is the order
+		// `store_value` is written for: it stores what the accumulator holds and
+		// is handed the expression only to decide how to convert it.
+		e.emit_expr_at(operand.value, 0)!
+		e.store_value(slot, operand.value, line, col)!
+		values << slot
+	}
+	registers := AsmRegisters{
+		accumulator: e.accumulator(line, col)!
+		remainder:   e.remainder(line, col)!
+		scratch:     e.scratch(line, col)!
+	}
+	if lines.len == 1 && lines[0].starts_with('div ') {
+		return e.emit_asm_divide(stmt, lines[0], inputs, outputs, values, registers)
+	}
+	if lines.len == 1 && lines[0].starts_with('mulq ') {
+		return e.emit_asm_multiply(stmt, lines[0], inputs, outputs, values, registers)
+	}
+	if lines.len == 3 && lines[0].starts_with('mulq ') && lines[1].starts_with('addq ')
+		&& lines[2].starts_with('adcq ') {
+		return e.emit_asm_multiply_add(stmt, lines, inputs, outputs, values, registers)
+	}
+	return e.refuse_asm(stmt, 'its instructions are not the four this back end emits')
+}
+
+// emit_asm_divide emits `div %[y]`: the dividend is the pair rdx:rax, the divisor is
+// the operand the text names, and the machine leaves the quotient in rax and the
+// remainder in rdx. The inputs with the constraints `a` and `d` are the dividend's
+// two halves, and the outputs `=a` and `=d` say where the two results are written.
+fn (mut e Emitter) emit_asm_divide(stmt ast.Stmt, text string, inputs []ast.AsmOperand, outputs []ast.AsmOperand, values []Slot, registers AsmRegisters) !void {
+	name := asm_named_operand(text)
+	divisor := asm_operand_named(inputs, name)
+	low := asm_operand_with(inputs, 'a')
+	high := asm_operand_with(inputs, 'd')
+	if name == '' || text != 'div %[${name}]' || asm_operand_with(inputs, 'r') != divisor
+		|| low < 0 || high < 0 || asm_operand_with(outputs, '=a') < 0
+		|| asm_operand_with(outputs, '=d') < 0 {
+		return e.refuse_asm(stmt, 'the divide is not written with the operands this back end places: an `=a` and an `=d` output, an `a`, a `d` and an `r` input, and the text naming the `r` one as the divisor')
+	}
+	e.load_argument(values[divisor], registers.scratch, e.target.word_size, stmt.line, stmt.col)!
+	e.load_argument(values[low], registers.accumulator, e.target.word_size, stmt.line, stmt.col)!
+	e.load_argument(values[high], registers.remainder, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.divide_pair(registers.scratch)!)
+	e.store_asm_output(stmt, outputs[asm_operand_with(outputs, '=a')], registers.accumulator)!
+	return e.store_asm_output(stmt, outputs[asm_operand_with(outputs, '=d')], registers.remainder)
+}
+
+// emit_asm_multiply emits `mulq %[a pair register]`: the machine multiplies rax by
+// the register the text names and leaves the low half of the product in rax and the
+// high half in rdx. The inputs with the constraints `a` and `d` are the two factors,
+// and the outputs `=a` and `=d` say where the two halves are written.
+fn (mut e Emitter) emit_asm_multiply(stmt ast.Stmt, text string, inputs []ast.AsmOperand, outputs []ast.AsmOperand, values []Slot, registers AsmRegisters) !void {
+	low := asm_operand_with(inputs, 'a')
+	high := asm_operand_with(inputs, 'd')
+	if text != 'mulq %%${e.asm_spelling(registers.remainder)}' || low < 0 || high < 0
+		|| asm_operand_with(outputs, '=a') < 0 || asm_operand_with(outputs, '=d') < 0 {
+		return e.refuse_asm(stmt, "the multiply is not written with the operands this back end places: an `=a` and an `=d` output, an `a` and a `d` input, and the text multiplying by the register a pair's high half travels in")
+	}
+	e.load_argument(values[low], registers.accumulator, e.target.word_size, stmt.line, stmt.col)!
+	e.load_argument(values[high], registers.remainder, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.multiply_pair(registers.remainder)!)
+	e.store_asm_output(stmt, outputs[asm_operand_with(outputs, '=a')], registers.accumulator)!
+	return e.store_asm_output(stmt, outputs[asm_operand_with(outputs, '=d')], registers.remainder)
+}
+
+// emit_asm_multiply_add emits the three instructions of `bits.mul_add_64`: the
+// multiply, then the operand the second line names added into the low half, then the
+// carry that addition leaves added into the high half. The operands are the three
+// factors of a multiply-add: `a` and `d` for the multiply and `r` for the value
+// added to the product.
+fn (mut e Emitter) emit_asm_multiply_add(stmt ast.Stmt, lines []string, inputs []ast.AsmOperand, outputs []ast.AsmOperand, values []Slot, registers AsmRegisters) !void {
+	name := asm_named_operand(lines[1])
+	added := asm_operand_named(inputs, name)
+	low := asm_operand_with(inputs, 'a')
+	high := asm_operand_with(inputs, 'd')
+	if name == '' || asm_operand_with(inputs, 'r') != added || low < 0 || high < 0
+		|| asm_operand_with(outputs, '=a') < 0 || asm_operand_with(outputs, '=d') < 0
+		|| lines[0] != 'mulq %%${e.asm_spelling(registers.remainder)}'
+		|| lines[1] != 'addq %[${name}], %%${e.asm_spelling(registers.accumulator)}'
+		|| lines[2] != 'adcq $0, %%${e.asm_spelling(registers.remainder)}' {
+		return e.refuse_asm(stmt, 'the multiply-add is not written with the operands this back end places: an `=a` and an `=d` output, an `a`, a `d` and an `r` input, and the three instructions this back end emits for it')
+	}
+	e.load_argument(values[low], registers.accumulator, e.target.word_size, stmt.line, stmt.col)!
+	e.load_argument(values[high], registers.remainder, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.multiply_pair(registers.remainder)!)
+	e.load_argument(values[added], registers.scratch, e.target.word_size, stmt.line, stmt.col)!
+	e.append(e.target.add_reg64(registers.accumulator, registers.scratch))
+	e.append(e.target.add_with_carry_immediate(registers.remainder, 0)!)
+	e.store_asm_output(stmt, outputs[asm_operand_with(outputs, '=a')], registers.accumulator)!
+	return e.store_asm_output(stmt, outputs[asm_operand_with(outputs, '=d')], registers.remainder)
+}
+
+// store_asm_output writes a register into the object an output operand names. The
+// object has to be a local or a parameter of the function being emitted, which is
+// what V's generated C writes here; an operand that is an lvalue of any other shape
+// is refused rather than stored somewhere the program did not ask for.
+fn (mut e Emitter) store_asm_output(stmt ast.Stmt, operand ast.AsmOperand, register backend.Register) !void {
+	name := asm_output_name(operand)
+	if name == '' {
+		return e.refuse_asm(stmt, 'the output operand ${asm_operand_spelling(operand)} is not a plain object name')
+	}
+	slot := e.lookup(name) or {
+		return e.refuse_asm(stmt, 'the output operand ${name} is not an object of the function being emitted')
+	}
+	e.store_register(slot, register, stmt.line, stmt.col)!
+}
+
+// refuse_asm is the one refusal a statement-level asm gets: the statement's text and
+// its location, with the reason this shape is not one the emitter writes.
+fn (mut e Emitter) refuse_asm(stmt ast.Stmt, why string) IError {
+	e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: the asm statement ${stmt.asm_spelling()} is not emitted by this compiler: ${why}')
+	return error('asm statement')
+}
+
+// asm_spelling is how an instruction template writes a register: the machine's own
+// name for it at the machine's word size, which is what `%%rdx` in V's generated C
+// is. The emitter's handles are named at four bytes and the template names the word,
+// so the two spellings are not the same string.
+fn (e &Emitter) asm_spelling(register backend.Register) string {
+	return e.target.describe(register).wide_name
+}
+
+// asm_instruction_lines reads the instructions out of a statement's text: one per
+// line, with the tabs and spaces V's generated C separates them with taken off each
+// end, and the empty lines a trailing separator leaves dropped.
+fn asm_instruction_lines(text string) []string {
+	mut lines := []string{}
+	for raw in text.split('\n') {
+		line := raw.trim_space()
+		if line.len > 0 {
+			lines << line
+		}
+	}
+	return lines
+}
+
+// asm_named_operand is the name a line of instruction text refers to with `%[name]`,
+// and empty when the line names no operand that way.
+fn asm_named_operand(text string) string {
+	open := text.index('%[') or { return '' }
+	close := text.index_after(']', open) or { return '' }
+	if close <= open + 2 {
+		return ''
+	}
+	return text[open + 2..close]
+}
+
+// asm_operand_named is where the operand a text refers to by name sits in a list,
+// and -1 when the list has no operand of that name.
+fn asm_operand_named(operands []ast.AsmOperand, name string) int {
+	for i, operand in operands {
+		if operand.name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// asm_operand_with is where the first operand whose constraint string is exactly
+// this one sits, and -1 when the list has none.
+fn asm_operand_with(operands []ast.AsmOperand, constraint string) int {
+	for i, operand in operands {
+		if operand.constraint == constraint {
+			return i
+		}
+	}
+	return -1
+}
+
+// asm_output_name is the object an output operand's value is written to, and empty
+// when the operand is not a plain name.
+fn asm_output_name(operand ast.AsmOperand) string {
+	value := operand.value
+	if value is ast.Ident {
+		return value.name
+	}
+	return ''
+}
+
+// asm_operand_spelling is how a diagnostic names an operand: its constraint string,
+// and the name it was given when it has one.
+fn asm_operand_spelling(operand ast.AsmOperand) string {
+	if operand.name.len > 0 {
+		return '"${operand.constraint}" ([${operand.name}])'
+	}
+	return '"${operand.constraint}"'
 }
 
 // emit_asm_goto emits the one shape an asm goto can take here: a template of
