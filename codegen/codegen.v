@@ -2469,8 +2469,8 @@ fn (mut e Emitter) emit_return(stmt ast.Stmt) !void {
 		}
 		e.load_accumulator(address, stmt.line, stmt.col)!
 		base := e.accumulator(stmt.line, stmt.col)!
-		e.load_return_eightbyte(base, 0, e.target.word_size, e.return_class.first_floating,
-			stmt.line, stmt.col)!
+		e.load_return_eightbyte(base, 0, low_eightbyte_width(e.return_class.bytes, e.target.word_size),
+			e.return_class.first_floating, stmt.line, stmt.col)!
 		e.append(e.target.frame_epilogue())
 		return
 	}
@@ -3260,8 +3260,8 @@ fn (mut e Emitter) assign_object(address Slot, width int, expr ast.Expr, line in
 			e.emit_expr_at(expr, depth + 1)!
 			base := e.scratch(line, col)!
 			e.load_argument(address, base, e.target.word_size, line, col)!
-			e.store_return_eightbyte(base, 0, e.target.word_size, class.first_floating, expr.line,
-				expr.col)!
+			e.store_return_eightbyte(base, 0, low_eightbyte_width(class.bytes, e.target.word_size),
+				class.first_floating, expr.line, expr.col)!
 			if class.count == 2 {
 				e.append(e.target.add_immediate(base, e.target.word_size))
 				e.store_return_eightbyte(base, 1, class.bytes - e.target.word_size,
@@ -3608,8 +3608,8 @@ fn (mut e Emitter) field_object_address(expr ast.Expr, depth int) !void {
 			base := e.scratch(expr.line, expr.col)!
 			frame := e.frame_pointer(expr.line, expr.col)!
 			e.append(e.target.address_of_slot(frame, temp.offset, base))
-			e.store_return_eightbyte(base, 0, e.target.word_size, class.first_floating, expr.line,
-				expr.col)!
+			e.store_return_eightbyte(base, 0, low_eightbyte_width(class.bytes, e.target.word_size),
+				class.first_floating, expr.line, expr.col)!
 			if class.count == 2 {
 				e.append(e.target.add_immediate(base, e.target.word_size))
 				e.store_return_eightbyte(base, 1, class.bytes - e.target.word_size,
@@ -5890,6 +5890,51 @@ fn (mut e Emitter) load_accumulator(slot Slot, line int, col int) !void {
 		return
 	}
 	e.append(e.target.load_slot(base, slot.offset, register, slot.width)!)
+}
+
+// low_eightbyte_width is how many bytes the first eightbyte of an object carries
+// when the object is handed over as a value: the whole word when the object is
+// more than one eightbyte, and the object's own bytes when it is fewer. A store
+// or a read at a full word runs past the object into whatever follows it, which
+// for a three-byte structure assigned from a call is the next field of the object
+// it is written into. Measured: `spec.qualifiers = add_qualifier(...)`, where the
+// three-byte result was written over the `storage` field after it, and every
+// typedef carrying a qualifier then resolved to a type with no storage class.
+fn low_eightbyte_width(bytes int, word_size int) int {
+	return if bytes < word_size { bytes } else { word_size }
+}
+
+// store_chunked_indirect writes a register into the `width` bytes at an address a
+// register holds, for an object of a width the machine does not move in one
+// instruction: the low chunk goes where the object is and each chunk above it is
+// shifted down out of a copy of the register first, so the register itself is left
+// as it was. A three-byte object is a two-byte write and a one-byte write of the
+// register shifted sixteen bits down, which is the shape gcc emits for the same
+// store.
+fn (mut e Emitter) store_chunked_indirect(address backend.Register, register backend.Register, width int, line int, col int) !void {
+	// The piece has to be a register the address and the value are not in: the
+	// address is the one the caller parked the object's address in and the value
+	// is the register the call handed it back in, so a copy of either used as
+	// scratch is lost. The three the emitter keeps are asked in turn, which is
+	// enough for every call site: the address stands in one of them and the value
+	// in another.
+	mut piece := e.scratch(line, col)!
+	if piece == address || piece == register {
+		piece = e.remainder(line, col)!
+	}
+	if piece == address || piece == register {
+		piece = e.accumulator(line, col)!
+	}
+	mut done := 0
+	for done < width {
+		chunk := machine_chunk(width - done)
+		e.append(e.target.move_register64(piece, register)!)
+		if done > 0 {
+			e.append(e.target.shift_right_word(piece, u8(done * 8))!)
+		}
+		e.append(e.target.store_slot(address, i32(done), piece, chunk)!)
+		done += chunk
+	}
 }
 
 // machine_chunk is the widest move the machine has that fits in `remaining` bytes,
@@ -12349,10 +12394,22 @@ fn (mut e Emitter) store_return_eightbyte(base backend.Register, offset int, wid
 				return error('no second floating register')
 			}
 		}
+		if width < 8 {
+			// A floating eightbyte of four bytes is a single float, and the
+			// eight bytes a double store writes would run past the object into
+			// whatever follows it.
+			e.append(e.target.store_float_indirect(base, value)!)
+			return
+		}
 		e.append(e.target.store_double_indirect(base, value)!)
 		return
 	}
 	value := if offset == 0 { e.accumulator(line, col)! } else { e.remainder(line, col)! }
+	if !machine_width_is_a_move(width) {
+		// An object narrower than a word: the low bytes of the register are the
+		// whole of it, and only those bytes may be written.
+		return e.store_chunked_indirect(base, value, width, line, col)
+	}
 	e.append(e.target.store_indirect(base, value, width)!)
 }
 
@@ -12378,6 +12435,12 @@ fn (mut e Emitter) load_return_eightbyte(base backend.Register, offset int, widt
 				return error('no second floating register')
 			}
 		}
+		if width < 8 {
+			// A floating eightbyte of four bytes is a single float: the eight
+			// bytes a double read would take up whatever follows the object.
+			e.append(e.target.load_float_indirect(base, register)!)
+			return
+		}
 		e.append(e.target.load_double_indirect(base, register)!)
 		return
 	}
@@ -12385,6 +12448,11 @@ fn (mut e Emitter) load_return_eightbyte(base backend.Register, offset int, widt
 	// it is read through is in the accumulator too and reading into the register one
 	// has just advanced would read from the value rather than from the object.
 	register := if offset == 0 { e.accumulator(line, col)! } else { e.remainder(line, col)! }
+	if !machine_width_is_a_move(width) {
+		// An object narrower than a word is read a chunk at a time, so the read
+		// does not take up the bytes after it.
+		return e.load_chunked_indirect(base, register, width, line, col)
+	}
 	e.append(e.target.load_indirect(base, register, width)!)
 }
 
