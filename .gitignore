@@ -17,6 +17,10 @@ vcc
 # builds `tools/build` beside it, and a run that stops early can leave its
 # scratch directory (`tools/.regress.v3cc.*`) there too. Both are byproducts of
 # running a script, and neither is a source.
+#
+# A plain `v -o vcc .` leaves one of the same shape beside the binary, named for
+# it: `.vcc.v3cc.<pid>.<three numbers>`, holding V's generated C. The pattern
+# below catches it at the root and under tools/ alike.
 *_test
 tools/gate
 tools/build
@@ -24,7 +28,7 @@ tools/bench
 tools/compliance
 tools/regress
 tools/tests
-tools/.*.v3cc.*
+.*.v3cc.*
 
 # Ignore binary output folders
 bin/
