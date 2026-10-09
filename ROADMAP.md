@@ -236,23 +236,41 @@ two runs of one binary did not reproduce once the names were right, and the
 twenty-six bytes between two builds of vcc is two builds rather than one input
 compiled twice.
 
-Step 4 is not met. What this compiler builds runs and gets simple programs
-right, but it segfaults on some inputs: `-c` on
-`compliance/gnu/gnu99/0013-hosted-known-1.c` with `-std=gnu99`, and on
-`compliance/iso/c99/1123-vprintf-formats-through-a-va-list.c` with `-std=c99`,
-both exit 139, and so does the same file with `-o` in place of `-c`. The crash
-is in the compiler rather than in the link, since `-c` alone reproduces it, and
-it is not in this tree's source, since `v -o vcc .` from the same commit
-compiles both files and the gate passes. The class is floating point and
-variable arguments: the compliance run under a compiler this one built reports
-170 problems, and the names are the math cases, `isinf`, `fpclassify`,
-`lround`, `fma`, `copysign`, `scalbn`, beside `vprintf` through a `va_list`. A
-second run reported 171, so one case is not stable between runs. The first
-compiler is therefore miscompiling part of the C that implements its own
-floating point and variadic paths, which is the fixed point step 4 exists to
-catch. A compiler built this way is 45,785,088 bytes and statically linked;
-`v -o vcc .` writes 7,103,184. Check which one is in the tree before trusting
-it.
+Step 4 is not met. A compiler this one built runs and gets simple programs
+right, but it segfaults on inputs that make the collector run while the front end
+is working. The witnesses are
+`compliance/gnu/gnu99/0013-hosted-known-1.c` under `-std=gnu99` and
+`compliance/iso/c99/1123-vprintf-formats-through-a-va-list.c` under `-std=c99`,
+both exit 139 with `-c`, with `-E` and with `-o`, and the smallest input that
+still crashes is three includes, `<stdio.h>`, `<math.h>` and `<tgmath.h>`, under
+`-std=gnu99`. `-E` alone reproduces it, so the crash is in the compiler rather
+than in the link, and it is not in this tree's source, since `v -o vcc .` from
+the same commit compiles both files and the gate passes.
+
+The fault is in libgcc's unwinder rather than in this tree. `uw_update_context_1`
+takes a general protection fault on a `movaps` to its own frame, because the
+sixteen-byte stack alignment the ABI requires across a call is not there, and the
+chain that reaches it is glibc's `backtrace()` called from libgc's
+`GC_save_callers` on a collection, which that collector performs every time
+(`SAVE_CALL_CHAIN` is on by default for Linux/x86, `thirdparty/libgc/gc.c:4059`).
+The alignment is therefore lost in a call this compiler generated. The class
+reads as floating point and variadic only because those cases are the ones that
+allocate enough to collect: compiling the same generated C with gcc and linking
+it against the same vendored `libgc.a` runs and exits 0 three times, so the
+defect is in the object this compiler emits rather than in the linker or in
+libgc, and the first generation compiles both witnesses and exits 0. A compiler
+built this way is 45,785,088 bytes and statically linked; `v -o vcc .` writes
+7,103,184. Check which one is in the tree before trusting it. The corpus run
+under such a compiler reports 170 problems, with one case that is not stable
+between runs, and the names are the math cases and `vprintf` through a
+`va_list`.
+
+A vcc object also carries no `.eh_frame`, where gcc's carries a CIE and an FDE
+for every function, and that costs the unwinder this compiler's frames:
+`backtrace()` inside a program this compiler built returns one frame where gcc
+returns five for the same source. Removing `.eh_frame` from the working `v -o vcc .`
+binary changes nothing, so the truncated unwinding and the crash are two defects
+rather than one, and neither is fixed here.
 
 
 ## Later, and not yet planned
