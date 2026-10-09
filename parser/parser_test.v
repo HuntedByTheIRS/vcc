@@ -2739,3 +2739,29 @@ fn test_writing_an_object_that_is_not_modifiable_is_refused() {
 	defined := parsed('typedef struct { int a; } S;\ntypedef struct { const int a; } T;\nS s = {1};\nint main(void) { const S c = {2}; T x = {3}; return x.a + c.a; }')
 	assert defined.diagnostics.len == 0
 }
+
+// An asm statement's operands are kept rather than counted: the constraint string
+// is the register a value travels in and the expression is which value, and the
+// emitter has neither without them. V's own generated C needs both, for the 128-bit
+// divide whose inputs go in rax and rdx and whose results come back out of them.
+fn test_an_asm_statements_operands_are_kept() {
+	source := 'int f(int a, int b) {\n	int q = 0;\n	int r = 0;\n	__asm__ ("div %[y]" : [q] "=a" (q), [r] "=d" (r) : [a] "a" (a), [y] "r" (b) : "cc");\n	return q + r;\n}'
+	result := parsed(source)
+	assert result.diagnostics.len == 0
+	body := result.unit.decls[0].body
+	assert body[2].kind == .asm_stmt
+	if extra := body[2].extra {
+		assert extra.asm_outputs == 2
+		assert extra.asm_inputs == 2
+		assert extra.asm_output_operands[0].name == 'q'
+		assert extra.asm_output_operands[0].constraint == '=a'
+		assert extra.asm_output_operands[1].constraint == '=d'
+		assert extra.asm_input_operands[0].name == 'a'
+		assert extra.asm_input_operands[0].constraint == 'a'
+		assert extra.asm_input_operands[1].name == 'y'
+		assert extra.asm_input_operands[1].constraint == 'r'
+		assert extra.asm_clobbers == ['cc']
+	} else {
+		assert false
+	}
+}

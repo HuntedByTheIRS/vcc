@@ -218,19 +218,19 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 		}
 		spelling += t.text
 	}
-	mut outputs := 0
-	mut inputs := 0
+	mut output_operands := []ast.AsmOperand{}
+	mut input_operands := []ast.AsmOperand{}
 	mut clobbers := []string{}
 	mut goto_labels := []string{}
 	if p.at_punct(':') {
 		p.next()
-		outputs = p.parse_asm_operands() or {
+		output_operands = p.parse_asm_operands() or {
 			p.skip_statement()
 			return []ast.Stmt{}
 		}
 		if p.at_punct(':') {
 			p.next()
-			inputs = p.parse_asm_operands() or {
+			input_operands = p.parse_asm_operands() or {
 				p.skip_statement()
 				return []ast.Stmt{}
 			}
@@ -269,13 +269,15 @@ fn (mut p Parser) parse_asm_statement() []ast.Stmt {
 	return [ast.Stmt{
 		kind:  .asm_stmt
 		extra: &ast.StmtExtra{
-			asm_text:        text
-			asm_spelling:    spelling
-			asm_outputs:     outputs
-			asm_inputs:      inputs
-			asm_clobbers:    clobbers
-			asm_is_goto:     is_goto
-			asm_goto_labels: goto_labels
+			asm_text:            text
+			asm_spelling:        spelling
+			asm_outputs:         output_operands.len
+			asm_inputs:          input_operands.len
+			asm_output_operands: output_operands
+			asm_input_operands:  input_operands
+			asm_clobbers:        clobbers
+			asm_is_goto:         is_goto
+			asm_goto_labels:     goto_labels
 		}
 		line:  start.line
 		col:   start.col
@@ -345,23 +347,24 @@ fn (p Parser) asm_is_a_statement() bool {
 // `:` that opens the list, and the list ends at the next `:`, at the `)` that
 // closes the statement, or at the end of the file, which the callers report.
 // An operand the reader cannot follow is refused where it stands.
-fn (mut p Parser) parse_asm_operands() !int {
-	mut count := 0
+fn (mut p Parser) parse_asm_operands() ![]ast.AsmOperand {
+	mut operands := []ast.AsmOperand{}
 	for {
 		if p.at_punct(':') || p.at_punct(')') {
-			return count
+			return operands
 		}
 		// An operand may carry a name, `[name]`, which the text refers to as
-		// `%[name]`. It is read and dropped: the text is kept as written and
-		// the name is one of the things that makes the statement an
-		// instruction body rather than a barrier.
+		// `%[name]`. An operand written without one is referred to by its
+		// position instead, so the name is empty rather than missing.
+		mut name := ''
 		if p.at_punct('[') {
 			open := p.next()
-			name := p.peek()
-			if name.kind != .identifier {
-				p.error_at(name, 'unsupported: expected a name in an asm operand ${open.text}...], found ${describe(name)}')
+			named := p.peek()
+			if named.kind != .identifier {
+				p.error_at(named, 'unsupported: expected a name in an asm operand ${open.text}...], found ${describe(named)}')
 				return error('asm operand name')
 			}
+			name = named.text
 			p.next()
 			if !p.expect_punct(']') {
 				return error('asm operand name')
@@ -371,20 +374,35 @@ fn (mut p Parser) parse_asm_operands() !int {
 			p.error_at(p.peek(), 'unsupported: expected a constraint string in an asm operand list, found ${describe(p.peek())}')
 			return error('asm constraint')
 		}
-		p.next()
+		constraint_token := p.next()
+		constraint := parse_string_literal(constraint_token.text) or {
+			p.error_at(constraint_token, err.msg())
+			return error('asm constraint')
+		}
 		if !p.at_punct('(') {
 			p.error_at(p.peek(), 'unsupported: expected ( after the constraint of an asm operand, found ${describe(p.peek())}')
 			return error('asm operand value')
 		}
-		open := p.next()
-		p.skip_balanced(open) or { return error('asm operand value') }
-		count++
+		p.next()
+		// The value is the expression between the parentheses, read as an
+		// expression rather than skipped: the emitter places its value in the
+		// register the constraint names and reads the result back out of it,
+		// which it can only do from the expression.
+		value := p.parse_assignment_expression() or { return error('asm operand value') }
+		if !p.expect_punct(')') {
+			return error('asm operand value')
+		}
+		operands << ast.AsmOperand{
+			name:       name
+			constraint: constraint.value
+			value:      value
+		}
 		if p.at_punct(',') {
 			p.next()
 			continue
 		}
 		if p.at_punct(':') || p.at_punct(')') {
-			return count
+			return operands
 		}
 		p.error_at(p.peek(), 'unsupported: expected , : or ) in an asm operand list, found ${describe(p.peek())}')
 		return error('asm operand list')

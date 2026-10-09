@@ -456,6 +456,14 @@ pub:
 	// barrier: a constraint and nothing to constrain.
 	asm_outputs int
 	asm_inputs  int
+	// asm_output_operands and asm_input_operands are those two lists as the file
+	// wrote them: the name an operand was given with `[name]`, empty when it was
+	// given none, the constraint string, and the expression whose value the
+	// operand is. The counts above are what the lists hold, and the emitter
+	// needs the lists: a register to place a value in comes from the constraint,
+	// and the value comes from the expression.
+	asm_output_operands []AsmOperand
+	asm_input_operands  []AsmOperand
 	// asm_clobbers is the clobber list, each entry as the file wrote it with
 	// its escapes resolved: `memory`, `cc`, or a register name. It says what a
 	// later pass may not keep across the statement, which is the whole of what
@@ -607,6 +615,32 @@ pub fn (stmt Stmt) asm_inputs() int {
 		return extra.asm_inputs
 	}
 	return 0
+}
+
+// AsmOperand is one operand of a statement-level GNU asm: the name it was given
+// with `[name]`, empty when it was written without one, the constraint string as
+// the file wrote it, and the expression whose value the operand is.
+pub struct AsmOperand {
+pub:
+	name       string
+	constraint string
+	value      Expr
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_output_operands() []AsmOperand {
+	if extra := stmt.extra {
+		return extra.asm_output_operands
+	}
+	return []
+}
+
+@[inline]
+pub fn (stmt Stmt) asm_input_operands() []AsmOperand {
+	if extra := stmt.extra {
+		return extra.asm_input_operands
+	}
+	return []
 }
 
 @[inline]
