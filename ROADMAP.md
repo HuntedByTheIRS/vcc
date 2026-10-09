@@ -293,12 +293,31 @@ step 3's bar rather than a behaviour of this compiler.
 A compiler built this way is 45,801,472 bytes and statically linked; `v -o vcc .`
 writes about 7.1 MB. Check which one is in the tree before trusting it.
 
-A vcc object also carries no `.eh_frame`, where gcc's carries a CIE and an FDE
-for every function, and that costs the unwinder this compiler's frames:
-`backtrace()` inside a program this compiler built returns one frame where gcc
-returns five for the same source. Removing `.eh_frame` from the working `v -o vcc .`
-binary changes nothing, so the truncated unwinding and the crash were two defects
-rather than one, and this one is still open.
+Relocatable objects now carry an unwind table, in 2aa2e40, where before they
+carried none and gcc's carried a CIE and an FDE for every function. Every
+function this compiler emits opens with the same prologue, so one CIE serves them
+all: the canonical frame address is rbp plus sixteen, the caller's return address
+at CFA minus eight, the saved frame pointer at CFA minus sixteen, and the return
+address needs a rule of its own, `DW_CFA_offset rip,-8`, or a walker cannot find
+the caller's program counter. The object holds one FDE per function body carrying
+the body's place and length and no instructions of its own, and `.rela.eh_frame`
+fills in each initial location with an `R_X86_64_PC32` against the `.text`
+section symbol. A body's extent is not the distance to the next label, because
+the routines an image writes behind the functions are code in the same section,
+so the emitter records each body's run in `image.Program` and the writer reads
+the ranges from there.
+
+The measurement is a chain of three calls that prints the count `backtrace()`
+returns: gcc answers 7, and the same source compiled by this compiler and linked
+with gcc answers 7, where a compiler built before the change answered 1.
+
+The in-house link answers 1 for that program, because a table only reaches an
+executable if the linker carries it: the units expose the runs, but `linking/`
+and the merge do not rebase them into the merged program, and the container in
+`backend/os/elf/elf.v` has neither an `.eh_frame_hdr` builder nor a
+`PT_GNU_EH_FRAME` header in its fixed set, which is what lets a static binary's
+unwinder find the table by scanning. The object half is what gcc's linker
+consumes; the half that remains is the one this compiler's own link needs.
 
 
 ## Later, and not yet planned
