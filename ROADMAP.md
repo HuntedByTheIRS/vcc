@@ -281,17 +281,19 @@ compiler before 615aed0 answers "0 against 8" for one function called from a
 statement and from inside a stacked argument.
 
 In-house steps 2 and 4 produce a compiler that behaves like the one it came from.
-`v -nocache -cc ./vcc -showcc -o /tmp/self .` exits 0 and writes 45,801,472 bytes,
-and that compiler runs both witnesses, three runs of the first and two of the
-second, all exit 0. The corpora under it are clean: compliance 1066 passed, 68
+`v -nocache -cc ./vcc -showcc -o /tmp/self .` exits 0 and writes 46,067,712
+bytes, and that compiler runs both witnesses, three runs of the first and two of
+the second, all exit 0. The corpora under it are clean: compliance 1066 passed, 68
 refused, 0 failed and 17 skipped, with 906 of 906 monolithic checks passing, and
 the regression corpus 119 passed and 0 failed, where the compiler built before the
 fix reported 170 problems on the first and 5 on the second. What the chain still
 owes is its own second half, V built by vcc and then V's suite under it, which is
 step 3's bar rather than a behaviour of this compiler.
 
-A compiler built this way is 45,801,472 bytes and statically linked; `v -o vcc .`
-writes about 7.1 MB. Check which one is in the tree before trusting it.
+A compiler built this way is 46,067,712 bytes and statically linked, and it
+carries the unwind table and its index the way any other program this compiler
+links now does; `v -o vcc .` writes about 7.1 MB. Check which one is in the tree
+before trusting it.
 
 Relocatable objects now carry an unwind table, in 2aa2e40, where before they
 carried none and gcc's carried a CIE and an FDE for every function. Every
@@ -311,13 +313,25 @@ The measurement is a chain of three calls that prints the count `backtrace()`
 returns: gcc answers 7, and the same source compiled by this compiler and linked
 with gcc answers 7, where a compiler built before the change answered 1.
 
-The in-house link answers 1 for that program, because a table only reaches an
-executable if the linker carries it: the units expose the runs, but `linking/`
-and the merge do not rebase them into the merged program, and the container in
-`backend/os/elf/elf.v` has neither an `.eh_frame_hdr` builder nor a
-`PT_GNU_EH_FRAME` header in its fixed set, which is what lets a static binary's
-unwinder find the table by scanning. The object half is what gcc's linker
-consumes; the half that remains is the one this compiler's own link needs.
+The in-house link carries it too, in 9b027dc and 0d2010b. The merge rebases each
+body's run into the merged program, and the container places the table, writes
+`.eh_frame_hdr` (version 1, the frame pointer as `DW_EH_PE_pcrel|DW_EH_PE_sdata4`,
+the count as `udata4`, and a table of `DW_EH_PE_datarel|DW_EH_PE_sdata4` pairs
+sorted by initial location), and advertises it with a `PT_GNU_EH_FRAME` program
+header. The program that answered 1 above answers 5 now, and those five are the
+chain: `leaf`, `middle`, `top`, `main` and the startup stub. gcc's seven counts
+three frames this compiler never links, because a program starts from codegen's
+own stub and leaves `crt1.o` out on purpose (`main.v:708`), so `_start`,
+`__libc_start_main` and `__libc_start_call_main` are not in the chain to be
+unwound. Nothing is truncated; the count differs because the startup does.
+
+Two limits on the table. An object or archive unit exposes its `.eh_frame` bytes
+rather than the runs the container builds from, so no frame inside `crt1.o` or
+`libgc.a` is described in a link that includes one, and the self-build is such a
+link. And a statically linked program that calls `backtrace()` aborts with exit
+134; the same abort is there at 4de67f2, built in a worktree of that commit and
+run with `-static` while the dynamic build of the same source answered 1, so the
+static path never printed a count and this work did not break it.
 
 
 ## Later, and not yet planned
