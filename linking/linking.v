@@ -192,6 +192,7 @@ pub fn link(units []image.Program, options Options) !image.Program {
 		labels:              labels
 		stub:                has_stub(units)
 		entry_place:         place_of_entry
+		function_runs:       merge_function_runs(units, layout)
 		string_blob:         read_only.blob
 		strings:             read_only.strings
 		wide_strings:        read_only.wide_strings
@@ -312,6 +313,31 @@ fn merge_text(units []image.Program, layout place.Layout) []u8 {
 		}
 	}
 	return text
+}
+
+// merge_function_runs rebases each unit's function bodies into the merged code.
+// The container builds the image's unwind table from these ranges, so a merged
+// program that carried none would describe no frame and a walk through it would
+// stop at the function that called into it. A body's place is where the byte at
+// its start lands in the merged code, which `text_place` answers: the unit's
+// text base for a body, since a function body is never inside the gathered
+// `.init` or `.fini` runs, but the same helper the merge's other moved ranges
+// are placed with so the two cannot disagree.
+fn merge_function_runs(units []image.Program, layout place.Layout) []image.CodeRun {
+	mut count := 0
+	for unit in units {
+		count += unit.function_runs.len
+	}
+	mut runs := []image.CodeRun{cap: count}
+	for i, unit in units {
+		for run in unit.function_runs {
+			runs << image.CodeRun{
+				base: text_place(unit, i, run.base, layout)
+				len:  run.len
+			}
+		}
+	}
+	return runs
 }
 
 // text_place is where a byte of a unit's code blob lands in the merged code: the

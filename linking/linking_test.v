@@ -464,3 +464,32 @@ fn test_a_literal_that_spells_a_section_key_keeps_the_literal() {
 	assert '.text' in merged.strings
 	assert merged.strings['.text'] == 0
 }
+
+// The merge rebases each unit's function bodies into the merged code, because
+// the container builds the image's unwind table from those ranges: a merged
+// program that carried none would describe no frame. A body keeps its length and
+// its start moves by the base the unit was placed at, which is where the byte at
+// its start landed rather than where the body began in the unit.
+fn test_function_bodies_move_with_their_unit_into_the_merged_code() {
+	mut first := defining('main', []u8{len: 3, init: u8(0x90)})
+	first.function_runs << image.CodeRun{
+		base: 1
+		len:  2
+	}
+	mut second := defining('helper', [u8(0xcc), u8(0xcc), u8(0xcc)])
+	second.function_runs << image.CodeRun{
+		base: 0
+		len:  3
+	}
+	merged := link([first, second], options('main')) or {
+		panic('the link failed: ${err.msg()}')
+	}
+	assert merged.function_runs.len == 2
+	// The first unit's body starts one byte into its own text, which is at zero;
+	// the second unit's begins where its text landed, after the first unit's
+	// three bytes.
+	assert merged.function_runs[0].base == 1
+	assert merged.function_runs[0].len == 2
+	assert merged.function_runs[1].base == 3
+	assert merged.function_runs[1].len == 3
+}
