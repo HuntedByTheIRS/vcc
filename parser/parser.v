@@ -3261,11 +3261,18 @@ fn (mut p Parser) call_type(name tokenize.Token, args []ast.Expr) types.Type {
 // A function type that named no parameters - `int f()` - says nothing about the
 // call, so nothing is checked against nothing.
 fn (mut p Parser) checked_arguments(signature types.Type, args []ast.Expr, at tokenize.Token, what string) types.Type {
-	if !signature.prototyped {
-		return signature.returns() or { types.Type{} }
+	// A function type's return type can carry an aggregate the tag namespace has
+	// completed since it was written: V's own generated C names a result structure
+	// in an encoder's function-pointer typedef before the structure's body, and the
+	// width of the call's result is read from what the tag holds. answered is that
+	// walk, so the result is taken from the type it answers and not from the
+	// mention the call was written with.
+	answered := p.tagged_type(signature)
+	if !answered.prototyped {
+		return answered.returns() or { types.Type{} }
 	}
-	parameters := signature.params
-	if !signature.variadic && parameters.len != args.len {
+	parameters := answered.params
+	if !answered.variadic && parameters.len != args.len {
 		p.error_at(at, 'the call to ${what} passes ${args.len} argument(s), and the declaration of ${what} names ${parameters.len} argument(s)')
 	}
 	for index, argument in args {
@@ -3277,7 +3284,7 @@ fn (mut p Parser) checked_arguments(signature types.Type, args []ast.Expr, at to
 		}
 		p.problem_span(argument.line, argument.col, problem)
 	}
-	return signature.returns() or { types.Type{} }
+	return answered.returns() or { types.Type{} }
 }
 
 // call builds the node for a call whose callee was read as an expression. A name
