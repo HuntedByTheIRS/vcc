@@ -2678,7 +2678,12 @@ fn (mut e Emitter) emit_var_decl(stmt ast.Stmt) !void {
 	// out, and that size may legitimately be zero: a structure with no members
 	// is a complete object of no bytes. measured tells declare the zero is the
 	// object's size and not a spelling it has no width for.
-	measured := e.known_aggregate_bytes(stmt.resolved()) != none
+	//
+	// An object of no bytes is the same zero by a different road. V's own
+	// generated C has one wherever a compiler macro would have filled in a
+	// declaration it leaves empty, as `(os__Eof){E_STRUCT}` is, and the reader's
+	// layout of an empty structure is a size the spelling has no width for.
+	measured := e.known_aggregate_bytes(stmt.resolved()) != none || e.storage_of_no_bytes(stmt.resolved())
 	slot := e.declare(stmt.decl_name, stmt.decl_type, stmt.decl_count, stmt.bytes(), stmt.decl_stride(),
 		stmt.line, stmt.col, measured)!
 	// What makes an object an argument list is the type it was declared with,
@@ -3338,6 +3343,20 @@ fn (mut e Emitter) copy_frame_object(source Slot, destination Slot, width int, l
 // is empty when no compiler macro fills its declaration in, and so does every
 // function that returns one of its result structures.
 fn (e Emitter) object_of_no_bytes(t types.Type) bool {
+	if t.kind == .array {
+		// An array is never handed over as itself: it decays to the address of its
+		// first element, and an array of empty structures has an address like any
+		// other. Reading it as nothing is what losing that address looks like.
+		return false
+	}
+	return e.storage_of_no_bytes(t)
+}
+
+// storage_of_no_bytes says whether a type is an object of an aggregate kind whose
+// storage is no bytes, which is what an empty structure is and what an array of
+// them is too. This is the predicate a declaration wants, where the object being
+// made is the storage itself.
+fn (e Emitter) storage_of_no_bytes(t types.Type) bool {
 	if !t.is_aggregate() {
 		return false
 	}
@@ -5786,6 +5805,12 @@ fn (mut e Emitter) remainder(line int, col int) !backend.Register {
 // holding a `_Bool` converts the value on the way in: 6.3.1.2 says every store
 // into one makes the value 0 or 1, so `_Bool b = 42;` leaves 1 and not 42.
 fn (mut e Emitter) store_register(slot Slot, register backend.Register, line int, col int) !void {
+	if slot.width == 0 {
+		// A slot of no bytes is an object of no bytes, which is what a structure
+		// with no members is: there is nothing for the register to write and the
+		// object is not made of the value. Nothing is emitted.
+		return
+	}
 	if slot.boolean {
 		e.append(e.target.test(register)!)
 		e.append(e.target.set_condition(backend.Condition.not_equal, register)!)
@@ -5806,6 +5831,12 @@ fn (mut e Emitter) store_accumulator(slot Slot, line int, col int) !void {
 // whose type is unsigned, with zero above it.
 fn (mut e Emitter) load_accumulator(slot Slot, line int, col int) !void {
 	register := e.accumulator(line, col)!
+	if slot.width == 0 {
+		// A read of an object of no bytes is nothing, the same way the store into
+		// one is: what the register would hold is a value the language does not
+		// have. Nothing is emitted and the register keeps what it had.
+		return
+	}
 	base := e.slot_base_register(slot, line, col)!
 	if slot.unsigned && slot.width < 4 {
 		e.append(e.target.load_slot_unsigned(base, slot.offset, register, slot.width)!)

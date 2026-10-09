@@ -1706,6 +1706,21 @@ fn test_a_discarded_read_of_an_aggregate_is_its_address_expression() {
 	assert run_image(emitted.bytes) == 4
 }
 
+// An empty structure is a complete object of no bytes, and V's own generated C has one
+// wherever a compiler macro leaves a declaration it would otherwise fill in: E_STRUCT
+// is empty unless __TINYC__ or _MSC_VER is defined, and this compiler defines neither,
+// so the structure an interface boxes a value inside has no members.
+//
+// Measured on gcc 16.2.1, which compiles this under -std=gnu11 and exits 2: the type and
+// the array of it are both zero bytes, while the address of that array is a place like
+// any other and is not null.
+fn test_an_object_of_no_bytes_is_declared_and_has_an_address() {
+	emitted := emit(translation_unit('struct E { };\ntypedef struct E E;\nint main(void) {\n\tE *p = (E[]){ (E){}, (E){}, (E){} };\n\tE x = (E){};\n\treturn (int)(sizeof(E) + (p != 0) + (&x != 0));\n}'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 2
+}
+
 // A statement expression used as a statement is the construct for what its body does:
 // its last expression is evaluated for what it does rather than read for its value,
 // which is the rule an expression statement follows. V's own generated C writes
