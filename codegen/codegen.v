@@ -12009,6 +12009,44 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 	// made with the stack aligned as the convention requires.
 	if stacked > 0 {
 		width := e.target.word_size
+		// An object or a long double handed over on the stack is materialized
+		// here, before any of the call's own stack area is taken, and the words
+		// are pushed from the slot its address was parked in below. Evaluating
+		// it after the area was reserved would run whatever call the expression
+		// contains with those bytes standing on the stack. The reservation is
+		// one word when the number of stacked words is odd, so an inner call
+		// would be entered eight bytes off the alignment the convention asks
+		// for, and every store through its frame pointer that wants sixteen
+		// bytes would fault.
+		for i := places.len - 1; i >= 0; i-- {
+			place := places[i]
+			if !place.stack || place.decimal {
+				continue
+			}
+			arg := call.args[i]
+			line := expr_line(arg)
+			col := expr_col(arg)
+			if place.extended {
+				if place.complex_long_double {
+					e.complex_long_double_argument_address(arg, depth + call.args.len + i + 1)!
+				} else {
+					e.emit_expr_at(arg, depth + call.args.len + i + 1)!
+				}
+				source := e.value_slot(depth + i)
+				e.store_accumulator(source, line, col)!
+				continue
+			}
+			if place.object {
+				class := e.aggregate_argument(call, i) or {
+					e.diagnostics << problem(call.line, call.col, 'internal: an object handed over on the stack has no class in the signature of ${call.name}')
+					return error('no class')
+				}
+				e.object_hand_over_address(arg, class, depth + call.args.len + i + 1)!
+				source := e.value_slot(depth + i)
+				e.store_accumulator(source, line, col)!
+				continue
+			}
+		}
 		if stacked % 2 == 1 {
 			e.append(e.target.frame_reserve(u32(width)))
 			e.stack_pushed += width
@@ -12050,13 +12088,10 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 				// at four words: the address of its thirty-two bytes, which the
 				// argument path builds where a real argument has to become a
 				// complex value first.
-				if place.complex_long_double {
-					e.complex_long_double_argument_address(arg, depth + call.args.len + i + 1)!
-				} else {
-					e.emit_expr_at(arg, depth + call.args.len + i + 1)!
-				}
+				// The value was materialized before the call's stack area was
+				// taken, so its words are read from the slot its address was
+				// parked in and no expression is evaluated here.
 				source := e.value_slot(depth + i)
-				e.store_accumulator(source, line, col)!
 				mut k := place.words - 1
 				for k >= 0 {
 					base := e.accumulator(line, col)!
@@ -12092,9 +12127,9 @@ fn (mut e Emitter) emit_call(call ast.Call, depth int) !void {
 					e.diagnostics << problem(call.line, call.col, 'internal: an object handed over on the stack has no class in the signature of ${call.name}')
 					return error('no class')
 				}
-				e.object_hand_over_address(arg, class, depth + call.args.len + i + 1)!
+				// The object was materialized before the call's stack area was
+				// taken, so only its words are read here.
 				source := e.value_slot(depth + i)
-				e.store_accumulator(source, line, col)!
 				mut k := place.words - 1
 				for k >= 0 {
 					offset := k * width
