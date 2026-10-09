@@ -1674,17 +1674,36 @@ fn test_more_arguments_than_the_machine_has_registers_is_passed_on_the_stack() {
 	assert emitted.bytes.contains(u8(0x50))
 }
 
-fn test_an_expression_statement_that_is_not_a_call_is_reported() {
-	body := [
-		ast.Stmt{
-			kind: .expr_stmt
-			expr: ast.Expr(ast.IntLit{ value: 1, text: '1' })
-		},
-	]
-	emitted := emit(program(body), Options{})
-	assert emitted.diagnostics.len == 1
-	assert emitted.diagnostics[0].msg.contains('call')
-	assert emitted.bytes.len == 0
+// An expression statement that is neither a call nor a void expression is evaluated
+// for what it does and its value thrown away, which is what 6.8.3 asks of every
+// expression statement. The value being unread is not a reason to emit nothing: the
+// statement can still do something, and the second program says so, where the calls
+// inside the discarded reads are what the statements are for.
+//
+// Measured on gcc 16.2.1, which compiles both under -std=c99 -pedantic-errors and
+// exits 7 and 5.
+fn test_an_expression_statement_that_is_not_a_call_is_evaluated_and_thrown_away() {
+	emitted := emit(translation_unit('int main(void) { 1; return 7; }'), Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 7
+	emitted_call := emit(translation_unit('unsigned long calls = 0;\nunsigned long words[2] = {3, 4};\nunsigned long *pick(unsigned long i) { calls = calls + 1; return &words[i]; }\nint main(void) {\n	*pick(1);\n	*pick(0);\n	return (int)(calls + words[0]);\n}'),
+		Options{})
+	assert emitted_call.diagnostics.len == 0
+	assert run_image(emitted_call.bytes) == 5
+}
+
+// A discarded read of an aggregate is its address expression and nothing more: the
+// value is not one a register holds, so there is nothing for a register to leave
+// unread, and what the statement still does is what the address expression does.
+//
+// V's own generated C writes `*(codegen__CaseWalk*)array__pop(&stack);` for a stack
+// it pops and never reads, which is the statement this test is named for. Measured on
+// gcc 16.2.1: this compiles under -std=c99 -pedantic-errors and exits 4.
+fn test_a_discarded_read_of_an_aggregate_is_its_address_expression() {
+	emitted := emit(translation_unit('typedef struct { unsigned long a; unsigned long b; } Pair;\nunsigned long calls = 0;\nunsigned long words[2] = {3, 4};\nPair *make(unsigned long *p) { calls = calls + 1; return (Pair *)p; }\nint main(void) {\n	*make(words);\n	return (int)(calls + words[0]);\n}'),
+		Options{})
+	assert emitted.diagnostics.len == 0
+	assert run_image(emitted.bytes) == 4
 }
 
 // A void expression in a statement is evaluated for its side effects and its

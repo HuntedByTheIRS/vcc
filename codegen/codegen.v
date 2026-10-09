@@ -4305,15 +4305,23 @@ fn (mut e Emitter) emit_expression_statement(stmt ast.Stmt) !void {
 		e.emit_statement_expression(expr as ast.StmtExpr, false)!
 		return
 	}
-	if expr.typ.is_void() {
-		// A void expression in a statement is evaluated for its side effects and
-		// its (nonexistent) value thrown away, which is what 6.8.3 says of an
-		// expression statement and 6.3.2.2 of a void expression.
-		e.emit_discard(expr, 0)!
-		return
+	// Everything else is an expression evaluated for what it does with its value
+	// thrown away, which is what 6.8.3 says of every expression statement.
+	// `emit_effect` is this emitter's name for that: the expression is emitted as
+	// it would be for its value and the register holding it is simply not read, and
+	// a void expression takes the same path.
+	//
+	// A value of an aggregate type is the one case that cannot be emitted as
+	// itself: it is not a value a register holds, so there is no register to leave
+	// unread. What such a statement still does is its operand's work, and
+	// `emit_discard` is the emitter's path for exactly that: it evaluates what the
+	// expression is written with and loads nothing. For `*p` that is the address
+	// expression, which is the call V's own generated C makes a statement of with
+	// `*(codegen__CaseWalk*)array__pop(&stack);`.
+	if expr.typ.is_void() || expr.typ.kind in [.struct_, .union_, .array] {
+		return e.emit_discard(expr, 0)
 	}
-	e.diagnostics << problem(stmt.line, stmt.col, 'unsupported: an expression statement is emitted when it is a call, and this one is not a call')
-	return error('not a call')
+	return e.emit_effect(expr, 0)
 }
 
 // emit_discard evaluates a void expression for its side effects and throws the
