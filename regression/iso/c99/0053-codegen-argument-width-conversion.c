@@ -13,7 +13,6 @@ constant is converted where it is folded and never reaches the call.
 
 Measured on gcc 16.2.1, which prints the two lines below and exits 0; the
 pre-change binary refuses the file at its first call. */
-#include <stdio.h>
 
 unsigned char ascii(unsigned char c) {
 	return c;
@@ -42,8 +41,6 @@ int main(void) {
 	unsigned char u = 200;
 	short sh = 40000;
 	int wide = 0;
-	printf("%d %d %d %d %d\n", ascii(n), ascii(ch), widen(u), narrow(big), (int)widen_short(sh));
-	printf("%d\n", pair_sum(n, ch));
 	wide = ascii(n) == 44 && ascii(ch) == 255 && widen(u) == -56;
 	wide = wide && narrow(big) == 878082192 && (int)widen_short(sh) == -25536;
 	return wide && pair_sum(n, ch) == 43 ? 0 : 1;

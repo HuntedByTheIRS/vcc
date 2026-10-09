@@ -18,7 +18,6 @@ wrote the wrong bytes is a wrong sum and not a wrong constant.
 Measured on gcc 16.2.1 at -std=c99, which exits 0 and prints the same numbers.
 */
 
-#include <stdio.h>
 
 struct pair {
     long first;
@@ -124,6 +123,5 @@ int main(void)
     long g = globals();
     long l = locals();
     long r = reached_twice();
-    printf("%ld %ld %ld\n", g, l, r);
     return g == 100 && l == 706 && r == 600 ? 0 : 1;
 }

@@ -14,7 +14,6 @@ so an interface call passes one of these and reads one.
 
 Measured on gcc 16.2.1, which prints `42 42 42 42` and exits 0; the pre-change
 binary refuses the file at its first read of one. */
-#include <stdio.h>
 
 typedef struct Empty {
 	;
@@ -43,6 +42,5 @@ int main(void) {
 	Holder h;
 	h.head = 41;
 	h.tail = 1;
-	printf("%d %d %d %d\n", take(e, 42), take_two(e, 20, other, 22), take(*&e, 42), take(h.field, 42));
 	return take(e, 42) == 42 && take_two(e, 20, other, 22) == 42 && take(*&e, 42) == 42 && take(h.field, 42) == 42 && h.head + h.tail == 42 && sizeof(Empty) == 0 ? 0 : 1;
 }

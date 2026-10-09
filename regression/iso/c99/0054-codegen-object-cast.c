@@ -12,7 +12,6 @@ literal, at four, eight and sixteen bytes.
 
 Measured on gcc 16.2.1, which prints the two lines below and exits 0; the
 pre-change binary refuses the file at its first cast. */
-#include <stdio.h>
 
 typedef struct Pair {
 	int a;
@@ -55,8 +54,6 @@ int main(void) {
 	Big c = big_cast((Big)(b));
 	Pair r = (Pair)((Pair){7, 8});
 	int said = 0;
-	printf("%d %d %ld %d %d %d\n", p.a + p.b, q.a * q.b, b.x + b.y + b.z, (int)c.x, (int)c.y, (int)c.z);
-	printf("%d\n", (int)r.a + (int)r.b);
 	said = p.a + p.b == 7 && q.a * q.b == 12 && b.x + b.y + b.z == 33;
 	said = said && (int)c.x == 10 && (int)c.y == 11 && (int)c.z == 12;
 	return said && (int)r.a + (int)r.b == 15 ? 0 : 1;

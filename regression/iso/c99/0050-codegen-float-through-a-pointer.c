@@ -20,7 +20,6 @@ four bytes read as an int.
 Measured on gcc 16.2.1: every value printed here is the same under gcc and under
 vcc, and the pre-change binary refuses the file at its first line. */
 
-#include <stdio.h>
 
 struct P { float x; float y; };
 
@@ -53,37 +52,31 @@ int main(void)
     /* Through an address of a const float, which is the shape V's own generated
        C does in its array-sort comparators. */
     if (read_through(cp) != 1.5f) {
-        fprintf(stderr, "a float read through an address is wrong: %f\n", (double)read_through(cp));
         return 1;
     }
 
     /* Written through an address, with the value converted from an int. */
     write_through(&a[1], 2.25f);
     if (a[1] != 2.25f) {
-        fprintf(stderr, "a float written through an address is wrong: %f\n", (double)a[1]);
         return 1;
     }
     write_through(&a[2], -3.5f);
     if (a[2] != -3.5f) {
-        fprintf(stderr, "a negative float written through an address is wrong: %f\n", (double)a[2]);
         return 1;
     }
 
     /* An element at a computed address, both ways. */
     write_element(a, 3, 7.5f);
     if (read_element(a, 3) != 7.5f) {
-        fprintf(stderr, "an element written at a computed address is wrong: %f\n", (double)a[3]);
         return 1;
     }
     if (read_element(a, 1) != 2.25f) {
-        fprintf(stderr, "an element read at a computed address is wrong: %f\n", (double)a[1]);
         return 1;
     }
 
     /* A cast to a const float pointer, and a member reached through one. */
     const struct P *pp = (const struct P *)&a[0];
     if (pp->y != 2.25f) {
-        fprintf(stderr, "a float member read through a pointer is wrong: %f\n", (double)pp->y);
         return 1;
     }
 
@@ -91,11 +84,8 @@ int main(void)
        the low byte here. */
     float small = 1.0e-40f;
     if (read_through(&small) != small) {
-        fprintf(stderr, "a denormal float did not survive a read through an address\n");
         return 1;
     }
 
-    printf("read=%f written=%f negated=%f element=%f member=%f\n",
-        (double)read_through(cp), (double)a[1], (double)a[2], (double)a[3], (double)pp->y);
     return 0;
 }

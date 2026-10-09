@@ -13,7 +13,6 @@ it, and a conditional of it. Each is compared against what gcc 16.2.1 makes of
 the same program, which is the reference for a GNU statement expression.
 */
 
-#include <stdio.h>
 
 struct pair {
     long first;
@@ -102,6 +101,5 @@ int main(void)
     long e = body_runs_in_order();
     long f = from_a_wide_call();
     long g = nested();
-    printf("%ld %ld %ld %ld %ld %ld %ld\n", a, b, c, d, e, f, g);
     return a == 7 && b == 12 && c == 15 && d == 19 && e == 22 && f == 15 && g == 23 ? 0 : 1;
 }
