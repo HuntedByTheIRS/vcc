@@ -282,6 +282,27 @@ fn test_a_read_through_an_address_reads_the_value_at_it() {
 	assert run_image(signed.bytes) == 200
 }
 
+fn test_a_pointer_to_a_narrow_type_comes_back_from_a_function_whole() {
+	// A spelling carrying a star names a pointer, and a predicate that read the
+	// words of a return type and ignored the star read `char *` as `char`, which
+	// cut the address to its low eight bits: the same program with the function
+	// answering 33 where gcc 16.2.1 answers 0. A pointer to an int hid the cut
+	// because an address in this image fits in thirty-two bits.
+	whole := emit(translation_unit('static char pool[8]; static char *f(void) { return pool; } int main() { char *p = f(); return p == pool ? 0 : 1; }'),
+		Options{})
+	assert whole.diagnostics.len == 0
+	assert run_image(whole.bytes) == 0
+	// The same question at an offset, and through a pointer parameter.
+	for source in [
+		'static char pool[8]; static char *g(long n) { return pool + n; } int main() { return g(3) == pool + 3 ? 0 : 2; }',
+		'static char pool[8]; static char *h(char *p) { return p; } int main() { return h(pool + 3) == pool + 3 ? 0 : 3; }',
+	] {
+		emitted := emit(translation_unit(source), Options{})
+		assert emitted.diagnostics.len == 0
+		assert run_image(emitted.bytes) == 0
+	}
+}
+
 // PointerDifferenceCase is one program whose `main` returns a pointer difference
 // and the status it exits with. A negative difference reaches the status through
 // its low byte, which is 252 for -4.

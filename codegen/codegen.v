@@ -2609,10 +2609,26 @@ fn (mut e Emitter) convert_to_return(expr ast.Expr, line int, col int) !void {
 	}
 }
 
+// written_names_a_pointer says whether a type as it was written names a pointer.
+// A spelling carrying a star is a pointer and not the type under it, and that is
+// the question every predicate here has to ask before it answers about the type
+// itself: `unsigned char *` read as `unsigned char` gave a function returning one
+// of them a byte-wide return, and the address came back cut to its low eight bits
+// (`p = 0x30` where gcc answers the array's own address). type_width asks this
+// first for the same reason, and writes_a_128 carries the same note.
+fn written_names_a_pointer(written string) bool {
+	return written.contains('*')
+}
+
 // narrow_return_kind is the kind of a return type narrower than an int, or none
 // for every other type. It is the question the cut in convert_to_return turns on
-// and the same list the return-type check admits.
+// and the same list the return-type check admits. A pointer to one of these types
+// is a pointer, so a spelling carrying a star is none of them: the cut it would
+// take is a cut of the address rather than of a value.
 fn (e Emitter) narrow_return_kind() ?types.Kind {
+	if written_names_a_pointer(e.returning) {
+		return none
+	}
 	typ := types.from_words(e.returning.split(' ')) or { return none }
 	return if typ.kind in [.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short] {
 		typ.kind
@@ -2624,8 +2640,12 @@ fn (e Emitter) narrow_return_kind() ?types.Kind {
 // narrow_integer_spelling says whether a written type is one of the integer kinds
 // narrower than an int. A function of one of those types returns a value the
 // caller reads at the type's own width, which is the width the register's low
-// bits hold, so the type is one the emitter has a return for.
+// bits hold, so the type is one the emitter has a return for. A pointer to one of
+// them is a pointer and not the type, the way it is above.
 fn (e Emitter) narrow_integer_spelling(written string) bool {
+	if written_names_a_pointer(written) {
+		return false
+	}
 	typ := types.from_words(written.split(' ')) or { return false }
 	return typ.kind in [.bool_, .char_, .signed_char, .unsigned_char, .short, .unsigned_short]
 }
@@ -5182,6 +5202,9 @@ fn (e Emitter) written_is_unsigned(written string) bool {
 // was written into it, and that is a step the width of the object does not ask
 // for.
 fn (e Emitter) declares_a_bool(written string) bool {
+	if written_names_a_pointer(written) {
+		return false
+	}
 	typ := types.from_words(written.split(' ')) or { return false }
 	return typ.kind == .bool_
 }
