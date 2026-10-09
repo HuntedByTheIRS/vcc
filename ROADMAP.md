@@ -236,41 +236,69 @@ two runs of one binary did not reproduce once the names were right, and the
 twenty-six bytes between two builds of vcc is two builds rather than one input
 compiled twice.
 
-Step 4 is not met. A compiler this one built runs and gets simple programs
-right, but it segfaults on inputs that make the collector run while the front end
-is working. The witnesses are
+Step 4 was blocked by a compiler this one built segfaulting on inputs that make
+the collector run while the front end is working. The witnesses were
 `compliance/gnu/gnu99/0013-hosted-known-1.c` under `-std=gnu99` and
 `compliance/iso/c99/1123-vprintf-formats-through-a-va-list.c` under `-std=c99`,
-both exit 139 with `-c`, with `-E` and with `-o`, and the smallest input that
-still crashes is three includes, `<stdio.h>`, `<math.h>` and `<tgmath.h>`, under
-`-std=gnu99`. `-E` alone reproduces it, so the crash is in the compiler rather
-than in the link, and it is not in this tree's source, since `v -o vcc .` from
-the same commit compiles both files and the gate passes.
+both exiting 139 with `-c`, with `-E` and with `-o`, and the smallest input that
+still crashed was three includes, `<stdio.h>`, `<math.h>` and `<tgmath.h>`, under
+`-std=gnu99`. `-E` alone reproduced it, so the crash was in the compiler rather
+than in the link, and it was not in this tree's source, since `v -o vcc .` from
+the same commit compiled both files and the gate passed.
 
-The fault is in libgcc's unwinder rather than in this tree. `uw_update_context_1`
-takes a general protection fault on a `movaps` to its own frame, because the
-sixteen-byte stack alignment the ABI requires across a call is not there, and the
-chain that reaches it is glibc's `backtrace()` called from libgc's
+The fault was in libgcc's unwinder rather than in this tree. `uw_update_context_1`
+took a general protection fault on a `movaps` to its own frame, because the
+sixteen-byte stack alignment the ABI requires across a call was not there, and the
+chain that reached it is glibc's `backtrace()` called from libgc's
 `GC_save_callers` on a collection, which that collector performs every time
 (`SAVE_CALL_CHAIN` is on by default for Linux/x86, `thirdparty/libgc/gc.c:4059`).
-The alignment is therefore lost in a call this compiler generated. The class
-reads as floating point and variadic only because those cases are the ones that
-allocate enough to collect: compiling the same generated C with gcc and linking
-it against the same vendored `libgc.a` runs and exits 0 three times, so the
-defect is in the object this compiler emits rather than in the linker or in
-libgc, and the first generation compiles both witnesses and exits 0. A compiler
-built this way is 45,785,088 bytes and statically linked; `v -o vcc .` writes
-7,103,184. Check which one is in the tree before trusting it. The corpus run
-under such a compiler reports 170 problems, with one case that is not stable
-between runs, and the names are the math cases and `vprintf` through a
-`va_list`.
+The alignment was lost in a call this compiler generated. The class read as
+floating point and variadic only because those cases are the ones that allocate
+enough to collect: compiling the same generated C with gcc and linking it against
+the same vendored `libgc.a` ran and exited 0 three times, so the defect was in the
+object this compiler emits rather than in the linker or in libgc, and the first
+generation compiled both witnesses and exited 0.
+
+It was one rule in `codegen/`, fixed in 615aed0. A call whose arguments do not all
+fit in registers takes one more word than it needs when the count of them is odd,
+so that the call itself is aligned, which is right. That word was taken before the
+stacked arguments were evaluated, and an object or a long double is evaluated in
+that same loop. An argument that is itself a call therefore ran with the
+reservation standing, eight bytes off, and a frame pointer that is not where
+sixteen-byte stores to a frame expect it takes a general protection fault. A
+`string` is three eightbytes, so a call returning one, written inside another
+call's argument, is the smallest shape that shows it, and that shape is most of
+V's generated C.
+
+The measurement is a scanner that walks a function's control flow tracking `rsp`
+modulo sixteen. This compiler's object for V's generated C had 2,337 call sites
+where `rsp` was not sixteen-byte aligned, against 35 in gcc's object for the same
+file, every one of them a cold-split part of a function no caller reaches. It
+reports 0 now. `regression/iso/c99/0066-codegen-call-inside-a-stacked-argument.c`
+holds the shape, and it is the one case here that needs no fault to observe the
+defect: the callee reports the alignment of a local of its own frame, and the
+compiler before 615aed0 answers "0 against 8" for one function called from a
+statement and from inside a stacked argument.
+
+In-house steps 2 and 4 produce a compiler that behaves like the one it came from.
+`v -nocache -cc ./vcc -showcc -o /tmp/self .` exits 0 and writes 45,801,472 bytes,
+and that compiler runs both witnesses, three runs of the first and two of the
+second, all exit 0. The corpora under it are clean: compliance 1066 passed, 68
+refused, 0 failed and 17 skipped, with 906 of 906 monolithic checks passing, and
+the regression corpus 119 passed and 0 failed, where the compiler built before the
+fix reported 170 problems on the first and 5 on the second. What the chain still
+owes is its own second half, V built by vcc and then V's suite under it, which is
+step 3's bar rather than a behaviour of this compiler.
+
+A compiler built this way is 45,801,472 bytes and statically linked; `v -o vcc .`
+writes about 7.1 MB. Check which one is in the tree before trusting it.
 
 A vcc object also carries no `.eh_frame`, where gcc's carries a CIE and an FDE
 for every function, and that costs the unwinder this compiler's frames:
 `backtrace()` inside a program this compiler built returns one frame where gcc
 returns five for the same source. Removing `.eh_frame` from the working `v -o vcc .`
-binary changes nothing, so the truncated unwinding and the crash are two defects
-rather than one, and neither is fixed here.
+binary changes nothing, so the truncated unwinding and the crash were two defects
+rather than one, and this one is still open.
 
 
 ## Later, and not yet planned
