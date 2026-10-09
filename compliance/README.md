@@ -73,10 +73,11 @@ Such a test is measured twice over: gcc compiles it, runs it and it exits 0, so
 the program is right, and this compiler's refusal is the gap. The program is a
 check with its own assertions, so the day this compiler takes it the test runs,
 and a gap that compiles is reported by name as a line that can go: the corpus
-does not keep a gap that has closed. 26 tests carry the line, all of them under
-`gnu/gnu99`; the section below lists them. Three were carried before those and
-have since closed: HUGE_VALL, whose glibc definition is `1e10000L`, and the
-division of a `long double _Complex` and its negation.
+does not keep a gap that has closed. One test carries the line, under
+`iso/c99`: a structure a function type names before its own definition, which is
+a shape V's generated C writes. Every gap the corpus carried before it has
+closed, HUGE_VALL and the division of a `long double _Complex` and its negation
+among them.
 
 ## The GNU extensions nothing reads yet
 
