@@ -4715,6 +4715,36 @@ fn test_a_weak_attribute_on_a_definition_runs() {
 	assert run_image(emitted.bytes) == 7
 }
 
+// The attribute belongs to the name rather than to the one declaration that
+// carries it, so a prototype marked weak answers for a definition of the same
+// name and either of the two may be written first: gcc 16.2.1 puts `W` in the
+// object for both orders. A weak definition is one a sibling unit's strong
+// definition replaces, and one nothing defines is an import the link does not
+// have to answer, so the name's answer is what the symbol tables are written
+// from and not the declaration's.
+fn test_a_weak_declaration_answers_for_the_name_it_declares() {
+	before := emit(translation_unit('int f(void) __attribute__((weak));\nint f(void) { return 7; }'),
+		Options{ link: true })
+	assert before.diagnostics.len == 0
+	assert before.program.weak['f']
+	after := emit(translation_unit('int f(void) { return 7; }\nint f(void) __attribute__((weak));'),
+		Options{ link: true })
+	assert after.diagnostics.len == 0
+	assert after.program.weak['f']
+	// The name a weak declaration leaves undefined is an import the link does not
+	// have to answer instead.
+	missing := emit(translation_unit('extern int g(void) __attribute__((weak));\nint main(void) { return g == 0 ? 0 : 1; }'),
+		Options{ link: true })
+	assert missing.diagnostics.len == 0
+	assert missing.program.weak_imports['g']
+	// And a name nothing marks weak is neither of the two.
+	plain := emit(translation_unit('int h(void) { return 3; }\nint main(void) { return h() == 3 ? 0 : 1; }'),
+		Options{ link: true })
+	assert plain.diagnostics.len == 0
+	assert !plain.program.weak['h']
+	assert !plain.program.weak_imports['h']
+}
+
 // A file-scope `static` function is a definition like any other to the program
 // itself: its body is emitted and a call in the file binds to it, and the
 // program runs. Only the object's symbol table treats it differently, and that

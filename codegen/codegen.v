@@ -1080,8 +1080,19 @@ fn (mut e Emitter) build() ![]u8 {
 	// names are collected here, with every body emitted and every import
 	// known. A name in `imports` is one something in this file reached; a
 	// prototype nothing references is not an import and is not recorded.
+	//
+	// The attribute belongs to the name rather than to the one declaration
+	// that carries it, so what is collected is the name's answer and not the
+	// declaration's: a definition of a name the file declares weak is the weak
+	// definition, and gcc emits the same binding whichever of the two is
+	// written first.
 	for decl in declared_functions {
-		if decl.weak && decl.name in e.program.imports && decl.name !in e.program.defined {
+		if !decl.weak {
+			continue
+		}
+		if decl.name in e.program.defined {
+			e.program.weak[decl.name] = true
+		} else if decl.name in e.program.imports {
 			e.program.weak_imports[decl.name] = true
 		}
 	}
