@@ -6,8 +6,8 @@ request does not meet an opinion the author could not have run first.
 
 ## v run tools/gate.vsh
 
-`v run tools/gate.vsh` runs six steps, each reporting on its own line, and
-exits zero only when all six pass.
+`v run tools/gate.vsh` runs seven steps, each reporting on its own line, and
+exits zero only when all seven pass.
 
 The formatting step runs `v fmt -verify .`, the same formatter every
 contributor runs. It refuses a file that is not formatted.
@@ -24,6 +24,13 @@ written in V, only that it has not started pulling C into the compiler.
 
 The build step runs `v -o <temp> .` into a temporary path. It refuses a tree
 that does not compile.
+
+The production build step runs `v -prod -o <temp> .`. It is a step of its own
+because `-prod` is not the plain build with optimizations on: it makes V's
+warnings into errors, so a construct the plain build reports and carries on
+past stops this one. That is how the tree stopped building at all once upstream
+marked `os.system` deprecated, which the compiler used for the external link
+and for `-run`.
 
 The tests step runs `v test .`.
 

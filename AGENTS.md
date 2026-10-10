@@ -48,7 +48,7 @@ Linux x86-64.
 ```sh
 v -o vcc .                 # build
 v test .                   # the suite
-v run tools/gate.vsh       # format, pure-V rule, build, tests, doc links
+v run tools/gate.vsh       # format, pure-V rule, build, prod build, tests, doc links
 v run tools/build.vsh      # the front door: build, gate, corpora, bench, image, version
 v run tools/bench.vsh      # wall time and peak memory, tcc alongside
 v fmt -w .                 # format before committing

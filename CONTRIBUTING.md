@@ -22,7 +22,7 @@ git clone https://github.com/HuntedByTheIRS/vcc
 cd vcc
 v -o vcc .            # build the compiler
 v test .              # the test suite
-v run tools/gate.vsh  # format, the pure-V rule, the build, the tests, doc links
+v run tools/gate.vsh  # format, the pure-V rule, the build, the prod build, the tests, doc links
 ./vcc -hh             # the flag surface, annotated
 ```
 

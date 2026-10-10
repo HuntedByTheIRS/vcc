@@ -45,16 +45,18 @@ opinion the author did not already have a chance to see.
 v run tools/gate.vsh
 ```
 
-Six steps, each reporting on its own line, exit status zero only when all pass:
+Seven steps, each reporting on its own line, exit status zero only when all pass:
 
-- **formatting** — `v fmt -verify .`
-- **pure V** — no C sources in the tree apart from the test directories
+- **formatting**: `v fmt -verify .`
+- **pure V**: no C sources in the tree apart from the test directories
   (`compliance/`, `regression/`, `goldens/`), and no `#include`, `#flag`, or `C.`
   interop in the compiler's own sources, including inside a test directory
-- **build** — `v -o <temp> .`
-- **tests** — `v test .`
-- **documents** — every relative link between the markdown files resolves
-- **workflows** — the files under `.github/workflows` pin the same V commit,
+- **build**: `v -o <temp> .`
+- **prod build**: `v -prod -o <temp> .`, the build a release makes, where V's
+  warnings are errors
+- **tests**: `v test .`
+- **documents**: every relative link between the markdown files resolves
+- **workflows**: the files under `.github/workflows` pin the same V commit,
   and every action is pinned to a version rather than a branch that moves
 
 The pure-V step is the machine-checked half of the first constraint. It cannot

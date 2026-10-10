@@ -5,9 +5,10 @@
 //
 //   v run tools/gate.vsh
 //
-// Six steps: formatting, the pure-V rule, the build, the test suite, the links
-// between the documents at the root, and the workflows. Each one reports on its
-// own line, and the exit status is zero only when all of them pass.
+// Seven steps: formatting, the pure-V rule, the build, the production build, the
+// test suite, the links between the documents at the root, and the workflows.
+// Each one reports on its own line, and the exit status is zero only when all of
+// them pass.
 
 import os
 
@@ -25,6 +26,7 @@ fn main() {
 	report('formatting', check_formatting(root), mut failures)
 	report('pure V', check_pure_v(root), mut failures)
 	report('build', check_build(root), mut failures)
+	report('prod build', check_prod(root), mut failures)
 	report('tests', check_tests(root), mut failures)
 	report('documents', check_documents(root), mut failures)
 	report('workflows', check_workflows(root), mut failures)
@@ -133,6 +135,24 @@ fn check_build(root string) []string {
 	os.rm(binary) or {}
 	if result.exit_code != 0 {
 		return ['the compiler did not build: ${result.output.trim_space()}']
+	}
+	return []
+}
+
+// check_prod builds the same source the way a release would, because -prod is
+// not the plain build with optimizations on: it makes V's warnings into errors,
+// so a deprecation the plain build reports and carries on past stops this one.
+// That is how the tree stopped building at all once upstream marked `os.system`
+// deprecated, which main.v used for the link and for -run.
+//
+// It is a build and not an artifact: the file is written under the temp
+// directory and removed here, so a gate run leaves nothing in the tree.
+fn check_prod(root string) []string {
+	binary := os.join_path(os.temp_dir(), 'vcc-gate-prod-${os.getpid()}')
+	result := run(root, 'v -prod -o ${os.quoted_path(binary)} .')
+	os.rm(binary) or {}
+	if result.exit_code != 0 {
+		return ['the compiler did not build with -prod: ${result.output.trim_space()}']
 	}
 	return []
 }

@@ -29,7 +29,7 @@ git clone https://github.com/vlang/v && cd v && make   # once
 cd /path/to/vcc
 v -o vcc .                 # build the compiler
 v test .                   # the suite
-v run tools/gate.vsh       # format, pure-V rule, build, tests, doc links, workflows
+v run tools/gate.vsh       # format, pure-V rule, build, prod build, tests, doc links, workflows
 v run tools/bench.vsh      # wall time and peak memory, tcc alongside
 ./vcc -bench file.c -o out # per-phase timings
 ```
