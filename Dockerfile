@@ -9,16 +9,20 @@
 # digest for the same reason, since an apt package that changes between builds
 # changes the gcc that builds V.
 #
-# Reproducibility itself comes from one post-processing step. Everything in the
-# default `v -o vcc .` build is deterministic except the debug strings: V
-# compiles the generated C in a scratch directory whose name carries a pid, a
-# monotonic timestamp and a stack address (vlib/v/tempname), and tcc writes the
-# absolute path of the source inside that directory into the .stab and .stabstr
-# sections. The name changes every run, so those bytes change every run;
-# nothing else does. Dropping the two sections with objcopy removes the only
-# difference and leaves the machine code untouched. Measured: two builds of the
-# same tree that differ in 26 bytes, all of them inside .stabstr, become
-# byte-identical after this step.
+# Reproducibility. The image is built with `-prod`, which compiles the generated
+# C without debug information: the binary carries no .stab and no .stabstr, so
+# nothing in it depends on where or when it was built. Measured on this tree:
+# two `v -prod -nocache` builds of the same source (the container has no cache
+# to reuse), 4,340,520 bytes each, identical sha256.
+#
+# The strip below is kept as a guard rather than as the thing that makes the
+# build reproducible. The plain build does carry the two sections, and the C
+# compiler V reaches for decides whether their bytes are stable: tcc writes the
+# absolute path of a scratch directory whose name carries a pid, a monotonic
+# timestamp and a stack address (vlib/v/tempname) into them, which is why two
+# plain builds of the same tree once differed in 26 bytes, all of them inside
+# .stabstr. Removing the two sections removes that difference and leaves the
+# machine code untouched, and objcopy exits 0 when there is nothing to remove.
 
 FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS build
 
@@ -50,7 +54,7 @@ ENV PATH=/opt/v:$PATH
 WORKDIR /src
 COPY . /src
 
-RUN v -o /vcc . \
+RUN v -prod -o /vcc . \
  && objcopy --remove-section=.stab --remove-section=.stabstr /vcc
 
 # The artifact is the compiler and nothing else: one file in the image, with no
