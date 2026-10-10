@@ -938,13 +938,21 @@ fn write_object(path string, bytes []u8) ! {
 //
 // The program is given the terminal rather than a pipe, because its output is
 // the whole reason for running it: a captured stream would arrive after the
-// program had finished, on the wrong one of the two, and in one lump.
+// program had finished, on the wrong one of the two, and in one lump. The
+// arguments travel as an array and reach the program as separate words, so
+// nothing in one of them is read again as syntax. A name with no directory in it
+// is given one first: `-o prog` names the file this compiler just wrote, while
+// the call below looks a bare word up on PATH, which is not where that file is.
 fn run_image(path string, args []string) {
-	mut command := os.quoted_path(path)
-	for arg in args {
-		command += ' ' + os.quoted_path(arg)
+	program := if path.contains(os.path_separator) { path } else { './${path}' }
+	mut invocation := [program]
+	invocation << args
+	status := os.system_args(invocation)
+	if status == -1 {
+		eprintln('vcc: cannot run ${path}: no such file, or it is not executable')
+		exit(127)
 	}
-	exit(os.system(command))
+	exit(status)
 }
 
 fn temporary_path() string {
@@ -1203,11 +1211,15 @@ fn external_link(opts cli.Options) {
 	} else {
 		eprintln('vcc: the link is handed to ${opts.external_linker} (-external-linker)')
 	}
-	command := link_command_line(program, invocation)
+	// What runs is the argument array and not one string a shell would read
+	// again, so a path or an argument holding a space stays one word. The line
+	// -verbose prints is the readable form of the same words.
 	if opts.verbose {
-		eprintln('link: ${command}')
+		eprintln('link: ${link_command_line(program, invocation)}')
 	}
-	status := os.system(command)
+	mut argv := [program]
+	argv << invocation
+	status := os.system_args(argv)
 	if status != 0 {
 		// The linker's own stderr reached the terminal as it ran; the status is
 		// carried out rather than replaced, so a failed link is a failed compile
@@ -1277,8 +1289,9 @@ fn link_object_path(index int) string {
 	return os.join_path(os.temp_dir(), 'vcc-extlink-${os.getpid()}-${index}.o')
 }
 
-// link_command_line is the one place the linker invocation becomes a shell
-// command, with every word quoted so a path with a space survives it.
+// link_command_line renders the linker invocation the way it would be typed,
+// with every word quoted so a path with a space reads as one word. It is the
+// line -verbose prints; what runs is the argument array beside it.
 fn link_command_line(program string, args []string) string {
 	mut command := os.quoted_path(program)
 	for arg in args {
