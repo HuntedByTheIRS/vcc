@@ -225,6 +225,10 @@ workload that matters.
 
 - A self-build benchmark, for the reason above: it needs a compiler that can
   compile V's output, which is M3's problem and not a tooling problem.
+- A self compile that gets anywhere. `v . -o vcc1` then `v . -cc vcc1 -o vcc` is
+  where this compiler reads the C V writes for it, and CI runs both as a
+  recorded step. What vcc refuses today, and the line it refuses at, is in the
+  step's summary in the run.
 - A phase-by-phase profile. `./vcc -bench` reports microseconds per phase and the
   harness prints them, but there is no history of those numbers across commits.
 - A speed gate. `.github/workflows/ci.yml` runs the harness and writes the
@@ -237,8 +241,9 @@ workload that matters.
 ## What CI does with them
 
 `.github/workflows/ci.yml` builds V from source at a pinned commit, runs
-`gate.vsh`, then runs the benchmark and writes the numbers into the run summary.
-On a push to `main` the same job counts the suite with `tests.vsh`, and the
+`gate.vsh`, then runs the benchmark and the self compile and writes both into
+the run summary. On a push to `main` the same job counts the suite with
+`tests.vsh`, and the
 compiler's lines with `lines.vsh`, writing `.github/badges/tests.json` and
 `.github/badges/lines.json` for the badges in `README.md`; the
 compliance job and the regression job do the same for the compliance and

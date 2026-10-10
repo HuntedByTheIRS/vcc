@@ -170,6 +170,19 @@ summary, and nothing fails on them: a shared runner's wall time is not a
 budget to hold a pull request to. The speed gate appears when the self-build
 number exists ([[Roadmap]] M6).
 
+## The self compile
+
+`v . -o vcc1` builds this compiler with V, and `v . -cc vcc1 -o vcc` asks V to
+generate the same C again and hand it to the compiler it just built. That
+second command is the first link of the bootstrap chain: vcc has to read and
+emit the C V writes for it, and the tree is 110,838 lines of generated C today.
+
+CI runs both commands and writes the result into the run summary. Nothing fails
+on it, for the same reason nothing fails on the benchmark: vcc cannot read that
+C yet, so the step records how far it gets rather than checking it. It becomes a
+gate on the day the second command exits 0 and the binary it wrote runs
+([[Roadmap]] M3).
+
 ## tools/build.vsh, the front door
 
 `v run tools/build.vsh` is the front door over the same commands: build the
