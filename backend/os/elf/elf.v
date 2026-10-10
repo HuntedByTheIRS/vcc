@@ -1582,7 +1582,8 @@ fn tpoff_of(program image.Program, name string, addend int) !i64 {
 // address is settled. `field` is where the field itself is, because a direct or
 // global-offset reference is a distance from it and the absolute and tpoff kinds
 // are not. An empty name with the absolute kind is a constant rather than a
-// place, and the addend is the whole of it.
+// place, and the addend is the whole of it; an undefined weak symbol is the
+// other name with no place to point at.
 fn relocation_value(program image.Program, sections Sections, base u64, extra []string, field int, relocation image.Relocation) !i64 {
 	match relocation.kind {
 		.direct {
@@ -1597,8 +1598,22 @@ fn relocation_value(program image.Program, sections Sections, base u64, extra []
 			if relocation.name == '' {
 				return i64(relocation.addend)
 			}
-			return i64(base) + i64(relocation_referent_of(program, sections, relocation.name)! +
-				relocation.addend)
+			where := relocation_referent_of(program, sections, relocation.name) or {
+				// An undefined weak symbol stands for the address zero (ELF),
+				// and a name nothing in the link defines is that symbol: the
+				// runtime's own crtbegin.o is where the shape is met, an
+				// absolute reference to `_ITM_deregisterTMCloneTable` in the
+				// `mov $0, %eax` that the `test %rax, %rax` under it then
+				// skips the call over. The addend is the whole of what the
+				// field holds, because the zero is the whole of the symbol's
+				// value; the image's base in its place would have the code
+				// jump to the base rather than skip.
+				if relocation.name in program.weak_imports {
+					return i64(relocation.addend)
+				}
+				return err
+			}
+			return i64(base) + i64(where + relocation.addend)
 		}
 		.tpoff {
 			return tpoff_of(program, relocation.name, relocation.addend)!

@@ -674,3 +674,72 @@ fn test_an_image_with_no_function_body_writes_no_unwind_header() {
 	assert se16(bytes, 56) == 4
 	assert se_phdr_of(bytes, elf_ph_type_gnu_eh_frame) == -1
 }
+
+// An undefined weak symbol stands for the address zero (ELF), and a name no unit
+// of the link defines is the one a reference to it names. The runtime's own
+// crtbegin.o is where a link meets the shape: `mov $0, %eax` loads the address of
+// `_ITM_deregisterTMCloneTable`, the `test %rax, %rax` under it skips the call
+// when the address is zero, and the field the move holds is an absolute
+// reference, a four-byte address rather than a distance. Ubuntu's crtbegin.o
+// carries that reference as R_X86_64_32, and the Arch one carries the same hook
+// as R_X86_64_REX_GOTPCRELX, which a slot answers; the absolute form is the one
+// that reached the resolver with nothing to answer it, and the image base in the
+// field's place would have the code jump to the base instead of skipping.
+//
+// The program is that shape in miniature. The exit status says which of the two
+// arms the test reached: 7 when the loaded address is zero, 1 when it is not.
+fn se_weak_absolute_program(target backend.Target, weak bool) image.Program {
+	zero := target.exit_sequence(7) or { panic('the target has no exit sequence: ${err.msg()}') }
+	other := target.exit_sequence(1) or { panic('the target has no exit sequence: ${err.msg()}') }
+	mut program := image.Program{}
+	// mov $hook, %eax: the four bytes the address is written into are the field
+	// the relocation fills, one byte past the opcode.
+	program.text = [u8(0xb8), 0, 0, 0, 0]
+	program.text << u8(0x48) // test %rax, %rax
+	program.text << u8(0x85)
+	program.text << u8(0xc0)
+	program.text << u8(0x75) // jne past the exit the zero reaches
+	program.text << u8(zero.len)
+	program.text << zero
+	program.text << other
+	program.imports << 'hook'
+	if weak {
+		program.weak_imports['hook'] = true
+	}
+	program.relocations << image.Relocation{
+		offset: 1
+		kind:   .absolute
+		name:   'hook'
+	}
+	return program
+}
+
+fn test_an_absolute_reference_to_an_undefined_weak_symbol_holds_the_zero() {
+	target := se_target()
+	program := se_weak_absolute_program(target, true)
+	bytes := write(program, target, .program) or {
+		panic('the program was not written: ${err.msg()}')
+	}
+	text := int(se64(bytes, 24)) - int(target.load_base)
+	assert se32(bytes, text + 1) == 0
+	path := os.join_path(os.temp_dir(), 'vcc_elf_weak_${os.getpid()}')
+	os.write_file_array(path, bytes) or { panic(err) }
+	os.chmod(path, 0o755) or { panic(err) }
+	result := os.execute(os.quoted_path(path))
+	os.rm(path) or {}
+	assert result.exit_code == 7
+}
+
+// The zero is the undefined weak symbol's and not every undefined name's: the
+// same reference to a name no unit defines and nothing marks weak is what a link
+// has to refuse, because a field holding the base with the caller's own comment
+// saying otherwise is worse than no file at all.
+fn test_an_absolute_reference_to_an_undefined_name_is_still_refused() {
+	target := se_target()
+	program := se_weak_absolute_program(target, false)
+	write(program, target, .program) or {
+		assert err.msg().contains('hook')
+		return
+	}
+	assert false, 'a program was written with an absolute reference to a name no unit defines'
+}
