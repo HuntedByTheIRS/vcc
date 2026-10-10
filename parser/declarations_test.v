@@ -220,6 +220,22 @@ fn test_a_file_scope_declaration_registers_every_declarator() {
 	assert plain.unit.globals[1].name == 'b'
 }
 
+// A cast in one declarator's initializer must not become the type of the
+// declarator that follows it. The specifiers a type name reads are the same
+// specifier state the declaration set, and the reader has to give that state
+// back once the type name is read. Measured before it did, `u64 la = (u32)5,
+// lb = 7;` was refused: lb was recorded as u32 and the object's own type then
+// read as a conflicting redeclaration of the same name.
+fn test_a_file_scope_declarator_after_a_cast_initializer_keeps_the_declared_type() {
+	result := declarations_of('typedef unsigned int u32; typedef unsigned long u64; u64 la = (u32)5, lb = 7;')
+	assert result.diagnostics.len == 0
+	assert result.unit.globals.len == 2
+	assert result.unit.globals[0].name == 'la'
+	assert result.unit.globals[0].resolved.describe() == 'unsigned long'
+	assert result.unit.globals[1].name == 'lb'
+	assert result.unit.globals[1].resolved.describe() == 'unsigned long'
+}
+
 // A brace initializer is a definition even when the declaration says extern:
 // the object has to live somewhere, and the values written are the ones the
 // image holds. Measured with gcc 16.2.1 and this compiler, `int x[2] = {1, 2};`

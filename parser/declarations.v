@@ -5481,6 +5481,18 @@ fn (mut p Parser) parse_type_name(depth int) !TypeName {
 // into the one TypeName a cast or a sizeof needs.
 fn (mut p Parser) parse_type_name_parts(depth int) !(DeclSpec, Declarator, tokenize.Token) {
 	start := p.peek()
+	// The specifiers a type name reads replace the pending base a surrounding
+	// declaration set, and a type name is read inside an expression, where that
+	// base belongs to the declaration the expression is the initializer of. A
+	// cast in one declarator's initializer must not hand its own type to the
+	// declarator that follows it in the same declaration list, so the base and
+	// the storage go back the way this reader found them before it answers.
+	saved_base := p.pending_base
+	saved_storage := p.pending_storage
+	defer {
+		p.pending_base = saved_base
+		p.pending_storage = saved_storage
+	}
 	spec := p.parse_decl_specifiers(depth)!
 	d := p.parse_declarator(depth)!
 	if d.name.len > 0 {
