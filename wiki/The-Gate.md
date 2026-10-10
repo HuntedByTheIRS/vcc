@@ -173,15 +173,18 @@ number exists ([[Roadmap]] M6).
 ## The self compile
 
 `v . -o vcc1` builds this compiler with V, and `v . -cc vcc1 -o vcc` asks V to
-generate the same C again and hand it to the compiler it just built. That
-second command is the first link of the bootstrap chain: vcc has to read and
-emit the C V writes for it, and the tree is 110,838 lines of generated C today.
+generate the same C again and hand it to the compiler it just built. That second
+command is the first link of the bootstrap chain: vcc reads and emits the C V
+writes for it, 110,838 lines of it, and the compiler that comes out runs. Both
+commands pass or CI fails, which makes this the milestone the tree was working
+toward rather than a record of how far it got.
 
-CI runs both commands and writes the result into the run summary. Nothing fails
-on it, for the same reason nothing fails on the benchmark: vcc cannot read that
-C yet, so the step records how far it gets rather than checking it. It becomes a
-gate on the day the second command exits 0 and the binary it wrote runs
-([[Roadmap]] M3).
+The line it used to stop at was `src.c:6166:135: unsupported: * takes int
+operands, and this one is a pointer`, and that was a parser bug rather than a
+missing back end: a declarator written after one whose initializer holds a cast
+was given the cast's type, so `unsigned long lb` read as `unsigned int` and the
+product it appears in was refused. The parser gives that specifier state back
+now. [[Roadmap]] M3 says what the chain needs next.
 
 ## tools/build.vsh, the front door
 

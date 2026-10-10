@@ -5,10 +5,9 @@ name: ci
 # links between the documents, and the workflows. `tools/README.md` says what
 # each step checks.
 #
-# Two steps in the gate job are recorded rather than gated, because neither has
-# a number a change can be held to yet: the benchmark, and the self compile.
-# Both write to the run's summary, so the state is in the run rather than only
-# in a terminal.
+# The benchmark step in the gate job is recorded rather than gated, because it
+# has no number a change can be held to yet: it writes its numbers into the
+# run's summary. The self compile beside it gates, because it can pass.
 #
 # Four jobs: the gate, the compliance corpus on a runner of its own, the
 # regression corpus on a runner of its own, and a run against whatever V master
@@ -91,38 +90,29 @@ jobs:
       # of the bootstrap chain. `v . -o vcc1` builds the compiler with V, and
       # `v . -cc vcc1 -o vcc` asks V for the same C again and hands it to the
       # compiler it just built, so vcc has to read and emit the C V writes for
-      # it, 110,838 lines of it today.
+      # it, 110,838 lines of it today, and the binary it produces has to run.
       #
-      # Recorded, not gated, for the same reason the benchmark is: vcc cannot do
-      # it yet, and a red job would say only that something is wrong. The first
-      # refusal is `src.c:6166:135: unsupported: * takes int operands, and this
-      # one is a pointer`, and that is a parser bug rather than a missing back
-      # end: a declarator written after one whose initializer holds a cast is
-      # given the cast's type, so `unsigned long lb` reads as `unsigned int` and
-      # the product it appears in is refused. When the second command exits 0
-      # and the binary it wrote runs, this is a gate and `continue-on-error`
-      # comes off.
-      - name: self compile (recorded, not gated)
-        continue-on-error: true
+      # This gates. It was recorded rather than gated until the refusal it named
+      # was fixed: a declarator written after one whose initializer holds a cast
+      # was given the cast's type, so `unsigned long lb` read as `unsigned int`
+      # and the product it appears in was refused at src.c:6166 with
+      # `unsupported: * takes int operands, and this one is a pointer`. The
+      # parser gives that specifier state back now, so a change that stops this
+      # compiler reading its own C fails here instead of quietly narrowing what
+      # it can build.
+      - name: self compile
         run: |
           work="$(mktemp -d)"
-          {
-            echo '### self compile'
-            echo '```'
-            if ! v . -o "$work/vcc1"; then
-              echo 'this tree did not build with V'
-            elif v . -cc "$work/vcc1" -o "$work/vcc" > "$work/log" 2>&1; then
-              echo 'the compiler read and emitted the C V writes for it'
-              "$work/vcc" --version
-            else
-              echo 'this tree cannot read the C V writes for it yet'
-              # The attempt is mostly V's notices about other people's source,
-              # each three lines of quoted context. The refusal is what matters,
-              # so the context lines are dropped and the rest is kept.
-              grep -vE '^ *[0-9]+ \||^ *\|' "$work/log" | tail -20
-            fi
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          v . -o "$work/vcc1"
+          "$work/vcc1" --version
+          if ! v . -cc "$work/vcc1" -o "$work/vcc" > "$work/log" 2>&1; then
+            echo 'this tree could not read the C V writes for it; the tail of the attempt:'
+            # Mostly V's notices about other people's source, each three lines
+            # of quoted context, so the context lines go and the rest stays.
+            grep -vE '^ *[0-9]+ \||^ *\|' "$work/log" | tail -25
+            exit 1
+          fi
+          "$work/vcc" --version
 
       # The tests badge in README.md reads a number this job computes, from the
       # tool that counts the suite rather than a second glob that can drift from
