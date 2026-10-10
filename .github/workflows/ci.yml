@@ -90,7 +90,7 @@ jobs:
       # of the bootstrap chain. `v . -o vcc1` builds the compiler with V, and
       # `v . -cc vcc1 -o vcc` asks V for the same C again and hands it to the
       # compiler it just built, so vcc has to read and emit the C V writes for
-      # it, 110,838 lines of it today, and the binary it produces has to run.
+      # it, about 110,000 lines of it, and the binary it produces has to run.
       #
       # This gates. It was recorded rather than gated until the refusal it named
       # was fixed: a declarator written after one whose initializer holds a cast

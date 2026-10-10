@@ -175,9 +175,9 @@ number exists ([[Roadmap]] M6).
 `v . -o vcc1` builds this compiler with V, and `v . -cc vcc1 -o vcc` asks V to
 generate the same C again and hand it to the compiler it just built. That second
 command is the first link of the bootstrap chain: vcc reads and emits the C V
-writes for it, 110,838 lines of it, and the compiler that comes out runs. Both
-commands pass or CI fails, which makes this the milestone the tree was working
-toward rather than a record of how far it got.
+writes for it, about 110,000 lines of it, and the compiler that comes out runs.
+Both commands pass or CI fails, which makes this the milestone the tree was
+working toward rather than a record of how far it got.
 
 The line it used to stop at was `src.c:6166:135: unsupported: * takes int
 operands, and this one is a pointer`, and that was a parser bug rather than a
