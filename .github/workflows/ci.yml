@@ -35,7 +35,21 @@ env:
   # (0cc8338), and upstream gained u128 and i128 on 2026-10-01. A pin older than
   # that fails the build with `parser/literals.v:448:15: error: unknown function:
   # u128`, and every test file fails behind it.
-  V_COMMIT: b99970bd438a7bdcdfbe38f74d9364db801d5439
+  #
+  # The later floor is the bootstrap, and it is the one that moves. `make` in the
+  # V checkout does not use the tree's own compiler: it clones vlang/vc, the
+  # rolling snapshot of master's generated C, and builds v1 from that. A pin is
+  # viable only while its source is one that snapshot's compiler still accepts,
+  # and the snapshot follows master. The 2026-10-01 pin wrote an `if` condition
+  # as `if (if x > 0.0 { x } else { -x }) < smallest_normal`; afbe25ce
+  # (2026-10-05) made that a checker error, so the v1 built from the snapshot
+  # refused the pinned source at vlib/math/bits/bits.v:621 and every job died at
+  # "build V at the pinned commit" without this tree changing at all. This pin is
+  # the master commit the current snapshot (vlang/vc 98961dd) was generated from,
+  # so the two agree by construction. Expect to move it when the snapshot does,
+  # and move it in all four places that name it: the three workflows and the
+  # Dockerfile.
+  V_COMMIT: a6826c4db0e28d306160fcc9e96baca90ea78f40
   V_DIR: /opt/v
 
 jobs:

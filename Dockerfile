@@ -24,7 +24,7 @@ FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffb
 
 # The V this tree is built and tested with, as a commit rather than a release
 # tag. Kept equal to .github/workflows/ci.yml.
-ARG V_COMMIT=b99970bd438a7bdcdfbe38f74d9364db801d5439
+ARG V_COMMIT=a6826c4db0e28d306160fcc9e96baca90ea78f40
 
 ENV DEBIAN_FRONTEND=noninteractive
 

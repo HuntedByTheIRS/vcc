@@ -33,7 +33,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  V_COMMIT: b99970bd438a7bdcdfbe38f74d9364db801d5439
+  V_COMMIT: a6826c4db0e28d306160fcc9e96baca90ea78f40
 
 jobs:
   publish:
