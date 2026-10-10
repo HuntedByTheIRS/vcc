@@ -722,13 +722,21 @@ fn emit_object_symbols(mut output []u8, parts PartOffsets, program image.Program
 	}
 	for name in program.imports {
 		at := parts.symtab + symbol_index[name] * elf_symbol_size
-		// An import is a function the loader resolves or an object another
-		// object defines, and the symbol's type says which: both have no value
-		// and no section, because the definition is somewhere this object is
-		// not. A reader of the table that treated an object as a function would
-		// call it; the type is what says not to.
+		// An import is a function another object defines or an object it
+		// defines, and the type says which: both have no value and no section,
+		// because the definition is somewhere this object is not. A reader of
+		// the table that treated an object as a function would call it; the
+		// type is what says not to.
+		//
+		// The binding is the other question, and it is the one an undefined
+		// weak name answers: a linker does not have to find a definition for
+		// it and reads what names it as the address zero (ELF). That is what
+		// `__attribute__((weak))` on a declaration this object has no
+		// definition for asks the table to say.
 		info := if program.object_imports[name] {
-			symbol_global_object
+			if name in program.weak_imports { symbol_weak_object } else { symbol_global_object }
+		} else if name in program.weak_imports {
+			symbol_weak_function
 		} else {
 			symbol_global_function
 		}

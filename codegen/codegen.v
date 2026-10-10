@@ -1071,6 +1071,20 @@ fn (mut e Emitter) build() ![]u8 {
 	// The same for the multiplications and divisions a unit asked for at run
 	// time: only the formats and operators a call site named are written.
 	e.emit_decimal_muldiv_routines()!
+	// A prototype this file marks weak and does not define names a symbol the
+	// link does not have to answer: an undefined weak symbol stands for zero
+	// (ELF), which is what the runtime's own startup files reach their optional
+	// hooks with. The declaration is where the attribute is read and not where
+	// the question is settled, because a definition anywhere in the file
+	// answers it and the prototype may be written either side of one, so the
+	// names are collected here, with every body emitted and every import
+	// known. A name in `imports` is one something in this file reached; a
+	// prototype nothing references is not an import and is not recorded.
+	for decl in declared_functions {
+		if decl.weak && decl.name in e.program.imports && decl.name !in e.program.defined {
+			e.program.weak_imports[decl.name] = true
+		}
+	}
 	// Every import this image made has to have something to bind to. The loader
 	// resolves each name out of a library the image names, and a name none of
 	// them defines is a program that cannot start. It is the question a link

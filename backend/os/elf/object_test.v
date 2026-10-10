@@ -496,6 +496,62 @@ fn test_a_weak_definition_is_weak_in_the_symbol_table() {
 	assert u64_at(bytes, callee + 8) == 5
 }
 
+// A declaration the object has no definition for is an import, and one marked
+// weak says that in the table: the binding is WEAK where a plain import says
+// GLOBAL. It is the object's half of what makes an undefined weak symbol stand
+// for the address zero, and what keeps a link from failing over a name nothing
+// has to define.
+fn test_a_weak_import_is_weak_in_the_symbol_table() {
+	mut program := image.Program{}
+	program.text = [u8(0xe8), u8(0), u8(0), u8(0), u8(0), u8(0xc3)]
+	program.imports << 'hook'
+	program.weak_imports['hook'] = true
+	program.fixups << image.Fixup{
+		start:  0
+		length: 5
+		kind:   .call_import
+		name:   'hook'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	hook := symbol_entry_at(bytes, first_global_symbol)
+	assert bytes[hook + 4] == symbol_weak_function
+	// The rest of the entry is what an import has: a name and no more, because
+	// the definition is somewhere this object is not.
+	assert u16_at(bytes, hook + 6) == shn_undef
+	assert u64_at(bytes, hook + 8) == 0
+}
+
+// The type and the binding are two questions with one entry to answer them in
+// (st_info), so a weak import of an object answers both: WEAK with the object
+// type, where an import a link has to resolve says GLOBAL with it.
+fn test_a_weak_import_of_an_object_is_weak_and_an_object() {
+	mut program := image.Program{}
+	program.text = [u8(0x48), u8(0x8b), u8(0x05), u8(0), u8(0), u8(0), u8(0), u8(0xc3)]
+	program.imports << 'counter'
+	program.object_imports['counter'] = true
+	program.weak_imports['counter'] = true
+	program.fixups << image.Fixup{
+		start:    0
+		length:   7
+		kind:     .got_address
+		name:     'counter'
+		register: 'rax'
+	}
+	bytes := object(program, x86_64()) or {
+		panic('the object was not written: ${err.msg()}')
+	}
+	entry := symbol_entry_at(bytes, first_global_symbol)
+	assert bytes[entry + 4] == symbol_weak_object
+	assert u16_at(bytes, entry + 6) == shn_undef
+	assert u64_at(bytes, entry + 8) == 0
+	// The reference itself is unchanged: the module is still what a linker
+	// fills, so the relocation is the same one a strong import gets.
+	assert relocation_count(bytes) == 1
+	assert u32(relocation_info(bytes, 0) & 0xffffffff) == x86_64().got_relocation()
+}
+
 // A definition with internal linkage is a local symbol, and the format wants
 // every local before every global, so it stands with the section symbols ahead
 // of where a linker starts reading globals. That is what keeps two translation
