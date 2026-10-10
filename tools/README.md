@@ -15,7 +15,7 @@ they alone take.
 ```sh
 v run tools/build.vsh                 # build the compiler, then the gate, then both corpora
 v run tools/build.vsh build [-o PATH] # the compiler only; -o is where it lands
-v run tools/build.vsh test            # `v test .`
+v run tools/build.vsh test            # `v -nocache test .`
 v run tools/build.vsh gate            # gate.vsh
 v run tools/build.vsh compliance      # compliance.vsh
 v run tools/build.vsh regress         # regress.vsh
@@ -54,7 +54,7 @@ Seven steps, each reporting on its own line, exit status zero only when all pass
 - **build**: `v -o <temp> .`
 - **prod build**: `v -prod -o <temp> .`, the build a release makes, where V's
   warnings are errors
-- **tests**: `v test .`
+- **tests**: `v -nocache test .`
 - **documents**: every relative link between the markdown files resolves
 - **workflows**: the files under `.github/workflows` pin the same V commit,
   and every action is pinned to a version rather than a branch that moves

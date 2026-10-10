@@ -14,7 +14,7 @@ import os
 import time
 
 // The default run: the compiler, then the gate, then both corpora. The gate
-// runs `v test .` itself, so the suite is not a step of its own here.
+// runs `v -nocache test .` itself, so the suite is not a step of its own here.
 const default_steps = ['build', 'gate', 'compliance', 'regress']
 
 // What `all` runs, each step once; `corpora` is those two runners together.
@@ -84,7 +84,7 @@ fn run_step(mut ctx Context, name string, args []string) Outcome {
 	mut outcome := Outcome{ name: name }
 	match name {
 		'build' { outcome = step_build(mut ctx, args) }
-		'test' { outcome = step_runner(mut ctx, 'test', 'v test .', args) }
+		'test' { outcome = step_runner(mut ctx, 'test', 'v -nocache test .', args) }
 		'gate' { outcome = step_runner(mut ctx, 'gate', 'v run tools/gate.vsh', args) }
 		'bench' { outcome = step_runner(mut ctx, 'bench', 'v run tools/bench.vsh', args) }
 		'compliance' { outcome = step_corpus(mut ctx, 'compliance', 'v run tools/compliance.vsh') }
@@ -309,7 +309,7 @@ fn failed(name string, detail string) Outcome {
 fn usage() {
 	println('usage: v run tools/build.vsh [STEP] [args]')
 	println('  build [-o PATH]   build the compiler only')
-	println('  test              the unit suite, `v test .`')
+	println('  test              the unit suite, `v -nocache test .`')
 	println('  gate              tools/gate.vsh')
 	println('  compliance        the corpus under compliance/, a directory per standard')
 	println('  regress           the regression and golden corpora')

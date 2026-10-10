@@ -32,7 +32,12 @@ past stops this one. That is how the tree stopped building at all once upstream
 marked `os.system` deprecated, which the compiler used for the external link
 and for `-run`.
 
-The tests step runs `v test .`.
+The tests step runs `v -nocache test .`. The cache makes the suite depend on
+which C compiler V uses for each file: V's implicit tcc cannot compile its own
+int128 C, so the files that need it fall back to cc, which then links the
+objects the earlier tcc pass cached and fails on a duplicate symbol, and V
+retries with a 0.5.2 fallback that rejects this tree's `shared`. Without the
+cache the cc fallback links clean and the suite passes.
 
 The documents step follows every relative link between the markdown files. It
 refuses a link whose target does not exist, because a link to a file that

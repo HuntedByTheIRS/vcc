@@ -158,7 +158,13 @@ fn check_prod(root string) []string {
 }
 
 fn check_tests(root string) []string {
-	result := run(root, 'v test .')
+	// -nocache, not `v test .`. The module cache makes the suite depend on which C
+	// compiler V uses for each file: V's implicit tcc cannot compile its own int128
+	// C, so the files that need it fall back to cc, which links the objects the
+	// earlier tcc pass cached and fails on a duplicate symbol, and V then retries
+	// with its 0.5.2 fallback that rejects this tree's `shared`. A cold cache fails
+	// 6 files that way on the runner; the same cache with -nocache passes 51 of 51.
+	result := run(root, 'v -nocache test .')
 	if result.exit_code == 0 {
 		return []
 	}
