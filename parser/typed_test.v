@@ -87,6 +87,31 @@ fn test_a_local_declaration_carries_the_type_it_declared() {
 	assert (sum.right as ast.Ident).typ.same(types.char_type())
 }
 
+// A cast in one declarator's initializer names its own type and not the
+// declaration's. The specifiers a type name reads are the specifier state a
+// surrounding declaration set, and a type name is read inside an expression,
+// so the declarator that follows the cast in the same list has to be built
+// from the declaration's own specifiers. Measured before that state was held,
+// `unsigned long la = (unsigned)a, lb = b;` declared lb an unsigned int, and
+// `la * lb` was then refused as a product with an 8-byte non-integer operand.
+fn test_a_declarator_after_a_cast_initializer_keeps_the_declared_type() {
+	result := checked('int main() { unsigned long a = 1, b = 2; unsigned long la = (unsigned)a, lb = b; return (int)(la * lb); }')
+	body := result.unit.decls[0].body
+	// A declaration writes one statement per declarator, so la and lb are the
+	// two statements after the ones that declared a and b. lb is the one the
+	// cast's type would have reached.
+	assert body[2].decl_name == 'la'
+	assert body[2].resolved().same(types.unsigned_long_type())
+	assert body[3].decl_name == 'lb'
+	assert body[3].resolved().same(types.unsigned_long_type())
+	// The cast inside la's initializer is still the conversion it names.
+	la_initializer := body[2].init or {
+		assert false
+		return
+	}
+	assert (la_initializer as ast.Cast).typ.same(types.unsigned_int_type())
+}
+
 fn test_an_inner_declaration_hides_an_outer_one_and_the_outer_one_comes_back() {
 	// The block is a scope: the x the second return reads is the one declared in
 	// the block while the block is open, and the one outside it afterwards.
